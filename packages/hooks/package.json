@@ -1,0 +1,37 @@
+{
+  "name": "@varveai/adit-hooks",
+  "version": "0.0.0",
+  "description": "Hook handlers for AI coding platforms",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "adit-hook": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./adapters": {
+      "types": "./dist/adapters/index.d.ts",
+      "import": "./dist/adapters/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@varveai/adit-core": "workspace:*",
+    "@varveai/adit-cloud": "workspace:*",
+    "@varveai/adit-engine": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "typescript": "^5.7.2"
+  }
+}

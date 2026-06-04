@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# ADIT local data
+.adit/
+
+# AI tool configs
+.claude/
+.opencode/
+.codex/
+
+# CLI build artifacts
+packages/cli/bin/
+
+# Test
+coverage/
+
+# Logs
+*.log
+
+.understand-anything/

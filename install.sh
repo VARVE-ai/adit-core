@@ -1,0 +1,601 @@
+#!/usr/bin/env bash
+# ────────────────────────────────────────────────────────────────────
+#  ADIT Core — install.sh
+#  Detects the system environment, installs required runtimes and
+#  libraries, builds the project, and registers the `adit` and
+#  `adit-hook` commands.
+#
+#  Two protections for `curl | bash` piped execution:
+#  1. Wrap in { } so bash reads the entire script before executing.
+#  2. `exec </dev/null` inside the block so child processes (git,
+#     nvm, npm, pnpm) cannot read from the pipe's stdin.
+# ────────────────────────────────────────────────────────────────────
+{
+# No `set -e` — we use explicit error handling instead, because
+# set -e causes silent deaths in pipes that are impossible to debug.
+set -uo pipefail
+
+# Close stdin and reopen from /dev/null so that sub-commands
+# (git clone, nvm, npm, pnpm) cannot accidentally consume the
+# piped script when invoked via `curl | bash`.
+exec </dev/null
+
+# Track progress for the EXIT trap
+_INSTALL_STEP="init"
+
+# Always report on exit — catches every failure mode including
+# set -u, pipefail, signals, and explicit exits.
+trap '_exit_code=$?; if [[ $_exit_code -ne 0 ]]; then printf "\033[0;31m[error]\033[0m Install failed during step: %s (exit code %d)\n" "$_INSTALL_STEP" "$_exit_code" >&2; fi' EXIT
+
+# ── Colours / helpers ───────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m' # No Colour
+
+info()  { printf "${CYAN}[info]${NC}  %s\n" "$*"; }
+ok()    { printf "${GREEN}[ok]${NC}    %s\n" "$*"; }
+warn()  { printf "${YELLOW}[warn]${NC}  %s\n" "$*"; }
+err()   { printf "${RED}[error]${NC} %s\n" "$*" >&2; }
+die()   { err "$*"; exit 1; }
+# Write debug to stderr so it is unbuffered and visible immediately
+debug() { [[ "${ADIT_DEBUG:-}" == "1" ]] && printf "[debug] %s\n" "$*" >&2 || true; }
+
+# ── Constants ───────────────────────────────────────────────────────
+REQUIRED_NODE_MAJOR=20
+REQUIRED_PNPM_MAJOR=9
+ADIT_REPO="https://github.com/VARVE-ai/adit-core.git"
+ADIT_INSTALL_DIR="${ADIT_INSTALL_DIR:-$HOME/.adit-core}"
+INSTALL_MODE="fresh"  # fresh | upgrade | up_to_date
+
+# ── Resolve project root ───────────────────────────────────────────
+# Must be inside a function so bash fully parses the script before
+# executing when piped via `curl | bash`.
+resolve_project_root() {
+  if [[ -f "$(dirname "${BASH_SOURCE[0]:-/dev/null}")/package.json" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  else
+    # Running via curl | bash — clone the repo into ADIT_INSTALL_DIR
+    if [[ -d "$ADIT_INSTALL_DIR/.git" ]]; then
+      info "Updating existing clone at $ADIT_INSTALL_DIR …"
+      git -C "$ADIT_INSTALL_DIR" pull --ff-only </dev/null 2>/dev/null || true
+    else
+      info "Cloning adit-core into $ADIT_INSTALL_DIR …"
+      git clone "$ADIT_REPO" "$ADIT_INSTALL_DIR" </dev/null
+    fi
+    SCRIPT_DIR="$ADIT_INSTALL_DIR"
+  fi
+}
+
+# ── OS / distro detection ──────────────────────────────────────────
+detect_platform() {
+  OS="$(uname -s)"
+  ARCH="$(uname -m)"
+
+  case "$OS" in
+    Darwin) PLATFORM=macos ;;
+    Linux)  PLATFORM=linux ;;
+    *)      die "Unsupported operating system: $OS" ;;
+  esac
+
+  DISTRO=""
+  PKG_MANAGER=""
+  if [[ "$PLATFORM" == "linux" ]]; then
+    if   command -v apt-get &>/dev/null; then DISTRO=debian; PKG_MANAGER=apt;
+    elif command -v dnf     &>/dev/null; then DISTRO=fedora; PKG_MANAGER=dnf;
+    elif command -v yum     &>/dev/null; then DISTRO=rhel;   PKG_MANAGER=yum;
+    elif command -v pacman  &>/dev/null; then DISTRO=arch;   PKG_MANAGER=pacman;
+    elif command -v apk     &>/dev/null; then DISTRO=alpine; PKG_MANAGER=apk;
+    elif command -v zypper  &>/dev/null; then DISTRO=suse;   PKG_MANAGER=zypper;
+    else warn "Unknown Linux distribution — will attempt best-effort install"; fi
+  fi
+
+  printf "\n${BOLD}System detected${NC}\n"
+  printf "  OS:           %s\n" "$OS"
+  printf "  Arch:         %s\n" "$ARCH"
+  printf "  Platform:     %s\n" "$PLATFORM"
+  [[ -n "$DISTRO" ]] && printf "  Distro:       %s\n" "$DISTRO"
+  [[ -n "$PKG_MANAGER" ]] && printf "  Pkg manager:  %s\n" "$PKG_MANAGER"
+  echo
+}
+
+# ── Helper: version comparison ──────────────────────────────────────
+# Returns 0 if $1 >= $2 (major-version comparison)
+version_ge() {
+  local have="$1" need="$2"
+  [[ "$have" -ge "$need" ]] 2>/dev/null
+}
+
+# ── Semver comparison ───────────────────────────────────────────────
+# Returns 0 if $1 == $2 (semver string equality)
+semver_eq() { [[ "$1" == "$2" ]]; }
+
+# ── Detect existing installation ───────────────────────────────────
+check_existing_install() {
+  # Check if the `adit` command is available
+  if ! command -v adit &>/dev/null; then
+    INSTALL_MODE="fresh"
+    debug "check_existing_install: adit not found, fresh install"
+    return
+  fi
+
+  # Get the currently installed version
+  local installed_ver
+  installed_ver="$(adit --version 2>/dev/null)" || installed_ver=""
+  debug "check_existing_install: installed version = '${installed_ver:-}'"
+
+  if [[ -z "$installed_ver" ]]; then
+    INSTALL_MODE="fresh"
+    return
+  fi
+
+  # Get the latest version from the repo source (after git pull)
+  local latest_ver=""
+  if [[ -f "$SCRIPT_DIR/packages/cli/package.json" ]]; then
+    # Use node if available, otherwise parse with grep/sed
+    if command -v node &>/dev/null; then
+      latest_ver="$(node -p "require('$SCRIPT_DIR/packages/cli/package.json').version" 2>/dev/null)" || latest_ver=""
+    else
+      latest_ver="$(grep '"version"' "$SCRIPT_DIR/packages/cli/package.json" | head -1 | sed 's/.*"\([0-9][0-9.]*\)".*/\1/')" || latest_ver=""
+    fi
+  fi
+  debug "check_existing_install: latest version = '${latest_ver:-}'"
+
+  if [[ -z "$latest_ver" ]]; then
+    # Cannot determine latest version — proceed with full install
+    INSTALL_MODE="upgrade"
+    return
+  fi
+
+  if semver_eq "$installed_ver" "$latest_ver"; then
+    INSTALL_MODE="up_to_date"
+    ok "adit v${installed_ver} is already up to date"
+  else
+    INSTALL_MODE="upgrade"
+    info "Upgrading adit from v${installed_ver} → v${latest_ver}"
+  fi
+}
+
+# ── Git ─────────────────────────────────────────────────────────────
+ensure_git() {
+  if command -v git &>/dev/null; then
+    ok "git $(git --version | awk '{print $3}') found"
+    return
+  fi
+  info "Installing git …"
+  case "$PLATFORM" in
+    macos)
+      # Xcode CLI tools include git
+      xcode-select --install 2>/dev/null || true
+      ;;
+    linux)
+      case "$PKG_MANAGER" in
+        apt)    sudo apt-get update -qq && sudo apt-get install -y -qq git ;;
+        dnf)    sudo dnf install -y git ;;
+        yum)    sudo yum install -y git ;;
+        pacman) sudo pacman -Sy --noconfirm git ;;
+        apk)    sudo apk add --no-cache git ;;
+        zypper) sudo zypper install -y git ;;
+        *)      die "Cannot install git — unknown package manager" ;;
+      esac
+      ;;
+  esac
+  command -v git &>/dev/null || die "git installation failed"
+  ok "git installed"
+}
+
+# ── Build tools (fallback for native addon compilation) ─────────────
+# better-sqlite3 ships prebuilt binaries for most platforms via
+# prebuild-install. Build tools are only needed as a fallback when
+# prebuilds are unavailable (rare). We check but don't block.
+check_build_tools() {
+  case "$PLATFORM" in
+    macos)
+      if xcode-select -p &>/dev/null; then
+        ok "Xcode Command Line Tools found (optional — prebuilds preferred)"
+      else
+        info "Xcode Command Line Tools not installed (not required — prebuilt binaries will be used)"
+        info "If native compilation is needed later, run: xcode-select --install"
+        HAS_BUILD_TOOLS=false
+      fi
+      ;;
+    linux)
+      local missing=()
+      command -v python3 &>/dev/null || missing+=(python3)
+      command -v make    &>/dev/null || missing+=(make)
+      command -v g++     &>/dev/null || command -v c++ &>/dev/null || missing+=(g++)
+
+      if [[ ${#missing[@]} -eq 0 ]]; then
+        ok "Build tools found (python3, make, g++)"
+      else
+        info "Build tools not fully installed: ${missing[*]} (not required — prebuilt binaries will be used)"
+        info "If native compilation is needed later, install: ${missing[*]}"
+        HAS_BUILD_TOOLS=false
+      fi
+      ;;
+  esac
+}
+
+# ── Node.js ─────────────────────────────────────────────────────────
+ensure_node() {
+  if command -v node &>/dev/null; then
+    local node_ver
+    node_ver="$(node -v | sed 's/^v//')"
+    local node_major="${node_ver%%.*}"
+    if version_ge "$node_major" "$REQUIRED_NODE_MAJOR"; then
+      ok "Node.js v${node_ver} found (>= ${REQUIRED_NODE_MAJOR} required)"
+      return
+    else
+      warn "Node.js v${node_ver} found but >= ${REQUIRED_NODE_MAJOR} is required"
+    fi
+  fi
+
+  info "Installing Node.js >= ${REQUIRED_NODE_MAJOR} …"
+
+  # Prefer fnm if available, else nvm, else system package manager
+  if command -v fnm &>/dev/null; then
+    info "Using fnm …"
+    fnm install "$REQUIRED_NODE_MAJOR" && fnm use "$REQUIRED_NODE_MAJOR"
+  elif command -v nvm &>/dev/null || [[ -s "$HOME/.nvm/nvm.sh" ]]; then
+    info "Using nvm …"
+    # shellcheck disable=SC1091
+    [[ -s "$HOME/.nvm/nvm.sh" ]] && source "$HOME/.nvm/nvm.sh"
+    nvm install "$REQUIRED_NODE_MAJOR" && nvm use "$REQUIRED_NODE_MAJOR"
+  else
+    # Install via platform package manager or NodeSource
+    case "$PLATFORM" in
+      macos)
+        if command -v brew &>/dev/null; then
+          brew install "node@${REQUIRED_NODE_MAJOR}"
+          brew link --overwrite "node@${REQUIRED_NODE_MAJOR}" 2>/dev/null || true
+        else
+          die "Please install Homebrew (https://brew.sh) or Node.js >= ${REQUIRED_NODE_MAJOR} manually"
+        fi
+        ;;
+      linux)
+        case "$PKG_MANAGER" in
+          apt)
+            info "Setting up NodeSource repository …"
+            curl -fsSL "https://deb.nodesource.com/setup_${REQUIRED_NODE_MAJOR}.x" | sudo -E bash -
+            sudo apt-get install -y -qq nodejs
+            ;;
+          dnf)
+            curl -fsSL "https://rpm.nodesource.com/setup_${REQUIRED_NODE_MAJOR}.x" | sudo -E bash -
+            sudo dnf install -y nodejs
+            ;;
+          yum)
+            curl -fsSL "https://rpm.nodesource.com/setup_${REQUIRED_NODE_MAJOR}.x" | sudo -E bash -
+            sudo yum install -y nodejs
+            ;;
+          pacman) sudo pacman -Sy --noconfirm nodejs npm ;;
+          apk)    sudo apk add --no-cache "nodejs~=${REQUIRED_NODE_MAJOR}" npm ;;
+          zypper)
+            curl -fsSL "https://rpm.nodesource.com/setup_${REQUIRED_NODE_MAJOR}.x" | sudo -E bash -
+            sudo zypper install -y nodejs
+            ;;
+          *)
+            die "Cannot auto-install Node.js — please install Node.js >= ${REQUIRED_NODE_MAJOR} manually"
+            ;;
+        esac
+        ;;
+    esac
+  fi
+
+  command -v node &>/dev/null || die "Node.js installation failed"
+  local final_ver
+  final_ver="$(node -v | sed 's/^v//')"
+  local final_major="${final_ver%%.*}"
+  version_ge "$final_major" "$REQUIRED_NODE_MAJOR" || die "Node.js v${final_ver} is below the required v${REQUIRED_NODE_MAJOR}"
+  ok "Node.js v${final_ver} ready"
+}
+
+# ── pnpm ────────────────────────────────────────────────────────────
+# Validate that a pnpm version string is actually a version (digits.digits.digits)
+# and not an error message dumped to stdout (e.g. corepack errors).
+is_valid_version() {
+  [[ "$1" =~ ^[0-9]+\.[0-9]+ ]]
+}
+
+ensure_pnpm() {
+  debug "ensure_pnpm: checking command -v pnpm"
+  if command -v pnpm &>/dev/null; then
+    debug "ensure_pnpm: pnpm found at $(command -v pnpm)"
+    local pnpm_ver
+    pnpm_ver="$(pnpm -v 2>/dev/null)" || true
+    debug "ensure_pnpm: pnpm -v returned '${pnpm_ver:-}'"
+    if is_valid_version "${pnpm_ver:-}"; then
+      local pnpm_major="${pnpm_ver%%.*}"
+      if version_ge "$pnpm_major" "$REQUIRED_PNPM_MAJOR"; then
+        ok "pnpm v${pnpm_ver} found (>= ${REQUIRED_PNPM_MAJOR} required)"
+        return
+      else
+        warn "pnpm v${pnpm_ver} found but >= ${REQUIRED_PNPM_MAJOR} is required"
+      fi
+    else
+      warn "pnpm found but broken (corepack shim failing) — will reinstall"
+      # Disable corepack's pnpm shim so npm-installed pnpm takes precedence
+      if command -v corepack &>/dev/null; then
+        debug "ensure_pnpm: disabling corepack pnpm shim"
+        corepack disable pnpm 2>/dev/null || true
+      fi
+    fi
+  else
+    debug "ensure_pnpm: pnpm not found"
+  fi
+
+  info "Installing pnpm …"
+  local pnpm_installed=false
+
+  # Method 1: npm install -g (try without sudo, then with sudo)
+  if command -v npm &>/dev/null; then
+    debug "ensure_pnpm: trying npm install -g pnpm"
+    if npm install -g "pnpm@${REQUIRED_PNPM_MAJOR}" 2>/dev/null; then
+      pnpm_installed=true
+    else
+      debug "ensure_pnpm: npm install -g failed, trying with sudo -n"
+      if sudo -n npm install -g "pnpm@${REQUIRED_PNPM_MAJOR}" 2>/dev/null; then
+        pnpm_installed=true
+      else
+        debug "ensure_pnpm: sudo npm install -g also failed"
+      fi
+    fi
+  fi
+
+  # Method 2: standalone pnpm install script (no sudo needed)
+  if [[ "$pnpm_installed" == "false" ]]; then
+    debug "ensure_pnpm: trying standalone install via curl"
+    if curl -fsSL https://get.pnpm.io/install.sh 2>/dev/null | env PNPM_VERSION="${REQUIRED_PNPM_MAJOR}" bash - 2>/dev/null; then
+      # The standalone installer puts pnpm in $PNPM_HOME or $HOME/.local/share/pnpm
+      local pnpm_home="${PNPM_HOME:-$HOME/.local/share/pnpm}"
+      if [[ -x "$pnpm_home/pnpm" ]]; then
+        export PNPM_HOME="$pnpm_home"
+        export PATH="$pnpm_home:$PATH"
+        pnpm_installed=true
+        debug "ensure_pnpm: standalone install succeeded at $pnpm_home"
+      fi
+    fi
+  fi
+
+  if [[ "$pnpm_installed" == "false" ]]; then
+    die "Could not install pnpm. Please install it manually: https://pnpm.io/installation"
+  fi
+
+  # Clear bash's command hash so it finds the newly installed pnpm
+  hash -r 2>/dev/null || true
+
+  command -v pnpm &>/dev/null || die "pnpm not found in PATH after installation"
+  local final_ver
+  final_ver="$(pnpm -v 2>/dev/null)" || true
+  if is_valid_version "${final_ver:-}"; then
+    ok "pnpm v${final_ver} ready"
+  else
+    die "pnpm installed but not working — run 'pnpm -v' to diagnose"
+  fi
+}
+
+# ── Install dependencies ───────────────────────────────────────────
+install_deps() {
+  info "Installing project dependencies …"
+  cd "$SCRIPT_DIR"
+  if pnpm install --frozen-lockfile 2>/dev/null || pnpm install; then
+    ok "Dependencies installed"
+  else
+    if [[ "${HAS_BUILD_TOOLS:-true}" == "false" ]]; then
+      err "Dependency install failed — prebuilt binaries may not be available for your platform."
+      err "Install build tools and retry:"
+      case "$PLATFORM" in
+        macos) err "  xcode-select --install" ;;
+        linux) err "  sudo apt-get install -y python3 make g++  (or equivalent)" ;;
+      esac
+      exit 1
+    else
+      die "Dependency install failed"
+    fi
+  fi
+}
+
+# ── Build ───────────────────────────────────────────────────────────
+build_project() {
+  info "Building all packages …"
+  cd "$SCRIPT_DIR"
+  if ! pnpm build; then
+    die "Build failed"
+  fi
+  ok "Build complete"
+}
+
+# ── Register commands ───────────────────────────────────────────────
+register_commands() {
+  info "Registering adit and adit-hook commands …"
+  cd "$SCRIPT_DIR"
+
+  # Determine a bin directory that is already on PATH.
+  # On macOS /usr/local/bin is standard; on Linux check common locations.
+  local bin_dir=""
+  for candidate in /usr/local/bin "$HOME/.local/bin" "$HOME/bin"; do
+    if echo "$PATH" | tr ':' '\n' | grep -q "^${candidate}$"; then
+      bin_dir="$candidate"
+      break
+    fi
+  done
+
+  # Fallback: use ~/.local/bin and add it to the shell profile
+  if [[ -z "$bin_dir" ]]; then
+    bin_dir="$HOME/.local/bin"
+  fi
+  mkdir -p "$bin_dir"
+
+  # Resolve absolute paths to the built entry points
+  local adit_bin="$SCRIPT_DIR/packages/cli/dist/index.js"
+  local hook_bin="$SCRIPT_DIR/packages/hooks/dist/index.js"
+
+  # Verify the built files exist
+  [[ -f "$adit_bin" ]] || die "CLI entry point not found at $adit_bin — build may have failed"
+  [[ -f "$hook_bin" ]] || die "Hook entry point not found at $hook_bin — build may have failed"
+
+  # Ensure they are executable
+  chmod +x "$adit_bin"
+  chmod +x "$hook_bin"
+
+  # Create wrapper scripts (avoids symlink issues with Node ESM resolution)
+  cat > "$bin_dir/adit" <<EOF
+#!/usr/bin/env bash
+exec node "$adit_bin" "\$@"
+EOF
+  chmod +x "$bin_dir/adit"
+
+  cat > "$bin_dir/adit-hook" <<EOF
+#!/usr/bin/env bash
+exec node "$hook_bin" "\$@"
+EOF
+  chmod +x "$bin_dir/adit-hook"
+
+  ok "adit     → $bin_dir/adit"
+  ok "adit-hook → $bin_dir/adit-hook"
+
+  # If bin_dir is not on PATH, add it to the shell profile automatically
+  if ! echo "$PATH" | tr ':' '\n' | grep -q "^${bin_dir}$"; then
+    local shell_profile=""
+    if [[ -n "${ZSH_VERSION:-}" ]] || [[ "$SHELL" == */zsh ]]; then
+      shell_profile="$HOME/.zshrc"
+    elif [[ -f "$HOME/.bashrc" ]]; then
+      shell_profile="$HOME/.bashrc"
+    elif [[ -f "$HOME/.bash_profile" ]]; then
+      shell_profile="$HOME/.bash_profile"
+    elif [[ -f "$HOME/.profile" ]]; then
+      shell_profile="$HOME/.profile"
+    fi
+
+    local path_line="export PATH=\"${bin_dir}:\$PATH\""
+    if [[ -n "$shell_profile" ]]; then
+      # Only add if not already present
+      if ! grep -qF "$bin_dir" "$shell_profile" 2>/dev/null; then
+        printf '\n# Added by ADIT installer\n%s\n' "$path_line" >> "$shell_profile"
+        ok "Added $bin_dir to PATH in $shell_profile"
+      fi
+      # Also export for the current session
+      export PATH="${bin_dir}:$PATH"
+    else
+      warn "$bin_dir is not in your PATH"
+      printf "  Add the following to your shell profile:\n"
+      printf "    ${BOLD}%s${NC}\n" "$path_line"
+      echo
+    fi
+  fi
+}
+
+# ── Verify installation ────────────────────────────────────────────
+verify() {
+  echo
+  printf "${BOLD}Verifying installation …${NC}\n"
+  local all_ok=true
+
+  if command -v adit &>/dev/null; then
+    ok "adit command available: $(command -v adit)"
+  else
+    warn "adit command not found in PATH (you may need to restart your shell)"
+    all_ok=false
+  fi
+
+  if command -v adit-hook &>/dev/null; then
+    ok "adit-hook command available: $(command -v adit-hook)"
+  else
+    warn "adit-hook command not found in PATH (you may need to restart your shell)"
+    all_ok=false
+  fi
+
+  # Show installed version
+  local final_ver=""
+  if command -v adit &>/dev/null; then
+    final_ver="$(adit --version 2>/dev/null)" || final_ver=""
+  fi
+
+  echo
+  if [[ "$all_ok" == "true" ]]; then
+    if [[ "$INSTALL_MODE" == "upgrade" ]]; then
+      printf "${GREEN}${BOLD}ADIT Core upgraded successfully!${NC}"
+    else
+      printf "${GREEN}${BOLD}ADIT Core installed successfully!${NC}"
+    fi
+    [[ -n "$final_ver" ]] && printf " ${BOLD}(v${final_ver})${NC}"
+    printf "\n"
+  else
+    printf "${YELLOW}${BOLD}ADIT Core built and registered.${NC}\n"
+    printf "Restart your shell or run:  ${BOLD}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}\n"
+  fi
+
+  echo
+  if [[ "$INSTALL_MODE" != "upgrade" ]]; then
+    printf "Quick start:\n"
+    printf "  ${BOLD}cd <your-project>${NC}\n"
+    printf "  ${BOLD}adit init${NC}            # initialize ADIT in a git repo\n"
+    printf "  ${BOLD}adit doctor${NC}          # verify the setup\n"
+    printf "  ${BOLD}adit list${NC}            # view the timeline\n"
+    echo
+  else
+    printf "Run ${BOLD}adit doctor${NC} to verify your installation.\n"
+    echo
+  fi
+}
+
+# ── Main ────────────────────────────────────────────────────────────
+main() {
+  printf "\n${BOLD}╔══════════════════════════════════════════════╗${NC}\n"
+  printf "${BOLD}║     ADIT Core — Installer                    ║${NC}\n"
+  printf "${BOLD}║     AI Development Intent Tracker            ║${NC}\n"
+  printf "${BOLD}╚══════════════════════════════════════════════╝${NC}\n\n"
+
+  HAS_BUILD_TOOLS=true
+
+  _INSTALL_STEP="resolve_project_root"; debug "step: $_INSTALL_STEP"
+  resolve_project_root || die "Failed to resolve project root"
+
+  # Check for existing installation before heavy work
+  _INSTALL_STEP="check_existing_install"; debug "step: $_INSTALL_STEP"
+  check_existing_install
+
+  if [[ "$INSTALL_MODE" == "up_to_date" ]]; then
+    printf "\n${GREEN}${BOLD}ADIT is already up to date!${NC}\n"
+    printf "Run ${BOLD}adit --version${NC} to confirm.\n\n"
+    _INSTALL_STEP="done"
+    return 0
+  fi
+
+  if [[ "$INSTALL_MODE" == "upgrade" ]]; then
+    printf "\n${CYAN}${BOLD}Upgrading ADIT …${NC}\n\n"
+  fi
+
+  _INSTALL_STEP="detect_platform"; debug "step: $_INSTALL_STEP"
+  detect_platform || die "Failed to detect platform"
+
+  _INSTALL_STEP="ensure_git"; debug "step: $_INSTALL_STEP"
+  ensure_git || die "Failed to ensure git"
+
+  _INSTALL_STEP="check_build_tools"; debug "step: $_INSTALL_STEP"
+  check_build_tools || die "Failed to check build tools"
+
+  _INSTALL_STEP="ensure_node"; debug "step: $_INSTALL_STEP"
+  ensure_node || die "Failed to ensure Node.js"
+
+  _INSTALL_STEP="ensure_pnpm"; debug "step: $_INSTALL_STEP"
+  ensure_pnpm || die "Failed to ensure pnpm"
+
+  _INSTALL_STEP="install_deps"; debug "step: $_INSTALL_STEP"
+  install_deps || die "Failed to install dependencies"
+
+  _INSTALL_STEP="build_project"; debug "step: $_INSTALL_STEP"
+  build_project || die "Failed to build project"
+
+  _INSTALL_STEP="register_commands"; debug "step: $_INSTALL_STEP"
+  register_commands || die "Failed to register commands"
+
+  _INSTALL_STEP="verify"; debug "step: $_INSTALL_STEP"
+  verify || die "Failed to verify installation"
+
+  _INSTALL_STEP="done"
+}
+
+main "$@"
+}

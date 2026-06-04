@@ -1,0 +1,54 @@
+{
+  "name": "@varveai/adit-cli",
+  "version": "0.0.0",
+  "description": "AI Development Intent Tracker — Transparent Time Machine for your codebase",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "bin": {
+    "adit": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VARVE-ai/adit-core"
+  },
+  "homepage": "https://github.com/VARVE-ai/adit-core",
+  "scripts": {
+    "build": "tsc",
+    "prepack": "pnpm run build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.123",
+    "@varveai/adit-cloud": "workspace:*",
+    "@varveai/adit-core": "workspace:*",
+    "@varveai/adit-engine": "workspace:*",
+    "@varveai/adit-hooks": "workspace:*",
+    "@varveai/adit-plans": "workspace:*",
+    "better-sqlite3": "12.6.2",
+    "commander": "^13.0.0",
+    "ink": "^5.2.1",
+    "ink-spinner": "^5.0.0",
+    "picocolors": "^1.1.1",
+    "react": "^18.3.1",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/react": "^18.3.28",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.7.2"
+  }
+}
