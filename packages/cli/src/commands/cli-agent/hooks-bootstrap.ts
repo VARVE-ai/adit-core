@@ -14,6 +14,8 @@ const EVENTS = [
   "SessionStart",
   "UserPromptSubmit",
   "Stop",
+  "StopFailure",
+  "Notification",
   "SubagentStop",
   "SessionEnd",
 ] as const;

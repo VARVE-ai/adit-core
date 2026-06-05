@@ -71,6 +71,8 @@ describe("installClaudeHooks", () => {
       const managedSettingsText = readFileSync(managedSettingsPath, "utf8");
       const managedSettings = JSON.parse(managedSettingsText);
       const command = managedSettings.hooks.SessionStart[0].hooks[0].command as string;
+      expect(managedSettings.hooks.Notification).toHaveLength(1);
+      expect(managedSettings.hooks.StopFailure).toHaveLength(1);
       expect(managedSettingsText).toContain("claude-sonnet");
       expect(managedSettingsText).toContain("from=adit-cloud-cli-1234");
       expect(command).toMatch(/^node -e /u);

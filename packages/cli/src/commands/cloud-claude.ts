@@ -93,6 +93,63 @@ function readHookModel(body: Record<string, unknown>): string | null {
   );
 }
 
+export function isLocalIdleHook(eventType: string, body: Record<string, unknown>): boolean {
+  if (
+    eventType === "Stop" ||
+    eventType === "StopFailure" ||
+    eventType === "SubagentStop" ||
+    eventType === "SessionEnd"
+  ) {
+    return true;
+  }
+  if (eventType !== "Notification") return false;
+  const text = [
+    readString(body.message),
+    readString(body.title),
+    readString(body.notification_type),
+  ]
+    .filter((item): item is string => Boolean(item))
+    .join("\n");
+  return /error|failed|failure|blocked|rejected|denied|security|safety|安全|敏感|失败|错误|拒绝/u.test(text);
+}
+
+export function isTerminalClaudeErrorEvent(event: CliAgentRelayEvent): boolean {
+  if (event.type === "message") {
+    const modelId = readString(event.payload.modelId);
+    if (modelId && modelId !== "<synthetic>") return false;
+    const text = readString(event.payload.text);
+    return Boolean(text && isTerminalClaudeErrorText(text));
+  }
+
+  if (event.type !== "tool") return false;
+  if (readString(event.payload.status) !== "error") return false;
+  const text = [
+    readString(event.payload.error),
+    readString(event.payload.output),
+  ]
+    .filter((item): item is string => Boolean(item))
+    .join("\n");
+  return isTerminalClaudeErrorText(text);
+}
+
+function isTerminalClaudeErrorText(text: string): boolean {
+  if (/Claude Code returned an error result/iu.test(text)) return true;
+  return /API Error/iu.test(text) &&
+    /safety|security|blocked|rejected|denied|policy|安全|不安全|敏感|拒绝/u.test(text);
+}
+
+function enqueueTranscriptEvents(
+  transcriptEvents: CliAgentRelayEvent[],
+  eventQueue: CliAgentRelayEvent[],
+): boolean {
+  let shouldMarkIdle = false;
+  for (const transcriptEvent of transcriptEvents) {
+    eventQueue.push(transcriptEvent);
+    if (isTerminalClaudeErrorEvent(transcriptEvent)) shouldMarkIdle = true;
+  }
+  return shouldMarkIdle;
+}
+
 function printCloudError(prefix: string, error: unknown): void {
   if (error instanceof CloudAuthError) {
     console.error(`${prefix}: authentication failed. Run 'adit cloud login' again.`);
@@ -393,8 +450,8 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
       if (event.type === "UserPromptSubmit") {
         if (isLocalOwner) {
           provider?.markLocalBusy();
-          for (const transcriptEvent of transcriptSync.drainSession(sessionId)) {
-            eventQueue.push(transcriptEvent);
+          if (enqueueTranscriptEvents(transcriptSync.drainSession(sessionId), eventQueue)) {
+            provider?.markLocalIdle();
           }
           const prompt = readString(body.prompt);
           if (sessionId && prompt) {
@@ -410,14 +467,11 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
           }
         }
       }
-      if (
-        event.type === "Stop" ||
-        event.type === "SubagentStop" ||
-        event.type === "SessionEnd"
-      ) {
+      if (isLocalIdleHook(event.type, body)) {
         if (isLocalOwner) {
           transcriptSync.scheduleDrain(sessionId, (transcriptEvent) => {
             eventQueue.push(transcriptEvent);
+            if (isTerminalClaudeErrorEvent(transcriptEvent)) provider?.markLocalIdle();
           });
           provider?.markLocalIdle();
         }
@@ -479,6 +533,14 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
             eventQueue,
             ws,
           });
+          const state = provider.state;
+          if (
+            state.owner === "local" &&
+            state.busy &&
+            enqueueTranscriptEvents(transcriptSync.drainSession(state.activeSessionId), eventQueue)
+          ) {
+            provider.markLocalIdle();
+          }
           ws.sendHeartbeat(provider.state);
           if (eventQueue.length > 0) {
             const batch = eventQueue.splice(0, 50);
