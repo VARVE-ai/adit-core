@@ -222,6 +222,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private contextUsageBySession = new Map<string, CliAgentContextUsage>();
   private contextUsageRefreshAt = 0;
   private contextUsageRefreshPromise: Promise<void> | null = null;
+  private localResumeSessionId: string | null = null;
   private lastStateEventKey: string | null = null;
   private promptQueue: PendingPrompt[] = [];
   private promptResolvers: Array<(value: QueuedSdkPrompt | null) => void> = [];
@@ -285,6 +286,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   noteLocalSession(id: string): void {
     if (!id) return;
     const changed = this.activeSessionId !== id || this.resumeSessionId !== id;
+    this.localResumeSessionId = id;
     this.activeSessionId = id;
     this.resumeSessionId = id;
     this.sdkSessionId = null;
@@ -358,7 +360,23 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       interruptRemote: true,
     });
     this.mergeRemoteTranscriptsIntoActive();
-    const resumeId = this.pickResumeSessionId({ fallbackToLatest: true });
+    const resumeId = this.pickLocalResumeSessionId();
+    if (resumeId) {
+      this.localResumeSessionId = resumeId;
+      this.activeSessionId = resumeId;
+      this.resumeSessionId = resumeId;
+      this.sdkSessionId = null;
+      this.remoteSdkSessionId = null;
+      this.applyStoredContextUsageForSession(resumeId);
+      this.refreshActiveModel({ sessionId: resumeId });
+    } else {
+      this.localResumeSessionId = null;
+      this.activeSessionId = null;
+      this.resumeSessionId = null;
+      this.sdkSessionId = null;
+      this.remoteSdkSessionId = null;
+      this.applyStoredContextUsageForSession(null);
+    }
     this.startLocal(resumeId ? ["--resume", resumeId] : []);
   }
 
@@ -370,6 +388,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     }
 
     const hasLocalTranscript = isValidClaudeSession(sessionId, this.opts.cwd);
+    if (hasLocalTranscript) this.localResumeSessionId = sessionId;
     if (!hasLocalTranscript && this.ownerValue !== "web") {
       throw Object.assign(new Error("Claude session not found for this project"), {
         statusCode: 404,
@@ -1361,6 +1380,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     if (sdkSessionId) {
       this.noteSdkSession(sdkSessionId, {
         keepActiveSession: Boolean(canonicalSessionId && sdkSessionId !== canonicalSessionId),
+        preserveResumeSession: opts.suppressActiveFallback === true,
       });
     }
     const sessionId =
@@ -1381,6 +1401,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       if (init.session_id) {
         this.noteSdkSession(init.session_id, {
           keepActiveSession: Boolean(canonicalSessionId && init.session_id !== canonicalSessionId),
+          preserveResumeSession: opts.suppressActiveFallback === true,
         });
         this.flushActivePromptEvent(sessionId);
       }
@@ -1450,14 +1471,23 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     });
   }
 
-  private noteSdkSession(id: string, opts: { keepActiveSession?: boolean } = {}): void {
+  private noteSdkSession(
+    id: string,
+    opts: {
+      keepActiveSession?: boolean;
+      preserveResumeSession?: boolean;
+    } = {},
+  ): void {
     if (!id) return;
     const nextActiveSessionId = opts.keepActiveSession
       ? this.activeSessionId ?? this.resumeSessionId
       : id;
-    const nextResumeSessionId = opts.keepActiveSession
-      ? this.resumeSessionId ?? this.activeSessionId
-      : id;
+    let nextResumeSessionId: string | null = id;
+    if (opts.preserveResumeSession) {
+      nextResumeSessionId = this.resumeSessionId;
+    } else if (opts.keepActiveSession) {
+      nextResumeSessionId = this.resumeSessionId ?? this.activeSessionId;
+    }
     const changed =
       this.sdkSessionId !== id ||
       this.remoteSdkSessionId !== id ||
@@ -1479,11 +1509,9 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     if (!pendingSessionId || !sessionId) return;
     const changed =
       this.activeSessionId !== sessionId ||
-      this.resumeSessionId !== sessionId ||
       this.sdkSessionId !== sessionId ||
       this.remoteSdkSessionId !== sessionId;
     this.activeSessionId = sessionId;
-    this.resumeSessionId = sessionId;
     this.sdkSessionId = sessionId;
     this.remoteSdkSessionId = sessionId;
     this.applyStoredContextUsageForSession(sessionId);
@@ -1891,8 +1919,8 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
   private pickResumeSessionId(opts: { fallbackToLatest: boolean }): string | null {
     const candidates = [
-      this.resumeSessionId,
       this.activeSessionId,
+      this.resumeSessionId,
       this.remoteSdkSessionId,
       this.sdkSessionId,
     ];
@@ -1914,6 +1942,23 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       return latest;
     }
     this.resumeSessionId = null;
+    return null;
+  }
+
+  private pickLocalResumeSessionId(): string | null {
+    const seen = new Set<string>();
+    const candidates = [
+      this.localResumeSessionId,
+      this.resumeSessionId,
+      this.activeSessionId,
+      this.remoteSdkSessionId,
+      this.sdkSessionId,
+    ];
+    for (const id of candidates) {
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      if (isValidClaudeSession(id, this.opts.cwd)) return id;
+    }
     return null;
   }
 

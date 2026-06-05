@@ -117,6 +117,29 @@ function tick(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+function writeClaudeTranscript(input: {
+  configDir: string;
+  cwd: string;
+  sessionId: string;
+  text?: string;
+}): void {
+  const projectId = path.resolve(input.cwd).replace(/[^a-zA-Z0-9-]/g, "-");
+  const projectDir = path.join(input.configDir, "projects", projectId);
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(projectDir, `${input.sessionId}.jsonl`),
+    JSON.stringify({
+      type: "user",
+      uuid: `user-${input.sessionId}`,
+      sessionId: input.sessionId,
+      message: {
+        role: "user",
+        content: input.text ?? "hello",
+      },
+    }) + "\n",
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.spawn.mockImplementation(() => mockChildProcess());
@@ -667,6 +690,51 @@ describe("ClaudeCodeProvider takeover", () => {
     });
 
     provider.stop();
+  });
+
+  it("resumes the trusted local Claude session when releasing Web control", async () => {
+    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const configDir = fs.mkdtempSync(path.join(tmpdir(), "adit-claude-config-"));
+    const cwd = "/tmp/project";
+    const localSessionId = "11111111-1111-4111-8111-111111111111";
+    const webSessionId = "22222222-2222-4222-8222-222222222222";
+    writeClaudeTranscript({ configDir, cwd, sessionId: localSessionId });
+    writeClaudeTranscript({ configDir, cwd, sessionId: webSessionId });
+
+    try {
+      process.env.CLAUDE_CONFIG_DIR = configDir;
+      const provider = new ClaudeCodeProvider({
+        bin: "claude",
+        args: [],
+        cwd,
+      });
+      provider.noteLocalSession(localSessionId);
+
+      await provider.takeover();
+      (provider as unknown as { bindPendingSession(pendingSessionId: string, sessionId: string): void })
+        .bindPendingSession("pending_web_session", webSessionId);
+      mocks.spawn.mockClear();
+
+      await provider.releaseToLocal();
+
+      expect(mocks.spawn).toHaveBeenCalledWith(
+        "claude",
+        ["--resume", localSessionId],
+        expect.objectContaining({ cwd }),
+      );
+      expect(provider.state.owner).toBe("local");
+      expect(provider.state.activeSessionId).toBe(localSessionId);
+      expect(provider.state.resumeSessionId).toBe(localSessionId);
+
+      provider.stop();
+    } finally {
+      if (originalConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir;
+      }
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
   });
 
   it("reports current branch and context usage while Web controls Claude", async () => {
