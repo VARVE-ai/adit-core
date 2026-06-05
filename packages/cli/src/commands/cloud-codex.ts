@@ -123,6 +123,8 @@ function isAditDebugEnabled(): boolean {
   return Boolean(value && value !== "0" && value !== "false" && value !== "off");
 }
 
+const CODEX_CLOUD_HOOK_MARKER = "from=adit-cloud-codex-env";
+
 function writeCodexDebugLines(lines: string[]): void {
   if (!isAditDebugEnabled()) return;
   for (const line of lines) console.error(`[adit cloud codex] debug: ${line}`);
@@ -407,13 +409,15 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
     installedHooks = installCodexHooks({
       cwd: config.projectRoot,
       endpoint: hookServer.endpoint,
-      marker: `from=adit-cloud-codex-${hookServer.port}`,
+      marker: CODEX_CLOUD_HOOK_MARKER,
     });
 
     provider = new CodexCliProvider({
       bin: codexExecutable,
       args: withHooksEnabled(opts?.arg ?? []),
       cwd: config.projectRoot,
+      hookEndpoint: hookServer.endpoint,
+      hookMarker: CODEX_CLOUD_HOOK_MARKER,
       onEvent: enqueueEvent,
     });
 

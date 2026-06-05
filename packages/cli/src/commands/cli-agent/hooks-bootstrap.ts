@@ -20,7 +20,12 @@ const EVENTS = [
 
 const HOOK_POST_SCRIPT = [
   "try{",
-  "const u=new URL(process.argv[1]);",
+  "const a=process.argv[1]||'';",
+  "const e=a||process.env.ADIT_CLOUD_CODEX_HOOK_ENDPOINT||'';",
+  "if(!e)process.exit(0);",
+  "const q=(a?process.argv[2]:process.env.ADIT_CLOUD_CODEX_HOOK_MARKER||process.argv[2])||'';",
+  "let u=new URL(e);",
+  "if(q&&!u.search.includes(q)){const s=u.search?'&':'?';u=new URL(u.toString()+s+q)}",
   "const m=u.protocol==='https:'?require('https'):require('http');",
   "let d='';",
   "let done=false;",
@@ -36,6 +41,9 @@ const HOOK_POST_SCRIPT = [
   "setTimeout(finish,3500).unref();",
   "}catch{process.exit(0)}",
 ].join("");
+
+const CODEX_CLOUD_HOOK_MARKER = "from=adit-cloud-codex-env";
+const CODEX_LEGACY_CLOUD_HOOK_PREFIX = "from=adit-cloud-codex-";
 
 interface HookCommand {
   type?: string;
@@ -279,7 +287,8 @@ function readClaudeCloudHookPort(settingsPath: string): number | null {
         if (!hookObject) continue;
         const command = hookObject.command;
         if (typeof command !== "string") continue;
-        const match = command.match(/https?:\/\/127\.0\.0\.1:(\d+)\/hook\?from=adit-cloud-cli-\d+\b/u);
+        if (!command.includes("from=adit-cloud-cli-")) continue;
+        const match = command.match(/https?:\/\/127\.0\.0\.1:(\d+)\/hook\b/u);
         if (!match?.[1]) continue;
         const port = Number.parseInt(match[1], 10);
         if (Number.isInteger(port) && port > 0 && port <= 65535) return port;
@@ -317,12 +326,11 @@ export function installCodexHooks(opts: {
   const codexDir = path.join(opts.cwd, ".codex");
   const hooksPath = path.join(codexDir, "hooks.json");
   const configPath = path.join(codexDir, "config.toml");
-  const command = buildCloudHookCommand(opts.endpoint, opts.marker);
-  const dirExisted = fs.existsSync(codexDir);
-  const fileExisted = fs.existsSync(hooksPath);
-  const originalContent = fileExisted ? readFile(hooksPath) : null;
-  const configFileExisted = fs.existsSync(configPath);
-  const originalConfigContent = configFileExisted ? readFile(configPath) : null;
+  const hookMarker = opts.marker || CODEX_CLOUD_HOOK_MARKER;
+  // Codex stores hooks at project scope, so the relay endpoint must come from
+  // the spawned Codex process env instead of being baked into hooks.json.
+  const command = buildCloudHookCommand("", hookMarker);
+  const originalContent = readFile(hooksPath);
   fs.mkdirSync(codexDir, { recursive: true });
 
   const existing = parseObject(originalContent) ?? {};
@@ -332,88 +340,56 @@ export function installCodexHooks(opts: {
   setCodexHook(hooks, "SessionStart", {
     matcher: "startup|resume",
     hooks: [{ type: "command", command, timeout: 30 }],
-  }, opts.marker);
+  }, hookMarker);
   setCodexHook(hooks, "UserPromptSubmit", {
     hooks: [{ type: "command", command, timeout: 30 }],
-  }, opts.marker);
+  }, hookMarker);
   setCodexHook(hooks, "Stop", {
     hooks: [{ type: "command", command, timeout: 30 }],
-  }, opts.marker);
+  }, hookMarker);
   setCodexHook(hooks, "PostToolUse", {
     hooks: [{ type: "command", command, timeout: 30 }],
-  }, opts.marker);
+  }, hookMarker);
 
   const hookStates = buildCodexHookStatesForEntries({
     hooksPath,
     hooks,
-    matchesEntry: (entry) => codexEntryHasMarker(entry, opts.marker),
+    matchesEntry: (entry) => codexEntryHasMarker(entry, hookMarker),
   });
-  const userConfigCleanup = installCodexHookTrustConfig({
+  installCodexHookTrustConfig({
     codexHome: opts.codexHome,
     blockName: ADIT_CLOUD_CODEX_HOOK_TRUST_BLOCK,
-    marker: opts.marker,
+    marker: hookMarker,
     states: hookStates,
   });
 
   fs.writeFileSync(hooksPath, JSON.stringify(existing, null, 2) + "\n");
   const installedConfigContent = enableCodexHooksFeature(readFile(configPath) ?? "");
   fs.writeFileSync(configPath, installedConfigContent);
-  const installedConfigMtimeMs = readFileMtimeMs(configPath);
 
   return {
     settingsPath: hooksPath,
     cleanup: () => {
-      let hookConfigChangedByOthers = false;
       try {
         const current = parseObject(readFile(hooksPath));
-        if (!current) {
-          restoreCodexHooks({ hooksPath, codexDir, dirExisted, fileExisted, originalContent });
-        } else {
-          const currentHooks = asObject(current.hooks);
-          if (currentHooks) {
-            for (const eventName of Object.keys(currentHooks)) {
-              if (!Array.isArray(currentHooks[eventName])) continue;
-              currentHooks[eventName] = (currentHooks[eventName] as unknown[]).filter(
-                (entry) => !codexEntryHasMarker(entry, opts.marker),
-              );
-              if ((currentHooks[eventName] as unknown[]).length === 0) {
-                delete currentHooks[eventName];
-              }
-            }
-            if (Object.keys(currentHooks).length === 0) delete current.hooks;
-          }
-          hookConfigChangedByOthers = !sameJsonObject(
-            stripCloudCodexHookEntries(parseObject(originalContent) ?? {}),
-            stripCloudCodexHookEntries(current),
-          );
-
-          if (Object.keys(current).length === 0 && !fileExisted) {
-            try {
-              fs.unlinkSync(hooksPath);
-            } catch {}
-            if (!dirExisted) {
-              try {
-                fs.rmdirSync(codexDir);
-              } catch {}
-            }
-          } else {
-            fs.writeFileSync(hooksPath, JSON.stringify(current, null, 2) + "\n");
+        if (!current) return;
+        const currentHooks = asObject(current.hooks);
+        if (!currentHooks) return;
+        let changed = false;
+        for (const eventName of Object.keys(currentHooks)) {
+          if (!Array.isArray(currentHooks[eventName])) continue;
+          const before = currentHooks[eventName] as unknown[];
+          const after = before.filter((entry) => !codexEntryHasLegacyCloudMarker(entry));
+          if (after.length !== before.length) changed = true;
+          currentHooks[eventName] = after;
+          if (after.length === 0) {
+            delete currentHooks[eventName];
           }
         }
+        if (Object.keys(currentHooks).length === 0) delete current.hooks;
+        if (changed) fs.writeFileSync(hooksPath, JSON.stringify(current, null, 2) + "\n");
       } catch {
-        restoreCodexHooks({ hooksPath, codexDir, dirExisted, fileExisted, originalContent });
-      } finally {
-        userConfigCleanup();
-        cleanupCodexConfig({
-          configPath,
-          codexDir,
-          dirExisted,
-          configFileExisted,
-          originalConfigContent,
-          installedConfigContent,
-          installedConfigMtimeMs,
-          hookConfigChangedByOthers,
-        });
+        // Leave hooks untouched on cleanup failures.
       }
     },
   };
@@ -427,7 +403,10 @@ function setCodexHook(
 ): void {
   const existing = Array.isArray(hooks[eventName]) ? hooks[eventName] as unknown[] : [];
   hooks[eventName] = [
-    ...existing.filter((item) => !codexEntryHasMarker(item, marker)),
+    ...existing.filter((item) =>
+      !codexEntryHasMarker(item, marker) &&
+      !codexEntryHasLegacyCloudMarker(item)
+    ),
     entry,
   ];
 }
@@ -437,7 +416,8 @@ function buildCloudHookCommand(endpoint: string, marker: string): string {
     "node",
     "-e",
     quoteHookCommandArg(HOOK_POST_SCRIPT),
-    quoteHookCommandArg(`${endpoint}?${marker}`),
+    quoteHookCommandArg(endpoint),
+    quoteHookCommandArg(marker),
   ].join(" ");
 }
 
@@ -457,22 +437,27 @@ function codexEntryHasMarker(entry: unknown, marker: string): boolean {
     typeof hook === "object" &&
     !Array.isArray(hook) &&
     typeof (hook as HookCommand).command === "string" &&
-    ((hook as HookCommand).command?.includes(marker) ||
-      (hook as HookCommand).command?.includes("from=adit-cloud-codex-"))
+    (hook as HookCommand).command?.includes(marker)
+  );
+}
+
+function codexEntryHasLegacyCloudMarker(entry: unknown): boolean {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  const hooks = (entry as Record<string, unknown>).hooks;
+  if (!Array.isArray(hooks)) return false;
+  return hooks.some((hook) =>
+    hook &&
+    typeof hook === "object" &&
+    !Array.isArray(hook) &&
+    typeof (hook as HookCommand).command === "string" &&
+    (hook as HookCommand).command?.includes(CODEX_LEGACY_CLOUD_HOOK_PREFIX) &&
+    !(hook as HookCommand).command?.includes(CODEX_CLOUD_HOOK_MARKER)
   );
 }
 
 function readFile(filePath: string): string | null {
   try {
     return fs.readFileSync(filePath, "utf8");
-  } catch {
-    return null;
-  }
-}
-
-function readFileMtimeMs(filePath: string): number | null {
-  try {
-    return fs.statSync(filePath).mtimeMs;
   } catch {
     return null;
   }
@@ -524,96 +509,6 @@ function enableCodexHooksFeature(text: string): string {
   return enableTomlBooleanFeature(cleaned, "hooks");
 }
 
-function canonicalJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalJson);
-  if (!value || typeof value !== "object") return value;
-  const record = value as Record<string, unknown>;
-  return Object.fromEntries(
-    Object.keys(record)
-      .sort()
-      .map((key) => [key, canonicalJson(record[key])]),
-  );
-}
-
-function cleanupCodexConfig(opts: {
-  configPath: string;
-  codexDir: string;
-  dirExisted: boolean;
-  configFileExisted: boolean;
-  originalConfigContent: string | null;
-  installedConfigContent: string;
-  installedConfigMtimeMs: number | null;
-  hookConfigChangedByOthers: boolean;
-}): void {
-  const current = readFile(opts.configPath);
-  if (current === null || current !== opts.installedConfigContent) {
-    return;
-  }
-  const currentMtimeMs = readFileMtimeMs(opts.configPath);
-  if (
-    opts.installedConfigMtimeMs !== null &&
-    currentMtimeMs !== null &&
-    currentMtimeMs !== opts.installedConfigMtimeMs
-  ) {
-    return;
-  }
-  if (opts.hookConfigChangedByOthers) {
-    return;
-  }
-
-  if (opts.configFileExisted && opts.originalConfigContent !== null) {
-    try {
-      fs.writeFileSync(opts.configPath, opts.originalConfigContent);
-    } catch {}
-    return;
-  }
-
-  if (!opts.configFileExisted && isOnlyCodexHooksFeatureConfig(current)) {
-    try {
-      fs.unlinkSync(opts.configPath);
-    } catch {}
-  }
-  if (!opts.dirExisted) {
-    try {
-      fs.rmdirSync(opts.codexDir);
-    } catch {}
-  }
-}
-
-function isOnlyCodexHooksFeatureConfig(text: string): boolean {
-  const normalized = text.replace(/\s+$/u, "");
-  return normalized === "[features]\nhooks = true";
-}
-
-function stripCloudCodexHookEntries(input: Record<string, unknown>): Record<string, unknown> {
-  const next: Record<string, unknown> = { ...input };
-  const hooks = asObject(next.hooks);
-  if (!hooks) return next;
-
-  const nextHooks: Record<string, unknown> = {};
-  for (const [eventName, entries] of Object.entries(hooks)) {
-    if (!Array.isArray(entries)) {
-      nextHooks[eventName] = entries;
-      continue;
-    }
-    const filtered = entries.filter((entry) => !codexEntryHasMarker(entry, "from=adit-cloud-codex-"));
-    if (filtered.length > 0) {
-      nextHooks[eventName] = filtered;
-    }
-  }
-
-  if (Object.keys(nextHooks).length > 0) {
-    next.hooks = nextHooks;
-  } else {
-    delete next.hooks;
-  }
-  return next;
-}
-
-function sameJsonObject(left: Record<string, unknown>, right: Record<string, unknown>): boolean {
-  return JSON.stringify(canonicalJson(left)) === JSON.stringify(canonicalJson(right));
-}
-
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
@@ -622,29 +517,4 @@ function asObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
-}
-
-function restoreCodexHooks(input: {
-  hooksPath: string;
-  codexDir: string;
-  dirExisted: boolean;
-  fileExisted: boolean;
-  originalContent: string | null;
-}): void {
-  try {
-    if (input.fileExisted && input.originalContent !== null) {
-      fs.writeFileSync(input.hooksPath, input.originalContent);
-      return;
-    }
-    try {
-      fs.unlinkSync(input.hooksPath);
-    } catch {}
-    if (!input.dirExisted) {
-      try {
-        fs.rmdirSync(input.codexDir);
-      } catch {}
-    }
-  } catch {
-    // Hook cleanup must never make the main relay crash on shutdown.
-  }
 }

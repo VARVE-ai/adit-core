@@ -66,6 +66,8 @@ interface CodexCliProviderOptions {
   bin: string;
   args: string[];
   cwd: string;
+  hookEndpoint?: string;
+  hookMarker?: string;
   onEvent?: (event: CliAgentRelayEvent) => void;
 }
 
@@ -1699,13 +1701,20 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   }
 
   private buildEnv(): NodeJS.ProcessEnv {
-    return {
+    const env: NodeJS.ProcessEnv = {
       ...process.env,
       TERM: process.env.TERM || "xterm-256color",
       COLORTERM: process.env.COLORTERM || "truecolor",
       FORCE_COLOR: process.env.FORCE_COLOR || "3",
       DISABLE_AUTOUPDATER: "1",
     };
+    if (this.opts.hookEndpoint) {
+      env.ADIT_CLOUD_CODEX_HOOK_ENDPOINT = this.opts.hookEndpoint;
+    }
+    if (this.opts.hookMarker) {
+      env.ADIT_CLOUD_CODEX_HOOK_MARKER = this.opts.hookMarker;
+    }
+    return env;
   }
 
   private attachReclaimInput(): void {
