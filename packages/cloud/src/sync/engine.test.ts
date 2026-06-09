@@ -33,7 +33,13 @@ const mockCountUnsyncedRecords = vi.mocked(countUnsyncedRecords);
 const mockUpsertSyncState = vi.mocked(upsertSyncState);
 
 function createEngine(
-  overrides: { batchSize?: number; projectId?: string; projectName?: string } = {},
+  overrides: {
+    batchSize?: number;
+    projectId?: string;
+    projectName?: string;
+    remoteUrl?: string | null;
+    canonicalRepoKey?: string | null;
+  } = {},
 ) {
   const projectId = overrides.projectId ?? "proj-001";
   const mockClient = {
@@ -60,6 +66,8 @@ function createEngine(
   const engine = new SyncEngine({} as never, mockClient as never, {
     projectId,
     projectName: overrides.projectName,
+    remoteUrl: overrides.remoteUrl,
+    canonicalRepoKey: overrides.canonicalRepoKey,
     batchSize: overrides.batchSize ?? 500,
     serverUrl: "https://cloud.example.com",
     cloudClientId: "client-001",
@@ -227,6 +235,32 @@ describe("SyncEngine", () => {
 
     expect(result.conflicts).toHaveLength(2);
     expect(result.accepted).toBe(148);
+  });
+
+  it("includes repository identity in sync push payload", async () => {
+    const { engine, mockClient } = createEngine({
+      remoteUrl: "git@github.com:VARVE-ai/adit-cloud.git",
+      canonicalRepoKey: "github:varve-ai/adit-cloud",
+    });
+    mockBuildSyncBatch.mockReturnValue({ events: [{}], sessions: [] } as never);
+    mockBatchRecordCount.mockReturnValue(1);
+    mockClient.post.mockResolvedValue({
+      accepted: 1,
+      duplicates: 0,
+      conflicts: [],
+      newSyncCursor: "cursor-1",
+      newSyncVersion: 1,
+    });
+
+    await engine.sync();
+
+    expect(mockClient.post).toHaveBeenCalledWith(
+      "/api/sync/push",
+      expect.objectContaining({
+        remoteUrl: "git@github.com:VARVE-ai/adit-cloud.git",
+        canonicalRepoKey: "github:varve-ai/adit-cloud",
+      }),
+    );
   });
 
   describe("per-project cursors", () => {

@@ -15,6 +15,9 @@ export { triggerProjectLinkSync } from "./auto-link.js";
 // Quality check
 export { checkQuality, formatQualityFeedback } from "./qualify.js";
 
+// Repository key normalization
+export { normalizeGitHubRepoKey } from "./repo-key.js";
+
 // Git collection
 export {
   collectRemoteUrl,

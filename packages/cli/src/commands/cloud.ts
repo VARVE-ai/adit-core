@@ -15,6 +15,7 @@ import {
   closeDatabase,
   projectNameFromRoot,
 } from "@varveai/adit-core";
+import { getRemoteUrl } from "@varveai/adit-engine";
 import {
   loadCloudConfig,
   loadCredentials,
@@ -32,6 +33,7 @@ import {
   clearSyncErrors,
   isSyncDisabled,
   DEFAULT_SERVER_URL,
+  normalizeGitHubRepoKey,
 } from "@varveai/adit-cloud";
 import type { DeviceAuthOptions } from "@varveai/adit-cloud";
 import { createHash } from "node:crypto";
@@ -206,9 +208,12 @@ export async function cloudSyncCommand(opts?: {
   try {
     const client = new CloudClient(serverUrl, credentials);
     const projectName = projectNameFromRoot(config.projectRoot);
+    const remoteUrl = await getProjectRemoteUrl(config.projectRoot);
     const engine = new SyncEngine(db, client, {
       projectId: config.projectId,
       projectName,
+      remoteUrl,
+      canonicalRepoKey: normalizeGitHubRepoKey(remoteUrl),
       batchSize: cloudConfig.batchSize,
       serverUrl,
       cloudClientId: credentials.clientId,
@@ -243,6 +248,14 @@ export async function cloudSyncCommand(opts?: {
     process.exitCode = 1;
   } finally {
     closeDatabase(db);
+  }
+}
+
+async function getProjectRemoteUrl(projectRoot: string): Promise<string | null> {
+  try {
+    return await getRemoteUrl(projectRoot);
+  } catch {
+    return null;
   }
 }
 
