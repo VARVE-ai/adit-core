@@ -22,6 +22,11 @@ export interface GitCommit {
   branch?: string;
 }
 
+export interface GitIdentity {
+  authorName: string | null;
+  authorEmail: string | null;
+}
+
 // ─── Document Discovery ────────────────────────────────────
 
 export interface DiscoveredDocument {
@@ -75,6 +80,8 @@ export interface LinkInitResponse {
     serverProjectId: string;
     remoteUrl: string;
     defaultBranch: string | null;
+    gitAuthorName: string | null;
+    gitAuthorEmail: string | null;
     branchCount: number;
     qualified: boolean;
     lastGitSyncAt: string | null;

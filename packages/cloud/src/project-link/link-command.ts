@@ -25,6 +25,7 @@ import type {
 import {
   collectRemoteUrl,
   collectDefaultBranch,
+  collectGitIdentity,
   collectBranches,
   collectCommitLogs,
   collectCommitCount,
@@ -182,6 +183,7 @@ export async function linkCommand(
 
   const allBranches = await collectBranches(projectRoot);
   const defaultBranch = await collectDefaultBranch(projectRoot);
+  const gitIdentity = await collectGitIdentity(projectRoot);
   let branchCount = 0;
 
   if (branchesStale) {
@@ -195,6 +197,8 @@ export async function linkCommand(
           localProjectId,
           remoteUrl,
           defaultBranch,
+          gitAuthorName: gitIdentity.authorName,
+          gitAuthorEmail: gitIdentity.authorEmail,
           branches: allBranches.map((b) => ({
             name: b.name,
             headSha: b.headSha,

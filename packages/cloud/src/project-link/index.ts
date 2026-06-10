@@ -20,6 +20,7 @@ export {
   collectRemoteUrl,
   collectDefaultBranch,
   collectCurrentBranch,
+  collectGitIdentity,
   collectBranches,
   collectCommitLogs,
   collectCommitCount,
@@ -44,6 +45,7 @@ export {
 export type {
   GitBranch,
   GitCommit,
+  GitIdentity,
   DiscoveredDocument,
   ProjectLinkCache,
   NegotiateResponse,

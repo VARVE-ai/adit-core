@@ -18,6 +18,7 @@ import {
   collectCommitLogs,
   collectCommitCount,
   collectDefaultBranch,
+  collectGitIdentity,
   collectRemoteUrl,
   resolveCommitBranches,
 } from "./git-collector.js";
@@ -181,6 +182,15 @@ describe("Git Collector (with temp repo)", () => {
   it("collectCurrentBranch returns current branch name", async () => {
     const branch = await collectCurrentBranch(repoDir);
     expect(branch).toBe("main");
+  });
+
+  it("collectGitIdentity returns the effective repo git author identity", async () => {
+    const identity = await collectGitIdentity(repoDir);
+
+    expect(identity).toEqual({
+      authorName: "Test User",
+      authorEmail: "test@example.com",
+    });
   });
 
   it("collectCurrentBranch returns branch after checkout", async () => {

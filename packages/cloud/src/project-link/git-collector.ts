@@ -8,7 +8,7 @@
  */
 
 import { runGit, getRemoteUrl } from "@varveai/adit-engine";
-import type { GitBranch, GitCommit } from "./types.js";
+import type { GitBranch, GitCommit, GitIdentity } from "./types.js";
 
 /** Collect the remote origin URL. Throws if no remote is configured. */
 export async function collectRemoteUrl(cwd: string): Promise<string> {
@@ -60,6 +60,24 @@ export async function collectCurrentBranch(cwd: string): Promise<string | null> 
 
   const branch = result.stdout.trim();
   return branch || null;
+}
+
+/**
+ * Collect the Git author identity that is effective for this repository.
+ *
+ * `git config --get user.*` resolves local config first, then global/system
+ * config, which matches the identity Git will use for new commits.
+ */
+export async function collectGitIdentity(cwd: string): Promise<GitIdentity> {
+  const [nameResult, emailResult] = await Promise.all([
+    runGit(["config", "--get", "user.name"], { cwd }),
+    runGit(["config", "--get", "user.email"], { cwd }),
+  ]);
+
+  return {
+    authorName: nameResult.exitCode === 0 ? normalizeGitIdentityValue(nameResult.stdout) : null,
+    authorEmail: emailResult.exitCode === 0 ? normalizeGitIdentityValue(emailResult.stdout) : null,
+  };
 }
 
 /**
@@ -119,6 +137,11 @@ function normalizeBranchRef(fullRef: string, shortRef: string): string | null {
   }
 
   return trimmedShortRef || null;
+}
+
+function normalizeGitIdentityValue(value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed || null;
 }
 
 /**
