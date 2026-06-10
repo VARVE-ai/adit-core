@@ -395,6 +395,147 @@ describe("ClaudeCodeProvider abort", () => {
     }
   });
 
+  it("resumes a Claude transcript without UUID markers when releasing Web control", async () => {
+    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const configDir = fs.mkdtempSync(path.join(tmpdir(), "adit-claude-config-"));
+    const cwd = "/tmp/project";
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    const latestSessionId = "22222222-2222-2222-2222-222222222222";
+    const projectId = path.resolve(cwd).replace(/[^a-zA-Z0-9-]/g, "-");
+    const projectDir = path.join(configDir, "projects", projectId);
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        sessionId,
+        type: "user",
+        message: { role: "user", content: "hello" },
+      })}\n`,
+    );
+    fs.writeFileSync(
+      path.join(projectDir, `${latestSessionId}.jsonl`),
+      `${JSON.stringify({ sessionId: latestSessionId, uuid: "latest-message" })}\n`,
+    );
+    fs.utimesSync(
+      path.join(projectDir, `${latestSessionId}.jsonl`),
+      new Date(Date.now() + 10_000),
+      new Date(Date.now() + 10_000),
+    );
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd,
+    });
+
+    try {
+      provider.noteLocalSession(sessionId);
+      await provider.takeover();
+      await provider.releaseToLocal();
+
+      expect(mocks.spawn.mock.calls.at(-1)?.[1]).toEqual(["--resume", sessionId]);
+      expect(provider.state.activeSessionId).toBe(sessionId);
+    } finally {
+      provider.stop();
+      if (originalConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir;
+      }
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the reclaimed session active when local Claude reports a new runtime session", async () => {
+    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const configDir = fs.mkdtempSync(path.join(tmpdir(), "adit-claude-config-"));
+    const cwd = "/tmp/project";
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    const runtimeSessionId = "33333333-3333-3333-3333-333333333333";
+    const laterSessionId = "44444444-4444-4444-4444-444444444444";
+    const projectId = path.resolve(cwd).replace(/[^a-zA-Z0-9-]/g, "-");
+    const projectDir = path.join(configDir, "projects", projectId);
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        sessionId,
+        type: "assistant",
+        message: { role: "assistant", content: [] },
+      })}\n`,
+    );
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd,
+    });
+
+    try {
+      provider.noteLocalSession(sessionId);
+      await provider.takeover();
+      await provider.releaseToLocal();
+
+      expect(mocks.spawn.mock.calls.at(-1)?.[1]).toEqual(["--resume", sessionId]);
+      expect(provider.noteLocalSession(runtimeSessionId)).toBe(sessionId);
+      expect(provider.noteLocalSession(runtimeSessionId)).toBe(sessionId);
+      expect(provider.state.activeSessionId).toBe(sessionId);
+      expect(provider.state.resumeSessionId).toBe(sessionId);
+      expect(provider.noteLocalSession(laterSessionId)).toBe(laterSessionId);
+      expect(provider.state.activeSessionId).toBe(laterSessionId);
+    } finally {
+      provider.stop();
+      if (originalConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir;
+      }
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not switch to an unrelated latest Claude session when reclaiming local control", async () => {
+    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const configDir = fs.mkdtempSync(path.join(tmpdir(), "adit-claude-config-"));
+    const cwd = "/tmp/project";
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    const latestSessionId = "22222222-2222-2222-2222-222222222222";
+    const projectId = path.resolve(cwd).replace(/[^a-zA-Z0-9-]/g, "-");
+    const projectDir = path.join(configDir, "projects", projectId);
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, `${latestSessionId}.jsonl`),
+      `${JSON.stringify({ sessionId: latestSessionId, uuid: "latest-message" })}\n`,
+    );
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd,
+    });
+
+    try {
+      provider.noteLocalSession(sessionId);
+      await provider.takeover();
+      await provider.releaseToLocal();
+
+      expect(mocks.spawn.mock.calls.at(-1)?.[1]).toEqual([]);
+      expect(provider.state.activeSessionId).toBeNull();
+      expect(provider.state.resumeSessionId).toBeNull();
+    } finally {
+      provider.stop();
+      if (originalConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir;
+      }
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
   it("emits run.aborted when the provider stops during an active run", async () => {
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
     const sessionId = "11111111-1111-1111-1111-111111111111";

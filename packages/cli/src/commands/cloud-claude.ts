@@ -138,14 +138,28 @@ function isTerminalClaudeErrorText(text: string): boolean {
     /safety|security|blocked|rejected|denied|policy|安全|不安全|敏感|拒绝/u.test(text);
 }
 
+function eventWithSessionId(event: CliAgentRelayEvent, sessionId: string | null): CliAgentRelayEvent {
+  if (!sessionId) return event;
+  if (event.payload.sessionId === sessionId) return event;
+  return {
+    ...event,
+    payload: {
+      ...event.payload,
+      sessionId,
+    },
+  };
+}
+
 function enqueueTranscriptEvents(
   transcriptEvents: CliAgentRelayEvent[],
   eventQueue: CliAgentRelayEvent[],
+  sessionId: string | null,
 ): boolean {
   let shouldMarkIdle = false;
   for (const transcriptEvent of transcriptEvents) {
-    eventQueue.push(transcriptEvent);
-    if (isTerminalClaudeErrorEvent(transcriptEvent)) shouldMarkIdle = true;
+    const event = eventWithSessionId(transcriptEvent, sessionId);
+    eventQueue.push(event);
+    if (isTerminalClaudeErrorEvent(event)) shouldMarkIdle = true;
   }
   return shouldMarkIdle;
 }
@@ -439,18 +453,20 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
 
     hookServer.events.on("hook", (event) => {
       const body = event.body as Record<string, unknown>;
-      const sessionId = transcriptSync.noteHook({
+      const rawSessionId = transcriptSync.noteHook({
         eventType: event.type,
         body,
         sessionId: readString(body.sessionId),
       });
       provider?.noteModel(readHookModel(body));
       const isLocalOwner = provider?.state.owner === "local";
-      if (sessionId && isLocalOwner) provider?.noteLocalSession(sessionId);
+      const sessionId = rawSessionId && isLocalOwner
+        ? provider?.noteLocalSession(rawSessionId) ?? rawSessionId
+        : rawSessionId;
       if (event.type === "UserPromptSubmit") {
         if (isLocalOwner) {
           provider?.markLocalBusy();
-          if (enqueueTranscriptEvents(transcriptSync.drainSession(sessionId), eventQueue)) {
+          if (enqueueTranscriptEvents(transcriptSync.drainSession(rawSessionId), eventQueue, sessionId)) {
             provider?.markLocalIdle();
           }
           const prompt = readString(body.prompt);
@@ -469,9 +485,10 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
       }
       if (isLocalIdleHook(event.type, body)) {
         if (isLocalOwner) {
-          transcriptSync.scheduleDrain(sessionId, (transcriptEvent) => {
-            eventQueue.push(transcriptEvent);
-            if (isTerminalClaudeErrorEvent(transcriptEvent)) provider?.markLocalIdle();
+          transcriptSync.scheduleDrain(rawSessionId, (transcriptEvent) => {
+            const mappedEvent = eventWithSessionId(transcriptEvent, sessionId);
+            eventQueue.push(mappedEvent);
+            if (isTerminalClaudeErrorEvent(mappedEvent)) provider?.markLocalIdle();
           });
           provider?.markLocalIdle();
         }
@@ -537,7 +554,11 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
           if (
             state.owner === "local" &&
             state.busy &&
-            enqueueTranscriptEvents(transcriptSync.drainSession(state.activeSessionId), eventQueue)
+            enqueueTranscriptEvents(
+              transcriptSync.drainSession(state.activeSessionId),
+              eventQueue,
+              state.activeSessionId,
+            )
           ) {
             provider.markLocalIdle();
           }

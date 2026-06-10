@@ -248,6 +248,8 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private skills: string[] = [];
   private capabilityHydrateGeneration = 0;
   private reclaimingToLocal = false;
+  private pendingLocalReclaimSessionId: string | null = null;
+  private localSessionAliases = new Map<string, string>();
   private reclaimBuffer = "";
   private reclaimAttached = false;
   private suppressNextLocalExit = false;
@@ -283,18 +285,25 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.emitState();
   }
 
-  noteLocalSession(id: string): void {
-    if (!id) return;
-    const changed = this.activeSessionId !== id || this.resumeSessionId !== id;
-    this.localResumeSessionId = id;
-    this.activeSessionId = id;
-    this.resumeSessionId = id;
+  noteLocalSession(id: string): string | null {
+    if (!id) return null;
+    let canonicalId = this.localSessionAliases.get(id) ?? id;
+    if (this.pendingLocalReclaimSessionId) {
+      canonicalId = this.pendingLocalReclaimSessionId;
+      if (id !== canonicalId) this.localSessionAliases.set(id, canonicalId);
+      this.pendingLocalReclaimSessionId = null;
+    }
+    const changed = this.activeSessionId !== canonicalId || this.resumeSessionId !== canonicalId;
+    this.localResumeSessionId = canonicalId;
+    this.activeSessionId = canonicalId;
+    this.resumeSessionId = canonicalId;
     this.sdkSessionId = null;
     this.remoteSdkSessionId = null;
-    this.applyStoredContextUsageForSession(id);
-    this.refreshActiveModel({ sessionId: id });
-    if (!changed) return;
+    this.applyStoredContextUsageForSession(canonicalId);
+    this.refreshActiveModel({ sessionId: canonicalId });
+    if (!changed) return canonicalId;
     this.emitState();
+    return canonicalId;
   }
 
   markLocalBusy(): void {
@@ -336,6 +345,8 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
     this.ownerValue = "web";
     this.reclaimingToLocal = false;
+    this.pendingLocalReclaimSessionId = null;
+    this.localSessionAliases.clear();
     this.emitState();
     process.stderr.write(
       `\n[adit cloud claude] Web has taken over Claude Code. Type ${RECLAIM_COMMAND} here to reclaim local control.\n`,
@@ -361,6 +372,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     });
     this.mergeRemoteTranscriptsIntoActive();
     const resumeId = this.pickLocalResumeSessionId();
+    this.pendingLocalReclaimSessionId = resumeId;
     if (resumeId) {
       this.localResumeSessionId = resumeId;
       this.activeSessionId = resumeId;
@@ -812,6 +824,8 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.stopCapabilityProbe();
     this.pendingRewinds.clear();
     this.detachReclaimInput();
+    this.pendingLocalReclaimSessionId = null;
+    this.localSessionAliases.clear();
     try {
       this.local?.kill("SIGTERM");
     } catch {}
@@ -2722,6 +2736,14 @@ function isValidClaudeSession(sessionId: string, cwd: string): boolean {
       if (typeof obj?.messageId === "string" && obj.messageId.length > 0) return true;
       if (typeof obj?.leafUuid === "string" && obj.leafUuid.length > 0) return true;
       if (typeof obj?.message?.id === "string" && obj.message.id.length > 0) return true;
+      if (
+        obj?.sessionId === sessionId &&
+        (obj?.type === "user" || obj?.type === "assistant") &&
+        obj?.message &&
+        typeof obj.message === "object"
+      ) {
+        return true;
+      }
     } catch {}
   }
   return false;
