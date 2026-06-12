@@ -45,6 +45,7 @@ import {
 import { checkQuality, formatQualityFeedback } from "./qualify.js";
 import { validateDocument } from "@varveai/adit-plans";
 import { collectGitRefsFingerprint, REFS_FINGERPRINT_CACHE_KEY } from "./auto-link.js";
+import { normalizeGitHubRepoKey } from "./repo-key.js";
 
 /** Maximum number of commits per upload batch */
 const COMMIT_BATCH_SIZE = 1000;
@@ -110,12 +111,13 @@ export async function linkCommand(
   const step1Start = startStep();
 
   const remoteUrl = await collectRemoteUrl(projectRoot);
+  const canonicalRepoKey = normalizeGitHubRepoKey(remoteUrl);
   const projectName = projectNameFromRemoteUrl(remoteUrl);
   const cachedServerProjectId = cache?.confirmedProjectId ?? null;
 
   const negotiate = await client.post<NegotiateResponse>(
     "/api/project-link/negotiate",
-    { localProjectId: projectId, remoteUrl, projectName },
+    { localProjectId: projectId, remoteUrl, canonicalRepoKey, projectName },
   );
   const confirmedProjectId = negotiate.confirmedProjectId;
   const serverProjectChanged =
@@ -196,6 +198,7 @@ export async function linkCommand(
         {
           localProjectId,
           remoteUrl,
+          canonicalRepoKey,
           defaultBranch,
           gitAuthorName: gitIdentity.authorName,
           gitAuthorEmail: gitIdentity.authorEmail,
@@ -459,6 +462,7 @@ export async function linkCommand(
     localProjectId,
     serverProjectId,
     projectName,
+    canonicalRepoKey,
     serverUrl,
     branchCount,
     commitCount,

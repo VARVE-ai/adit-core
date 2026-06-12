@@ -68,6 +68,7 @@ export interface NegotiateResponse {
   serverProjectId: string;
   confirmedProjectId: string;
   projectName: string;
+  canonicalRepoKey?: string | null;
   status: "confirmed" | "id_mismatch";
   message: string;
 }
@@ -79,6 +80,7 @@ export interface LinkInitResponse {
     projectId: string;
     serverProjectId: string;
     remoteUrl: string;
+    canonicalRepoKey?: string | null;
     defaultBranch: string | null;
     gitAuthorName: string | null;
     gitAuthorEmail: string | null;
@@ -94,6 +96,7 @@ export interface LinkInitResponse {
 export interface CommitUploadResponse {
   localProjectId?: string;
   serverProjectId?: string;
+  canonicalRepoKey?: string | null;
   accepted: number;
   duplicates: number;
   totalCommits: number;
@@ -103,6 +106,7 @@ export interface CommitUploadResponse {
 export interface DocumentUploadResponse {
   localProjectId?: string;
   serverProjectId?: string;
+  canonicalRepoKey?: string | null;
   results: Array<{
     fileName: string;
     documentId: string;
@@ -142,6 +146,7 @@ export interface LinkStatusResponse {
     id: string;
     projectId: string;
     remoteUrl: string;
+    canonicalRepoKey?: string | null;
     defaultBranch: string | null;
     qualified: boolean;
     lastGitSyncAt: string | null;
@@ -272,6 +277,7 @@ export interface LinkResult {
   /** Cloud project ID returned by the server. */
   serverProjectId: string;
   projectName: string;
+  canonicalRepoKey: string | null;
   serverUrl: string;
   branchCount: number;
   commitCount: number;

@@ -21,6 +21,7 @@
 
 import type Database from "better-sqlite3";
 import { getSyncState, loadConfig, projectNameFromRoot } from "@varveai/adit-core";
+import { getRemoteUrl } from "@varveai/adit-engine";
 import { loadCloudConfig, DEFAULT_SERVER_URL } from "../config.js";
 import {
   loadCredentials,
@@ -34,6 +35,7 @@ import {
 } from "../auth/credentials.js";
 import { CloudClient } from "../http/client.js";
 import { CloudNetworkError, CloudAuthError } from "../http/errors.js";
+import { normalizeGitHubRepoKey } from "../project-link/repo-key.js";
 import { SyncEngine } from "./engine.js";
 import { countUnsyncedRecords } from "./serializer.js";
 
@@ -132,10 +134,13 @@ export async function triggerAutoSync(
 
   try {
     const projectRoot = options?.projectRoot ?? loadConfig().projectRoot;
+    const remoteUrl = await safeGetRemoteUrl(projectRoot);
     const client = new CloudClient(serverUrl, credentials);
     const engine = new SyncEngine(db, client, {
       projectId,
       projectName: projectNameFromRoot(projectRoot),
+      remoteUrl,
+      canonicalRepoKey: normalizeGitHubRepoKey(remoteUrl),
       batchSize: cloudConfig.batchSize,
       serverUrl,
       cloudClientId: credentials.clientId,
@@ -171,5 +176,13 @@ export async function triggerAutoSync(
         );
       }
     }
+  }
+}
+
+async function safeGetRemoteUrl(projectRoot: string): Promise<string | null> {
+  try {
+    return await getRemoteUrl(projectRoot);
+  } catch {
+    return null;
   }
 }

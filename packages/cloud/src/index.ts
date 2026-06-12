@@ -89,6 +89,7 @@ export {
   collectDefaultBranch,
   collectCurrentBranch,
   projectNameFromRemoteUrl,
+  normalizeGitHubRepoKey,
   discoverDocuments,
   loadDocSettings,
   getProjectLinkCache,

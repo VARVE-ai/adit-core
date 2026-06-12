@@ -45,6 +45,7 @@ interface PushResponse {
 interface ProjectCursor {
   localProjectId?: string;
   serverProjectId?: string | null;
+  canonicalRepoKey?: string | null;
   lastSyncedEventId: string | null;
   lastSyncedAt: string | null;
 }
@@ -71,6 +72,8 @@ export class SyncEngine {
   private readonly client: CloudClient;
   private readonly projectId: string;
   private readonly projectName: string;
+  private readonly remoteUrl: string | null;
+  private readonly canonicalRepoKey: string | null;
   private readonly batchSize: number;
   private readonly serverUrl: string;
   private readonly cloudClientId: string;
@@ -82,6 +85,8 @@ export class SyncEngine {
     config: {
       projectId: string;
       projectName?: string;
+      remoteUrl?: string | null;
+      canonicalRepoKey?: string | null;
       batchSize: number;
       serverUrl: string;
       cloudClientId: string;
@@ -92,6 +97,8 @@ export class SyncEngine {
     this.client = client;
     this.projectId = config.projectId;
     this.projectName = config.projectName ?? "";
+    this.remoteUrl = config.remoteUrl ?? null;
+    this.canonicalRepoKey = config.canonicalRepoKey ?? null;
     this.batchSize = config.batchSize;
     this.serverUrl = config.serverUrl;
     this.cloudClientId = config.cloudClientId;
@@ -209,6 +216,8 @@ export class SyncEngine {
             syncVersion,
             batch,
             ...(isNewProject && this.projectName ? { projectName: this.projectName } : {}),
+            ...(this.remoteUrl ? { remoteUrl: this.remoteUrl } : {}),
+            ...(this.canonicalRepoKey ? { canonicalRepoKey: this.canonicalRepoKey } : {}),
           },
         );
 

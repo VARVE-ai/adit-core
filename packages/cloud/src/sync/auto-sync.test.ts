@@ -44,6 +44,10 @@ vi.mock("@varveai/adit-core", () => ({
   ),
 }));
 
+vi.mock("@varveai/adit-engine", () => ({
+  getRemoteUrl: vi.fn(() => "git@github.com:VARVE-ai/adit-cloud.git"),
+}));
+
 vi.mock("./serializer.js", () => ({
   countUnsyncedRecords: vi.fn(),
 }));
@@ -160,6 +164,23 @@ describe("triggerAutoSync", () => {
       expect.anything(),
       expect.objectContaining({
         projectName: "windows-project",
+      }),
+    );
+  });
+
+  it("passes normalized repository identity when syncing", async () => {
+    mockCountUnsyncedRecords.mockReturnValue(20);
+
+    await triggerAutoSync(fakeDb, PROJECT_ID, {
+      projectRoot: "/Users/edy/develop/coding/adit/adit-cloud",
+    });
+
+    expect(syncEngineConstructorFn).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        remoteUrl: "git@github.com:VARVE-ai/adit-cloud.git",
+        canonicalRepoKey: "github:varve-ai/adit-cloud",
       }),
     );
   });
