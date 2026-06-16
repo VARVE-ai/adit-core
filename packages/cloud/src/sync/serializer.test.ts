@@ -78,7 +78,7 @@ describe("sync serializer", () => {
     cleanupDb(dbPath);
   });
 
-  it("stops the event batch before an unanswered prompt", () => {
+  it("includes unanswered prompts without blocking later sessions", () => {
     const firstSessionId = "01H000000000000000000000001";
     const laterSessionId = "01H000000000000000000000025";
     insertTestSession(db, firstSessionId);
@@ -108,11 +108,13 @@ describe("sync serializer", () => {
 
     const batch = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
 
-    expect(batch.sessions.map((s) => s.id)).toEqual([firstSessionId]);
+    expect(batch.sessions.map((s) => s.id)).toEqual([firstSessionId, laterSessionId]);
     expect(batch.events.map((e) => e.id)).toEqual([
       "01H000000000000000000000010",
+      "01H000000000000000000000020",
+      "01H000000000000000000000030",
     ]);
-    expect(batch.events.some((e) => e.event_type === "prompt_submit")).toBe(false);
+    expect(batch.events.some((e) => e.event_type === "prompt_submit")).toBe(true);
   });
 
   it("includes a prompt once the same session has a following assistant response", () => {

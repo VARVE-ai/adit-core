@@ -112,11 +112,6 @@ export interface SyncBatch {
   diffs: SyncDiff[];
 }
 
-interface EventSyncWindow {
-  /** Exclusive upper bound. Null means no open prompt blocks this batch. */
-  beforeEventId: string | null;
-}
-
 /**
  * Build a sync batch of records after the given cursor.
  *
@@ -137,7 +132,6 @@ export function buildSyncBatch(
   cloudClientId: string,
   batchSize: number,
 ): SyncBatch {
-  const syncWindow = getEventSyncWindow(db, afterEventId, projectId);
   const batch: SyncBatch = {
     sessions: [],
     events: [],
@@ -154,7 +148,6 @@ export function buildSyncBatch(
       db,
       afterEventId,
       lastSyncedAt,
-      syncWindow,
       projectId,
       cloudClientId,
       remaining,
@@ -167,7 +160,6 @@ export function buildSyncBatch(
     batch.events = queryEvents(
       db,
       afterEventId,
-      syncWindow,
       projectId,
       cloudClientId,
       remaining,
@@ -180,7 +172,6 @@ export function buildSyncBatch(
     batch.envSnapshots = queryEnvSnapshots(
       db,
       afterEventId,
-      syncWindow,
       projectId,
       cloudClientId,
       remaining,
@@ -194,7 +185,6 @@ export function buildSyncBatch(
       db,
       afterEventId,
       lastSyncedAt,
-      syncWindow,
       projectId,
       cloudClientId,
       remaining,
@@ -278,68 +268,10 @@ export function batchRecordCount(batch: SyncBatch): number {
 
 // --- Internal query helpers ---
 
-function getEventSyncWindow(
-  db: Database.Database,
-  afterEventId: string | null,
-  projectId: string,
-): EventSyncWindow {
-  const promptBarrier = findFirstUnansweredPromptEventId(
-    db,
-    afterEventId,
-    projectId,
-  );
-  return { beforeEventId: promptBarrier };
-}
-
-function findFirstUnansweredPromptEventId(
-  db: Database.Database,
-  afterEventId: string | null,
-  projectId: string,
-): string | null {
-  const params: unknown[] = [];
-  const afterClause = afterEventId ? "AND p.id > ?" : "";
-  if (afterEventId) params.push(afterEventId);
-  params.push(projectId);
-
-  const row = db
-    .prepare(
-      `SELECT p.id
-       FROM events p
-       JOIN sessions s ON p.session_id = s.id
-       WHERE p.event_type = 'prompt_submit'
-         ${afterClause}
-         AND s.project_id = ?
-         AND NOT EXISTS (
-           SELECT 1
-           FROM events a
-           WHERE a.session_id = p.session_id
-             AND a.event_type = 'assistant_response'
-             AND a.id > p.id
-         )
-       ORDER BY p.id ASC
-       LIMIT 1`,
-    )
-    .get(...params) as { id: string } | undefined;
-
-  return row?.id ?? null;
-}
-
-function addUpperBound(
-  conditions: string[],
-  params: unknown[],
-  columnName: string,
-  syncWindow: EventSyncWindow,
-): void {
-  if (!syncWindow.beforeEventId) return;
-  conditions.push(`${columnName} < ?`);
-  params.push(syncWindow.beforeEventId);
-}
-
 function querySessions(
   db: Database.Database,
   afterId: string | null,
   lastSyncedAt: string | null,
-  syncWindow: EventSyncWindow,
   projectId: string,
   cloudClientId: string,
   limit: number,
@@ -355,12 +287,10 @@ function querySessions(
       params.push(lastSyncedAt);
     }
     conditions[1] += ")";
-    addUpperBound(conditions, params, "id", syncWindow);
     sql = `SELECT * FROM sessions WHERE ${conditions.join(" AND ")} ORDER BY id ASC LIMIT ?`;
   } else {
     const conditions = ["project_id = ?"];
     params.push(projectId);
-    addUpperBound(conditions, params, "id", syncWindow);
     sql = `SELECT * FROM sessions WHERE ${conditions.join(" AND ")} ORDER BY id ASC LIMIT ?`;
   }
   params.push(limit);
@@ -385,7 +315,6 @@ function querySessions(
 function queryEvents(
   db: Database.Database,
   afterId: string | null,
-  syncWindow: EventSyncWindow,
   projectId: string,
   cloudClientId: string,
   limit: number,
@@ -396,7 +325,6 @@ function queryEvents(
   if (afterId) {
     const conditions = ["e.id > ?", "s.project_id = ?"];
     params.push(afterId, projectId);
-    addUpperBound(conditions, params, "e.id", syncWindow);
     sql = `SELECT e.* FROM events e
            JOIN sessions s ON e.session_id = s.id
            WHERE ${conditions.join(" AND ")}
@@ -404,7 +332,6 @@ function queryEvents(
   } else {
     const conditions = ["s.project_id = ?"];
     params.push(projectId);
-    addUpperBound(conditions, params, "e.id", syncWindow);
     sql = `SELECT e.* FROM events e
            JOIN sessions s ON e.session_id = s.id
            WHERE ${conditions.join(" AND ")}
@@ -448,7 +375,6 @@ function queryEvents(
 function queryEnvSnapshots(
   db: Database.Database,
   afterId: string | null,
-  syncWindow: EventSyncWindow,
   projectId: string,
   cloudClientId: string,
   limit: number,
@@ -460,7 +386,6 @@ function queryEnvSnapshots(
   if (afterId) {
     const conditions = ["es.id > ?", "s.project_id = ?"];
     params.push(afterId, projectId);
-    addUpperBound(conditions, params, "es.id", syncWindow);
     sql = `SELECT es.* FROM env_snapshots es
            JOIN sessions s ON es.session_id = s.id
            WHERE ${conditions.join(" AND ")}
@@ -468,7 +393,6 @@ function queryEnvSnapshots(
   } else {
     const conditions = ["s.project_id = ?"];
     params.push(projectId);
-    addUpperBound(conditions, params, "es.id", syncWindow);
     sql = `SELECT es.* FROM env_snapshots es
            JOIN sessions s ON es.session_id = s.id
            WHERE ${conditions.join(" AND ")}
@@ -506,7 +430,6 @@ function queryPlans(
   db: Database.Database,
   afterId: string | null,
   lastSyncedAt: string | null,
-  syncWindow: EventSyncWindow,
   projectId: string,
   cloudClientId: string,
   limit: number,
@@ -522,12 +445,10 @@ function queryPlans(
       params.push(lastSyncedAt);
     }
     conditions[1] += ")";
-    addUpperBound(conditions, params, "id", syncWindow);
     sql = `SELECT * FROM plans WHERE ${conditions.join(" AND ")} ORDER BY id ASC LIMIT ?`;
   } else {
     const conditions = ["project_id = ?"];
     params.push(projectId);
-    addUpperBound(conditions, params, "id", syncWindow);
     sql = `SELECT * FROM plans WHERE ${conditions.join(" AND ")} ORDER BY id ASC LIMIT ?`;
   }
   params.push(limit);
