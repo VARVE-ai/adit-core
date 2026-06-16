@@ -989,7 +989,10 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         ? canonicalSessionId
         : undefined;
       const promptInput = new PushableSdkPromptStream(
-        toUserMessage(first.message, first.attachments, pendingClaudeSessionId ?? undefined),
+        toUserMessage(first.message, first.attachments, pendingClaudeSessionId ?? undefined, {
+          priority: "now",
+          shouldQuery: true,
+        }),
       );
       this.activePromptInput = {
         generation,

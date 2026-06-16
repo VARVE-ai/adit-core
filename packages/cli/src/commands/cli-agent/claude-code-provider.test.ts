@@ -1219,6 +1219,28 @@ describe("ClaudeCodeProvider takeover", () => {
 });
 
 describe("ClaudeCodeProvider steerPrompt", () => {
+  it("marks the first web prompt as an immediate assistant turn", async () => {
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+
+      const iterator = findRemotePromptStream()[Symbol.asyncIterator]();
+      const first = await iterator.next();
+      expect((first.value.message as { content?: unknown }).content).toBe("hello");
+      expect(first.value.priority).toBe("now");
+      expect(first.value.shouldQuery).toBe(true);
+    } finally {
+      await provider.abort();
+      provider.stop();
+    }
+  });
+
   it("sends image attachments as Claude content blocks", async () => {
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
     const provider = new ClaudeCodeProvider({
