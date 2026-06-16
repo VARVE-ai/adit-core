@@ -1151,6 +1151,126 @@ describe("ClaudeCodeProvider takeover", () => {
     }
   });
 
+  it("emits Claude SDK text deltas without trimming leading spaces", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    mocks.query.mockImplementation((
+      input: {
+        options?: {
+          includePartialMessages?: boolean;
+        };
+      },
+    ) => {
+      if (!input.options?.includePartialMessages) {
+        return createCapabilityQuery();
+      }
+
+      return {
+        supportedCommands: vi.fn(async () => []),
+        mcpServerStatus: vi.fn(async () => []),
+        getContextUsage: vi.fn(async () => ({
+          totalTokens: 100,
+          maxTokens: 200,
+          percentage: 50,
+          model: "claude-test",
+        })),
+        close: mocks.remoteClose,
+        interrupt: mocks.remoteInterrupt,
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "stream_event",
+            session_id: sessionId,
+            uuid: "partial-1",
+            parent_tool_use_id: null,
+            event: {
+              type: "message_start",
+              message: {
+                id: "message-1",
+                model: "glm-4.5-flash",
+              },
+            },
+          };
+          yield {
+            type: "stream_event",
+            session_id: sessionId,
+            uuid: "partial-1",
+            parent_tool_use_id: null,
+            event: {
+              type: "content_block_delta",
+              index: 0,
+              delta: {
+                type: "text_delta",
+                text: "Hello",
+              },
+            },
+          };
+          yield {
+            type: "stream_event",
+            session_id: sessionId,
+            uuid: "partial-1",
+            parent_tool_use_id: null,
+            event: {
+              type: "content_block_delta",
+              index: 0,
+              delta: {
+                type: "text_delta",
+                text: " world",
+              },
+            },
+          };
+          yield {
+            type: "stream_event",
+            session_id: sessionId,
+            uuid: "partial-1",
+            parent_tool_use_id: null,
+            event: {
+              type: "message_stop",
+            },
+          };
+          yield {
+            type: "result",
+            session_id: sessionId,
+            usage: { input_tokens: 1, output_tokens: 2 },
+          };
+        },
+      };
+    });
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      await tick();
+      await tick();
+
+      const deltaEvents = events.filter((event) => event.type === "assistant-delta");
+      expect(deltaEvents.map((event) => event.payload.text)).toEqual(["Hello", " world"]);
+      expect(deltaEvents).toHaveLength(2);
+      for (const event of deltaEvents) {
+        expect(event.payload).toEqual(expect.objectContaining({
+          sessionId,
+          messageId: "message-1",
+          modelId: "glm-4.5-flash",
+        }));
+      }
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "usage",
+        payload: expect.objectContaining({
+          sessionId,
+          messageId: "message-1",
+        }),
+      }));
+    } finally {
+      provider.stop();
+    }
+  });
+
   it("keeps the run busy until the SDK iterator finishes after result usage", async () => {
     let finishSdkOutput: () => void = () => {};
     const sdkOutputFinished = new Promise<void>((resolve) => {

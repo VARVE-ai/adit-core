@@ -13,6 +13,7 @@ import {
   type Query,
   type SDKAssistantMessage,
   type SDKMessage,
+  type SDKPartialAssistantMessage,
   type SDKSystemMessage,
   type SDKUserMessage,
   type SlashCommand,
@@ -198,6 +199,11 @@ interface PendingRewindRequest {
   checkpoints: ClaudeRewindCheckpoint[];
 }
 
+interface PartialAssistantStreamState {
+  messageId: string;
+  modelId?: string;
+}
+
 export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider {
   readonly provider = "claude-code" as const;
   private local: ChildProcess | null = null;
@@ -243,6 +249,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private pendingRewinds = new Map<string, PendingRewindRequest>();
   private boundPendingSessionIds = new Set<string>();
   private lastAssistantMessageBySession = new Map<string, string>();
+  private partialAssistantStreams = new Map<string, PartialAssistantStreamState>();
   private slashCommandsByName = new Map<string, CliSlashCommandInfo>();
   private mcpServers: Array<{ name: string; status: string }> = [];
   private skills: string[] = [];
@@ -983,6 +990,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       this.startingPrompt = first;
       this.activePromptEvent = first.promptEvent;
       this.activePromptMode = first.mode;
+      this.partialAssistantStreams.clear();
       const permissionMode: PermissionMode = first.mode === "plan" ? "plan" : "bypassPermissions";
       const disallowedTools = first.mode === "build" ? [ASK_USER_QUESTION_TOOL] : undefined;
       const explicitSessionId = !resumeId && canonicalSessionId && isUuid(canonicalSessionId)
@@ -1219,6 +1227,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.activePromptMode = null;
     this.activePromptInput?.stream.close();
     this.activePromptInput = null;
+    this.partialAssistantStreams.clear();
     if (this.startingPrompt) {
       this.startingPrompt.reject(error);
       this.startingPrompt = null;
@@ -1430,6 +1439,11 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       return sdkSessionId;
     }
 
+    if (message.type === "stream_event") {
+      this.emitPartialAssistantMessage(message as SDKPartialAssistantMessage, sessionId);
+      return sdkSessionId;
+    }
+
     if (message.type === "user") {
       this.emitToolResults(message as SDKUserMessage, sessionId);
       return sdkSessionId;
@@ -1625,6 +1639,59 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         }
       }
     }
+  }
+
+  private emitPartialAssistantMessage(message: SDKPartialAssistantMessage, fallbackSessionId: string): void {
+    const sessionId = readString(message.session_id) ?? fallbackSessionId;
+    const event = asRecord(message.event);
+    const eventType = readString(event.type);
+    const streamKey = partialAssistantStreamKey(message, sessionId);
+
+    if (eventType === "message_start") {
+      const started = this.createPartialAssistantStreamState(message, sessionId, event);
+      this.partialAssistantStreams.set(streamKey, started);
+      this.lastAssistantMessageBySession.set(sessionId, started.messageId);
+      if (started.modelId) this.activeModelId = started.modelId;
+      return;
+    }
+
+    if (eventType === "message_stop") {
+      this.partialAssistantStreams.delete(streamKey);
+      return;
+    }
+
+    if (eventType !== "content_block_delta") return;
+    const delta = asRecord(event.delta);
+    if (readString(delta.type) !== "text_delta") return;
+    const text = readDeltaString(delta.text);
+    if (!text) return;
+
+    const stream = this.partialAssistantStreams.get(streamKey) ??
+      this.createPartialAssistantStreamState(message, sessionId, event);
+    this.partialAssistantStreams.set(streamKey, stream);
+    this.lastAssistantMessageBySession.set(sessionId, stream.messageId);
+    if (stream.modelId) this.activeModelId = stream.modelId;
+    this.pushEvent("assistant-delta", {
+      sessionId,
+      messageId: stream.messageId,
+      modelId: stream.modelId ?? this.activeModelId ?? undefined,
+      text,
+      mode: this.activePromptMode ?? undefined,
+      createdAt: Date.now(),
+    });
+  }
+
+  private createPartialAssistantStreamState(
+    message: SDKPartialAssistantMessage,
+    sessionId: string,
+    event: Record<string, unknown>,
+  ): PartialAssistantStreamState {
+    const startedMessage = asRecord(event.message);
+    const messageId = readString(startedMessage.id) ??
+      readString((message as { uuid?: unknown }).uuid) ??
+      `claude-stream-${sessionId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const modelId = readString(startedMessage.model) ?? this.activeModelId ?? undefined;
+    return { messageId, modelId };
   }
 
   private emitTodoWrite(input: {
@@ -2466,6 +2533,11 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function partialAssistantStreamKey(message: SDKPartialAssistantMessage, sessionId: string): string {
+  const parentToolUseId = readString(message.parent_tool_use_id) ?? "main";
+  return `${sessionId}:${parentToolUseId}`;
+}
+
 function normalizeQuestionInput(input: Record<string, unknown>): Array<{
   question: string;
   header: string;
@@ -2673,6 +2745,10 @@ function readSettingsModel(file: string): string | null {
 
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readDeltaString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function readNumber(value: unknown): number | null {

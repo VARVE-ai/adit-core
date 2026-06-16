@@ -41,6 +41,27 @@ describe("isTerminalClaudeErrorEvent", () => {
     })).toBe(true);
   });
 
+  it("treats synthetic Claude API overload messages as terminal local errors", () => {
+    expect(isTerminalClaudeErrorEvent({
+      type: "message",
+      payload: {
+        role: "assistant",
+        modelId: "<synthetic>",
+        text: "API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]. This is a server-side issue, usually temporary.",
+      },
+    })).toBe(true);
+  });
+
+  it("treats Claude API overload error results as terminal local errors", () => {
+    expect(isTerminalClaudeErrorEvent({
+      type: "tool",
+      payload: {
+        status: "error",
+        error: "Claude Code returned an error result: API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]",
+      },
+    })).toBe(true);
+  });
+
   it("does not treat ordinary tool errors as terminal Claude errors", () => {
     expect(isTerminalClaudeErrorEvent({
       type: "tool",

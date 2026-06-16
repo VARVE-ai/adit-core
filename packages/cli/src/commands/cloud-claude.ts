@@ -135,7 +135,11 @@ export function isTerminalClaudeErrorEvent(event: CliAgentRelayEvent): boolean {
 function isTerminalClaudeErrorText(text: string): boolean {
   if (/Claude Code returned an error result/iu.test(text)) return true;
   return /API Error/iu.test(text) &&
-    /safety|security|blocked|rejected|denied|policy|安全|不安全|敏感|拒绝/u.test(text);
+    (
+      /safety|security|blocked|rejected|denied|policy|安全|不安全|敏感|拒绝/u.test(text) ||
+      /\b(429|500|502|503|504|529)\b|overload|rate.?limit|server-side|temporary|访问量过大|稍后再试|限流|过载|繁忙/iu
+        .test(text)
+    );
 }
 
 function eventWithSessionId(event: CliAgentRelayEvent, sessionId: string | null): CliAgentRelayEvent {
