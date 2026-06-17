@@ -923,6 +923,7 @@ describe("ClaudeCodeProvider takeover", () => {
 
       const options = findRemoteQueryCall().options;
       expect(options?.permissionMode).toBe("bypassPermissions");
+      expect(options?.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
       expect(options?.allowDangerouslySkipPermissions).toBe(true);
       expect(options?.disallowedTools).toEqual(["AskUserQuestion"]);
       expect(options?.canUseTool).toBeUndefined();
@@ -1434,7 +1435,7 @@ describe("ClaudeCodeProvider takeover", () => {
 });
 
 describe("ClaudeCodeProvider steerPrompt", () => {
-  it("marks the first web prompt as an immediate assistant turn", async () => {
+  it("does not force the first web prompt as an immediate assistant turn", async () => {
     const provider = new ClaudeCodeProvider({
       bin: "claude",
       args: [],
@@ -1448,8 +1449,8 @@ describe("ClaudeCodeProvider steerPrompt", () => {
       const iterator = findRemotePromptStream()[Symbol.asyncIterator]();
       const first = await iterator.next();
       expect((first.value.message as { content?: unknown }).content).toBe("hello");
-      expect(first.value.priority).toBe("now");
-      expect(first.value.shouldQuery).toBe(true);
+      expect(first.value.priority).toBeUndefined();
+      expect(first.value.shouldQuery).toBeUndefined();
     } finally {
       await provider.abort();
       provider.stop();

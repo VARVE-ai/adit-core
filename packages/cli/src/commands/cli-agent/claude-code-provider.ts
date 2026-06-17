@@ -984,10 +984,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         ? canonicalSessionId
         : undefined;
       const promptInput = new PushableSdkPromptStream(
-        toUserMessage(first.message, first.attachments, pendingClaudeSessionId ?? undefined, {
-          priority: "now",
-          shouldQuery: true,
-        }),
+        toUserMessage(first.message, first.attachments, pendingClaudeSessionId ?? undefined),
       );
       this.activePromptInput = {
         generation,
@@ -1017,6 +1014,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         resume: resumeId ?? undefined,
         sessionId: explicitSessionId,
         settings: this.opts.hookSettingsPath,
+        systemPrompt: { type: "preset", preset: "claude_code" },
         permissionMode,
         ...(disallowedTools ? { disallowedTools } : {}),
         ...(permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
