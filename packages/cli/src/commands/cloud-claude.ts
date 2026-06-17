@@ -40,6 +40,13 @@ function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function readModelValue(value: unknown): string | null {
+  if (typeof value === "string") return readString(value);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const model = value as Record<string, unknown>;
+  return readString(model.display_name) ?? readString(model.id);
+}
+
 function readStringMatrix(value: unknown): string[][] {
   if (!Array.isArray(value)) return [];
   return value.map((item) =>
@@ -83,13 +90,9 @@ function isPendingSessionId(value: string | null | undefined): boolean {
 }
 
 function readHookModel(body: Record<string, unknown>): string | null {
-  const env = body.env && typeof body.env === "object" && !Array.isArray(body.env)
-    ? body.env as Record<string, unknown>
-    : {};
   return (
-    readString(body.model) ??
-    readString(body.activeModelId) ??
-    readString(env.ANTHROPIC_MODEL)
+    readModelValue(body.model) ??
+    readString(body.activeModelId)
   );
 }
 
@@ -457,16 +460,20 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
 
     hookServer.events.on("hook", (event) => {
       const body = event.body as Record<string, unknown>;
+      const hookModel = readHookModel(body);
       const rawSessionId = transcriptSync.noteHook({
         eventType: event.type,
         body,
         sessionId: readString(body.sessionId),
       });
-      provider?.noteModel(readHookModel(body));
       const isLocalOwner = provider?.state.owner === "local";
       const sessionId = rawSessionId && isLocalOwner
         ? provider?.noteLocalSession(rawSessionId) ?? rawSessionId
         : rawSessionId;
+      if (event.type === "StatusLine" || event.type === "SessionStart") {
+        transcriptSync.noteModel(rawSessionId, hookModel);
+        provider?.noteModel(hookModel);
+      }
       if (event.type === "UserPromptSubmit") {
         if (isLocalOwner) {
           provider?.markLocalBusy();

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { connect } from "node:net";
 import {
@@ -47,8 +48,46 @@ const HOOK_POST_SCRIPT = [
   "}catch{process.exit(0)}",
 ].join("");
 
+const STATUSLINE_POST_SCRIPT = [
+  "try{",
+  "const cp=require('child_process'),http=require('http'),https=require('https');",
+  "const e=process.argv[1]?process.argv[1]:'',q=process.argv[2]?process.argv[2]:'',oc=process.argv[3]?Buffer.from(process.argv[3],'base64').toString('utf8'):'';",
+  "let d='';",
+  "process.stdin.setEncoding('utf8');",
+  "process.stdin.on('data',c=>{d+=c});",
+  "function done(o){if(o)process.stdout.write(o)}",
+  "function run(o){",
+  "if(!oc)return done(o);",
+  "let p;",
+  "try{p=cp.spawn(oc,{shell:true,stdio:['pipe','pipe','ignore'],env:process.env})}catch{return done(o)}",
+  "let out='';",
+  "const t=setTimeout(()=>{try{p.kill()}catch{}},3000);",
+  "p.stdout.on('data',c=>{out+=c;if(out.length>200000)out=out.slice(0,200000)});",
+  "p.on('close',()=>{clearTimeout(t);done(out?out:(o?o:''))});",
+  "try{p.stdin.end(d)}catch{}",
+  "}",
+  "process.stdin.on('end',()=>{",
+  "let x={};",
+  "try{x=d?JSON.parse(d):{}}catch{}",
+  "const mo=x&&typeof x.model==='object'?x.model:{};",
+  "const m=(mo&&typeof mo.display_name==='string'&&mo.display_name.trim())?mo.display_name.trim():((mo&&typeof mo.id==='string'&&mo.id.trim())?mo.id.trim():((typeof x.model==='string'&&x.model.trim())?x.model.trim():''));",
+  "if(!e){run(m);return}",
+  "if(!m){run(m);return}",
+  "let u;",
+  "try{u=new URL(e);if(q&&!u.search.includes(q)){const sp=u.search?'&':'?';u=new URL(u.toString()+sp+q)}}catch{run(m);return}",
+  "const lib=u.protocol==='https:'?https:http;",
+  "const body=JSON.stringify({hook_event_name:'StatusLine',event:'StatusLine',model:m,activeModelId:m,session_id:x.session_id,transcript_path:x.transcript_path,cwd:x.cwd,source:'statusLine'});",
+  "let finished=false;",
+  "const next=()=>{if(finished)return;finished=true;run(m)};",
+  "try{const r=lib.request(u,{method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(body)},timeout:1000},res=>{res.resume();res.on('end',next)});r.on('timeout',()=>{r.destroy();next()});r.on('error',next);r.end(body)}catch{next()}",
+  "setTimeout(next,1500).unref()",
+  "});",
+  "}catch{process.exit(0)}",
+].join("");
+
 const CODEX_CLOUD_HOOK_MARKER = "from=adit-cloud-codex-env";
 const CODEX_LEGACY_CLOUD_HOOK_PREFIX = "from=adit-cloud-codex-";
+const CLAUDE_CLOUD_HOOK_PREFIX = "from=adit-cloud-cli-";
 
 interface HookCommand {
   type?: string;
@@ -165,6 +204,16 @@ export function installClaudeHooks(opts: {
       existing = {};
     }
   }
+  const previousStatusLine = existing.statusLine;
+  const statusLineCommand = buildCloudStatusLineCommand({
+    endpoint: opts.endpoint,
+    marker: opts.marker,
+    originalCommand: findOriginalStatusLineCommand({
+      cwd: opts.cwd,
+      existingSettings: existing,
+      marker: opts.marker,
+    }),
+  });
 
   const hooks = (existing.hooks ??= {}) as Record<string, unknown>;
   for (const eventName of EVENTS) {
@@ -184,6 +233,11 @@ export function installClaudeHooks(opts: {
     filtered.push({ hooks: [{ type: "command", command, timeout: 5000 }] });
     hooks[eventName] = filtered;
   }
+  existing.statusLine = {
+    type: "command",
+    command: statusLineCommand,
+    refreshInterval: 1,
+  };
 
   fs.writeFileSync(settingsPath, JSON.stringify(existing, null, 2) + "\n");
 
@@ -219,6 +273,19 @@ export function installClaudeHooks(opts: {
             }
           }
           if (Object.keys(parsed.hooks).length === 0) delete parsed.hooks;
+        }
+
+        const statusLine = asObject(parsed.statusLine);
+        const statusLineCommand = statusLine?.command;
+        if (
+          typeof statusLineCommand === "string" &&
+          statusLineCommand.includes(opts.marker)
+        ) {
+          if (previousStatusLine === undefined) {
+            delete parsed.statusLine;
+          } else {
+            parsed.statusLine = previousStatusLine;
+          }
         }
 
         if (Object.keys(parsed).length === 0 && !fileExisted) {
@@ -464,11 +531,57 @@ function buildCloudHookCommand(endpoint: string, marker: string): string {
   ].join(" ");
 }
 
+function buildCloudStatusLineCommand(opts: {
+  endpoint: string;
+  marker: string;
+  originalCommand: string | null;
+}): string {
+  return [
+    "node",
+    "-e",
+    quoteHookCommandArg(STATUSLINE_POST_SCRIPT),
+    quoteHookCommandArg(opts.endpoint),
+    quoteHookCommandArg(opts.marker),
+    quoteHookCommandArg(Buffer.from(opts.originalCommand ?? "", "utf8").toString("base64")),
+  ].join(" ");
+}
+
 function quoteHookCommandArg(value: string): string {
   if (value.includes("\"")) {
     throw new Error("Hook command arguments cannot contain double quotes");
   }
   return `"${value}"`;
+}
+
+function findOriginalStatusLineCommand(opts: {
+  cwd: string;
+  existingSettings: Record<string, unknown>;
+  marker: string;
+}): string | null {
+  return (
+    readStatusLineCommand(opts.existingSettings.statusLine, opts.marker) ??
+    readStatusLineCommandFromFile(path.join(opts.cwd, ".claude", "settings.json"), opts.marker) ??
+    readStatusLineCommandFromFile(path.join(getClaudeConfigDir(), "settings.json"), opts.marker)
+  );
+}
+
+function readStatusLineCommandFromFile(filePath: string, marker: string): string | null {
+  const parsed = parseObject(readFile(filePath));
+  return parsed ? readStatusLineCommand(parsed.statusLine, marker) : null;
+}
+
+function readStatusLineCommand(value: unknown, marker: string): string | null {
+  const statusLine = asObject(value);
+  if (!statusLine) return null;
+  const type = typeof statusLine.type === "string" ? statusLine.type : "command";
+  const command = typeof statusLine.command === "string" ? statusLine.command.trim() : "";
+  if (type !== "command" || !command) return null;
+  if (command.includes(marker) || command.includes(CLAUDE_CLOUD_HOOK_PREFIX)) return null;
+  return command;
+}
+
+function getClaudeConfigDir(): string {
+  return process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), ".claude");
 }
 
 function codexEntryHasMarker(entry: unknown, marker: string): boolean {

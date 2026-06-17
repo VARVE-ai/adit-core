@@ -8,6 +8,7 @@ interface TranscriptSession {
   firstPromptAt?: number;
   seenKeys: Set<string>;
   lastAssistantMessageId?: string;
+  modelObservations: Array<{ modelId: string; observedAt: number }>;
 }
 
 interface NoteHookInput {
@@ -69,10 +70,23 @@ export class ClaudeTranscriptSync {
         id,
         startedAt: Date.now(),
         seenKeys: new Set<string>(),
+        modelObservations: [],
       };
       this.sessions.set(id, session);
     }
     return session;
+  }
+
+  noteModel(sessionId: string | null | undefined, modelId: string | null | undefined, observedAt = Date.now()): void {
+    if (!sessionId || !modelId?.trim()) return;
+    const session = this.ensureSession(sessionId);
+    const normalized = modelId.trim();
+    const last = session.modelObservations.at(-1);
+    if (last?.modelId === normalized) return;
+    session.modelObservations.push({ modelId: normalized, observedAt });
+    if (session.modelObservations.length > 100) {
+      session.modelObservations.splice(0, session.modelObservations.length - 100);
+    }
   }
 
   private drainTranscript(session: TranscriptSession): CliAgentRelayEvent[] {
@@ -119,7 +133,7 @@ export class ClaudeTranscriptSync {
     const message = isRecord(obj.message) ? obj.message : null;
     const content = message?.content;
     const messageId = makeMessageId(obj, session.id);
-    const modelId = readString(message?.model) ?? undefined;
+    const modelId = this.modelIdForEvent(session, timestamp);
     const usage = normalizeClaudeUsage(message?.usage);
     const events: CliAgentRelayEvent[] = [];
 
@@ -261,7 +275,7 @@ export class ClaudeTranscriptSync {
       readString(part.toolUseID) ??
       `tool-${hashText(`${makeMessageId(obj, session.id)}:${index}`)}`;
     const message = isRecord(obj.message) ? obj.message : null;
-    const modelId = readString(message?.model) ?? undefined;
+    const modelId = this.modelIdForEvent(session, timestamp);
     const usage = normalizeClaudeUsage(message?.usage);
     const output = formatToolResult(part, obj);
     const isError = part.is_error === true;
@@ -304,6 +318,18 @@ export class ClaudeTranscriptSync {
     if (session.seenKeys.has(key)) return;
     session.seenKeys.add(key);
     events.push(event);
+  }
+
+  private modelIdForEvent(
+    session: TranscriptSession,
+    timestamp: number,
+  ): string | undefined {
+    let observedModelId: string | null = null;
+    for (const observation of session.modelObservations) {
+      if (observation.observedAt > timestamp + 2_000) break;
+      observedModelId = observation.modelId;
+    }
+    return observedModelId ?? undefined;
   }
 }
 

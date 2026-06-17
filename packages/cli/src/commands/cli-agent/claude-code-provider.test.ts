@@ -900,7 +900,7 @@ describe("ClaudeCodeProvider takeover", () => {
           percentage: 50,
           totalTokens: 100,
           maxTokens: 200,
-          modelId: "claude-test",
+          modelId: null,
           source: "claude-sdk",
         }),
       }),
@@ -928,6 +928,101 @@ describe("ClaudeCodeProvider takeover", () => {
       expect(options?.canUseTool).toBeUndefined();
     } finally {
       await provider.abort().catch(() => undefined);
+      provider.stop();
+    }
+  });
+
+  it("passes the latest local runtime model to the Web-owned Claude SDK run", async () => {
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+    });
+
+    try {
+      provider.noteModel("glm-5.2[1M][1m]");
+      await provider.takeover();
+      await provider.sendPrompt("start", { mode: "build" });
+
+      expect(findRemoteQueryCall().options?.model).toBe("glm-5.2[1M][1m]");
+    } finally {
+      await provider.abort().catch(() => undefined);
+      provider.stop();
+    }
+  });
+
+  it("keeps the runtime model when Claude SDK reports a provider-normalized base model", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    mocks.query.mockImplementation((
+      input: {
+        options?: {
+          includePartialMessages?: boolean;
+        };
+      },
+    ) => {
+      if (!input.options?.includePartialMessages) return createCapabilityQuery();
+      return {
+        supportedCommands: vi.fn(async () => []),
+        mcpServerStatus: vi.fn(async () => []),
+        getContextUsage: vi.fn(async () => ({
+          totalTokens: 100,
+          maxTokens: 200,
+          percentage: 50,
+          model: "glm-5.2",
+        })),
+        close: mocks.remoteClose,
+        interrupt: mocks.remoteInterrupt,
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "assistant",
+            session_id: sessionId,
+            message: {
+              id: "message-1",
+              role: "assistant",
+              model: "glm-5.2",
+              content: [{ type: "text", text: "OK" }],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            },
+          };
+          yield {
+            type: "result",
+            session_id: sessionId,
+            usage: { input_tokens: 1, output_tokens: 1 },
+          };
+        },
+      };
+    });
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      provider.noteModel("glm-5.2[1M][1m]");
+      await provider.takeover();
+      await provider.sendPrompt("start", { mode: "build" });
+      await tick();
+      await tick();
+
+      expect(findRemoteQueryCall().options?.model).toBe("glm-5.2[1M][1m]");
+      expect(provider.state.activeModelId).toBe("glm-5.2[1M][1m]");
+      expect(events).not.toContainEqual(expect.objectContaining({
+        type: "state",
+        payload: expect.objectContaining({ activeModelId: "glm-5.2" }),
+      }));
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "message",
+        payload: expect.objectContaining({
+          sessionId,
+          messageId: "message-1",
+          modelId: "glm-5.2[1M][1m]",
+          text: "OK",
+        }),
+      }));
+    } finally {
       provider.stop();
     }
   });
@@ -1256,7 +1351,7 @@ describe("ClaudeCodeProvider takeover", () => {
         expect(event.payload).toEqual(expect.objectContaining({
           sessionId,
           messageId: "message-1",
-          modelId: "glm-4.5-flash",
+          modelId: undefined,
         }));
       }
       expect(events).toContainEqual(expect.objectContaining({

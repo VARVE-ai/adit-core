@@ -201,7 +201,6 @@ interface PendingRewindRequest {
 
 interface PartialAssistantStreamState {
   messageId: string;
-  modelId?: string;
 }
 
 export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider {
@@ -287,9 +286,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   }
 
   noteModel(modelId: string | null | undefined): void {
-    if (!modelId || modelId === this.activeModelId) return;
-    this.activeModelId = modelId;
-    this.emitState();
+    this.setActiveModel(modelId, { emit: true });
   }
 
   noteLocalSession(id: string): string | null {
@@ -307,7 +304,6 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.sdkSessionId = null;
     this.remoteSdkSessionId = null;
     this.applyStoredContextUsageForSession(canonicalId);
-    this.refreshActiveModel({ sessionId: canonicalId });
     if (!changed) return canonicalId;
     this.emitState();
     return canonicalId;
@@ -387,7 +383,6 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       this.sdkSessionId = null;
       this.remoteSdkSessionId = null;
       this.applyStoredContextUsageForSession(resumeId);
-      this.refreshActiveModel({ sessionId: resumeId });
     } else {
       this.localResumeSessionId = null;
       this.activeSessionId = null;
@@ -426,7 +421,6 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       this.sdkSessionId = null;
       this.remoteSdkSessionId = null;
       this.applyStoredContextUsageForSession(sessionId);
-      this.refreshActiveModel({ sessionId });
       this.emitState();
       void this.runRemoteLoop(generation);
       return;
@@ -437,7 +431,6 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.sdkSessionId = null;
     this.remoteSdkSessionId = null;
     this.applyStoredContextUsageForSession(sessionId);
-    this.refreshActiveModel({ sessionId });
     this.emitState();
 
     if (this.ownerValue === "local") {
@@ -469,9 +462,6 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     const trimmed = prompt.trim();
     const attachments = opts.attachments ?? [];
     if (!trimmed && attachments.length === 0) return;
-    const sessionId = this.activeSessionId ?? this.resumeSessionId;
-    this.refreshActiveModel({ sessionId });
-
     await new Promise<void>((resolve, reject) => {
       this.promptQueue.push({
         message: trimmed,
@@ -982,9 +972,6 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       const resumeId = pendingSessionId
         ? null
         : this.pickResumeSessionId({ fallbackToLatest: false });
-      this.refreshActiveModel({
-        sessionId: canonicalSessionId ?? resumeId,
-      });
       const abortController = new AbortController();
       this.remoteAbortController = abortController;
       this.startingPrompt = first;
@@ -1026,6 +1013,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         pathToClaudeCodeExecutable: this.opts.bin,
         spawnClaudeCodeProcess: spawnClaudeCliProcess,
         env: this.buildEnv(),
+        ...(this.activeModelId ? { model: this.activeModelId } : {}),
         resume: resumeId ?? undefined,
         sessionId: explicitSessionId,
         settings: this.opts.hookSettingsPath,
@@ -1417,10 +1405,6 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       sdkSessionId ??
       "pending";
     if (sdkSessionId) this.flushActivePromptEvent(sessionId);
-    const messageModelId = extractModelId(message);
-    if (messageModelId) this.activeModelId = messageModelId;
-    this.emitState();
-
     if (message.type === "system" && (message as SDKSystemMessage).subtype === "init") {
       const init = message as SDKSystemMessage;
       this.updateClaudeCapabilities(init);
@@ -1532,7 +1516,6 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     if (nextActiveSessionId) {
       this.rememberRemoteSdkSession(nextActiveSessionId, id);
     }
-    this.refreshActiveModel({ sessionId: id });
     if (changed) this.emitState();
   }
 
@@ -1546,7 +1529,6 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.sdkSessionId = sessionId;
     this.remoteSdkSessionId = sessionId;
     this.applyStoredContextUsageForSession(sessionId);
-    this.refreshActiveModel({ sessionId });
     if (!this.boundPendingSessionIds.has(pendingSessionId)) {
       this.boundPendingSessionIds.add(pendingSessionId);
       this.pushEvent("session-bound", {
@@ -1579,10 +1561,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     if (!Array.isArray(content)) return;
     const messageId = makeMessageId(message, sessionId);
     const parentToolUseId = readString((message as { parent_tool_use_id?: unknown }).parent_tool_use_id);
-    const modelId = typeof message.message?.model === "string"
-      ? message.message.model
-      : undefined;
-    if (modelId) this.activeModelId = modelId;
+    const eventModelId = this.activeModelId ?? undefined;
     const usage = normalizeClaudeUsage((message.message as { usage?: unknown }).usage);
     this.lastAssistantMessageBySession.set(sessionId, messageId);
     for (const part of content as unknown as Array<Record<string, unknown>>) {
@@ -1591,7 +1570,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
           role: "assistant",
           sessionId,
           messageId,
-          modelId,
+          modelId: eventModelId,
           usage,
           text: part.text,
           mode: this.activePromptMode ?? undefined,
@@ -1602,7 +1581,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         this.pushEvent("reasoning", {
           sessionId,
           messageId,
-          modelId,
+          modelId: eventModelId,
           usage,
           text: part.thinking,
           mode: this.activePromptMode ?? undefined,
@@ -1616,7 +1595,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         this.pushEvent("tool", {
           sessionId,
           messageId,
-          modelId,
+          modelId: eventModelId,
           usage,
           toolUseId,
           toolName,
@@ -1651,7 +1630,6 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       const started = this.createPartialAssistantStreamState(message, sessionId, event);
       this.partialAssistantStreams.set(streamKey, started);
       this.lastAssistantMessageBySession.set(sessionId, started.messageId);
-      if (started.modelId) this.activeModelId = started.modelId;
       return;
     }
 
@@ -1670,11 +1648,10 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       this.createPartialAssistantStreamState(message, sessionId, event);
     this.partialAssistantStreams.set(streamKey, stream);
     this.lastAssistantMessageBySession.set(sessionId, stream.messageId);
-    if (stream.modelId) this.activeModelId = stream.modelId;
     this.pushEvent("assistant-delta", {
       sessionId,
       messageId: stream.messageId,
-      modelId: stream.modelId ?? this.activeModelId ?? undefined,
+      modelId: this.activeModelId ?? undefined,
       text,
       mode: this.activePromptMode ?? undefined,
       createdAt: Date.now(),
@@ -1690,8 +1667,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     const messageId = readString(startedMessage.id) ??
       readString((message as { uuid?: unknown }).uuid) ??
       `claude-stream-${sessionId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const modelId = readString(startedMessage.model) ?? this.activeModelId ?? undefined;
-    return { messageId, modelId };
+    return { messageId };
   }
 
   private emitTodoWrite(input: {
@@ -2012,7 +1988,6 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       if (id && isValidClaudeSession(id, this.opts.cwd)) {
         this.resumeSessionId = id;
         this.activeSessionId = id;
-        this.refreshActiveModel({ sessionId: id });
         return id;
       }
     }
@@ -2021,7 +1996,6 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     if (latest) {
       this.resumeSessionId = latest;
       this.activeSessionId = latest;
-      this.refreshActiveModel({ sessionId: latest });
       this.emitState();
       return latest;
     }
@@ -2163,15 +2137,17 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.contextUsage = sessionId ? this.contextUsageBySession.get(sessionId) ?? null : null;
   }
 
-  private refreshActiveModel(opts: { sessionId?: string | null } = {}): string | null {
-    const modelId = resolveClaudeModel({
-      cwd: this.opts.cwd,
-      sessionId: opts.sessionId ?? this.activeSessionId ?? this.resumeSessionId,
-    });
-    if (modelId && modelId !== this.activeModelId) {
-      this.activeModelId = modelId;
-    }
-    return this.activeModelId;
+  private setActiveModel(
+    modelId: string | null | undefined,
+    opts: { emit: boolean },
+  ): boolean {
+    const normalized = typeof modelId === "string" && modelId.trim() ? modelId.trim() : null;
+    if (!normalized) return false;
+    const changed = this.activeModelId !== normalized;
+    if (!changed) return false;
+    this.activeModelId = normalized;
+    if (changed && opts.emit) this.emitState();
+    return changed;
   }
 
   private rememberRemoteSdkSession(
@@ -2449,20 +2425,6 @@ function extractSessionId(message: SDKMessage): string | null {
   return null;
 }
 
-function extractModelId(message: SDKMessage): string | null {
-  const maybe = message as {
-    model?: unknown;
-    message?: { model?: unknown };
-  };
-  if (typeof maybe.message?.model === "string" && maybe.message.model.trim()) {
-    return maybe.message.model.trim();
-  }
-  if (typeof maybe.model === "string" && maybe.model.trim()) {
-    return maybe.model.trim();
-  }
-  return null;
-}
-
 function makeMessageId(message: SDKMessage, sessionId: string): string {
   const maybe = message as { uuid?: unknown; message?: { id?: unknown } };
   if (typeof maybe.message?.id === "string") return maybe.message.id;
@@ -2504,7 +2466,7 @@ function normalizeClaudeContextUsage(
     percentage: Math.max(0, Math.min(100, rawPercentage)),
     totalTokens: Math.max(0, Math.floor(totalTokens)),
     maxTokens: Math.floor(maxTokens),
-    modelId: readString(usage.model) ?? fallbackModelId,
+    modelId: fallbackModelId,
     updatedAt: Date.now(),
     source: "claude-sdk",
   };
@@ -2682,65 +2644,6 @@ function getClaudeProjectDir(cwd: string): string {
   const projectId = path.resolve(cwd).replace(/[^a-zA-Z0-9-]/g, "-");
   const claudeConfigDir = process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), ".claude");
   return path.join(claudeConfigDir, "projects", projectId);
-}
-
-function getClaudeConfigDir(): string {
-  return process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), ".claude");
-}
-
-function resolveClaudeModel(input: {
-  cwd: string;
-  sessionId?: string | null;
-}): string | null {
-  return (
-    readLastSessionModel(input.cwd, input.sessionId) ??
-    readSettingsModel(path.join(input.cwd, ".claude", "settings.local.json")) ??
-    readSettingsModel(path.join(input.cwd, ".claude", "settings.json")) ??
-    readSettingsModel(path.join(getClaudeConfigDir(), "settings.json")) ??
-    readString(process.env.ANTHROPIC_MODEL)
-  );
-}
-
-function readLastSessionModel(cwd: string, sessionId?: string | null): string | null {
-  if (!sessionId || !isUuid(sessionId)) return null;
-  const file = path.join(getClaudeProjectDir(cwd), `${sessionId}.jsonl`);
-  let text: string;
-  try {
-    text = fs.readFileSync(file, "utf8");
-  } catch {
-    return null;
-  }
-
-  let lastModel: string | null = null;
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const parsed = JSON.parse(line) as unknown;
-      const obj = asRecord(parsed);
-      const message = asRecord(obj.message);
-      const model = readString(message.model) ?? readString(obj.model);
-      if (model) lastModel = model;
-    } catch {}
-  }
-  return lastModel;
-}
-
-function readSettingsModel(file: string): string | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return null;
-  }
-  const settings = asRecord(parsed);
-  const env = asRecord(settings.env);
-  return (
-    readString(env.ANTHROPIC_MODEL) ??
-    readString(settings.model) ??
-    readString(env.ANTHROPIC_DEFAULT_SONNET_MODEL) ??
-    readString(env.ANTHROPIC_DEFAULT_OPUS_MODEL) ??
-    readString(env.ANTHROPIC_DEFAULT_HAIKU_MODEL)
-  );
 }
 
 function readString(value: unknown): string | null {
