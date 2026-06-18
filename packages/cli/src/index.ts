@@ -46,6 +46,8 @@ import {
   cloudAuthTokenCommand,
 } from "./commands/cloud.js";
 import { registerCloudCliAgentCommands } from "./commands/cloud-cli-agent.js";
+import { cloudClaudeCommand } from "./commands/cloud-claude.js";
+import { cloudCodexCommand } from "./commands/cloud-codex.js";
 import { dbClearEventsCommand } from "./commands/db.js";
 import {
   transcriptEnableCommand,
@@ -64,6 +66,7 @@ import { selfUpdateCommand } from "./commands/self-update.js";
 import { docsScaffoldCommand, docsValidateCommand } from "./commands/docs.js";
 import { isCliEntrypoint } from "./entrypoint.js";
 import { launchTui } from "./tui/index.js";
+import { withUpdateWarning } from "./update-check.js";
 import { CLI_VERSION } from "./version.js";
 
 export function createProgram(): Command {
@@ -86,13 +89,13 @@ export function createProgram(): Command {
       "-f, --force",
       "Force reinstall hooks (removes existing ADIT hooks first)",
     )
-    .action((opts) =>
+    .action(withUpdateWarning("init", (opts) =>
       initCommand({
         cwd: process.cwd(),
         platform: opts.platform,
         force: opts.force,
       }),
-    );
+    ));
 
   program
     .command("timeline")
@@ -170,14 +173,18 @@ export function createProgram(): Command {
     .command("status")
     .description("Show ADIT status for the current project")
     .option("--json", "Output as JSON")
-    .action((opts) => statusCommand({ json: opts.json }));
+    .action(withUpdateWarning("status", (opts) =>
+      statusCommand({ json: opts.json }),
+    ));
 
   program
     .command("doctor")
     .description("Validate ADIT installation health")
     .option("--fix", "Attempt automatic fixes")
     .option("--json", "Output as JSON")
-    .action((opts) => doctorCommand({ fix: opts.fix, json: opts.json }));
+    .action(withUpdateWarning("doctor", (opts) =>
+      doctorCommand({ fix: opts.fix, json: opts.json }),
+    ));
 
   // Export commands
   const exportCmd = program.command("export").description("Export event data");
@@ -244,11 +251,11 @@ export function createProgram(): Command {
     .description("Authenticate with adit-cloud")
     .option("-s, --server <url>", "Cloud server URL")
     .option("--token <token>", "Authenticate with a static JWT token")
-    .action((opts) =>
+    .action(withUpdateWarning("cloud.login", (opts) =>
       opts.token
         ? cloudAuthTokenCommand(opts.token, { server: opts.server })
         : cloudLoginCommand({ server: opts.server }),
-    );
+    ));
 
   cloudCmd
     .command("logout")
@@ -259,13 +266,17 @@ export function createProgram(): Command {
     .command("sync")
     .description("Push unsynced records to cloud")
     .option("--json", "Output as JSON")
-    .action((opts) => cloudSyncCommand({ json: opts.json }));
+    .action(withUpdateWarning("cloud.sync", (opts) =>
+      cloudSyncCommand({ json: opts.json }),
+    ));
 
   cloudCmd
     .command("status")
     .description("Show cloud sync status")
     .option("--json", "Output as JSON")
-    .action((opts) => cloudStatusCommand({ json: opts.json }));
+    .action(withUpdateWarning("cloud.status", (opts) =>
+      cloudStatusCommand({ json: opts.json }),
+    ));
 
   const cloudAuthCmd = cloudCmd
     .command("auth")
@@ -277,7 +288,10 @@ export function createProgram(): Command {
     .option("-y, --yes", "Skip confirmation")
     .action((opts) => cloudResetCredentialsCommand({ yes: opts.yes }));
 
-  registerCloudCliAgentCommands(cloudCmd);
+  registerCloudCliAgentCommands(cloudCmd, {
+    claude: withUpdateWarning("cloud.claude", cloudClaudeCommand),
+    codex: withUpdateWarning("cloud.codex", cloudCodexCommand),
+  });
 
   // Transcript upload management (under cloud)
   const transcriptCmd = cloudCmd
@@ -298,19 +312,25 @@ export function createProgram(): Command {
     .command("status")
     .description("Show transcript upload status")
     .option("--json", "Output as JSON")
-    .action((opts) => transcriptStatusCommand({ json: opts.json }));
+    .action(withUpdateWarning("cloud.transcript.status", (opts) =>
+      transcriptStatusCommand({ json: opts.json }),
+    ));
 
   transcriptCmd
     .command("upload")
     .description("Manually trigger transcript uploads")
     .option("--json", "Output as JSON")
-    .action((opts) => transcriptUploadCommand({ json: opts.json }));
+    .action(withUpdateWarning("cloud.transcript.upload", (opts) =>
+      transcriptUploadCommand({ json: opts.json }),
+    ));
 
   transcriptCmd
     .command("reset <id>")
     .description("Reset a failed transcript for re-upload")
     .option("--json", "Output as JSON")
-    .action((id, opts) => transcriptResetCommand(id, { json: opts.json }));
+    .action(withUpdateWarning("cloud.transcript.reset", (id, opts) =>
+      transcriptResetCommand(id, { json: opts.json }),
+    ));
 
   cloudCmd
     .command("link")
@@ -321,7 +341,7 @@ export function createProgram(): Command {
     .option("--skip-qualify", "Skip document quality check")
     .option("--dry-run", "Preview without uploading")
     .option("--json", "Output result as JSON")
-    .action((opts) =>
+    .action(withUpdateWarning("cloud.link", (opts) =>
       projectLinkCliHandler({
         force: opts.force,
         skipDocs: opts.skipDocs,
@@ -330,7 +350,7 @@ export function createProgram(): Command {
         dryRun: opts.dryRun,
         json: opts.json,
       }),
-    );
+    ));
 
   // cloud intent — list/view intents, with complete subcommand
   const intentCmd = cloudCmd
@@ -339,25 +359,25 @@ export function createProgram(): Command {
     .option("--id <id>", "Intent ID")
     .option("--state <state>", "Filter by intent state")
     .option("--json", "Output as JSON")
-    .action((opts) =>
+    .action(withUpdateWarning("cloud.intent", (opts) =>
       projectIntentCliHandler({
         id: opts.id,
         state: opts.state,
         json: opts.json,
       }),
-    );
+    ));
 
   intentCmd
     .command("complete <id>")
     .description("Complete a phase or entire intent")
     .option("--phase <number>", "Complete a specific phase (1-99)")
     .option("--json", "Output as JSON")
-    .action((intentId, opts) =>
+    .action(withUpdateWarning("cloud.intent.complete", (intentId, opts) =>
       completeCliHandler(intentId, {
         phase: opts.phase ? parseInt(opts.phase, 10) : undefined,
         json: opts.json,
       }),
-    );
+    ));
 
   // Debug and maintenance commands
   const debugCmd = program
@@ -488,7 +508,8 @@ export function createProgram(): Command {
 
   // Self-update
   program
-    .command("self-update")
+    .command("upgrade")
+    .alias("self-update")
     .description("Update ADIT to the latest version")
     .option("-c, --check", "Check for updates without installing")
     .action((opts) => selfUpdateCommand({ check: opts.check }));
@@ -536,9 +557,9 @@ function registerHookCommands(hookCmd: Command): void {
     .command("install [platform]")
     .description("Install ADIT hooks for a platform")
     .option("--json", "Output as JSON")
-    .action((platform, opts) =>
+    .action(withUpdateWarning("hook.install", (platform, opts) =>
       pluginInstallCommand(platform, { json: opts.json }),
-    );
+    ));
 
   hookCmd
     .command("uninstall [platform]")
@@ -564,9 +585,9 @@ function registerHookCommands(hookCmd: Command): void {
     .command("validate [platform]")
     .description("Validate platform hook installation")
     .option("--json", "Output as JSON")
-    .action((platform, opts) =>
+    .action(withUpdateWarning("hook.validate", (platform, opts) =>
       pluginValidateCommand(platform, { json: opts.json }),
-    );
+    ));
 }
 
 function configureTopLevelHelp(program: Command): void {
@@ -599,7 +620,7 @@ Commands:
 
   doctor [options]           Validate installation health
   tui                        Launch the interactive terminal UI
-  self-update [options]      Update ADIT
+  upgrade [options]          Update ADIT
   debug                      Debug and maintenance commands
   help [command...]          display help for command
 `;

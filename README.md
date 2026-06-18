@@ -237,7 +237,7 @@ platform integrations.
 | `adit debug db clear-events` | Clear local events, sessions, diffs, and environment snapshots |
 | `adit debug perf stats` | Show performance stats |
 | `adit debug perf clear` | Clear performance logs |
-| `adit self-update` | Update ADIT or check for updates |
+| `adit upgrade` | Update ADIT or check for updates |
 
 ## Interactive TUI
 
@@ -342,7 +342,7 @@ Files larger than 500 KB are skipped with a warning.
 | `ADIT_PROJECT_LINK_STALE_HOURS` | Project-link cache staleness threshold | `2` |
 | `ADIT_DEBUG` | Enable debug output for selected cloud/agent paths | unset |
 | `ADIT_CODEX_BIN` | Override Codex binary used by cloud coding commands | unset |
-| `ADIT_INSTALL_DIR` | Override self-update install directory | unset |
+| `ADIT_INSTALL_DIR` | Override the upgrade install directory | unset |
 | `ADIT_ALLOW_NATIVE_BUILD` | Allow native better-sqlite3 build when no prebuild is confirmed | unset |
 | `ADIT_SKIP_NATIVE_PREBUILD_CHECK` | Bypass the native prebuild preflight check | unset |
 

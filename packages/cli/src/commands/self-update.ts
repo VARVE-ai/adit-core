@@ -1,5 +1,5 @@
 /**
- * `adit self-update` — Update ADIT to the latest version.
+ * `adit upgrade` — Update ADIT to the latest version.
  *
  * Detects the installation directory (source-install via git clone),
  * pulls the latest changes, rebuilds, and re-registers commands.
@@ -142,7 +142,7 @@ export async function selfUpdateCommand(opts?: {
     console.error(
       "Failed to pull latest changes. You may have local modifications.",
     );
-    console.error("Try: git -C " + installDir + " stash && adit self-update");
+    console.error("Try: git -C " + installDir + " stash && adit upgrade");
     process.exitCode = 1;
     return;
   }

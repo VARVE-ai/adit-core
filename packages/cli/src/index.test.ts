@@ -45,7 +45,7 @@ describe("CLI help", () => {
     expect(help).toContain("debug");
     expect(help).toContain("docs");
     expect(help).toContain("hook");
-    expect(help).toContain("self-update [options]");
+    expect(help).toContain("upgrade [options]");
     expect(help).toContain("timeline|list [options]");
     expect(help).toContain("uninstall [options]");
     expect(help).toContain("help [command...]");
@@ -75,6 +75,13 @@ describe("CLI help", () => {
 
     expect(timelineCommand.aliases()).toEqual(["list", "ls"]);
     expect(findCommand(createProgram(), "ls").name()).toBe("timeline");
+  });
+
+  it("keeps self-update as a compatibility alias for upgrade", () => {
+    const upgradeCommand = findCommand(createProgram(), "upgrade");
+
+    expect(upgradeCommand.aliases()).toContain("self-update");
+    expect(findCommand(createProgram(), "self-update").name()).toBe("upgrade");
   });
 
   it("lists cloud coding and project commands", () => {
