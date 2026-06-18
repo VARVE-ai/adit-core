@@ -33,8 +33,27 @@ interface CloudClaudeOptions {
   arg?: string[];
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function createRelayLoopWake() {
+  let wakeCurrent: (() => void) | null = null;
+  return {
+    wake(): void {
+      const wake = wakeCurrent;
+      wakeCurrent = null;
+      wake?.();
+    },
+    wait(ms: number): Promise<void> {
+      return new Promise((resolve) => {
+        let timer: ReturnType<typeof setTimeout>;
+        const finish = () => {
+          if (wakeCurrent === finish) wakeCurrent = null;
+          clearTimeout(timer);
+          resolve();
+        };
+        timer = setTimeout(finish, ms);
+        wakeCurrent = finish;
+      });
+    },
+  };
 }
 
 function readString(value: unknown): string | null {
@@ -160,13 +179,13 @@ function eventWithSessionId(event: CliAgentRelayEvent, sessionId: string | null)
 
 function enqueueTranscriptEvents(
   transcriptEvents: CliAgentRelayEvent[],
-  eventQueue: CliAgentRelayEvent[],
+  enqueueEvent: (event: CliAgentRelayEvent) => void,
   sessionId: string | null,
 ): boolean {
   let shouldMarkIdle = false;
   for (const transcriptEvent of transcriptEvents) {
     const event = eventWithSessionId(transcriptEvent, sessionId);
-    eventQueue.push(event);
+    enqueueEvent(event);
     if (isTerminalClaudeErrorEvent(event)) shouldMarkIdle = true;
   }
   return shouldMarkIdle;
@@ -319,7 +338,7 @@ function enqueueCommand(input: {
 async function drainCommandQueue(input: {
   provider: ClaudeCodeProvider;
   commands: RelayCommand[];
-  eventQueue: CliAgentRelayEvent[];
+  enqueueEvent: (event: CliAgentRelayEvent) => void;
   ws: CliAgentRelayWebSocket | null;
 }): Promise<void> {
   while (input.commands.length > 0) {
@@ -331,7 +350,7 @@ async function drainCommandQueue(input: {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       input.ws?.commandError(command.id, message);
-      input.eventQueue.push({
+      input.enqueueEvent({
         type: "error",
         payload: {
           message,
@@ -394,6 +413,11 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
   const commandQueue: RelayCommand[] = [];
   const seenCommandIds = new Set<string>();
   const transcriptSync = new ClaudeTranscriptSync();
+  const relayLoopWake = createRelayLoopWake();
+  const enqueueEvent = (event: CliAgentRelayEvent): void => {
+    eventQueue.push(event);
+    relayLoopWake.wake();
+  };
 
   try {
     try {
@@ -428,7 +452,7 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
       args: opts?.arg ?? [],
       cwd: config.projectRoot,
       hookSettingsPath: installedHooks.settingsPath,
-      onEvent: (event) => eventQueue.push(event),
+      onEvent: enqueueEvent,
     });
 
     const ws = new CliAgentRelayWebSocket({
@@ -450,11 +474,14 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
         console.log("Local Claude Code owns the session until the Coding page takes over.");
         console.log("When Web owns the session, type /local in this terminal to reclaim it.");
       },
-      onCommand: (command) => enqueueCommand({
-        queue: commandQueue,
-        seen: seenCommandIds,
-        command,
-      }),
+      onCommand: (command) => {
+        enqueueCommand({
+          queue: commandQueue,
+          seen: seenCommandIds,
+          command,
+        });
+        relayLoopWake.wake();
+      },
       onConnectionClosed: () => {
         // Server archived our panel; reconnect will get a fresh one.
       },
@@ -482,12 +509,12 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
       if (event.type === "UserPromptSubmit") {
         if (isLocalOwner) {
           provider?.markLocalBusy();
-          if (enqueueTranscriptEvents(transcriptSync.drainSession(rawSessionId), eventQueue, sessionId)) {
+          if (enqueueTranscriptEvents(transcriptSync.drainSession(rawSessionId), enqueueEvent, sessionId)) {
             provider?.markLocalIdle();
           }
           const prompt = readString(body.prompt);
           if (sessionId && prompt) {
-            eventQueue.push({
+            enqueueEvent({
               type: "message",
               payload: {
                 role: "user",
@@ -503,7 +530,7 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
         if (isLocalOwner) {
           transcriptSync.scheduleDrain(rawSessionId, (transcriptEvent) => {
             const mappedEvent = eventWithSessionId(transcriptEvent, sessionId);
-            eventQueue.push(mappedEvent);
+            enqueueEvent(mappedEvent);
             if (isTerminalClaudeErrorEvent(mappedEvent)) provider?.markLocalIdle();
           });
           provider?.markLocalIdle();
@@ -563,7 +590,7 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
           await drainCommandQueue({
             provider,
             commands: commandQueue,
-            eventQueue,
+            enqueueEvent,
             ws,
           });
           const state = provider.state;
@@ -572,7 +599,7 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
             state.busy &&
             enqueueTranscriptEvents(
               transcriptSync.drainSession(state.activeSessionId),
-              eventQueue,
+              enqueueEvent,
               state.activeSessionId,
             )
           ) {
@@ -591,7 +618,10 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
         printCloudError("[adit cloud claude] relay loop", error);
       }
 
-      await sleep(1500);
+      const relayConnected = ws.isOpen && Boolean(ws.currentConnectionId);
+      if (commandQueue.length === 0 && (!relayConnected || eventQueue.length === 0)) {
+        await relayLoopWake.wait(1500);
+      }
     }
   } catch (error) {
     printCloudError("Failed to start Claude Coding relay", error);

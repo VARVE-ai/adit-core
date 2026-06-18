@@ -923,7 +923,7 @@ describe("ClaudeCodeProvider takeover", () => {
 
       const options = findRemoteQueryCall().options;
       expect(options?.permissionMode).toBe("bypassPermissions");
-      expect(options?.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
+      expect(options?.systemPrompt).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
       expect(options?.allowDangerouslySkipPermissions).toBe(true);
       expect(options?.disallowedTools).toEqual(["AskUserQuestion"]);
       expect(options?.canUseTool).toBeUndefined();
@@ -1360,6 +1360,220 @@ describe("ClaudeCodeProvider takeover", () => {
         payload: expect.objectContaining({
           sessionId,
           messageId: "message-1",
+        }),
+      }));
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("emits Claude SDK thinking deltas as reasoning updates", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    mocks.query.mockImplementation((
+      input: {
+        options?: {
+          includePartialMessages?: boolean;
+        };
+      },
+    ) => {
+      if (!input.options?.includePartialMessages) {
+        return createCapabilityQuery();
+      }
+
+      return {
+        supportedCommands: vi.fn(async () => []),
+        mcpServerStatus: vi.fn(async () => []),
+        getContextUsage: vi.fn(async () => null),
+        close: mocks.remoteClose,
+        interrupt: mocks.remoteInterrupt,
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "stream_event",
+            session_id: sessionId,
+            uuid: "partial-1",
+            parent_tool_use_id: null,
+            event: {
+              type: "message_start",
+              message: {
+                id: "message-1",
+                model: "glm-4.5-flash",
+              },
+            },
+          };
+          yield {
+            type: "stream_event",
+            session_id: sessionId,
+            uuid: "partial-1",
+            parent_tool_use_id: null,
+            event: {
+              type: "content_block_delta",
+              index: 0,
+              delta: {
+                type: "thinking_delta",
+                thinking: "First",
+              },
+            },
+          };
+          yield {
+            type: "stream_event",
+            session_id: sessionId,
+            uuid: "partial-1",
+            parent_tool_use_id: null,
+            event: {
+              type: "content_block_delta",
+              index: 0,
+              delta: {
+                type: "thinking_delta",
+                thinking: " thought",
+              },
+            },
+          };
+          yield {
+            type: "assistant",
+            session_id: sessionId,
+            message: {
+              id: "message-1",
+              role: "assistant",
+              model: "glm-4.5-flash",
+              content: [
+                { type: "thinking", thinking: "First thought" },
+              ],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            },
+          };
+          yield {
+            type: "result",
+            session_id: sessionId,
+            usage: { input_tokens: 1, output_tokens: 1 },
+          };
+        },
+      };
+    });
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      await tick();
+      await tick();
+
+      const reasoningEvents = events.filter((event) => event.type === "reasoning");
+      expect(reasoningEvents.map((event) => event.payload.text)).toEqual([
+        "First",
+        " thought",
+        "First thought",
+      ]);
+      expect(reasoningEvents[0]?.payload).toEqual(expect.objectContaining({
+        sessionId,
+        messageId: "message-1",
+        partId: "message-1-reasoning-0",
+        contentBlockIndex: 0,
+        delta: true,
+      }));
+      expect(reasoningEvents[1]?.payload).toEqual(expect.objectContaining({
+        sessionId,
+        messageId: "message-1",
+        partId: "message-1-reasoning-0",
+        contentBlockIndex: 0,
+        delta: true,
+      }));
+      expect(reasoningEvents[2]?.payload).toEqual(expect.objectContaining({
+        sessionId,
+        messageId: "message-1",
+        partId: "message-1-reasoning-0",
+        contentBlockIndex: 0,
+        replace: true,
+      }));
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("emits Claude SDK API retry status and final result errors", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const sessionId = "session-retry";
+    mocks.query.mockImplementation((
+      input: {
+        prompt?: AsyncIterable<Record<string, unknown>>;
+        options?: {
+          includePartialMessages?: boolean;
+        };
+      },
+    ) => {
+      if (!input.options?.includePartialMessages || !input.prompt) {
+        return createCapabilityQuery();
+      }
+
+      return {
+        supportedCommands: vi.fn(async () => []),
+        mcpServerStatus: vi.fn(async () => []),
+        getContextUsage: vi.fn(async () => null),
+        close: mocks.remoteClose,
+        interrupt: mocks.remoteInterrupt,
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "system",
+            subtype: "api_retry",
+            attempt: 1,
+            max_retries: 10,
+            retry_delay_ms: 1000,
+            error_status: 529,
+            error: "overloaded",
+            uuid: "retry-1",
+            session_id: sessionId,
+          };
+          yield {
+            type: "result",
+            subtype: "error_during_execution",
+            is_error: true,
+            session_id: sessionId,
+            errors: ["API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]"],
+            usage: { input_tokens: 1, output_tokens: 0 },
+            total_cost_usd: 0,
+          };
+        },
+      };
+    });
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      await tick();
+      await tick();
+
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "run.retry",
+        payload: expect.objectContaining({
+          sessionId,
+          attempt: 1,
+          maxRetries: 10,
+          retryDelayMs: 1000,
+          retryDelaySeconds: 1,
+          errorStatus: 529,
+          error: "overloaded",
+          message: "API overloaded, retrying 1/10 in 1s...",
+        }),
+      }));
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "error",
+        payload: expect.objectContaining({
+          title: "Claude request failed",
+          message: "API Error: 529 [1305][该模型当前访问量过大，请您稍后再试]",
+          sessionId,
         }),
       }));
     } finally {

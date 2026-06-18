@@ -11,6 +11,7 @@ import {
   type PermissionMode,
   type PermissionResult,
   type Query,
+  type SDKAPIRetryMessage,
   type SDKAssistantMessage,
   type SDKMessage,
   type SDKPartialAssistantMessage,
@@ -98,6 +99,7 @@ const ASK_USER_QUESTION_TOOL = "AskUserQuestion";
 const EXIT_PLAN_MODE_TOOL = "ExitPlanMode";
 const TODO_WRITE_TOOL = "TodoWrite";
 const CLAUDE_CLOUD_NATIVE_SLASH_COMMANDS = ["rewind"] as const;
+const CLAUDE_CLOUD_WEB_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude.";
 const BRANCH_REFRESH_INTERVAL_MS = 5_000;
 const CONTEXT_USAGE_REFRESH_INTERVAL_MS = 10_000;
 
@@ -249,6 +251,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private boundPendingSessionIds = new Set<string>();
   private lastAssistantMessageBySession = new Map<string, string>();
   private partialAssistantStreams = new Map<string, PartialAssistantStreamState>();
+  private streamedThinkingPartKeys = new Set<string>();
   private slashCommandsByName = new Map<string, CliSlashCommandInfo>();
   private mcpServers: Array<{ name: string; status: string }> = [];
   private skills: string[] = [];
@@ -978,6 +981,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       this.activePromptEvent = first.promptEvent;
       this.activePromptMode = first.mode;
       this.partialAssistantStreams.clear();
+      this.streamedThinkingPartKeys.clear();
       const permissionMode: PermissionMode = first.mode === "plan" ? "plan" : "bypassPermissions";
       const disallowedTools = first.mode === "build" ? [ASK_USER_QUESTION_TOOL] : undefined;
       const explicitSessionId = !resumeId && canonicalSessionId && isUuid(canonicalSessionId)
@@ -1014,7 +1018,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         resume: resumeId ?? undefined,
         sessionId: explicitSessionId,
         settings: this.opts.hookSettingsPath,
-        systemPrompt: { type: "preset", preset: "claude_code" },
+        systemPrompt: CLAUDE_CLOUD_WEB_SYSTEM_PROMPT,
         permissionMode,
         ...(disallowedTools ? { disallowedTools } : {}),
         ...(permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
@@ -1214,6 +1218,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.activePromptInput?.stream.close();
     this.activePromptInput = null;
     this.partialAssistantStreams.clear();
+    this.streamedThinkingPartKeys.clear();
     if (this.startingPrompt) {
       this.startingPrompt.reject(error);
       this.startingPrompt = null;
@@ -1403,6 +1408,11 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       sdkSessionId ??
       "pending";
     if (sdkSessionId) this.flushActivePromptEvent(sessionId);
+    if (message.type === "system" && readString((message as { subtype?: unknown }).subtype) === "api_retry") {
+      this.emitApiRetry(message as SDKAPIRetryMessage, sessionId);
+      return sdkSessionId;
+    }
+
     if (message.type === "system" && (message as SDKSystemMessage).subtype === "init") {
       const init = message as SDKSystemMessage;
       this.updateClaudeCapabilities(init);
@@ -1433,6 +1443,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
     if (message.type === "result") {
       this.emitResultUsage(message, sessionId);
+      this.emitResultError(message, sessionId);
     }
     return sdkSessionId;
   }
@@ -1562,7 +1573,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     const eventModelId = this.activeModelId ?? undefined;
     const usage = normalizeClaudeUsage((message.message as { usage?: unknown }).usage);
     this.lastAssistantMessageBySession.set(sessionId, messageId);
-    for (const part of content as unknown as Array<Record<string, unknown>>) {
+    for (const [index, part] of (content as unknown as Array<Record<string, unknown>>).entries()) {
       if (part.type === "text" && typeof part.text === "string" && part.text) {
         this.pushEvent("message", {
           role: "assistant",
@@ -1576,12 +1587,19 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         });
       } else if (part.type === "thinking" && typeof part.thinking === "string") {
         if (!part.thinking.trim()) continue;
+        const partId = claudeReasoningPartId(messageId, index);
+        const streamed = this.streamedThinkingPartKeys.delete(
+          claudeThinkingPartKey(sessionId, messageId, index),
+        );
         this.pushEvent("reasoning", {
           sessionId,
           messageId,
+          partId,
+          contentBlockIndex: index,
           modelId: eventModelId,
           usage,
           text: part.thinking,
+          replace: streamed ? true : undefined,
           mode: this.activePromptMode ?? undefined,
           createdAt: Date.now(),
         });
@@ -1638,14 +1656,39 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
     if (eventType !== "content_block_delta") return;
     const delta = asRecord(event.delta);
-    if (readString(delta.type) !== "text_delta") return;
-    const text = readDeltaString(delta.text);
+    const deltaType = readString(delta.type);
+    const text = deltaType === "thinking_delta"
+      ? readDeltaString(delta.thinking)
+      : deltaType === "text_delta"
+        ? readDeltaString(delta.text)
+        : null;
     if (!text) return;
 
     const stream = this.partialAssistantStreams.get(streamKey) ??
       this.createPartialAssistantStreamState(message, sessionId, event);
     this.partialAssistantStreams.set(streamKey, stream);
     this.lastAssistantMessageBySession.set(sessionId, stream.messageId);
+    if (deltaType === "thinking_delta") {
+      const contentBlockIndex = readNumber(event.index) ?? 0;
+      const partId = claudeReasoningPartId(stream.messageId, contentBlockIndex);
+      this.streamedThinkingPartKeys.add(
+        claudeThinkingPartKey(sessionId, stream.messageId, contentBlockIndex),
+      );
+      this.pushEvent("reasoning", {
+        sessionId,
+        messageId: stream.messageId,
+        partId,
+        contentBlockIndex,
+        modelId: this.activeModelId ?? undefined,
+        text,
+        delta: true,
+        mode: this.activePromptMode ?? undefined,
+        createdAt: Date.now(),
+      });
+      return;
+    }
+
+    if (deltaType !== "text_delta") return;
     this.pushEvent("assistant-delta", {
       sessionId,
       messageId: stream.messageId,
@@ -1666,6 +1709,68 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       readString((message as { uuid?: unknown }).uuid) ??
       `claude-stream-${sessionId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     return { messageId };
+  }
+
+  private emitApiRetry(message: SDKAPIRetryMessage, sessionId: string): void {
+    const attempt = readNumber(message.attempt);
+    const maxRetries = readNumber(message.max_retries) ??
+      readNumber((message as { maxRetries?: unknown }).maxRetries);
+    const retryDelayMs = readNumber(message.retry_delay_ms) ??
+      readNumber((message as { retryDelayMs?: unknown }).retryDelayMs);
+    const errorStatus = readNumber(message.error_status);
+    const error = readString(message.error);
+    const retryLabel = errorStatus === 529 || error === "overloaded"
+      ? "API overloaded"
+      : errorStatus !== null
+        ? `API error ${errorStatus}`
+        : "API request failed";
+    const retryText = attempt !== null && maxRetries !== null && retryDelayMs !== null
+      ? `${retryLabel}, retrying ${attempt}/${maxRetries} in ${formatRetryDelay(retryDelayMs)}...`
+      : `${retryLabel}, retrying...`;
+    this.pushEvent("run.retry", {
+      sessionId,
+      ...(this.activeModelId ? { modelId: this.activeModelId } : {}),
+      attempt,
+      maxRetries,
+      retryDelayMs,
+      retryDelaySeconds: retryDelayMs === null ? null : Math.ceil(retryDelayMs / 1000),
+      errorStatus,
+      error,
+      message: retryText,
+      mode: this.activePromptMode ?? undefined,
+      createdAt: Date.now(),
+    });
+  }
+
+  private emitResultError(message: SDKMessage, sessionId: string): void {
+    const result = message as {
+      subtype?: unknown;
+      is_error?: unknown;
+      errors?: unknown;
+      api_error_status?: unknown;
+    };
+    const subtype = readString(result.subtype);
+    const isError = result.is_error === true || Boolean(subtype?.startsWith("error_"));
+    if (!isError) return;
+    const errors = Array.isArray(result.errors)
+      ? result.errors.filter((item): item is string => typeof item === "string" && item.length > 0)
+      : [];
+    const messageText = errors.length > 0
+      ? errors.join("\n")
+      : subtype
+        ? `Claude SDK result failed: ${subtype}`
+        : "Claude SDK result failed.";
+    this.pushEvent("error", {
+      title: "Claude request failed",
+      message: messageText,
+      sessionId,
+      ...(this.activeModelId ? { modelId: this.activeModelId } : {}),
+      ...(readNumber(result.api_error_status) !== null
+        ? { errorStatus: readNumber(result.api_error_status) }
+        : {}),
+      mode: this.activePromptMode ?? undefined,
+      createdAt: Date.now(),
+    });
   }
 
   private emitTodoWrite(input: {
@@ -2498,6 +2603,14 @@ function partialAssistantStreamKey(message: SDKPartialAssistantMessage, sessionI
   return `${sessionId}:${parentToolUseId}`;
 }
 
+function claudeReasoningPartId(messageId: string, contentBlockIndex: number): string {
+  return `${messageId}-reasoning-${contentBlockIndex}`;
+}
+
+function claudeThinkingPartKey(sessionId: string, messageId: string, contentBlockIndex: number): string {
+  return `${sessionId}:${messageId}:${contentBlockIndex}`;
+}
+
 function normalizeQuestionInput(input: Record<string, unknown>): Array<{
   question: string;
   header: string;
@@ -2654,6 +2767,12 @@ function readDeltaString(value: unknown): string | null {
 
 function readNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function formatRetryDelay(delayMs: number): string {
+  if (delayMs <= 0) return "0s";
+  if (delayMs % 1000 === 0) return `${delayMs / 1000}s`;
+  return `${(delayMs / 1000).toFixed(1).replace(/\.0$/, "")}s`;
 }
 
 function readTodoStatus(value: unknown): ClaudeTodoStatus | null {
