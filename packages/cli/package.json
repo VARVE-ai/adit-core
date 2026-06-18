@@ -31,7 +31,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.123",
+    "@anthropic-ai/claude-agent-sdk": "0.3.179",
+    "@anthropic-ai/sdk": "0.104.2",
     "@varveai/adit-cloud": "workspace:*",
     "@varveai/adit-core": "workspace:*",
     "@varveai/adit-engine": "workspace:*",
