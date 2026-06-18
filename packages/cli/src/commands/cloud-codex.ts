@@ -22,6 +22,7 @@ import {
 } from "./cli-agent/hooks-bootstrap.js";
 import { startCliAgentHookServer, type HookServer } from "./cli-agent/hook-server.js";
 import { CliAgentRelayWebSocket } from "./cli-agent/relay-client.js";
+import { requireAditProjectInitialized } from "./project-initialization.js";
 import type {
   CliAgentRelayEvent,
   PromptImageAttachment,
@@ -322,6 +323,10 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
   const gitRoot = findGitRoot(process.cwd());
   if (!gitRoot) {
     console.error("Not inside a git project. Run this from the project you want to connect.");
+    process.exitCode = 1;
+    return;
+  }
+  if (!requireAditProjectInitialized(gitRoot, "adit cloud codex")) {
     process.exitCode = 1;
     return;
   }
