@@ -19,6 +19,12 @@ const mocks = vi.hoisted(() => ({
   },
   resumeWatcherStop: vi.fn(),
   startResumeWatcher: vi.fn(),
+  modelWatcherOptions: null as null | {
+    cwd: string;
+    onModel: (modelId: string) => void;
+  },
+  modelWatcherStop: vi.fn(),
+  startModelWatcher: vi.fn(),
   savedThreadIds: new Set<string>(),
   isSavedThread: vi.fn(),
 }));
@@ -78,6 +84,17 @@ vi.mock("./codex-resume-log-watcher.js", () => ({
   },
 }));
 
+vi.mock("./codex-model-config-watcher.js", () => ({
+  startCodexModelConfigWatcher: (options: unknown) => {
+    mocks.modelWatcherOptions = options as typeof mocks.modelWatcherOptions;
+    mocks.startModelWatcher(options);
+    return {
+      refresh: vi.fn(),
+      stop: mocks.modelWatcherStop,
+    };
+  },
+}));
+
 vi.mock("@varveai/adit-engine", () => ({
   getCurrentBranch: vi.fn(async () => "main"),
 }));
@@ -113,6 +130,7 @@ const DEFAULT_APP_SERVER_METHODS = [
   "initialize",
   "thread/start",
   "thread/resume",
+  "thread/settings/update",
   "thread/fork",
   "thread/compact/start",
   "skills/list",
@@ -137,6 +155,7 @@ beforeEach(() => {
   mocks.deferredSystemSkillsStderr = false;
   mocks.appServerOptions = null;
   mocks.resumeWatcherOptions = null;
+  mocks.modelWatcherOptions = null;
   mocks.savedThreadIds.clear();
   mocks.isSavedThread.mockImplementation((options: unknown) => {
     const threadId = (options as { threadId?: string }).threadId;
@@ -297,6 +316,101 @@ describe("Codex prompt modes", () => {
 });
 
 describe("CodexCliProvider takeover", () => {
+  it("updates local active model from Codex config watcher changes", () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(mocks.startModelWatcher).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "/tmp/project" }),
+    );
+
+    mocks.modelWatcherOptions?.onModel("gpt-5.5");
+
+    expect(provider.state.activeModelId).toBe("gpt-5.5");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "state",
+      payload: expect.objectContaining({
+        activeModelId: "gpt-5.5",
+      }),
+    }));
+
+    provider.stop();
+    expect(mocks.modelWatcherStop).toHaveBeenCalled();
+  });
+
+  it("applies the latest local model to a resumed Web thread before starting a turn", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const threadId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    mocks.appRequest.mockImplementation(async (method: string) => {
+      if (method === "adit/capabilities/discover") {
+        throw appServerMethodsError();
+      }
+      if (method === "thread/resume") {
+        return {
+          model: "gpt-5.5",
+          thread: { id: threadId },
+        };
+      }
+      if (method === "thread/settings/update") return {};
+      if (method === "turn/start") return { turn: { id: "turn-1" } };
+      if (method === "skills/list") return { data: [] };
+      if (method === "mcpServerStatus/list") return { data: [] };
+      return {};
+    });
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+    provider.noteLocalSession(threadId);
+    mocks.modelWatcherOptions?.onModel("gpt-5.4");
+
+    await provider.takeover();
+    await provider.sendPrompt("hello");
+
+    const calls = mocks.appRequest.mock.calls;
+    const settingsIndex = calls.findIndex(([method]) => method === "thread/settings/update");
+    const turnStartIndex = calls.findIndex(([method]) => method === "turn/start");
+    expect(settingsIndex).toBeGreaterThan(-1);
+    expect(turnStartIndex).toBeGreaterThan(settingsIndex);
+    expect(calls[settingsIndex]).toEqual([
+      "thread/settings/update",
+      {
+        threadId,
+        model: "gpt-5.4",
+      },
+    ]);
+    expect(provider.state.activeModelId).toBe("gpt-5.4");
+
+    mocks.appServerOptions?.onNotification?.({
+      method: "item/completed",
+      params: {
+        threadId,
+        item: {
+          id: "item-1",
+          type: "agentMessage",
+          text: "done",
+        },
+      },
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "message",
+      payload: expect.objectContaining({
+        role: "assistant",
+        modelId: "gpt-5.4",
+        text: "done",
+      }),
+    }));
+
+    provider.stop();
+  });
+
   it("updates local session state when Codex resume is detected before hooks run", () => {
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
     const provider = new CodexCliProvider({

@@ -61,6 +61,13 @@ function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function readModelValue(value: unknown): string | null {
+  if (typeof value === "string") return readString(value);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const model = value as Record<string, unknown>;
+  return readString(model.display_name) ?? readString(model.id);
+}
+
 function readStringMatrix(value: unknown): string[][] {
   if (!Array.isArray(value)) return [];
   return value.map((item) =>
@@ -104,7 +111,7 @@ function isPendingSessionId(value: string | null | undefined): boolean {
 }
 
 function readHookModel(body: Record<string, unknown>): string | null {
-  return readString(body.model) ?? readString(body.activeModelId);
+  return readModelValue(body.model) ?? readString(body.activeModelId);
 }
 
 function withHooksEnabled(args: string[]): string[] {

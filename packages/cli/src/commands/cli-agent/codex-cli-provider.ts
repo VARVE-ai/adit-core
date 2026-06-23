@@ -29,6 +29,10 @@ import {
   startCodexResumeLogWatcher,
   type CodexResumeLogWatcher,
 } from "./codex-resume-log-watcher.js";
+import {
+  startCodexModelConfigWatcher,
+  type CodexModelConfigWatcher,
+} from "./codex-model-config-watcher.js";
 
 interface PendingPrompt {
   message: string;
@@ -102,6 +106,7 @@ const CODEX_PLAN_MODE_INSTRUCTION = [
 ].join("\n");
 
 const CODEX_CAPABILITY_DISCOVERY_METHOD = "adit/capabilities/discover";
+const CODEX_THREAD_SETTINGS_UPDATE_METHOD = "thread/settings/update";
 const CODEX_CLOUD_SLASH_COMMAND_SPECS: CodexSlashCommandSpec[] = [
   { name: "compact", description: "Compress the current Codex thread", method: "thread/compact/start" },
   { name: "mcp", description: "Show Codex MCP server status", method: "mcpServerStatus/list" },
@@ -166,6 +171,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private lastTokenUsage: CliAgentTokenUsage | null = null;
   private contextUsageBySession = new Map<string, CliAgentContextUsage>();
   private lastTokenUsageBySession = new Map<string, CliAgentTokenUsage>();
+  private threadModelBySession = new Map<string, string>();
   private promptQueue: PendingPrompt[] = [];
   private promptActive = false;
   private activeTurnId: string | null = null;
@@ -186,6 +192,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private codexSkills: Array<Record<string, unknown>> = [];
   private codexMcpServers: Array<Record<string, unknown>> = [];
   private localResumeLogWatcher: CodexResumeLogWatcher | null = null;
+  private localModelConfigWatcher: CodexModelConfigWatcher | null = null;
 
   constructor(private readonly opts: CodexCliProviderOptions) {
     super();
@@ -284,6 +291,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.suppressNextLocalExit = Boolean(oldLocal);
     this.local = null;
     this.stopLocalResumeLogWatcher();
+    this.stopLocalModelConfigWatcher();
     await stopLocalCodexProcess(oldLocal);
 
     this.ownerValue = "web";
@@ -335,6 +343,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       const oldLocal = this.local;
       this.local = null;
       this.stopLocalResumeLogWatcher();
+      this.stopLocalModelConfigWatcher();
       try {
         oldLocal?.kill("SIGTERM");
       } catch {}
@@ -714,6 +723,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       this.local?.kill("SIGTERM");
     } catch {}
     this.stopLocalResumeLogWatcher();
+    this.stopLocalModelConfigWatcher();
     this.local = null;
     this.ownerValue = "stopped";
     this.setThinking(false);
@@ -724,6 +734,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private startLocal(extraArgs: string[] = []): void {
     const wasWeb = this.ownerValue === "web";
     this.stopLocalResumeLogWatcher();
+    this.stopLocalModelConfigWatcher();
     this.detachReclaimInput();
     this.finishWebPrompts(new Error("local mode active"));
     this.resetAppServerCapabilities();
@@ -738,6 +749,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.local = child;
     this.ownerValue = "local";
     this.startLocalResumeLogWatcher(child);
+    this.startLocalModelConfigWatcher(child);
     this.emitState();
 
     child.on("error", (error) => {
@@ -746,6 +758,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       if (this.local === child) {
         this.local = null;
         this.stopLocalResumeLogWatcher();
+        this.stopLocalModelConfigWatcher();
         this.ownerValue = "stopped";
         this.emitState();
         this.emit("exit", { code: null, signal: null });
@@ -756,6 +769,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       this.setBusy(false);
       if (this.local === child || this.suppressNextLocalExit) {
         this.stopLocalResumeLogWatcher();
+        this.stopLocalModelConfigWatcher();
       }
       if (this.suppressNextLocalExit) {
         this.suppressNextLocalExit = false;
@@ -787,6 +801,23 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.localResumeLogWatcher = null;
   }
 
+  private startLocalModelConfigWatcher(child: ChildProcess): void {
+    this.localModelConfigWatcher = startCodexModelConfigWatcher({
+      cwd: this.opts.cwd,
+      onModel: (modelId) => {
+        if (this.ownerValue !== "local" || this.local !== child) return;
+        this.noteModel(modelId);
+      },
+    });
+  }
+
+  private stopLocalModelConfigWatcher(): void {
+    try {
+      this.localModelConfigWatcher?.stop();
+    } catch {}
+    this.localModelConfigWatcher = null;
+  }
+
   private async drainPromptQueue(): Promise<void> {
     if (this.promptActive || this.busyValue || this.ownerValue !== "web") return;
     const item = this.promptQueue.shift();
@@ -796,6 +827,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     try {
       await this.ensureAppServer();
       const threadId = await this.ensureThreadForPrompt(item.pendingSessionId, item.mode);
+      await this.applyActiveModelToThread(threadId, this.activeModelId);
       this.pushEvent("message", {
         role: "user",
         sessionId: threadId,
@@ -869,6 +901,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
 
   private async startThread(mode: CodexPromptMode): Promise<string> {
     await this.ensureAppServer();
+    const preferredModelId = this.activeModelId;
     const result = asRecord(await this.appServer?.request("thread/start", {
       cwd: this.opts.cwd,
       ...codexThreadModeOverrides(mode),
@@ -878,7 +911,10 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     const thread = asRecord(result?.thread);
     const threadId = readString(thread?.id);
     if (!threadId) throw new Error("Codex app-server did not return a thread id");
-    this.noteThread(thread, result);
+    this.noteThread(thread, result, {
+      preserveActiveModel: Boolean(preferredModelId),
+    });
+    await this.applyActiveModelToThread(threadId, preferredModelId);
     this.emptyThreadIds.add(threadId);
     return threadId;
   }
@@ -888,6 +924,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     mode: CodexPromptMode = "build",
   ): Promise<void> {
     await this.ensureAppServer();
+    const preferredModelId = this.activeModelId;
     const result = asRecord(await this.appServer?.request("thread/resume", {
       threadId,
       cwd: this.opts.cwd,
@@ -898,7 +935,9 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     const resumedId = readString(thread?.id) ?? threadId;
     this.noteThread({ ...(thread ?? {}), id: resumedId }, result, {
       markLocalResumable: true,
+      preserveActiveModel: Boolean(preferredModelId),
     });
+    await this.applyActiveModelToThread(resumedId, preferredModelId);
   }
 
   private handleAppNotification(message: CodexJsonRpcMessage): void {
@@ -922,6 +961,19 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       const active = status?.type === "active";
       this.setBusy(active);
       this.setThinking(active);
+      return;
+    }
+
+    if (method === "thread/settings/updated") {
+      const sessionId = readString(params.threadId);
+      const settings = asRecord(params.threadSettings);
+      const modelId = readString(settings?.model);
+      if (sessionId && modelId) {
+        this.threadModelBySession.set(sessionId, modelId);
+        if (sessionId === this.activeSessionId || sessionId === this.resumeSessionId) {
+          this.noteModel(modelId);
+        }
+      }
       return;
     }
 
@@ -1101,7 +1153,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private noteThread(
     thread: Record<string, unknown> | null,
     result: Record<string, unknown> | null,
-    opts: { markLocalResumable?: boolean } = {},
+    opts: { markLocalResumable?: boolean; preserveActiveModel?: boolean } = {},
   ): void {
     const threadId = readString(thread?.id);
     if (!threadId) return;
@@ -1114,10 +1166,36 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.applyStoredUsageForSession(threadId);
     const modelId = readString(result?.model);
     if (modelId) {
-      this.activeModelId = modelId;
-      this.refreshContextUsage();
+      this.threadModelBySession.set(threadId, modelId);
+      if (!opts.preserveActiveModel) {
+        this.activeModelId = modelId;
+        this.refreshContextUsage();
+      }
     }
     this.emitState();
+  }
+
+  private async applyActiveModelToThread(
+    threadId: string,
+    modelId: string | null | undefined,
+  ): Promise<void> {
+    const nextModelId = readString(modelId);
+    if (!nextModelId) return;
+    if (this.threadModelBySession.get(threadId) === nextModelId) return;
+    if (
+      this.supportedAppServerMethods.size > 0 &&
+      !this.supportedAppServerMethods.has(CODEX_THREAD_SETTINGS_UPDATE_METHOD)
+    ) {
+      return;
+    }
+    try {
+      await this.appServer?.request(CODEX_THREAD_SETTINGS_UPDATE_METHOD, {
+        threadId,
+        model: nextModelId,
+      });
+      this.threadModelBySession.set(threadId, nextModelId);
+      this.noteModel(nextModelId);
+    } catch {}
   }
 
   private emitThreadItem(
