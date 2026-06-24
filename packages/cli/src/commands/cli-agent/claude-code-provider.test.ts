@@ -813,6 +813,112 @@ describe("ClaudeCodeProvider takeover", () => {
     }
   });
 
+  it("emits Claude context compaction status and boundary as internal tool events", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    mocks.query.mockImplementation((
+      input: {
+        options?: {
+          abortController?: AbortController;
+          includePartialMessages?: boolean;
+        };
+      },
+    ) => {
+      if (!input.options?.includePartialMessages) return createCapabilityQuery();
+      return {
+        supportedCommands: vi.fn(async () => []),
+        mcpServerStatus: vi.fn(async () => []),
+        getContextUsage: vi.fn(async () => ({
+          totalTokens: 100,
+          maxTokens: 200,
+          percentage: 50,
+          model: "claude-test",
+        })),
+        close: mocks.remoteClose,
+        interrupt: mocks.remoteInterrupt,
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: sessionId,
+            slash_commands: [],
+          };
+          yield {
+            type: "system",
+            subtype: "status",
+            status: "compacting",
+            uuid: "compact-status-1",
+            session_id: sessionId,
+          };
+          yield {
+            type: "system",
+            subtype: "compact_boundary",
+            uuid: "compact-boundary-1",
+            session_id: sessionId,
+            compact_metadata: {
+              trigger: "auto",
+              pre_tokens: 1000,
+              post_tokens: 250,
+              duration_ms: 1500,
+            },
+          };
+          yield {
+            type: "result",
+            session_id: sessionId,
+            usage: { input_tokens: 1, output_tokens: 1 },
+          };
+        },
+      };
+    });
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      await tick();
+      await tick();
+
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "tool",
+        payload: expect.objectContaining({
+          sessionId,
+          messageId: `claude-tools-${sessionId}`,
+          toolUseId: "compact-status-1",
+          toolName: "Context compaction",
+          input: { source: "claude" },
+          tool_scope: "internal",
+          status: "running",
+        }),
+      }));
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "tool",
+        payload: expect.objectContaining({
+          sessionId,
+          messageId: `claude-tools-${sessionId}`,
+          toolUseId: "compact-status-1",
+          toolName: "Context compaction",
+          input: {
+            source: "claude",
+            trigger: "auto",
+            preTokens: 1000,
+            postTokens: 250,
+            durationMs: 1500,
+          },
+          tool_scope: "internal",
+          output: "Claude context compaction completed (trigger=auto, tokens 1000 -> 250, duration=1.5s).",
+          status: "completed",
+        }),
+      }));
+    } finally {
+      provider.stop();
+    }
+  });
+
   it("rejects Web takeover after the local Claude CLI exits", async () => {
     const provider = new ClaudeCodeProvider({
       bin: "claude",

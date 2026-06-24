@@ -102,6 +102,7 @@ const CLAUDE_CLOUD_NATIVE_SLASH_COMMANDS = ["rewind"] as const;
 const CLAUDE_CLOUD_WEB_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude.";
 const BRANCH_REFRESH_INTERVAL_MS = 5_000;
 const CONTEXT_USAGE_REFRESH_INTERVAL_MS = 10_000;
+const CONTEXT_COMPACTION_TOOL_MERGE_WINDOW_MS = 30_000;
 
 function hasClaudeWorkspacePath(input: unknown): boolean {
   if (!input || typeof input !== "object" || Array.isArray(input)) return false;
@@ -229,6 +230,11 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private contextUsageBySession = new Map<string, CliAgentContextUsage>();
   private contextUsageRefreshAt = 0;
   private contextUsageRefreshPromise: Promise<void> | null = null;
+  private contextCompactionToolBySession = new Map<string, {
+    id: string;
+    completed: boolean;
+    completedAt?: number;
+  }>();
   private localResumeSessionId: string | null = null;
   private lastStateEventKey: string | null = null;
   private promptQueue: PendingPrompt[] = [];
@@ -1408,22 +1414,35 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       sdkSessionId ??
       "pending";
     if (sdkSessionId) this.flushActivePromptEvent(sessionId);
-    if (message.type === "system" && readString((message as { subtype?: unknown }).subtype) === "api_retry") {
-      this.emitApiRetry(message as SDKAPIRetryMessage, sessionId);
-      return sdkSessionId;
-    }
-
-    if (message.type === "system" && (message as SDKSystemMessage).subtype === "init") {
-      const init = message as SDKSystemMessage;
-      this.updateClaudeCapabilities(init);
-      if (init.session_id) {
-        this.noteSdkSession(init.session_id, {
-          keepActiveSession: Boolean(canonicalSessionId && init.session_id !== canonicalSessionId),
-          preserveResumeSession: opts.suppressActiveFallback === true,
-        });
-        this.flushActivePromptEvent(sessionId);
+    if (message.type === "system") {
+      const subtype = readString((message as { subtype?: unknown }).subtype);
+      if (subtype === "api_retry") {
+        this.emitApiRetry(message as SDKAPIRetryMessage, sessionId);
+        return sdkSessionId;
       }
-      return sdkSessionId;
+
+      if (subtype === "status") {
+        this.emitCompactStatus(message, sessionId);
+        return sdkSessionId;
+      }
+
+      if (subtype === "compact_boundary") {
+        this.emitCompactBoundary(message, sessionId);
+        return sdkSessionId;
+      }
+
+      if ((message as SDKSystemMessage).subtype === "init") {
+        const init = message as SDKSystemMessage;
+        this.updateClaudeCapabilities(init);
+        if (init.session_id) {
+          this.noteSdkSession(init.session_id, {
+            keepActiveSession: Boolean(canonicalSessionId && init.session_id !== canonicalSessionId),
+            preserveResumeSession: opts.suppressActiveFallback === true,
+          });
+          this.flushActivePromptEvent(sessionId);
+        }
+        return sdkSessionId;
+      }
     }
 
     if (message.type === "assistant") {
@@ -1446,6 +1465,111 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       this.emitResultError(message, sessionId);
     }
     return sdkSessionId;
+  }
+
+  private emitCompactStatus(message: SDKMessage, sessionId: string): void {
+    const record = asRecord(message);
+    const status = readString(record.status);
+    const compactResult = readString(record.compact_result);
+    const compactError = readString(record.compact_error);
+    if (status !== "compacting" && !compactResult) return;
+
+    if (status === "compacting") {
+      const toolUseId = this.contextCompactionToolId(sessionId, readString(record.uuid), true);
+      this.emitContextCompactionTool({
+        sessionId,
+        toolUseId,
+        input: { source: "claude" },
+        status: "running",
+      });
+    }
+
+    if (compactResult) {
+      const failed = compactResult === "failed";
+      const toolUseId = this.contextCompactionToolId(sessionId, readString(record.uuid), false);
+      this.emitContextCompactionTool({
+        sessionId,
+        toolUseId,
+        input: { source: "claude", result: compactResult },
+        output: failed ? undefined : "Claude context compaction completed.",
+        error: failed ? compactError ?? "Claude context compaction failed." : undefined,
+        status: failed ? "error" : "completed",
+      });
+    }
+  }
+
+  private emitCompactBoundary(message: SDKMessage, sessionId: string): void {
+    const record = asRecord(message);
+    const metadata = asRecord(record.compact_metadata);
+    const trigger = readString(metadata.trigger);
+    const preTokens = readNumber(metadata.pre_tokens);
+    const postTokens = readNumber(metadata.post_tokens);
+    const durationMs = readNumber(metadata.duration_ms);
+    const input = {
+      source: "claude",
+      ...(trigger ? { trigger } : {}),
+      ...(preTokens !== null ? { preTokens } : {}),
+      ...(postTokens !== null ? { postTokens } : {}),
+      ...(durationMs !== null ? { durationMs } : {}),
+    };
+    const toolUseId = this.contextCompactionToolId(sessionId, readString(record.uuid), false);
+    this.emitContextCompactionTool({
+      sessionId,
+      toolUseId,
+      input,
+      output: formatClaudeCompactionOutput({ trigger, preTokens, postTokens, durationMs }),
+      status: "completed",
+    });
+  }
+
+  private contextCompactionToolId(sessionId: string, fallbackId: string | null, running: boolean): string {
+    const existing = this.contextCompactionToolBySession.get(sessionId);
+    if (running && existing && !existing.completed) return existing.id;
+    const now = Date.now();
+    if (
+      !running &&
+      existing &&
+      (!existing.completed ||
+        (existing.completedAt !== undefined &&
+          now - existing.completedAt <= CONTEXT_COMPACTION_TOOL_MERGE_WINDOW_MS))
+    ) {
+      this.contextCompactionToolBySession.set(sessionId, {
+        id: existing.id,
+        completed: true,
+        completedAt: now,
+      });
+      return existing.id;
+    }
+    const id = fallbackId ?? `claude-compact-${sessionId}-${Date.now()}`;
+    this.contextCompactionToolBySession.set(sessionId, {
+      id,
+      completed: !running,
+      ...(running ? {} : { completedAt: now }),
+    });
+    return id;
+  }
+
+  private emitContextCompactionTool(input: {
+    sessionId: string;
+    toolUseId: string;
+    input: Record<string, unknown>;
+    output?: string;
+    error?: string;
+    status: "running" | "completed" | "error";
+  }): void {
+    this.pushEvent("tool", {
+      sessionId: input.sessionId,
+      messageId: this.lastAssistantMessageBySession.get(input.sessionId) ?? `claude-tools-${input.sessionId}`,
+      toolUseId: input.toolUseId,
+      toolName: "Context compaction",
+      input: input.input,
+      tool_scope: "internal",
+      mode: this.activePromptMode ?? undefined,
+      output: input.output,
+      error: input.error,
+      status: input.status,
+      createdAt: Date.now(),
+    });
   }
 
   private updateClaudeCapabilities(init: SDKSystemMessage): void {
@@ -2671,6 +2795,25 @@ function formatToolResult(content: unknown): string {
   } catch {
     return String(content);
   }
+}
+
+function formatClaudeCompactionOutput(input: {
+  trigger: string | null;
+  preTokens: number | null;
+  postTokens: number | null;
+  durationMs: number | null;
+}): string {
+  const details: string[] = [];
+  if (input.trigger) details.push(`trigger=${input.trigger}`);
+  if (input.preTokens !== null && input.postTokens !== null) {
+    details.push(`tokens ${input.preTokens} -> ${input.postTokens}`);
+  } else if (input.preTokens !== null) {
+    details.push(`preTokens=${input.preTokens}`);
+  }
+  if (input.durationMs !== null) details.push(`duration=${formatRetryDelay(input.durationMs)}`);
+  return details.length > 0
+    ? `Claude context compaction completed (${details.join(", ")}).`
+    : "Claude context compaction completed.";
 }
 
 function commandInfoFromClaudeSlashName(name: string): CliSlashCommandInfo {
