@@ -1928,6 +1928,89 @@ describe("ClaudeCodeProvider steerPrompt", () => {
     provider.stop();
   });
 
+  it("does not surface Claude SDK user diagnostic result errors while steering", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const remotePrompts: string[] = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    let markFirstPromptRead: () => void = () => {};
+    const firstPromptRead = new Promise<void>((resolve) => {
+      markFirstPromptRead = resolve;
+    });
+
+    mocks.query.mockImplementation((
+      input: {
+        prompt?: AsyncIterable<Record<string, unknown>>;
+        options?: {
+          includePartialMessages?: boolean;
+        };
+      },
+    ) => {
+      if (!input.options?.includePartialMessages || !input.prompt) {
+        return createCapabilityQuery();
+      }
+
+      return {
+        supportedCommands: vi.fn(async () => []),
+        mcpServerStatus: vi.fn(async () => []),
+        getContextUsage: vi.fn(async () => null),
+        close: mocks.remoteClose,
+        interrupt: mocks.remoteInterrupt,
+        async *[Symbol.asyncIterator]() {
+          const iterator = input.prompt![Symbol.asyncIterator]();
+          const first = await iterator.next();
+          remotePrompts.push(String((first.value?.message as { content?: unknown } | undefined)?.content));
+          markFirstPromptRead();
+
+          const second = await iterator.next();
+          remotePrompts.push(String((second.value?.message as { content?: unknown } | undefined)?.content));
+          yield {
+            type: "result",
+            session_id: sessionId,
+            result_type: "user",
+            subtype: "error_diagnostic",
+            is_error: true,
+            errors: ["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"],
+            usage: { input_tokens: 1, output_tokens: 0 },
+            total_cost_usd: 0,
+          };
+          yield {
+            type: "result",
+            session_id: sessionId,
+            usage: { input_tokens: 1, output_tokens: 1 },
+            total_cost_usd: 0,
+          };
+        },
+      };
+    });
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      await firstPromptRead;
+      await provider.steerPrompt("today?");
+      await tick();
+      await tick();
+
+      expect(remotePrompts).toEqual(["hello", "today?"]);
+      expect(events).not.toContainEqual(expect.objectContaining({
+        type: "error",
+        payload: expect.objectContaining({
+          title: "Claude request failed",
+          message: "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+        }),
+      }));
+    } finally {
+      provider.stop();
+    }
+  });
+
   it("keeps the SDK prompt stream open until steered turns also complete", async () => {
     const remotePrompts: string[] = [];
     let releaseFirstResult: () => void = () => {};

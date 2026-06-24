@@ -1936,6 +1936,8 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
   private emitResultError(message: SDKMessage, sessionId: string): void {
     const result = message as {
+      result_type?: unknown;
+      resultType?: unknown;
       subtype?: unknown;
       is_error?: unknown;
       errors?: unknown;
@@ -1947,6 +1949,15 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     const errors = Array.isArray(result.errors)
       ? result.errors.filter((item): item is string => typeof item === "string" && item.length > 0)
       : [];
+    const resultType = readString(result.result_type) ?? readString(result.resultType);
+    if (
+      resultType === "user" ||
+      errors.some((error) =>
+        error.includes("[ede_diagnostic]") && error.includes("result_type=user")
+      )
+    ) {
+      return;
+    }
     const messageText = errors.length > 0
       ? errors.join("\n")
       : subtype
