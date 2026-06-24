@@ -1094,6 +1094,86 @@ describe("CodexCliProvider takeover", () => {
       params: {
         threadId: "019e2110-d96f-7e40-882e-b524fa9148e4",
         tokenUsage: {
+          modelContextWindow: 258_400,
+          last: {
+            totalTokens: 126_215,
+            inputTokens: 125_152,
+            outputTokens: 1_063,
+            reasoningOutputTokens: 516,
+            cachedInputTokens: 124_288,
+            cacheCreationInputTokens: 10,
+          },
+        },
+      },
+    });
+    await tick();
+
+    expect(provider.state.currentBranch).toBe("main");
+    expect(provider.state.lastTokenUsage).toEqual(expect.objectContaining({
+      totalTokens: 126_215,
+      inputTokens: 125_152,
+      outputTokens: 1_063,
+      reasoningTokens: 516,
+      cacheReadTokens: 124_288,
+      cacheWriteTokens: 10,
+      source: "codex-app-server",
+    }));
+    expect(provider.state.contextUsage).toEqual(expect.objectContaining({
+      percentage: 46,
+      totalTokens: 126_215,
+      maxTokens: 258_400,
+      modelId: "gpt-5.5",
+      source: "codex-app-server",
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "state",
+      payload: expect.objectContaining({
+        currentBranch: "main",
+        contextUsage: expect.objectContaining({
+          percentage: 46,
+          totalTokens: 126_215,
+          maxTokens: 258_400,
+          modelId: "gpt-5.5",
+        }),
+        lastTokenUsage: expect.objectContaining({
+          totalTokens: 126_215,
+          inputTokens: 125_152,
+          outputTokens: 1_063,
+          reasoningTokens: 516,
+          cacheReadTokens: 124_288,
+          cacheWriteTokens: 10,
+        }),
+      }),
+    }));
+
+    (provider as unknown as { contextUsage: null }).contextUsage = null;
+    provider.noteModel("gpt-5.5");
+    expect(provider.state.contextUsage).toEqual(expect.objectContaining({
+      percentage: 46,
+      totalTokens: 126_215,
+      maxTokens: 258_400,
+      modelId: "gpt-5.5",
+    }));
+
+    provider.stop();
+  });
+
+  it("falls back to model context window when Codex omits runtime context window", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    await provider.takeover();
+    provider.noteModel("gpt-5.5");
+    mocks.appServerOptions?.onNotification?.({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId: "019e2110-d96f-7e40-882e-b524fa9148e4",
+        tokenUsage: {
           last: {
             inputTokens: 1200,
             outputTokens: 300,
@@ -1121,7 +1201,7 @@ describe("CodexCliProvider takeover", () => {
       modelId: "gpt-5.5",
       source: "codex-app-server",
     }));
-    expect(provider.state.contextUsage?.percentage).toBeCloseTo(1500 / 1_050_000 * 100);
+    expect(provider.state.contextUsage?.percentage).toBe(0);
     expect(events).toContainEqual(expect.objectContaining({
       type: "state",
       payload: expect.objectContaining({
@@ -1200,7 +1280,9 @@ describe("CodexCliProvider takeover", () => {
       params: {
         threadId: "019e2110-d96f-7e40-882e-b524fa9148e4",
         tokenUsage: {
+          modelContextWindow: 258_400,
           last: {
+            totalTokens: 1500,
             inputTokens: 1200,
             outputTokens: 300,
           },
@@ -1209,6 +1291,7 @@ describe("CodexCliProvider takeover", () => {
     });
     await tick();
     expect(provider.state.contextUsage?.totalTokens).toBe(1500);
+    expect(provider.state.contextUsage?.maxTokens).toBe(258_400);
 
     await provider.switchSession("019e0000-0000-7000-8000-000000000001");
     provider.noteModel("gpt-5.5");
@@ -1220,7 +1303,9 @@ describe("CodexCliProvider takeover", () => {
       params: {
         threadId: "019e0000-0000-7000-8000-000000000001",
         tokenUsage: {
+          modelContextWindow: 258_400,
           last: {
+            totalTokens: 2600,
             inputTokens: 2200,
             outputTokens: 400,
           },
@@ -1232,6 +1317,7 @@ describe("CodexCliProvider takeover", () => {
 
     await provider.switchSession("019e2110-d96f-7e40-882e-b524fa9148e4");
     expect(provider.state.contextUsage?.totalTokens).toBe(1500);
+    expect(provider.state.contextUsage?.maxTokens).toBe(258_400);
     expect(provider.state.lastTokenUsage?.inputTokens).toBe(1200);
 
     provider.stop();

@@ -119,6 +119,7 @@ const CODEX_CLOUD_SLASH_COMMAND_SPECS: CodexSlashCommandSpec[] = [
 const CODEX_MCP_SLASH_COMMAND_PREFIX = "mcp.";
 const BRANCH_REFRESH_INTERVAL_MS = 5_000;
 const CODEX_SYSTEM_SKILLS_RETRY_DELAYS_MS = [250, 1_000];
+const CODEX_CONTEXT_BASELINE_TOKENS = 12_000;
 const CODEX_ADIT_THREAD_CONFIG = {
   [`features.${CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_FEATURE}`]: true,
 };
@@ -169,8 +170,10 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private branchRefreshPromise: Promise<void> | null = null;
   private contextUsage: CliAgentContextUsage | null = null;
   private lastTokenUsage: CliAgentTokenUsage | null = null;
+  private contextWindow: number | null = null;
   private contextUsageBySession = new Map<string, CliAgentContextUsage>();
   private lastTokenUsageBySession = new Map<string, CliAgentTokenUsage>();
+  private contextWindowBySession = new Map<string, number>();
   private threadModelBySession = new Map<string, string>();
   private promptQueue: PendingPrompt[] = [];
   private promptActive = false;
@@ -1054,7 +1057,24 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
 
     if (method === "thread/tokenUsage/updated") {
       const sessionId = readString(params.threadId);
-      const rawUsage = asRecord(asRecord(params.tokenUsage)?.last);
+      const rawTokenUsage = asRecord(params.tokenUsage) ?? {};
+      const runtimeContextWindow = normalizeCodexContextWindow(
+        readNumber(rawTokenUsage.modelContextWindow) ??
+          readNumber(rawTokenUsage.model_context_window),
+      );
+      const previousContextWindow = sessionId
+        ? this.contextWindowBySession.get(sessionId) ?? null
+        : this.contextWindow;
+      const contextWindowChanged =
+        runtimeContextWindow !== null && runtimeContextWindow !== previousContextWindow;
+      if (runtimeContextWindow !== null) {
+        if (sessionId) {
+          this.contextWindowBySession.set(sessionId, runtimeContextWindow);
+        } else {
+          this.contextWindow = runtimeContextWindow;
+        }
+      }
+      const rawUsage = asRecord(rawTokenUsage.last);
       const usage = normalizeCodexUsage(rawUsage);
       const tokenUsage = normalizeCodexTokenUsage(rawUsage);
       const previousTokenUsage = sessionId
@@ -1069,6 +1089,13 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
           this.refreshContextUsage();
           this.emitState();
         }
+      } else if (
+        tokenUsage &&
+        contextWindowChanged &&
+        (!sessionId || sessionId === this.currentUsageSessionId())
+      ) {
+        this.refreshContextUsage();
+        this.emitState();
       }
       if (sessionId && usage) {
         this.pushEvent("usage", {
@@ -1522,7 +1549,15 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       ? this.lastTokenUsageBySession.get(sessionId) ?? null
       : this.lastTokenUsage;
     this.lastTokenUsage = tokenUsage;
-    const nextUsage = buildCodexContextUsage(tokenUsage, this.activeModelId);
+    const runtimeContextWindow = sessionId
+      ? this.contextWindowBySession.get(sessionId) ?? null
+      : this.contextWindow;
+    this.contextWindow = runtimeContextWindow;
+    const nextUsage = buildCodexContextUsage(
+      tokenUsage,
+      this.activeModelId,
+      runtimeContextWindow,
+    );
     if (!nextUsage) {
       this.contextUsage = null;
       if (sessionId) this.contextUsageBySession.delete(sessionId);
@@ -1554,9 +1589,11 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     if (!sessionId) {
       this.contextUsage = null;
       this.lastTokenUsage = null;
+      this.contextWindow = null;
       return;
     }
     this.lastTokenUsage = this.lastTokenUsageBySession.get(sessionId) ?? null;
+    this.contextWindow = this.contextWindowBySession.get(sessionId) ?? null;
     this.contextUsage = this.contextUsageBySession.get(sessionId) ?? null;
   }
 
@@ -2192,7 +2229,9 @@ function normalizeCodexUsage(value: Record<string, unknown> | null): Record<stri
 
 function normalizeCodexTokenUsage(value: Record<string, unknown> | null): CliAgentTokenUsage | null {
   if (!value) return null;
+  const totalTokens = readNumber(value.totalTokens);
   const usage: CliAgentTokenUsage = {
+    ...(totalTokens !== null ? { totalTokens } : {}),
     inputTokens: readNumber(value.inputTokens) ?? 0,
     outputTokens: readNumber(value.outputTokens) ?? 0,
     reasoningTokens: readNumber(value.reasoningOutputTokens) ?? 0,
@@ -2215,19 +2254,36 @@ function normalizeCodexTokenUsage(value: Record<string, unknown> | null): CliAge
 function buildCodexContextUsage(
   usage: CliAgentTokenUsage | null,
   modelId: string | null,
+  runtimeContextWindow: number | null = null,
 ): CliAgentContextUsage | null {
-  const maxTokens = getCodexModelContextWindow(modelId);
+  const maxTokens = runtimeContextWindow ?? getCodexModelContextWindow(modelId);
   if (!usage || maxTokens === null) return null;
   const outputTokens = Math.max(usage.outputTokens, usage.reasoningTokens);
-  const totalTokens = Math.max(0, Math.floor(usage.inputTokens + outputTokens));
+  const totalTokens = Math.max(
+    0,
+    Math.floor(usage.totalTokens ?? usage.inputTokens + outputTokens),
+  );
   return {
-    percentage: Math.max(0, Math.min(100, totalTokens / maxTokens * 100)),
+    percentage: calculateCodexContextUsedPercentage(totalTokens, maxTokens),
     totalTokens,
     maxTokens,
     modelId: modelId ?? undefined,
     updatedAt: usage.updatedAt,
     source: "codex-app-server",
   };
+}
+
+function calculateCodexContextUsedPercentage(totalTokens: number, maxTokens: number): number {
+  if (maxTokens <= CODEX_CONTEXT_BASELINE_TOKENS) return 100;
+  const effectiveWindow = maxTokens - CODEX_CONTEXT_BASELINE_TOKENS;
+  const usedTokens = Math.max(0, totalTokens - CODEX_CONTEXT_BASELINE_TOKENS);
+  const remainingTokens = Math.max(0, effectiveWindow - usedTokens);
+  const remainingPercent = Math.round(remainingTokens / effectiveWindow * 100);
+  return Math.max(0, Math.min(100, 100 - remainingPercent));
+}
+
+function normalizeCodexContextWindow(value: number | null): number | null {
+  return value !== null && value > 0 ? Math.floor(value) : null;
 }
 
 function getCodexModelContextWindow(modelId: string | null): number | null {
@@ -2260,6 +2316,7 @@ function isSameTokenUsage(
   return Boolean(
     current &&
       current.inputTokens === next.inputTokens &&
+      current.totalTokens === next.totalTokens &&
       current.outputTokens === next.outputTokens &&
       current.reasoningTokens === next.reasoningTokens &&
       current.cacheReadTokens === next.cacheReadTokens &&

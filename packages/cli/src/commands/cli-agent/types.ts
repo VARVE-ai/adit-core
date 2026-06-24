@@ -12,6 +12,7 @@ export interface CliAgentContextUsage {
 }
 
 export interface CliAgentTokenUsage {
+  totalTokens?: number;
   inputTokens: number;
   outputTokens: number;
   reasoningTokens: number;
