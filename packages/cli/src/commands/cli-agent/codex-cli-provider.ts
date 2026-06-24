@@ -1269,6 +1269,22 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       return;
     }
 
+    if (type === "contextCompaction") {
+      this.pushEvent("tool", {
+        sessionId,
+        messageId: this.lastAssistantMessageBySession.get(sessionId) ?? `codex-tools-${sessionId}`,
+        toolUseId: id,
+        toolName: "Context compaction",
+        input: { source: "codex" },
+        tool_scope: "internal",
+        mode: this.activePromptMode ?? undefined,
+        output: opts.running ? undefined : "Context compaction completed.",
+        status: opts.running ? "running" : "completed",
+        createdAt,
+      });
+      return;
+    }
+
     if (type === "commandExecution") {
       const command = readString(item.command) ?? "command";
       const status = readString(item.status);

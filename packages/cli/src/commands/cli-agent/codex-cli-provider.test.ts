@@ -411,6 +411,69 @@ describe("CodexCliProvider takeover", () => {
     provider.stop();
   });
 
+  it("emits Codex context compaction items as internal tool events", async () => {
+    const threadId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    provider.noteLocalSession(threadId);
+    await provider.takeover();
+
+    mocks.appServerOptions?.onNotification?.({
+      method: "item/started",
+      params: {
+        threadId,
+        item: {
+          id: "compact-1",
+          type: "contextCompaction",
+        },
+      },
+    });
+    mocks.appServerOptions?.onNotification?.({
+      method: "item/completed",
+      params: {
+        threadId,
+        item: {
+          id: "compact-1",
+          type: "contextCompaction",
+        },
+      },
+    });
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "tool",
+      payload: expect.objectContaining({
+        sessionId: threadId,
+        messageId: `codex-tools-${threadId}`,
+        toolUseId: "compact-1",
+        toolName: "Context compaction",
+        input: { source: "codex" },
+        tool_scope: "internal",
+        status: "running",
+      }),
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "tool",
+      payload: expect.objectContaining({
+        sessionId: threadId,
+        messageId: `codex-tools-${threadId}`,
+        toolUseId: "compact-1",
+        toolName: "Context compaction",
+        input: { source: "codex" },
+        tool_scope: "internal",
+        output: "Context compaction completed.",
+        status: "completed",
+      }),
+    }));
+
+    provider.stop();
+  });
+
   it("updates local session state when Codex resume is detected before hooks run", () => {
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
     const provider = new CodexCliProvider({
