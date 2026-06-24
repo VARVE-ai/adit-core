@@ -122,6 +122,35 @@ describe("Git Collector (with temp repo)", () => {
     expect(commits[0].message).toBe("Add file");
     expect(commits[1].message).toBe("Initial commit");
     expect(commits[0].authorEmail).toBe("test@example.com");
+    expect(commits[0].parentSha).toBe(commits[1].sha);
+    expect(commits[1].parentSha).toBeNull();
+  });
+
+  it("collectCommitLogs uses the first parent for merge commits", async () => {
+    const mainBaseSha = execSync("git rev-parse HEAD", { cwd: repoDir, encoding: "utf-8" }).trim();
+
+    execSync("git checkout -b feature/merge-parent", { cwd: repoDir, stdio: "pipe" });
+    writeFileSync(join(repoDir, "feature-parent.txt"), "feature\n");
+    execSync("git add . && git commit -m 'Feature parent commit'", { cwd: repoDir, stdio: "pipe" });
+    const featureSha = execSync("git rev-parse HEAD", { cwd: repoDir, encoding: "utf-8" }).trim();
+
+    execSync("git checkout main", { cwd: repoDir, stdio: "pipe" });
+    writeFileSync(join(repoDir, "main-parent.txt"), "main\n");
+    execSync("git add . && git commit -m 'Main parent commit'", { cwd: repoDir, stdio: "pipe" });
+    const mainSha = execSync("git rev-parse HEAD", { cwd: repoDir, encoding: "utf-8" }).trim();
+
+    expect(mainSha).not.toBe(mainBaseSha);
+    execSync("git merge --no-ff feature/merge-parent -m 'Merge feature parent'", {
+      cwd: repoDir,
+      stdio: "pipe",
+    });
+
+    const commits = await collectCommitLogs(repoDir);
+    const mergeCommit = commits.find((commit) => commit.message === "Merge feature parent");
+
+    expect(mergeCommit).toBeDefined();
+    expect(mergeCommit!.parentSha).toBe(mainSha);
+    expect(mergeCommit!.parentSha).not.toBe(featureSha);
   });
 
   it("collectCommitLogs returns incremental commits since SHA", async () => {

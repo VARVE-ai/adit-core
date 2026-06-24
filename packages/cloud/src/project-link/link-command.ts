@@ -251,6 +251,7 @@ export async function linkCommand(
             sinceCommitSha: null,
             commits: batch.map((c) => ({
               sha: c.sha,
+              parentSha: c.parentSha,
               authorName: c.authorName,
               authorEmail: c.authorEmail,
               date: c.date,

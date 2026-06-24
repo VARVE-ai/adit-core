@@ -15,6 +15,7 @@ export interface GitBranch {
 
 export interface GitCommit {
   sha: string;
+  parentSha: string | null;
   authorName: string;
   authorEmail: string;
   date: string; // ISO 8601

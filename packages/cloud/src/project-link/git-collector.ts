@@ -196,12 +196,13 @@ export async function collectCommitLogs(
     sinceCommitSha = sinceCommitShaOrOptions;
   }
   // %H  = full SHA
+  // %P  = parent SHAs, space-separated (first parent is used for parentSha)
   // %an = author name
   // %ae = author email
   // %aI = author date (ISO 8601 strict)
   // %B  = subject + body (may contain newlines)
   // %x01 = SOH field delimiter, %x00 = NUL record delimiter
-  const args = ["log", "--format=%H%x01%an%x01%ae%x01%aI%x01%B%x00"];
+  const args = ["log", "--format=%H%x01%P%x01%an%x01%ae%x01%aI%x01%B%x00"];
 
   if (allRefs) {
     args.push("--branches", "--remotes");
@@ -228,16 +229,19 @@ export async function collectCommitLogs(
     if (!trimmed) continue;
 
     const fields = trimmed.split("\x01");
-    if (fields.length < 5) continue;
+    if (fields.length < 6) continue;
+
+    const parentSha = fields[1]?.trim().split(/\s+/).filter(Boolean)[0] ?? null;
 
     commits.push({
       sha: fields[0],
-      authorName: fields[1],
-      authorEmail: fields[2],
-      date: fields[3],
-      // %B may contain SOH-free multi-line text; everything after the 4th
+      parentSha,
+      authorName: fields[2],
+      authorEmail: fields[3],
+      date: fields[4],
+      // %B may contain SOH-free multi-line text; everything after the 5th
       // SOH is the message (rejoin in case of unexpected extra SOH chars).
-      message: fields.slice(4).join("\x01").trim(),
+      message: fields.slice(5).join("\x01").trim(),
       branch: branch ?? undefined,
     });
   }
