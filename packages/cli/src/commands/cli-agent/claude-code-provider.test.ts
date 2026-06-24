@@ -1473,6 +1473,85 @@ describe("ClaudeCodeProvider takeover", () => {
     }
   });
 
+  it("synthesizes assistant deltas when Claude SDK only returns final text", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    const text = "This final-only Claude response should still reach the panel as assistant deltas.";
+    mocks.query.mockImplementation((
+      input: {
+        options?: {
+          includePartialMessages?: boolean;
+        };
+      },
+    ) => {
+      if (!input.options?.includePartialMessages) {
+        return createCapabilityQuery();
+      }
+
+      return {
+        supportedCommands: vi.fn(async () => []),
+        mcpServerStatus: vi.fn(async () => []),
+        getContextUsage: vi.fn(async () => ({
+          totalTokens: 100,
+          maxTokens: 200,
+          percentage: 50,
+          model: "claude-test",
+        })),
+        close: mocks.remoteClose,
+        interrupt: mocks.remoteInterrupt,
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "assistant",
+            session_id: sessionId,
+            uuid: "assistant-1",
+            parent_tool_use_id: null,
+            message: {
+              id: "message-final-only",
+              role: "assistant",
+              model: "glm-5.2",
+              content: [{ type: "text", text }],
+            },
+          };
+          yield {
+            type: "result",
+            session_id: sessionId,
+            usage: { input_tokens: 1, output_tokens: 2 },
+          };
+        },
+      };
+    });
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      await new Promise((resolve) => setTimeout(resolve, 120));
+
+      const deltaEvents = events.filter((event) => event.type === "assistant-delta");
+      expect(deltaEvents.length).toBeGreaterThan(1);
+      expect(deltaEvents.map((event) => event.payload.text).join("")).toBe(text);
+
+      const lastDeltaIndex = events.reduce(
+        (last, event, index) => event.type === "assistant-delta" ? index : last,
+        -1,
+      );
+      const finalMessageIndex = events.findIndex((event) =>
+        event.type === "message" &&
+        event.payload.role === "assistant" &&
+        event.payload.messageId === "message-final-only"
+      );
+      expect(finalMessageIndex).toBeGreaterThan(lastDeltaIndex);
+    } finally {
+      provider.stop();
+    }
+  });
+
   it("emits Claude SDK thinking deltas as reasoning updates", async () => {
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
     const sessionId = "11111111-1111-1111-1111-111111111111";

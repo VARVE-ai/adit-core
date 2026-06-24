@@ -103,6 +103,27 @@ const CLAUDE_CLOUD_WEB_SYSTEM_PROMPT = "You are Claude Code, Anthropic's officia
 const BRANCH_REFRESH_INTERVAL_MS = 5_000;
 const CONTEXT_USAGE_REFRESH_INTERVAL_MS = 10_000;
 const CONTEXT_COMPACTION_TOOL_MERGE_WINDOW_MS = 30_000;
+const CLAUDE_SYNTHETIC_DELTA_MIN_CHARS = 24;
+const CLAUDE_SYNTHETIC_DELTA_MAX_CHUNKS = 80;
+const CLAUDE_SYNTHETIC_DELTA_INTERVAL_MS = 16;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function chunkTextForSyntheticDeltas(text: string): string[] {
+  const codePoints = Array.from(text);
+  if (codePoints.length <= CLAUDE_SYNTHETIC_DELTA_MIN_CHARS) return [text];
+  const chunkSize = Math.max(
+    CLAUDE_SYNTHETIC_DELTA_MIN_CHARS,
+    Math.ceil(codePoints.length / CLAUDE_SYNTHETIC_DELTA_MAX_CHUNKS),
+  );
+  const chunks: string[] = [];
+  for (let index = 0; index < codePoints.length; index += chunkSize) {
+    chunks.push(codePoints.slice(index, index + chunkSize).join(""));
+  }
+  return chunks;
+}
 
 function hasClaudeWorkspacePath(input: unknown): boolean {
   if (!input || typeof input !== "object" || Array.isArray(input)) return false;
@@ -257,6 +278,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private boundPendingSessionIds = new Set<string>();
   private lastAssistantMessageBySession = new Map<string, string>();
   private partialAssistantStreams = new Map<string, PartialAssistantStreamState>();
+  private streamedTextMessageIds = new Set<string>();
   private streamedThinkingPartKeys = new Set<string>();
   private slashCommandsByName = new Map<string, CliSlashCommandInfo>();
   private mcpServers: Array<{ name: string; status: string }> = [];
@@ -987,6 +1009,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       this.activePromptEvent = first.promptEvent;
       this.activePromptMode = first.mode;
       this.partialAssistantStreams.clear();
+      this.streamedTextMessageIds.clear();
       this.streamedThinkingPartKeys.clear();
       const permissionMode: PermissionMode = first.mode === "plan" ? "plan" : "bypassPermissions";
       const disallowedTools = first.mode === "build" ? [ASK_USER_QUESTION_TOOL] : undefined;
@@ -1078,7 +1101,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       try {
         for await (const message of this.remoteQuery) {
           if (this.remoteLoopGeneration !== generation) break;
-          const sdkSessionId = this.handleSdkMessage(message, canonicalSessionId ?? resumeId, {
+          const sdkSessionId = await this.handleSdkMessage(message, canonicalSessionId ?? resumeId, {
             suppressActiveFallback: Boolean(pendingSessionId),
           });
           this.scheduleContextUsageRefresh(message.type === "result");
@@ -1224,6 +1247,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.activePromptInput?.stream.close();
     this.activePromptInput = null;
     this.partialAssistantStreams.clear();
+    this.streamedTextMessageIds.clear();
     this.streamedThinkingPartKeys.clear();
     if (this.startingPrompt) {
       this.startingPrompt.reject(error);
@@ -1394,11 +1418,11 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     ].some((id) => id === sessionId);
   }
 
-  private handleSdkMessage(
+  private async handleSdkMessage(
     message: SDKMessage,
     canonicalSessionId: string | null,
     opts: { suppressActiveFallback?: boolean } = {},
-  ): string | null {
+  ): Promise<string | null> {
     const sdkSessionId = extractSessionId(message);
     if (sdkSessionId) {
       this.noteSdkSession(sdkSessionId, {
@@ -1446,7 +1470,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     }
 
     if (message.type === "assistant") {
-      this.emitAssistantMessage(message as SDKAssistantMessage, sessionId);
+      await this.emitAssistantMessage(message as SDKAssistantMessage, sessionId);
       return sdkSessionId;
     }
 
@@ -1689,7 +1713,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     });
   }
 
-  private emitAssistantMessage(message: SDKAssistantMessage, sessionId: string): void {
+  private async emitAssistantMessage(message: SDKAssistantMessage, sessionId: string): Promise<void> {
     const content = message.message?.content;
     if (!Array.isArray(content)) return;
     const messageId = makeMessageId(message, sessionId);
@@ -1699,6 +1723,16 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.lastAssistantMessageBySession.set(sessionId, messageId);
     for (const [index, part] of (content as unknown as Array<Record<string, unknown>>).entries()) {
       if (part.type === "text" && typeof part.text === "string" && part.text) {
+        if (!this.streamedTextMessageIds.has(messageId)) {
+          const completed = await this.emitSyntheticAssistantDeltas({
+            sessionId,
+            messageId,
+            modelId: eventModelId,
+            text: part.text,
+            mode: this.activePromptMode ?? undefined,
+          });
+          if (!completed) return;
+        }
         this.pushEvent("message", {
           role: "assistant",
           sessionId,
@@ -1760,6 +1794,39 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     }
   }
 
+  private async emitSyntheticAssistantDeltas(input: {
+    sessionId: string;
+    messageId: string;
+    modelId?: string;
+    text: string;
+    mode?: CliPromptMode;
+  }): Promise<boolean> {
+    const generation = this.remoteLoopGeneration;
+    const chunks = chunkTextForSyntheticDeltas(input.text);
+    this.streamedTextMessageIds.add(input.messageId);
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (!this.canContinueSyntheticAssistantDeltas(generation)) return false;
+      this.pushEvent("assistant-delta", {
+        sessionId: input.sessionId,
+        messageId: input.messageId,
+        modelId: input.modelId,
+        text: chunks[index],
+        mode: input.mode,
+        createdAt: Date.now(),
+      });
+      if (index < chunks.length - 1) {
+        await sleep(CLAUDE_SYNTHETIC_DELTA_INTERVAL_MS);
+      }
+    }
+    return this.canContinueSyntheticAssistantDeltas(generation);
+  }
+
+  private canContinueSyntheticAssistantDeltas(generation: number): boolean {
+    return this.ownerValue === "web" &&
+      this.remoteLoopGeneration === generation &&
+      this.remoteAbortController?.signal.aborted !== true;
+  }
+
   private emitPartialAssistantMessage(message: SDKPartialAssistantMessage, fallbackSessionId: string): void {
     const sessionId = readString(message.session_id) ?? fallbackSessionId;
     const event = asRecord(message.event);
@@ -1813,6 +1880,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     }
 
     if (deltaType !== "text_delta") return;
+    this.streamedTextMessageIds.add(stream.messageId);
     this.pushEvent("assistant-delta", {
       sessionId,
       messageId: stream.messageId,
