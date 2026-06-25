@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
-import { spawnCliProcess } from "./cli-process.js";
+import { spawnCliProcess } from "../cli-process.js";
 
 export interface CodexJsonRpcMessage {
   id?: string | number;

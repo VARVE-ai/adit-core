@@ -9,17 +9,17 @@ import {
   loadCloudConfig,
   loadCredentials,
 } from "@varveai/adit-cloud";
-import { CodexCliProvider } from "./cli-agent/codex-cli-provider.js";
+import { CodexCliProvider } from "./cli-agent/codex/provider.js";
 import {
   codexBinaryMismatchDebugLines,
   selectCodexExecutable,
-} from "./cli-agent/codex-binary-resolver.js";
-import { CodexRelayEventDeduper, CodexTranscriptSync } from "./cli-agent/codex-transcript-sync.js";
+} from "./cli-agent/codex/codex-binary-resolver.js";
+import { CodexRelayEventDeduper, CodexTranscriptSync } from "./cli-agent/codex/codex-transcript-sync.js";
 import {
   ensurePersistentCodexHooksInstalled,
   installCodexHooks,
   type InstalledHooks,
-} from "./cli-agent/hooks-bootstrap.js";
+} from "./cli-agent/codex/hooks-bootstrap.js";
 import { startCliAgentHookServer, type HookServer } from "./cli-agent/hook-server.js";
 import { CliAgentRelayWebSocket } from "./cli-agent/relay-client.js";
 import { requireAditProjectInitialized } from "./project-initialization.js";
@@ -159,6 +159,13 @@ async function processCommand(
 ): Promise<void> {
   if (command.type === "takeover") {
     await provider.takeover();
+    return;
+  }
+
+  if (command.type === "new-session") {
+    await provider.startNewSession?.(
+      readString(command.payload.pendingSessionId) ?? readString(command.payload.sessionId),
+    );
     return;
   }
 

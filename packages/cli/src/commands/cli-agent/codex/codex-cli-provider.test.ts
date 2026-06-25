@@ -106,7 +106,7 @@ import {
   formatCodexTerminalNotice,
   normalizeCodexReclaimInput,
   promptInputForCodexMode,
-} from "./codex-cli-provider.js";
+} from "./provider.js";
 
 function mockChildProcess() {
   const child = new EventEmitter() as EventEmitter & {
@@ -854,7 +854,7 @@ describe("CodexCliProvider takeover", () => {
     provider.stop();
   });
 
-  it("binds a pending Web session when the first slash command starts a thread", async () => {
+  it("resumes a bound pending Web session when releasing Web control", async () => {
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
     let threadStartCount = 0;
     const initialThreadId = "019e2110-d96f-7e40-882e-b524fa9148e4";
@@ -894,6 +894,7 @@ describe("CodexCliProvider takeover", () => {
     });
 
     expect(provider.state.activeSessionId).toBe(slashThreadId);
+    expect(provider.state.resumeSessionId).toBe(slashThreadId);
     expect(events).toContainEqual(expect.objectContaining({
       type: "session-bound",
       payload: {
@@ -908,6 +909,68 @@ describe("CodexCliProvider takeover", () => {
         title: "/new",
         sessionId: slashThreadId,
       }),
+    }));
+
+    mocks.savedThreadIds.add(slashThreadId);
+    mocks.spawn.mockClear();
+
+    await provider.releaseToLocal();
+
+    expect(mocks.spawn).toHaveBeenCalledWith(
+      "codex",
+      ["resume", slashThreadId],
+      expect.objectContaining({ cwd: "/tmp/project" }),
+    );
+    expect(provider.state.owner).toBe("local");
+    expect(provider.state.activeSessionId).toBe(slashThreadId);
+    expect(provider.state.resumeSessionId).toBe(slashThreadId);
+
+    provider.stop();
+  });
+
+  it("starts a new Codex thread for an empty Web session request", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    let threadStartCount = 0;
+    const initialThreadId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    const newThreadId = "019e2110-d96f-7e40-882e-b524fa9148e6";
+    mocks.appRequest.mockImplementation(async (method: string) => {
+      if (method === "adit/capabilities/discover") {
+        throw appServerMethodsError();
+      }
+      if (method === "thread/start") {
+        threadStartCount += 1;
+        return {
+          model: "gpt-test",
+          thread: { id: threadStartCount === 1 ? initialThreadId : newThreadId },
+        };
+      }
+      if (method === "turn/interrupt") return {};
+      if (method === "skills/list") return { data: [] };
+      if (method === "mcpServerStatus/list") return { data: [] };
+      return {};
+    });
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    await provider.takeover();
+    events.length = 0;
+
+    await provider.startNewSession("pending_web_session");
+
+    expect(threadStartCount).toBe(2);
+    expect(provider.state.activeSessionId).toBe(newThreadId);
+    expect(provider.state.resumeSessionId).toBe(newThreadId);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "session-bound",
+      payload: {
+        pendingSessionId: "pending_web_session",
+        sessionId: newThreadId,
+        createdAt: expect.any(Number),
+      },
     }));
 
     provider.stop();

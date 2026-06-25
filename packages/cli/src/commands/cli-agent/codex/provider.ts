@@ -12,18 +12,64 @@ import type {
   CliAgentContextUsage,
   CliAgentTokenUsage,
   PromptImageAttachment,
-} from "./types.js";
+} from "../types.js";
 import {
-  CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_FEATURE,
   CodexAppServerClient,
   type CodexJsonRpcMessage,
 } from "./codex-app-server-client.js";
 import {
-  CODEX_UPDATE_PLAN_TOOL,
-  normalizeCodexUpdatePlanInput,
-  parseCodexToolInput,
-} from "./codex-plan-normalizer.js";
-import { spawnCliProcess } from "./cli-process.js";
+  handleCodexAppServerRequest,
+  type CodexPendingPermission,
+  type CodexPendingQuestion,
+} from "./app-requests.js";
+import {
+  CODEX_CAPABILITY_DISCOVERY_METHOD,
+  CODEX_CLOUD_SLASH_COMMAND_SPECS,
+  CODEX_MCP_SLASH_COMMAND_PREFIX,
+  CODEX_SYSTEM_SKILLS_RETRY_DELAYS_MS,
+  CODEX_THREAD_SETTINGS_UPDATE_METHOD,
+  extractCodexMcpServers,
+  extractCodexSkills,
+  extractCodexSupportedMethodsFromError,
+  formatCodexMcpServers,
+  formatCodexModels,
+  formatCodexSkillPrompt,
+  formatCodexSkills,
+  normalizeSlashCommandName,
+  pendingSessionIdFromSlashCommand,
+  type CodexSlashCommandSpec,
+} from "./capabilities.js";
+import { asRecord, delay, isMissingCodexRolloutError, pluralize, readDeltaString, readNumber, readString } from "./helpers.js";
+import {
+  codexInputItems,
+  codexThreadModeOverrides,
+  codexTurnModeOverrides,
+  type CodexPromptMode,
+} from "./input-mode.js";
+import {
+  buildApprovalResponse,
+  buildQuestionResponse,
+} from "./requests.js";
+import {
+  applyReclaimText,
+  normalizeCodexReclaimInput,
+  restoreTerminalForCodexReclaim,
+  stopLocalCodexProcess,
+  writeCodexTerminalNotice,
+} from "./terminal.js";
+import {
+  buildCodexContextUsage,
+  isSameContextUsage,
+  isSameTokenUsage,
+  normalizeCodexContextWindow,
+  normalizeCodexTokenUsage,
+  normalizeCodexUsage,
+} from "./usage.js";
+import { emitCodexThreadItem } from "./thread-items.js";
+export { promptInputForCodexMode, codexThreadModeOverrides, codexTurnModeOverrides } from "./input-mode.js";
+export type { CodexPromptMode } from "./input-mode.js";
+export { formatCodexTerminalNotice, normalizeCodexReclaimInput } from "./terminal.js";
+import { spawnCliProcess } from "../cli-process.js";
 import {
   isCodexThreadSavedForCwd,
   startCodexResumeLogWatcher,
@@ -44,28 +90,6 @@ interface PendingPrompt {
   reject: (error: Error) => void;
 }
 
-interface PendingPermission {
-  request: CliPermissionRequest;
-  method: string;
-  params: Record<string, unknown>;
-  resolve: (result: unknown) => void;
-  reject: (error: Error) => void;
-}
-
-interface PendingQuestion {
-  id: string;
-  method: string;
-  params: Record<string, unknown>;
-  resolve: (result: unknown) => void;
-  reject: (error: Error) => void;
-}
-
-interface CodexSlashCommandSpec {
-  name: string;
-  description: string;
-  method: string;
-}
-
 interface CodexCliProviderOptions {
   bin: string;
   args: string[];
@@ -75,84 +99,8 @@ interface CodexCliProviderOptions {
   onEvent?: (event: CliAgentRelayEvent) => void;
 }
 
-export type CodexPromptMode = "build" | "plan";
-type CliToolScope =
-  | "approval"
-  | "internal"
-  | "internal_plan"
-  | "shell"
-  | "workspace_read"
-  | "workspace_write";
-
 const RECLAIM_COMMAND = "/local";
-const CLEAR_TERMINAL_LINE = "\r\x1b[2K";
-const CLEAR_TO_END_OF_LINE = "\x1b[0K";
-const LOCAL_CLI_EXIT_WAIT_MS = 750;
-const TERMINAL_RECLAIM_RESET = [
-  "\x1b[?1004l", // Focus in/out reporting.
-  "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l", // Mouse modes.
-  "\x1b[?2004l", // Bracketed paste.
-  "\x1b[?1l", // Application cursor keys.
-  "\x1b[=0u\x1b[<u\x1b[<u\x1b[<u", // Kitty/CSI-u keyboard protocol.
-  "\x1b[>4;0m", // xterm modifyOtherKeys.
-  "\x1b[?25h", // Cursor visible.
-].join("");
-
-const CODEX_PLAN_MODE_INSTRUCTION = [
-  "ADIT Plan mode is active.",
-  "Do not modify files, create files, apply patches, install packages, start services, commit changes, or otherwise change the working tree.",
-  "Use read-only inspection only. If implementation is needed, return a concrete plan with files, steps, risks, and questions instead of editing.",
-  "Do not announce that you are about to edit files; stop at the plan.",
-].join("\n");
-
-const CODEX_CAPABILITY_DISCOVERY_METHOD = "adit/capabilities/discover";
-const CODEX_THREAD_SETTINGS_UPDATE_METHOD = "thread/settings/update";
-const CODEX_CLOUD_SLASH_COMMAND_SPECS: CodexSlashCommandSpec[] = [
-  { name: "compact", description: "Compress the current Codex thread", method: "thread/compact/start" },
-  { name: "mcp", description: "Show Codex MCP server status", method: "mcpServerStatus/list" },
-  { name: "skills", description: "List Codex skills", method: "skills/list" },
-  { name: "fork", description: "Fork the current Codex thread", method: "thread/fork" },
-  { name: "model", description: "List available Codex models", method: "model/list" },
-  { name: "new", description: "Start a new Codex thread", method: "thread/start" },
-  { name: "clear", description: "Start a clean Codex thread", method: "thread/start" },
-];
-const CODEX_MCP_SLASH_COMMAND_PREFIX = "mcp.";
 const BRANCH_REFRESH_INTERVAL_MS = 5_000;
-const CODEX_SYSTEM_SKILLS_RETRY_DELAYS_MS = [250, 1_000];
-const CODEX_CONTEXT_BASELINE_TOKENS = 12_000;
-const CODEX_ADIT_THREAD_CONFIG = {
-  [`features.${CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_FEATURE}`]: true,
-};
-const CODEX_MODEL_CONTEXT_WINDOWS: Array<[RegExp, number]> = [
-  [/^gpt-5\.5(?:$|[-_\s])/, 1_050_000],
-  [/^gpt-5(?:\.\d+)?(?:-codex(?:-max|-mini)?|-chat-latest)?(?:$|[-_\s])/, 400_000],
-];
-
-function codexToolScope(toolName: string, mode: CodexPromptMode | null): CliToolScope {
-  const normalized = toolName.trim().toLowerCase();
-  if (normalized === CODEX_UPDATE_PLAN_TOOL.toLowerCase() || normalized === "update_plan") {
-    return mode === "plan" ? "internal_plan" : "internal";
-  }
-  if (
-    normalized === "bash" ||
-    normalized === "commandexecution" ||
-    normalized === "exec_command"
-  ) {
-    return "shell";
-  }
-  if (
-    normalized === "read" ||
-    normalized === "grep" ||
-    normalized === "glob" ||
-    normalized === "ls"
-  ) {
-    return "workspace_read";
-  }
-  if (normalized === "apply_patch" || normalized === "filechange") {
-    return mode === "plan" ? "internal_plan" : "workspace_write";
-  }
-  return "internal";
-}
 
 export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   readonly provider = "codex" as const;
@@ -182,8 +130,8 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private loadedThreadIds = new Set<string>();
   private emptyThreadIds = new Set<string>();
   private boundPendingSessionIds = new Set<string>();
-  private pendingPermissions = new Map<string, PendingPermission>();
-  private pendingQuestions = new Map<string, PendingQuestion>();
+  private pendingPermissions = new Map<string, CodexPendingPermission>();
+  private pendingQuestions = new Map<string, CodexPendingQuestion>();
   private lastAssistantMessageBySession = new Map<string, string>();
   private reclaimAttached = false;
   private reclaimBuffer = "";
@@ -332,6 +280,28 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       this.applyStoredUsageForSession(null);
     }
     this.startLocal(resumeId ? ["resume", resumeId] : []);
+  }
+
+  async startNewSession(pendingSessionId?: string | null): Promise<void> {
+    if (this.ownerValue !== "web") {
+      throw Object.assign(new Error("Web has not taken over this Codex session"), {
+        statusCode: 409,
+      });
+    }
+    await this.finishActiveRunAsAborted({
+      errorMessage: "Codex session switched",
+      eventMessage: "Codex session switched.",
+      interruptTurn: true,
+    });
+    const threadId = await this.startThread("build");
+    if (pendingSessionId) {
+      this.bindPendingSession(pendingSessionId, threadId);
+    } else {
+      this.resumeSessionId = threadId;
+      this.sdkSessionId = threadId;
+      this.applyStoredUsageForSession(threadId);
+      this.emitState();
+    }
   }
 
   async switchSession(sessionId: string): Promise<void> {
@@ -1107,75 +1077,18 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       }
     }
   }
-
   private handleAppServerRequest(message: CodexJsonRpcMessage): Promise<unknown> {
-    if (message.id === undefined || !message.method) {
-      return Promise.resolve(null);
-    }
-    const id = String(message.id);
-    const params = asRecord(message.params) ?? {};
-    const sessionId = readString(params.threadId) ?? this.activeSessionId ?? this.resumeSessionId;
-
-    if (
-      message.method === "item/tool/requestUserInput" ||
-      message.method === "mcpServer/elicitation/request"
-    ) {
-      return new Promise((resolve, reject) => {
-        this.pendingQuestions.set(id, {
-          id,
-          method: message.method ?? "",
-          params,
-          resolve,
-          reject,
-        });
-        this.pushEvent("question.asked", {
-          id,
-          sessionId,
-          questions: normalizeCodexQuestions(message.method ?? "", params),
-          createdAt: Date.now(),
-        });
-        this.emitState();
-      });
-    }
-
-    if (
-      message.method === "item/commandExecution/requestApproval" ||
-      message.method === "item/fileChange/requestApproval" ||
-      message.method === "item/permissions/requestApproval" ||
-      message.method === "applyPatchApproval" ||
-      message.method === "execCommandApproval"
-    ) {
-      return new Promise((resolve, reject) => {
-        const toolName = approvalToolName(message.method ?? "", params);
-        const request: CliPermissionRequest = {
-          id,
-          toolName,
-          input: params,
-          createdAt: Date.now(),
-        };
-        this.pendingPermissions.set(id, {
-          request,
-          method: message.method ?? "",
-          params,
-          resolve,
-          reject,
-        });
-        this.pushEvent("permission", {
-          id,
-          toolName,
-          input: params,
-          tool_scope: codexToolScope(toolName, this.activePromptMode),
-          mode: this.activePromptMode ?? undefined,
-          inputKind: "prompt",
-          createdAt: request.createdAt,
-          sessionId,
-        });
-        this.emitState();
-      });
-    }
-
-    return Promise.reject(new Error(`Unsupported Codex app-server request: ${message.method}`));
+    return handleCodexAppServerRequest(message, {
+      activeSessionId: this.activeSessionId,
+      resumeSessionId: this.resumeSessionId,
+      activePromptMode: this.activePromptMode,
+      pendingPermissions: this.pendingPermissions,
+      pendingQuestions: this.pendingQuestions,
+      pushEvent: (type, payload) => this.pushEvent(type, payload),
+      emitState: () => this.emitState(),
+    });
   }
+
 
   private noteThread(
     thread: Record<string, unknown> | null,
@@ -1224,185 +1137,31 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       this.noteModel(nextModelId);
     } catch {}
   }
-
   private emitThreadItem(
     item: Record<string, unknown> | null,
     opts: { threadId: string | null; running: boolean },
   ): void {
-    if (!item) return;
-    const type = readString(item.type);
-    const sessionId = opts.threadId ?? this.activeSessionId ?? this.resumeSessionId;
-    const id = readString(item.id);
-    if (!type || !sessionId || !id) return;
-    const createdAt = Date.now();
-    this.emptyThreadIds.delete(sessionId);
-
-    if ((type === "agentMessage" || type === "plan") && !opts.running) {
-      const text = readString(item.text);
-      if (!text) return;
-      this.lastAssistantMessageBySession.set(sessionId, id);
-      this.pushEvent("message", {
-        role: "assistant",
-        sessionId,
-        messageId: id,
-        modelId: this.activeModelId ?? undefined,
-        text,
-        mode: this.activePromptMode ?? undefined,
-        createdAt,
-      });
-      return;
-    }
-
-    if (type === "reasoning" && !opts.running) {
-      const content = [
-        ...readStringArray(item.summary),
-        ...readStringArray(item.content),
-      ].join("\n");
-      if (!content) return;
-      this.pushEvent("reasoning", {
-        sessionId,
-        messageId: id,
-        text: content,
-        mode: this.activePromptMode ?? undefined,
-        createdAt,
-      });
-      return;
-    }
-
-    if (type === "contextCompaction") {
-      this.pushEvent("tool", {
-        sessionId,
-        messageId: this.lastAssistantMessageBySession.get(sessionId) ?? `codex-tools-${sessionId}`,
-        toolUseId: id,
-        toolName: "Context compaction",
-        input: { source: "codex" },
-        tool_scope: "internal",
-        mode: this.activePromptMode ?? undefined,
-        output: opts.running ? undefined : "Context compaction completed.",
-        status: opts.running ? "running" : "completed",
-        createdAt,
-      });
-      return;
-    }
-
-    if (type === "commandExecution") {
-      const command = readString(item.command) ?? "command";
-      const status = readString(item.status);
-      this.pushEvent("tool", {
-        sessionId,
-        messageId: this.lastAssistantMessageBySession.get(sessionId) ?? `codex-tools-${sessionId}`,
-        toolUseId: id,
-        toolName: "Bash",
-        input: {
-          command,
-          cwd: readString(item.cwd),
-          source: item.source,
-          commandActions: item.commandActions,
-        },
-        tool_scope: codexToolScope("Bash", this.activePromptMode),
-        mode: this.activePromptMode ?? undefined,
-        inputKind: "prompt",
-        output: readString(item.aggregatedOutput) ?? undefined,
-        error: status === "failed" ? readString(item.aggregatedOutput) ?? "Command failed" : undefined,
-        status: opts.running || status === "inProgress"
-          ? "running"
-          : status === "completed"
-            ? "completed"
-            : "error",
-        createdAt,
-      });
-      return;
-    }
-
-    if (type === "fileChange") {
-      const status = readString(item.status);
-      this.pushEvent("tool", {
-        sessionId,
-        messageId: this.lastAssistantMessageBySession.get(sessionId) ?? `codex-tools-${sessionId}`,
-        toolUseId: id,
-        toolName: "apply_patch",
-        input: { changes: item.changes },
-        tool_scope: codexToolScope("apply_patch", this.activePromptMode),
-        mode: this.activePromptMode ?? undefined,
-        inputKind: "prompt",
-        output: status === "completed" ? safeJson(item.changes) : undefined,
-        error: status === "failed" || status === "declined" ? `File change ${status}` : undefined,
-        status: opts.running || status === "inProgress"
-          ? "running"
-          : status === "completed"
-            ? "completed"
-            : "error",
-        createdAt,
-      });
-      return;
-    }
-
-    if (isCodexToolItemType(type)) {
-      const toolName = readString(item.tool) ??
-        readString(item.name) ??
-        readString(item.toolName) ??
-        readString(item.server) ??
-        type;
-      const status = readString(item.status);
-      const messageId = this.lastAssistantMessageBySession.get(sessionId) ?? `codex-tools-${sessionId}`;
-      const input = item.arguments !== undefined
-        ? parseCodexToolInput(item.arguments)
-        : item.input !== undefined
-          ? parseCodexToolInput(item.input)
-          : item.toolInput !== undefined
-            ? parseCodexToolInput(item.toolInput)
-            : { query: item.query };
-      this.pushEvent("tool", {
-        sessionId,
-        messageId,
-        toolUseId: id,
-        toolName,
-        input,
-        tool_scope: codexToolScope(toolName, this.activePromptMode),
-        mode: this.activePromptMode ?? undefined,
-        inputKind: "prompt",
-        output: item.result !== undefined ? safeJson(item.result) : undefined,
-        error: item.error !== undefined ? safeJson(item.error) : undefined,
-        status: opts.running || status === "inProgress" || status === "running"
-          ? "running"
-          : item.error ? "error" : "completed",
-        createdAt,
-      });
-      if (toolName === CODEX_UPDATE_PLAN_TOOL) {
-        this.emitUpdatePlan({
-          sessionId,
-          messageId,
-          toolUseId: id,
-          input,
-          createdAt,
-        });
-      }
-    }
-  }
-
-  private emitUpdatePlan(input: {
-    sessionId: string;
-    messageId: string;
-    toolUseId: string;
-    input: unknown;
-    createdAt: number;
-  }): void {
-    const snapshot = normalizeCodexUpdatePlanInput(input.input);
-    if (!snapshot) return;
-    this.pushEvent("todos.updated", {
-      sessionId: input.sessionId,
-      messageId: input.messageId,
-      toolUseId: input.toolUseId,
-      scopeId: "main",
-      todos: snapshot.todos,
-      ...(snapshot.explanation ? { explanation: snapshot.explanation } : {}),
-      createdAt: input.createdAt,
+    emitCodexThreadItem(item, opts, {
+      activeSessionId: this.activeSessionId,
+      resumeSessionId: this.resumeSessionId,
+      activeModelId: this.activeModelId,
+      activePromptMode: this.activePromptMode,
+      emptyThreadIds: this.emptyThreadIds,
+      lastAssistantMessageBySession: this.lastAssistantMessageBySession,
+      pushEvent: (type, payload) => this.pushEvent(type, payload),
     });
   }
 
+
+
   private bindPendingSession(pendingSessionId: string, sessionId: string): void {
     if (!pendingSessionId || !sessionId) return;
+    const changed =
+      this.activeSessionId !== sessionId ||
+      this.resumeSessionId !== sessionId ||
+      this.sdkSessionId !== sessionId;
     this.activeSessionId = sessionId;
+    this.resumeSessionId = sessionId;
     this.sdkSessionId = sessionId;
     this.applyStoredUsageForSession(sessionId);
     if (!this.boundPendingSessionIds.has(pendingSessionId)) {
@@ -1413,7 +1172,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
         createdAt: Date.now(),
       });
     }
-    this.emitState();
+    if (changed) this.emitState();
   }
 
   private finishWebPrompts(error: Error): void {
@@ -1898,557 +1657,4 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       );
     }
   };
-}
-
-function writeCodexTerminalNotice(message: string): void {
-  process.stderr.write(formatCodexTerminalNotice(message));
-}
-
-export function formatCodexTerminalNotice(message: string, isTTY = Boolean(process.stderr.isTTY)): string {
-  const text = message.replace(/\r?\n$/u, "");
-  if (!isTTY) return `\n${text}\n`;
-  return `${CLEAR_TERMINAL_LINE}\r\n${CLEAR_TERMINAL_LINE}${text}${CLEAR_TO_END_OF_LINE}\r\n${CLEAR_TERMINAL_LINE}`;
-}
-
-async function stopLocalCodexProcess(child: ChildProcess | null): Promise<void> {
-  if (!child) return;
-  const exited = waitForChildExit(child, LOCAL_CLI_EXIT_WAIT_MS);
-  try {
-    child.kill("SIGTERM");
-  } catch {}
-  await exited;
-}
-
-function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<void> {
-  if (child.exitCode != null || child.signalCode != null) return Promise.resolve();
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      child.off("exit", finish);
-      child.off("close", finish);
-      resolve();
-    };
-    const timer = setTimeout(finish, timeoutMs);
-    timer.unref?.();
-    child.once("exit", finish);
-    child.once("close", finish);
-  });
-}
-
-function restoreTerminalForCodexReclaim(): void {
-  try {
-    if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
-      process.stdin.setRawMode(false);
-    }
-  } catch {}
-  try {
-    if (process.stderr.isTTY) {
-      process.stderr.write(TERMINAL_RECLAIM_RESET);
-    }
-  } catch {}
-}
-
-export function normalizeCodexReclaimInput(text: string): string {
-  return text
-    .replace(/\x1b\[(\d+)(?:;([0-9:]+))?u/g, (_match, rawCode: string, rawModifier: string | undefined) =>
-      decodeCsiUCode(Number(rawCode), rawModifier),
-    )
-    .replace(/\x1b\[(?:I|O)/g, "")
-    .replace(/\x1b\[[?=>]?[0-9;:]*[A-Za-z~]/g, "");
-}
-
-function decodeCsiUCode(code: number, rawModifier?: string): string {
-  if (code === 99 && isCsiUCtrlModifier(rawModifier)) return "\u0003";
-  if (code === 13) return "\n";
-  if (code === 9) return "\t";
-  if (code === 8 || code === 127) return "\b";
-  if (code < 32 || !Number.isFinite(code)) return "";
-  try {
-    return String.fromCodePoint(code);
-  } catch {
-    return "";
-  }
-}
-
-function isCsiUCtrlModifier(rawModifier: string | undefined): boolean {
-  if (!rawModifier) return false;
-  return rawModifier.split(":").includes("5");
-}
-
-function applyReclaimText(buffer: string, text: string): string {
-  let next = buffer;
-  for (const char of text) {
-    if (char === "\b" || char === "\x7f") {
-      next = next.slice(0, -1);
-    } else {
-      next += char;
-    }
-  }
-  return next;
-}
-
-export function promptInputForCodexMode(
-  prompt: string,
-  mode: CodexPromptMode,
-): string {
-  if (mode !== "plan") return prompt;
-  return `${CODEX_PLAN_MODE_INSTRUCTION}\n\nUser request:\n${prompt}`;
-}
-
-async function codexInputItems(
-  prompt: string,
-  mode: CodexPromptMode,
-  attachments: PromptImageAttachment[] = [],
-): Promise<Array<Record<string, unknown>>> {
-  const imageItems = await Promise.all(attachments.map(codexImageInputItem));
-  return [
-    ...(prompt || mode === "plan"
-      ? [{
-          type: "text",
-          text: promptInputForCodexMode(prompt, mode),
-          text_elements: [],
-        }]
-      : []),
-    ...imageItems,
-  ];
-}
-
-async function codexImageInputItem(
-  attachment: PromptImageAttachment,
-): Promise<Record<string, unknown>> {
-  return {
-    type: "image",
-    url: await imageAttachmentDataUrl(attachment),
-    detail: "high",
-  };
-}
-
-async function imageAttachmentDataUrl(attachment: PromptImageAttachment): Promise<string> {
-  if (attachment.url.startsWith("data:image/")) return attachment.url;
-  const response = await fetch(attachment.url);
-  if (!response.ok) {
-    throw new Error(`Failed to load image attachment ${attachment.fileName ?? attachment.id} (${response.status})`);
-  }
-  const contentType = response.headers.get("content-type")?.split(";")[0]?.trim() || attachment.mimeType;
-  const data = Buffer.from(await response.arrayBuffer()).toString("base64");
-  return `data:${contentType};base64,${data}`;
-}
-
-export function codexThreadModeOverrides(
-  mode: CodexPromptMode,
-): Record<string, unknown> {
-  return {
-    approvalPolicy: "never",
-    approvalsReviewer: "user",
-    sandbox: mode === "plan" ? "read-only" : "danger-full-access",
-    config: { ...CODEX_ADIT_THREAD_CONFIG },
-  };
-}
-
-export function codexTurnModeOverrides(
-  mode: CodexPromptMode,
-): Record<string, unknown> {
-  if (mode === "plan") {
-    return {
-      approvalPolicy: "never",
-      approvalsReviewer: "user",
-      sandboxPolicy: {
-        type: "readOnly",
-        networkAccess: false,
-      },
-    };
-  }
-
-  return {
-    approvalPolicy: "never",
-    approvalsReviewer: "user",
-    sandboxPolicy: {
-      type: "dangerFullAccess",
-    },
-  };
-}
-
-function readString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function readDeltaString(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function readStringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
-    : [];
-}
-
-function isMissingCodexRolloutError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.toLowerCase().includes("no rollout found");
-}
-
-function safeJson(value: unknown): string {
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value ?? {}, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function extractCodexMcpServers(value: unknown): Array<Record<string, unknown>> {
-  const data = Array.isArray(asRecord(value)?.data) ? asRecord(value)?.data as unknown[] : [];
-  return data.map((item) => {
-    const server = asRecord(item) ?? {};
-    const name = readString(server.name) ?? "unnamed";
-    const tools = asRecord(server.tools);
-    const toolCount = tools ? Object.keys(tools).length : 0;
-    const authStatus = readString(server.authStatus) ?? "unknown";
-    const resources = Array.isArray(server.resources) ? server.resources : [];
-    const resourceTemplates = Array.isArray(server.resourceTemplates) ? server.resourceTemplates : [];
-    return {
-      name,
-      authStatus,
-      toolCount,
-      resourceCount: resources.length,
-      resourceTemplateCount: resourceTemplates.length,
-    };
-  });
-}
-
-function formatCodexMcpServers(servers: Array<Record<string, unknown>>): string {
-  if (servers.length === 0) return "Codex did not report any MCP servers.";
-  return servers.map((server) => {
-    const name = readString(server.name) ?? "unnamed";
-    const authStatus = readString(server.authStatus) ?? "unknown";
-    const toolCount = readNumber(server.toolCount) ?? 0;
-    return `- ${name}: auth=${authStatus}, tools=${toolCount}`;
-  }).join("\n");
-}
-
-function extractCodexSkills(value: unknown): Array<Record<string, unknown>> {
-  const data = Array.isArray(asRecord(value)?.data) ? asRecord(value)?.data as unknown[] : [];
-  const skillsOut: Array<Record<string, unknown>> = [];
-  for (const entry of data) {
-    const record = asRecord(entry) ?? {};
-    const cwd = readString(record.cwd);
-    const skills = Array.isArray(record.skills) ? record.skills : [];
-    for (const rawSkill of skills) {
-      const skill = asRecord(rawSkill) ?? {};
-      const name = readString(skill.name);
-      if (!name) continue;
-      const skillInterface = asRecord(skill.interface) ?? {};
-      skillsOut.push({
-        name,
-        displayName: readString(skillInterface.displayName),
-        description:
-          readString(skillInterface.shortDescription) ??
-          readString(skill.shortDescription) ??
-          readString(skill.description),
-        path: readString(skill.path),
-        scope: readString(skill.scope),
-        cwd,
-        enabled: skill.enabled !== false,
-        defaultPrompt:
-          readString(skillInterface.defaultPrompt) ??
-          readString(skill.defaultPrompt),
-      });
-    }
-  }
-  return skillsOut;
-}
-
-function formatCodexSkills(skills: Array<Record<string, unknown>>): string {
-  const lines = skills.map((skill) => {
-    const name = readString(skill.name);
-    if (!name) return null;
-    const enabled = skill.enabled === false ? "disabled" : "enabled";
-    const cwd = readString(skill.cwd);
-    const description = readString(skill.description);
-    return `- ${name} (${enabled})${cwd ? ` @ ${cwd}` : ""}${description ? `: ${description}` : ""}`;
-  }).filter((line): line is string => Boolean(line));
-  return lines.join("\n") || "Codex did not report any skills for this workspace.";
-}
-
-function normalizeSlashCommandName(value: string): string | null {
-  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-  return /^[a-z0-9][a-z0-9._-]*$/.test(normalized) ? normalized : null;
-}
-
-function pendingSessionIdFromSlashCommand(command: CliSlashCommand): string | null {
-  if (command.sessionId?.startsWith("pending_")) return command.sessionId;
-  return null;
-}
-
-function formatCodexSkillPrompt(skill: Record<string, unknown>, args: string): string {
-  const name = readString(skill.name) ?? "skill";
-  const path = readString(skill.path);
-  const prefix = path ? `[$${name}](${path})` : `$${name}`;
-  return `${prefix}${args ? ` ${args}` : ""}`;
-}
-
-function extractCodexSupportedMethodsFromError(error: unknown): Set<string> {
-  const message = error instanceof Error ? error.message : String(error);
-  const marker = "expected one of ";
-  const markerIndex = message.indexOf(marker);
-  if (markerIndex === -1) return new Set<string>();
-  const expected = message.slice(markerIndex + marker.length);
-  return new Set(
-    Array.from(expected.matchAll(/`([^`]+)`/g))
-      .map((match) => match[1])
-      .filter((method): method is string => Boolean(method)),
-  );
-}
-
-function pluralize(word: string, count: number): string {
-  return count === 1 ? word : `${word}s`;
-}
-
-function formatCodexModels(value: unknown): string {
-  const data = Array.isArray(asRecord(value)?.data) ? asRecord(value)?.data as unknown[] : [];
-  const lines = data
-    .map((item) => {
-      const model = asRecord(item) ?? {};
-      const id = readString(model.id) ?? readString(model.model);
-      if (!id) return null;
-      const displayName = readString(model.displayName);
-      const suffix = model.isDefault === true ? " [default]" : "";
-      return `- ${displayName ?? id} (${id})${suffix}`;
-    })
-    .filter((line): line is string => Boolean(line));
-  return lines.join("\n") || "Codex did not report any available models.";
-}
-
-function normalizeCodexUsage(value: Record<string, unknown> | null): Record<string, number> | undefined {
-  if (!value) return undefined;
-  const usage = {
-    input_tokens: readNumber(value.inputTokens) ?? 0,
-    output_tokens: readNumber(value.outputTokens) ?? 0,
-    reasoning_tokens: readNumber(value.reasoningOutputTokens) ?? 0,
-    cache_read_input_tokens: readNumber(value.cachedInputTokens) ?? 0,
-  };
-  return Object.values(usage).some((item) => item > 0) ? usage : undefined;
-}
-
-function normalizeCodexTokenUsage(value: Record<string, unknown> | null): CliAgentTokenUsage | null {
-  if (!value) return null;
-  const totalTokens = readNumber(value.totalTokens);
-  const usage: CliAgentTokenUsage = {
-    ...(totalTokens !== null ? { totalTokens } : {}),
-    inputTokens: readNumber(value.inputTokens) ?? 0,
-    outputTokens: readNumber(value.outputTokens) ?? 0,
-    reasoningTokens: readNumber(value.reasoningOutputTokens) ?? 0,
-    cacheReadTokens: readNumber(value.cachedInputTokens) ?? 0,
-    cacheWriteTokens: readNumber(value.cacheCreationInputTokens) ?? 0,
-    updatedAt: Date.now(),
-    source: "codex-app-server",
-  };
-  return Object.values({
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    reasoningTokens: usage.reasoningTokens,
-    cacheReadTokens: usage.cacheReadTokens,
-    cacheWriteTokens: usage.cacheWriteTokens,
-  }).some((item) => item > 0)
-    ? usage
-    : null;
-}
-
-function buildCodexContextUsage(
-  usage: CliAgentTokenUsage | null,
-  modelId: string | null,
-  runtimeContextWindow: number | null = null,
-): CliAgentContextUsage | null {
-  const maxTokens = runtimeContextWindow ?? getCodexModelContextWindow(modelId);
-  if (!usage || maxTokens === null) return null;
-  const outputTokens = Math.max(usage.outputTokens, usage.reasoningTokens);
-  const totalTokens = Math.max(
-    0,
-    Math.floor(usage.totalTokens ?? usage.inputTokens + outputTokens),
-  );
-  return {
-    percentage: calculateCodexContextUsedPercentage(totalTokens, maxTokens),
-    totalTokens,
-    maxTokens,
-    modelId: modelId ?? undefined,
-    updatedAt: usage.updatedAt,
-    source: "codex-app-server",
-  };
-}
-
-function calculateCodexContextUsedPercentage(totalTokens: number, maxTokens: number): number {
-  if (maxTokens <= CODEX_CONTEXT_BASELINE_TOKENS) return 100;
-  const effectiveWindow = maxTokens - CODEX_CONTEXT_BASELINE_TOKENS;
-  const usedTokens = Math.max(0, totalTokens - CODEX_CONTEXT_BASELINE_TOKENS);
-  const remainingTokens = Math.max(0, effectiveWindow - usedTokens);
-  const remainingPercent = Math.round(remainingTokens / effectiveWindow * 100);
-  return Math.max(0, Math.min(100, 100 - remainingPercent));
-}
-
-function normalizeCodexContextWindow(value: number | null): number | null {
-  return value !== null && value > 0 ? Math.floor(value) : null;
-}
-
-function getCodexModelContextWindow(modelId: string | null): number | null {
-  if (!modelId) return null;
-  const normalized = modelId.trim().toLowerCase();
-  for (const [pattern, maxTokens] of CODEX_MODEL_CONTEXT_WINDOWS) {
-    if (pattern.test(normalized)) return maxTokens;
-  }
-  return null;
-}
-
-function isSameContextUsage(
-  current: CliAgentContextUsage | null,
-  next: CliAgentContextUsage | null,
-): boolean {
-  if (!current || !next) return current === next;
-  return Boolean(
-    current.percentage === next.percentage &&
-      current.totalTokens === next.totalTokens &&
-      current.maxTokens === next.maxTokens &&
-      current.modelId === next.modelId &&
-      current.source === next.source,
-  );
-}
-
-function isSameTokenUsage(
-  current: CliAgentTokenUsage | null,
-  next: CliAgentTokenUsage,
-): boolean {
-  return Boolean(
-    current &&
-      current.inputTokens === next.inputTokens &&
-      current.totalTokens === next.totalTokens &&
-      current.outputTokens === next.outputTokens &&
-      current.reasoningTokens === next.reasoningTokens &&
-      current.cacheReadTokens === next.cacheReadTokens &&
-      current.cacheWriteTokens === next.cacheWriteTokens,
-  );
-}
-
-function readNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function approvalToolName(method: string, params: Record<string, unknown>): string {
-  if (method === "item/commandExecution/requestApproval" || method === "execCommandApproval") {
-    return "Bash";
-  }
-  if (method === "item/fileChange/requestApproval" || method === "applyPatchApproval") {
-    return "apply_patch";
-  }
-  if (method === "item/permissions/requestApproval") {
-    return "CodexPermissions";
-  }
-  return readString(params.toolName) ?? "Codex";
-}
-
-function isCodexToolItemType(type: string): boolean {
-  return type === "mcpToolCall" ||
-    type === "dynamicToolCall" ||
-    type === "webSearch" ||
-    type === "functionCall" ||
-    type === "function_call" ||
-    type === "customToolCall" ||
-    type === "custom_tool_call";
-}
-
-function buildApprovalResponse(
-  method: string,
-  params: Record<string, unknown>,
-  approved: boolean,
-): unknown {
-  if (method === "item/commandExecution/requestApproval") {
-    return { decision: approved ? "accept" : "decline" };
-  }
-  if (method === "item/fileChange/requestApproval") {
-    return { decision: approved ? "accept" : "decline" };
-  }
-  if (method === "item/permissions/requestApproval") {
-    return {
-      permissions: approved ? asRecord(params.permissions) ?? {} : {},
-      scope: "turn",
-    };
-  }
-  if (method === "applyPatchApproval" || method === "execCommandApproval") {
-    return { decision: approved ? "approved" : "denied" };
-  }
-  return { decision: approved ? "accept" : "decline" };
-}
-
-function normalizeCodexQuestions(method: string, params: Record<string, unknown>): Array<{
-  question: string;
-  header: string;
-  options: Array<{ label: string; description: string }>;
-  multiple: boolean;
-  custom: boolean;
-}> {
-  if (method === "mcpServer/elicitation/request") {
-    return [{
-      question: readString(params.message) ?? readString(params.title) ?? "Codex needs input.",
-      header: readString(params.title) ?? "Question",
-      options: [],
-      multiple: false,
-      custom: true,
-    }];
-  }
-
-  const rawQuestions = Array.isArray(params.questions) ? params.questions : [];
-  return rawQuestions.map((item) => {
-    const question = asRecord(item) ?? {};
-    const options = Array.isArray(question.options)
-      ? question.options.map((option) => {
-          const record = asRecord(option) ?? {};
-          const label = readString(record.label) ?? readString(record.value) ?? "";
-          return {
-            label,
-            description: readString(record.description) ?? "",
-          };
-        }).filter((option) => option.label)
-      : [];
-    return {
-      question: readString(question.question) ?? "Codex needs input.",
-      header: readString(question.header) ?? "Question",
-      options,
-      multiple: false,
-      custom: question.isOther !== false,
-    };
-  });
-}
-
-function buildQuestionResponse(
-  method: string,
-  params: Record<string, unknown>,
-  answers: string[][],
-): unknown {
-  if (method === "mcpServer/elicitation/request") {
-    return {
-      action: answers.length > 0 ? "accept" : "decline",
-      content: answers.length > 0 ? { answer: answers.flat().join("\n") } : null,
-      _meta: null,
-    };
-  }
-
-  const rawQuestions = Array.isArray(params.questions) ? params.questions : [];
-  const mapped: Record<string, { answers: string[] }> = {};
-  rawQuestions.forEach((item, index) => {
-    const question = asRecord(item) ?? {};
-    const id = readString(question.id) ?? `question-${index}`;
-    mapped[id] = { answers: answers[index] ?? [] };
-  });
-  return { answers: mapped };
 }

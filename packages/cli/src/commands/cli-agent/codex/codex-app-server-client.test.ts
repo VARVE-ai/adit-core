@@ -5,7 +5,7 @@ const mocks = vi.hoisted(() => ({
   spawnCliProcess: vi.fn(),
 }));
 
-vi.mock("./cli-process.js", () => ({
+vi.mock("../cli-process.js", () => ({
   spawnCliProcess: (...args: unknown[]) => mocks.spawnCliProcess(...args),
 }));
 

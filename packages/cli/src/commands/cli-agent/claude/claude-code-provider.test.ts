@@ -35,7 +35,7 @@ import {
   buildClaudeCloudRelayEnv,
   normalizeClaudeSdkTranscriptEntrypoints,
   normalizeClaudeTodoWriteInput,
-} from "./claude-code-provider.js";
+} from "./provider.js";
 
 function mockChildProcess() {
   const child = new EventEmitter() as EventEmitter & {
@@ -939,7 +939,7 @@ describe("ClaudeCodeProvider takeover", () => {
     provider.stop();
   });
 
-  it("resumes the trusted local Claude session when releasing Web control", async () => {
+  it("resumes the bound Web Claude session when releasing Web control", async () => {
     const originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
     const configDir = fs.mkdtempSync(path.join(tmpdir(), "adit-claude-config-"));
     const cwd = "/tmp/project";
@@ -966,12 +966,121 @@ describe("ClaudeCodeProvider takeover", () => {
 
       expect(mocks.spawn).toHaveBeenCalledWith(
         "claude",
-        ["--resume", localSessionId],
+        ["--resume", webSessionId],
         expect.objectContaining({ cwd }),
       );
       expect(provider.state.owner).toBe("local");
-      expect(provider.state.activeSessionId).toBe(localSessionId);
-      expect(provider.state.resumeSessionId).toBe(localSessionId);
+      expect(provider.state.activeSessionId).toBe(webSessionId);
+      expect(provider.state.resumeSessionId).toBe(webSessionId);
+
+      provider.stop();
+    } finally {
+      if (originalConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir;
+      }
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not resume the old local Claude session after an empty Web session request", async () => {
+    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const configDir = fs.mkdtempSync(path.join(tmpdir(), "adit-claude-config-"));
+    const cwd = "/tmp/project";
+    const localSessionId = "11111111-1111-4111-8111-111111111111";
+    writeClaudeTranscript({ configDir, cwd, sessionId: localSessionId });
+
+    try {
+      process.env.CLAUDE_CONFIG_DIR = configDir;
+      const provider = new ClaudeCodeProvider({
+        bin: "claude",
+        args: [],
+        cwd,
+      });
+      provider.noteLocalSession(localSessionId);
+
+      await provider.takeover();
+      await provider.startNewSession("pending_web_session");
+      mocks.spawn.mockClear();
+
+      await provider.releaseToLocal();
+
+      expect(mocks.spawn).toHaveBeenCalledWith(
+        "claude",
+        [],
+        expect.objectContaining({ cwd }),
+      );
+      expect(provider.state.owner).toBe("local");
+      expect(provider.state.activeSessionId).toBeNull();
+      expect(provider.state.resumeSessionId).toBeNull();
+
+      provider.stop();
+    } finally {
+      if (originalConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir;
+      }
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps Claude listening for the first prompt after an empty Web session request", async () => {
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+    });
+
+    try {
+      await provider.takeover();
+      await provider.startNewSession("pending_web_session");
+
+      const promptResult = provider
+        .sendPrompt("hello", { pendingSessionId: "pending_web_session" })
+        .then(() => "sent" as const)
+        .catch(() => "rejected" as const);
+      const result = await Promise.race([
+        promptResult,
+        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 50)),
+      ]);
+
+      expect(result).toBe("sent");
+      expect(findRemoteQueryCall().options?.includePartialMessages).toBe(true);
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("preserves the latest runtime model when releasing Web control to local Claude", async () => {
+    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const configDir = fs.mkdtempSync(path.join(tmpdir(), "adit-claude-config-"));
+    const cwd = "/tmp/project";
+    const sessionId = "11111111-1111-4111-8111-111111111111";
+    writeClaudeTranscript({ configDir, cwd, sessionId });
+
+    try {
+      process.env.CLAUDE_CONFIG_DIR = configDir;
+      const provider = new ClaudeCodeProvider({
+        bin: "claude",
+        args: ["--model=claude-default", "--debug"],
+        cwd,
+      });
+      provider.noteLocalSession(sessionId);
+      provider.noteModel("glm-5.2[1M][1m]");
+
+      await provider.takeover();
+      mocks.spawn.mockClear();
+
+      await provider.releaseToLocal();
+
+      expect(mocks.spawn).toHaveBeenCalledWith(
+        "claude",
+        ["--resume", sessionId, "--debug", "--model", "glm-5.2[1M][1m]"],
+        expect.objectContaining({ cwd }),
+      );
+      expect(provider.state.activeModelId).toBe("glm-5.2[1M][1m]");
 
       provider.stop();
     } finally {

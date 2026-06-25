@@ -10,15 +10,15 @@ import {
   loadCloudConfig,
   loadCredentials,
 } from "@varveai/adit-cloud";
-import { ClaudeCodeProvider } from "./cli-agent/claude-code-provider.js";
+import { ClaudeCodeProvider } from "./cli-agent/claude/provider.js";
 import { resolveExecutable } from "./cli-agent/cli-process.js";
-import { ClaudeTranscriptSync } from "./cli-agent/claude-transcript-sync.js";
+import { ClaudeTranscriptSync } from "./cli-agent/claude/claude-transcript-sync.js";
 import {
   cleanupStaleClaudeCloudSettings,
   ensurePersistentClaudeHooksInstalled,
   installClaudeHooks,
   type InstalledHooks,
-} from "./cli-agent/hooks-bootstrap.js";
+} from "./cli-agent/claude/hooks-bootstrap.js";
 import { startCliAgentHookServer, type HookServer } from "./cli-agent/hook-server.js";
 import { CliAgentRelayWebSocket } from "./cli-agent/relay-client.js";
 import { requireAditProjectInitialized } from "./project-initialization.js";
@@ -212,6 +212,13 @@ async function processCommand(
 ): Promise<void> {
   if (command.type === "takeover") {
     await provider.takeover();
+    return;
+  }
+
+  if (command.type === "new-session") {
+    await provider.startNewSession?.(
+      readString(command.payload.pendingSessionId) ?? readString(command.payload.sessionId),
+    );
     return;
   }
 

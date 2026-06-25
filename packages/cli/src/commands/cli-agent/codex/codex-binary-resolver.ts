@@ -3,7 +3,7 @@
  */
 
 import fs from "node:fs";
-import { resolveExecutable, spawnCliSync } from "./cli-process.js";
+import { resolveExecutable, spawnCliSync } from "../cli-process.js";
 
 export interface CodexBinCandidate {
   bin: string;
