@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import type { CliAgentRelayEvent } from "./types.js";
+import type { CliAgentRelayEvent } from "../types.js";
 import {
   CODEX_UPDATE_PLAN_TOOL,
   type CodexUpdatePlanSnapshot,

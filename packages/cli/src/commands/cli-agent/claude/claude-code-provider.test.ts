@@ -35,7 +35,7 @@ import {
   buildClaudeCloudRelayEnv,
   normalizeClaudeSdkTranscriptEntrypoints,
   normalizeClaudeTodoWriteInput,
-} from "./claude-code-provider.js";
+} from "./provider.js";
 
 function mockChildProcess() {
   const child = new EventEmitter() as EventEmitter & {
@@ -813,6 +813,112 @@ describe("ClaudeCodeProvider takeover", () => {
     }
   });
 
+  it("emits Claude context compaction status and boundary as internal tool events", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    mocks.query.mockImplementation((
+      input: {
+        options?: {
+          abortController?: AbortController;
+          includePartialMessages?: boolean;
+        };
+      },
+    ) => {
+      if (!input.options?.includePartialMessages) return createCapabilityQuery();
+      return {
+        supportedCommands: vi.fn(async () => []),
+        mcpServerStatus: vi.fn(async () => []),
+        getContextUsage: vi.fn(async () => ({
+          totalTokens: 100,
+          maxTokens: 200,
+          percentage: 50,
+          model: "claude-test",
+        })),
+        close: mocks.remoteClose,
+        interrupt: mocks.remoteInterrupt,
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "system",
+            subtype: "init",
+            session_id: sessionId,
+            slash_commands: [],
+          };
+          yield {
+            type: "system",
+            subtype: "status",
+            status: "compacting",
+            uuid: "compact-status-1",
+            session_id: sessionId,
+          };
+          yield {
+            type: "system",
+            subtype: "compact_boundary",
+            uuid: "compact-boundary-1",
+            session_id: sessionId,
+            compact_metadata: {
+              trigger: "auto",
+              pre_tokens: 1000,
+              post_tokens: 250,
+              duration_ms: 1500,
+            },
+          };
+          yield {
+            type: "result",
+            session_id: sessionId,
+            usage: { input_tokens: 1, output_tokens: 1 },
+          };
+        },
+      };
+    });
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      await tick();
+      await tick();
+
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "tool",
+        payload: expect.objectContaining({
+          sessionId,
+          messageId: `claude-tools-${sessionId}`,
+          toolUseId: "compact-status-1",
+          toolName: "Context compaction",
+          input: { source: "claude" },
+          tool_scope: "internal",
+          status: "running",
+        }),
+      }));
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "tool",
+        payload: expect.objectContaining({
+          sessionId,
+          messageId: `claude-tools-${sessionId}`,
+          toolUseId: "compact-status-1",
+          toolName: "Context compaction",
+          input: {
+            source: "claude",
+            trigger: "auto",
+            preTokens: 1000,
+            postTokens: 250,
+            durationMs: 1500,
+          },
+          tool_scope: "internal",
+          output: "Claude context compaction completed (trigger=auto, tokens 1000 -> 250, duration=1.5s).",
+          status: "completed",
+        }),
+      }));
+    } finally {
+      provider.stop();
+    }
+  });
+
   it("rejects Web takeover after the local Claude CLI exits", async () => {
     const provider = new ClaudeCodeProvider({
       bin: "claude",
@@ -833,7 +939,7 @@ describe("ClaudeCodeProvider takeover", () => {
     provider.stop();
   });
 
-  it("resumes the trusted local Claude session when releasing Web control", async () => {
+  it("resumes the bound Web Claude session when releasing Web control", async () => {
     const originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
     const configDir = fs.mkdtempSync(path.join(tmpdir(), "adit-claude-config-"));
     const cwd = "/tmp/project";
@@ -860,12 +966,121 @@ describe("ClaudeCodeProvider takeover", () => {
 
       expect(mocks.spawn).toHaveBeenCalledWith(
         "claude",
-        ["--resume", localSessionId],
+        ["--resume", webSessionId],
         expect.objectContaining({ cwd }),
       );
       expect(provider.state.owner).toBe("local");
-      expect(provider.state.activeSessionId).toBe(localSessionId);
-      expect(provider.state.resumeSessionId).toBe(localSessionId);
+      expect(provider.state.activeSessionId).toBe(webSessionId);
+      expect(provider.state.resumeSessionId).toBe(webSessionId);
+
+      provider.stop();
+    } finally {
+      if (originalConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir;
+      }
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not resume the old local Claude session after an empty Web session request", async () => {
+    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const configDir = fs.mkdtempSync(path.join(tmpdir(), "adit-claude-config-"));
+    const cwd = "/tmp/project";
+    const localSessionId = "11111111-1111-4111-8111-111111111111";
+    writeClaudeTranscript({ configDir, cwd, sessionId: localSessionId });
+
+    try {
+      process.env.CLAUDE_CONFIG_DIR = configDir;
+      const provider = new ClaudeCodeProvider({
+        bin: "claude",
+        args: [],
+        cwd,
+      });
+      provider.noteLocalSession(localSessionId);
+
+      await provider.takeover();
+      await provider.startNewSession("pending_web_session");
+      mocks.spawn.mockClear();
+
+      await provider.releaseToLocal();
+
+      expect(mocks.spawn).toHaveBeenCalledWith(
+        "claude",
+        [],
+        expect.objectContaining({ cwd }),
+      );
+      expect(provider.state.owner).toBe("local");
+      expect(provider.state.activeSessionId).toBeNull();
+      expect(provider.state.resumeSessionId).toBeNull();
+
+      provider.stop();
+    } finally {
+      if (originalConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir;
+      }
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps Claude listening for the first prompt after an empty Web session request", async () => {
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+    });
+
+    try {
+      await provider.takeover();
+      await provider.startNewSession("pending_web_session");
+
+      const promptResult = provider
+        .sendPrompt("hello", { pendingSessionId: "pending_web_session" })
+        .then(() => "sent" as const)
+        .catch(() => "rejected" as const);
+      const result = await Promise.race([
+        promptResult,
+        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 50)),
+      ]);
+
+      expect(result).toBe("sent");
+      expect(findRemoteQueryCall().options?.includePartialMessages).toBe(true);
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("preserves the latest runtime model when releasing Web control to local Claude", async () => {
+    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const configDir = fs.mkdtempSync(path.join(tmpdir(), "adit-claude-config-"));
+    const cwd = "/tmp/project";
+    const sessionId = "11111111-1111-4111-8111-111111111111";
+    writeClaudeTranscript({ configDir, cwd, sessionId });
+
+    try {
+      process.env.CLAUDE_CONFIG_DIR = configDir;
+      const provider = new ClaudeCodeProvider({
+        bin: "claude",
+        args: ["--model=claude-default", "--debug"],
+        cwd,
+      });
+      provider.noteLocalSession(sessionId);
+      provider.noteModel("glm-5.2[1M][1m]");
+
+      await provider.takeover();
+      mocks.spawn.mockClear();
+
+      await provider.releaseToLocal();
+
+      expect(mocks.spawn).toHaveBeenCalledWith(
+        "claude",
+        ["--resume", sessionId, "--debug", "--model", "glm-5.2[1M][1m]"],
+        expect.objectContaining({ cwd }),
+      );
+      expect(provider.state.activeModelId).toBe("glm-5.2[1M][1m]");
 
       provider.stop();
     } finally {
@@ -1367,6 +1582,85 @@ describe("ClaudeCodeProvider takeover", () => {
     }
   });
 
+  it("synthesizes assistant deltas when Claude SDK only returns final text", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    const text = "This final-only Claude response should still reach the panel as assistant deltas.";
+    mocks.query.mockImplementation((
+      input: {
+        options?: {
+          includePartialMessages?: boolean;
+        };
+      },
+    ) => {
+      if (!input.options?.includePartialMessages) {
+        return createCapabilityQuery();
+      }
+
+      return {
+        supportedCommands: vi.fn(async () => []),
+        mcpServerStatus: vi.fn(async () => []),
+        getContextUsage: vi.fn(async () => ({
+          totalTokens: 100,
+          maxTokens: 200,
+          percentage: 50,
+          model: "claude-test",
+        })),
+        close: mocks.remoteClose,
+        interrupt: mocks.remoteInterrupt,
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "assistant",
+            session_id: sessionId,
+            uuid: "assistant-1",
+            parent_tool_use_id: null,
+            message: {
+              id: "message-final-only",
+              role: "assistant",
+              model: "glm-5.2",
+              content: [{ type: "text", text }],
+            },
+          };
+          yield {
+            type: "result",
+            session_id: sessionId,
+            usage: { input_tokens: 1, output_tokens: 2 },
+          };
+        },
+      };
+    });
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      await new Promise((resolve) => setTimeout(resolve, 120));
+
+      const deltaEvents = events.filter((event) => event.type === "assistant-delta");
+      expect(deltaEvents.length).toBeGreaterThan(1);
+      expect(deltaEvents.map((event) => event.payload.text).join("")).toBe(text);
+
+      const lastDeltaIndex = events.reduce(
+        (last, event, index) => event.type === "assistant-delta" ? index : last,
+        -1,
+      );
+      const finalMessageIndex = events.findIndex((event) =>
+        event.type === "message" &&
+        event.payload.role === "assistant" &&
+        event.payload.messageId === "message-final-only"
+      );
+      expect(finalMessageIndex).toBeGreaterThan(lastDeltaIndex);
+    } finally {
+      provider.stop();
+    }
+  });
+
   it("emits Claude SDK thinking deltas as reasoning updates", async () => {
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
     const sessionId = "11111111-1111-1111-1111-111111111111";
@@ -1741,6 +2035,89 @@ describe("ClaudeCodeProvider steerPrompt", () => {
 
     await provider.abort();
     provider.stop();
+  });
+
+  it("does not surface Claude SDK user diagnostic result errors while steering", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const remotePrompts: string[] = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    let markFirstPromptRead: () => void = () => {};
+    const firstPromptRead = new Promise<void>((resolve) => {
+      markFirstPromptRead = resolve;
+    });
+
+    mocks.query.mockImplementation((
+      input: {
+        prompt?: AsyncIterable<Record<string, unknown>>;
+        options?: {
+          includePartialMessages?: boolean;
+        };
+      },
+    ) => {
+      if (!input.options?.includePartialMessages || !input.prompt) {
+        return createCapabilityQuery();
+      }
+
+      return {
+        supportedCommands: vi.fn(async () => []),
+        mcpServerStatus: vi.fn(async () => []),
+        getContextUsage: vi.fn(async () => null),
+        close: mocks.remoteClose,
+        interrupt: mocks.remoteInterrupt,
+        async *[Symbol.asyncIterator]() {
+          const iterator = input.prompt![Symbol.asyncIterator]();
+          const first = await iterator.next();
+          remotePrompts.push(String((first.value?.message as { content?: unknown } | undefined)?.content));
+          markFirstPromptRead();
+
+          const second = await iterator.next();
+          remotePrompts.push(String((second.value?.message as { content?: unknown } | undefined)?.content));
+          yield {
+            type: "result",
+            session_id: sessionId,
+            result_type: "user",
+            subtype: "error_diagnostic",
+            is_error: true,
+            errors: ["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"],
+            usage: { input_tokens: 1, output_tokens: 0 },
+            total_cost_usd: 0,
+          };
+          yield {
+            type: "result",
+            session_id: sessionId,
+            usage: { input_tokens: 1, output_tokens: 1 },
+            total_cost_usd: 0,
+          };
+        },
+      };
+    });
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      await firstPromptRead;
+      await provider.steerPrompt("today?");
+      await tick();
+      await tick();
+
+      expect(remotePrompts).toEqual(["hello", "today?"]);
+      expect(events).not.toContainEqual(expect.objectContaining({
+        type: "error",
+        payload: expect.objectContaining({
+          title: "Claude request failed",
+          message: "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+        }),
+      }));
+    } finally {
+      provider.stop();
+    }
   });
 
   it("keeps the SDK prompt stream open until steered turns also complete", async () => {

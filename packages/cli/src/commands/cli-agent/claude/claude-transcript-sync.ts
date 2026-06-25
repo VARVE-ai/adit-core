@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import type { CliAgentRelayEvent } from "./types.js";
+import type { CliAgentRelayEvent } from "../types.js";
 
 interface TranscriptSession {
   id: string;

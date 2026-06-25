@@ -37,39 +37,41 @@ vi.mock("@varveai/adit-cloud", () => {
   };
 });
 
-vi.mock("./cli-agent/claude-code-provider.js", () => ({
+vi.mock("./cli-agent/claude/provider.js", () => ({
   ClaudeCodeProvider: class {},
 }));
 
 vi.mock("./cli-agent/cli-process.js", () => ({
   resolveExecutable: mocks.resolveExecutable,
   spawnCliProcess: vi.fn(),
-  spawnClaudeCliProcess: vi.fn(),
 }));
 
-vi.mock("./cli-agent/claude-transcript-sync.js", () => ({
+vi.mock("./cli-agent/claude/claude-transcript-sync.js", () => ({
   ClaudeTranscriptSync: class {},
 }));
 
-vi.mock("./cli-agent/codex-cli-provider.js", () => ({
+vi.mock("./cli-agent/codex/provider.js", () => ({
   CodexCliProvider: class {},
 }));
 
-vi.mock("./cli-agent/codex-binary-resolver.js", () => ({
+vi.mock("./cli-agent/codex/codex-binary-resolver.js", () => ({
   codexBinaryMismatchDebugLines: vi.fn(() => []),
   selectCodexExecutable: mocks.selectCodexExecutable,
 }));
 
-vi.mock("./cli-agent/codex-transcript-sync.js", () => ({
+vi.mock("./cli-agent/codex/codex-transcript-sync.js", () => ({
   CodexRelayEventDeduper: class {},
   CodexTranscriptSync: class {},
 }));
 
-vi.mock("./cli-agent/hooks-bootstrap.js", () => ({
+vi.mock("./cli-agent/claude/hooks-bootstrap.js", () => ({
   cleanupStaleClaudeCloudSettings: vi.fn(),
   ensurePersistentClaudeHooksInstalled: mocks.ensurePersistentClaudeHooksInstalled,
-  ensurePersistentCodexHooksInstalled: mocks.ensurePersistentCodexHooksInstalled,
   installClaudeHooks: vi.fn(),
+}));
+
+vi.mock("./cli-agent/codex/hooks-bootstrap.js", () => ({
+  ensurePersistentCodexHooksInstalled: mocks.ensurePersistentCodexHooksInstalled,
   installCodexHooks: vi.fn(),
 }));
 

@@ -106,7 +106,7 @@ import {
   formatCodexTerminalNotice,
   normalizeCodexReclaimInput,
   promptInputForCodexMode,
-} from "./codex-cli-provider.js";
+} from "./provider.js";
 
 function mockChildProcess() {
   const child = new EventEmitter() as EventEmitter & {
@@ -405,6 +405,69 @@ describe("CodexCliProvider takeover", () => {
         role: "assistant",
         modelId: "gpt-5.4",
         text: "done",
+      }),
+    }));
+
+    provider.stop();
+  });
+
+  it("emits Codex context compaction items as internal tool events", async () => {
+    const threadId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    provider.noteLocalSession(threadId);
+    await provider.takeover();
+
+    mocks.appServerOptions?.onNotification?.({
+      method: "item/started",
+      params: {
+        threadId,
+        item: {
+          id: "compact-1",
+          type: "contextCompaction",
+        },
+      },
+    });
+    mocks.appServerOptions?.onNotification?.({
+      method: "item/completed",
+      params: {
+        threadId,
+        item: {
+          id: "compact-1",
+          type: "contextCompaction",
+        },
+      },
+    });
+
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "tool",
+      payload: expect.objectContaining({
+        sessionId: threadId,
+        messageId: `codex-tools-${threadId}`,
+        toolUseId: "compact-1",
+        toolName: "Context compaction",
+        input: { source: "codex" },
+        tool_scope: "internal",
+        status: "running",
+      }),
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "tool",
+      payload: expect.objectContaining({
+        sessionId: threadId,
+        messageId: `codex-tools-${threadId}`,
+        toolUseId: "compact-1",
+        toolName: "Context compaction",
+        input: { source: "codex" },
+        tool_scope: "internal",
+        output: "Context compaction completed.",
+        status: "completed",
       }),
     }));
 
@@ -791,7 +854,7 @@ describe("CodexCliProvider takeover", () => {
     provider.stop();
   });
 
-  it("binds a pending Web session when the first slash command starts a thread", async () => {
+  it("resumes a bound pending Web session when releasing Web control", async () => {
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
     let threadStartCount = 0;
     const initialThreadId = "019e2110-d96f-7e40-882e-b524fa9148e4";
@@ -831,6 +894,7 @@ describe("CodexCliProvider takeover", () => {
     });
 
     expect(provider.state.activeSessionId).toBe(slashThreadId);
+    expect(provider.state.resumeSessionId).toBe(slashThreadId);
     expect(events).toContainEqual(expect.objectContaining({
       type: "session-bound",
       payload: {
@@ -845,6 +909,68 @@ describe("CodexCliProvider takeover", () => {
         title: "/new",
         sessionId: slashThreadId,
       }),
+    }));
+
+    mocks.savedThreadIds.add(slashThreadId);
+    mocks.spawn.mockClear();
+
+    await provider.releaseToLocal();
+
+    expect(mocks.spawn).toHaveBeenCalledWith(
+      "codex",
+      ["resume", slashThreadId],
+      expect.objectContaining({ cwd: "/tmp/project" }),
+    );
+    expect(provider.state.owner).toBe("local");
+    expect(provider.state.activeSessionId).toBe(slashThreadId);
+    expect(provider.state.resumeSessionId).toBe(slashThreadId);
+
+    provider.stop();
+  });
+
+  it("starts a new Codex thread for an empty Web session request", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    let threadStartCount = 0;
+    const initialThreadId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    const newThreadId = "019e2110-d96f-7e40-882e-b524fa9148e6";
+    mocks.appRequest.mockImplementation(async (method: string) => {
+      if (method === "adit/capabilities/discover") {
+        throw appServerMethodsError();
+      }
+      if (method === "thread/start") {
+        threadStartCount += 1;
+        return {
+          model: "gpt-test",
+          thread: { id: threadStartCount === 1 ? initialThreadId : newThreadId },
+        };
+      }
+      if (method === "turn/interrupt") return {};
+      if (method === "skills/list") return { data: [] };
+      if (method === "mcpServerStatus/list") return { data: [] };
+      return {};
+    });
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    await provider.takeover();
+    events.length = 0;
+
+    await provider.startNewSession("pending_web_session");
+
+    expect(threadStartCount).toBe(2);
+    expect(provider.state.activeSessionId).toBe(newThreadId);
+    expect(provider.state.resumeSessionId).toBe(newThreadId);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "session-bound",
+      payload: {
+        pendingSessionId: "pending_web_session",
+        sessionId: newThreadId,
+        createdAt: expect.any(Number),
+      },
     }));
 
     provider.stop();
@@ -1094,6 +1220,86 @@ describe("CodexCliProvider takeover", () => {
       params: {
         threadId: "019e2110-d96f-7e40-882e-b524fa9148e4",
         tokenUsage: {
+          modelContextWindow: 258_400,
+          last: {
+            totalTokens: 126_215,
+            inputTokens: 125_152,
+            outputTokens: 1_063,
+            reasoningOutputTokens: 516,
+            cachedInputTokens: 124_288,
+            cacheCreationInputTokens: 10,
+          },
+        },
+      },
+    });
+    await tick();
+
+    expect(provider.state.currentBranch).toBe("main");
+    expect(provider.state.lastTokenUsage).toEqual(expect.objectContaining({
+      totalTokens: 126_215,
+      inputTokens: 125_152,
+      outputTokens: 1_063,
+      reasoningTokens: 516,
+      cacheReadTokens: 124_288,
+      cacheWriteTokens: 10,
+      source: "codex-app-server",
+    }));
+    expect(provider.state.contextUsage).toEqual(expect.objectContaining({
+      percentage: 46,
+      totalTokens: 126_215,
+      maxTokens: 258_400,
+      modelId: "gpt-5.5",
+      source: "codex-app-server",
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "state",
+      payload: expect.objectContaining({
+        currentBranch: "main",
+        contextUsage: expect.objectContaining({
+          percentage: 46,
+          totalTokens: 126_215,
+          maxTokens: 258_400,
+          modelId: "gpt-5.5",
+        }),
+        lastTokenUsage: expect.objectContaining({
+          totalTokens: 126_215,
+          inputTokens: 125_152,
+          outputTokens: 1_063,
+          reasoningTokens: 516,
+          cacheReadTokens: 124_288,
+          cacheWriteTokens: 10,
+        }),
+      }),
+    }));
+
+    (provider as unknown as { contextUsage: null }).contextUsage = null;
+    provider.noteModel("gpt-5.5");
+    expect(provider.state.contextUsage).toEqual(expect.objectContaining({
+      percentage: 46,
+      totalTokens: 126_215,
+      maxTokens: 258_400,
+      modelId: "gpt-5.5",
+    }));
+
+    provider.stop();
+  });
+
+  it("falls back to model context window when Codex omits runtime context window", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    await provider.takeover();
+    provider.noteModel("gpt-5.5");
+    mocks.appServerOptions?.onNotification?.({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId: "019e2110-d96f-7e40-882e-b524fa9148e4",
+        tokenUsage: {
           last: {
             inputTokens: 1200,
             outputTokens: 300,
@@ -1121,7 +1327,7 @@ describe("CodexCliProvider takeover", () => {
       modelId: "gpt-5.5",
       source: "codex-app-server",
     }));
-    expect(provider.state.contextUsage?.percentage).toBeCloseTo(1500 / 1_050_000 * 100);
+    expect(provider.state.contextUsage?.percentage).toBe(0);
     expect(events).toContainEqual(expect.objectContaining({
       type: "state",
       payload: expect.objectContaining({
@@ -1200,7 +1406,9 @@ describe("CodexCliProvider takeover", () => {
       params: {
         threadId: "019e2110-d96f-7e40-882e-b524fa9148e4",
         tokenUsage: {
+          modelContextWindow: 258_400,
           last: {
+            totalTokens: 1500,
             inputTokens: 1200,
             outputTokens: 300,
           },
@@ -1209,6 +1417,7 @@ describe("CodexCliProvider takeover", () => {
     });
     await tick();
     expect(provider.state.contextUsage?.totalTokens).toBe(1500);
+    expect(provider.state.contextUsage?.maxTokens).toBe(258_400);
 
     await provider.switchSession("019e0000-0000-7000-8000-000000000001");
     provider.noteModel("gpt-5.5");
@@ -1220,7 +1429,9 @@ describe("CodexCliProvider takeover", () => {
       params: {
         threadId: "019e0000-0000-7000-8000-000000000001",
         tokenUsage: {
+          modelContextWindow: 258_400,
           last: {
+            totalTokens: 2600,
             inputTokens: 2200,
             outputTokens: 400,
           },
@@ -1232,6 +1443,7 @@ describe("CodexCliProvider takeover", () => {
 
     await provider.switchSession("019e2110-d96f-7e40-882e-b524fa9148e4");
     expect(provider.state.contextUsage?.totalTokens).toBe(1500);
+    expect(provider.state.contextUsage?.maxTokens).toBe(258_400);
     expect(provider.state.lastTokenUsage?.inputTokens).toBe(1200);
 
     provider.stop();

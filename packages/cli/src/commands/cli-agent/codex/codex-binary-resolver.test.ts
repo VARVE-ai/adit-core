@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({
   spawnCliSync: vi.fn(),
 }));
 
-vi.mock("./cli-process.js", () => ({
+vi.mock("../cli-process.js", () => ({
   resolveExecutable: (...args: unknown[]) => mocks.resolveExecutable(...args),
   spawnCliSync: (...args: unknown[]) => mocks.spawnCliSync(...args),
 }));
