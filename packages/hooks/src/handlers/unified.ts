@@ -133,7 +133,6 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
   const changedFiles = await withPerf(ctx.config.dataDir, "git", "getChangedFiles", () =>
     getChangedFiles(input.cwd),
   );
-  const dirty = changedFiles.length > 0;
 
   const recentPrompts = await timeline.list({
     sessionId: ctx.session.id,
@@ -149,7 +148,6 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     ?? await recoverAssistantMessageFromTranscript(input.transcriptPath);
   // Fall back to stop_reason for backward compatibility, then to "completed".
   const responseText = recoveredAssistantMessage ?? input.stopReason ?? "completed";
-  const checkpointLabel = input.stopReason ?? "completed";
 
   // Debug: log response resolution chain to trace why "completed" is recorded
   try {
@@ -168,21 +166,13 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     }) + "\n");
   } catch { /* best-effort */ }
 
-  const event = await timeline.recordEvent({
+  await timeline.recordEvent({
     sessionId: ctx.session.id,
     eventType: "assistant_response",
     actor: "assistant",
     promptText: lastPrompt,
     responseText,
   });
-
-  if (dirty) {
-    await timeline.createCheckpoint(
-      event.id,
-      `[adit] assistant response (${checkpointLabel})`,
-      changedFiles,
-    );
-  }
 
   if (ctx.config.captureEnv) {
     try {

@@ -13,33 +13,19 @@ import {
   insertEventAutoSeq,
   getEventById,
   queryEvents,
-  updateEventCheckpoint,
   searchEvents,
   getLatestCheckpointEvent,
-  insertDiff,
   getDiffText,
   type AditEvent,
   type EventType,
   type Actor,
   type AditConfig,
-  withPerf,
 } from "@varveai/adit-core";
-import { createSnapshot, getCheckpointDiff } from "../snapshot/creator.js";
-import type { FileChange } from "../detector/working-tree.js";
-import { getHeadSha, getCurrentBranch, shaExists } from "../git/runner.js";
-import { getRefPrefix } from "../git/refs.js";
-import { runGitOrThrow } from "../git/runner.js";
+import { getHeadSha, getCurrentBranch, shaExists, runGitOrThrow } from "../git/runner.js";
 
 export interface TimelineManager {
   /** Record a new event in the timeline */
   recordEvent(params: RecordEventParams): Promise<AditEvent>;
-
-  /** Create a git checkpoint for an event */
-  createCheckpoint(
-    eventId: string,
-    message: string,
-    preComputedChanges?: FileChange[],
-  ): Promise<{ sha: string; ref: string } | null>;
 
   /** Revert working tree to a checkpoint */
   revertTo(eventId: string): Promise<void>;
@@ -133,50 +119,6 @@ export function createTimelineManager(
         throw new Error(`Failed to retrieve event after insert: ${id}`);
       }
       return event;
-    },
-
-    async createCheckpoint(
-      eventId: string,
-      message: string,
-      preComputedChanges?: FileChange[],
-    ): Promise<{ sha: string; ref: string } | null> {
-      return withPerf(config.dataDir, "snapshot", "createCheckpoint", async () => {
-        const event = getEventById(db, eventId);
-        if (!event) throw new Error(`Event not found: ${eventId}`);
-
-        // Find the parent checkpoint SHA for proper chaining
-        const lastCheckpoint = getLatestCheckpointEvent(db, event.sessionId);
-        const parentSha = lastCheckpoint?.checkpointSha ?? (await getHeadSha(cwd));
-
-        const refPath = `${getRefPrefix()}/${eventId}`;
-        const result = await createSnapshot(cwd, parentSha, message, refPath, preComputedChanges);
-        if (!result) return null;
-
-        // Store the diff
-        const diffText = await getCheckpointDiff(
-          cwd,
-          result.sha,
-          parentSha ?? undefined,
-        );
-        if (diffText) {
-          insertDiff(db, {
-            id: generateId(),
-            eventId,
-            diffText,
-          });
-        }
-
-        // Update the event with checkpoint info
-        updateEventCheckpoint(
-          db,
-          eventId,
-          result.sha,
-          result.ref,
-          JSON.stringify(result.files),
-        );
-
-        return { sha: result.sha, ref: result.ref };
-      });
     },
 
     async revertTo(eventId: string): Promise<void> {

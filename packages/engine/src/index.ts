@@ -17,12 +17,10 @@ export {
 } from "./git/runner.js";
 
 export {
-  storeCheckpointRef,
   resolveCheckpointRef,
   deleteCheckpointRef,
   listCheckpointRefs,
   getParentSha,
-  getRefPrefix,
 } from "./git/refs.js";
 
 // Working tree detection
@@ -35,13 +33,6 @@ export {
   type FileChange,
   type NumstatEntry,
 } from "./detector/working-tree.js";
-
-// Snapshot creation
-export {
-  createSnapshot,
-  getCheckpointDiff,
-  type SnapshotResult,
-} from "./snapshot/creator.js";
 
 // Timeline management
 export {

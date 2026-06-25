@@ -17,7 +17,6 @@ const mockRecordEvent = vi.fn().mockResolvedValue({
   eventType: "prompt_submit",
   actor: "user",
 });
-const mockCreateCheckpoint = vi.fn().mockResolvedValue(null);
 const mockList = vi.fn().mockResolvedValue([]);
 
 vi.mock("@varveai/adit-core", () => ({
@@ -30,7 +29,6 @@ vi.mock("@varveai/adit-engine", () => ({
   getChangedFiles: vi.fn().mockResolvedValue([]),
   createTimelineManager: vi.fn(() => ({
     recordEvent: mockRecordEvent,
-    createCheckpoint: mockCreateCheckpoint,
     list: mockList,
   })),
   captureEnvironment: vi.fn().mockResolvedValue("env-001"),
@@ -157,40 +155,6 @@ describe("dispatchHook", () => {
       "proj-001",
       { projectRoot: "/test" },
     );
-  });
-
-  it("creates checkpoint on stop when working tree is dirty", async () => {
-    mockGetChangedFiles.mockResolvedValue([
-      { path: "src/auth.ts", status: "M" },
-    ]);
-
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "stop",
-      stopReason: "completed",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockCreateCheckpoint).toHaveBeenCalledWith(
-      "evt-001",
-      "[adit] assistant response (completed)",
-      [{ path: "src/auth.ts", status: "M" }],
-    );
-  });
-
-  it("does not create checkpoint on stop when working tree is clean", async () => {
-    mockGetChangedFiles.mockResolvedValue([]);
-
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "stop",
-      stopReason: "completed",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockCreateCheckpoint).not.toHaveBeenCalled();
   });
 
   it("routes session-end and calls endSession", async () => {

@@ -22,15 +22,8 @@ vi.mock("@varveai/adit-core", () => ({
   insertEventAutoSeq: (...args: unknown[]) => mockInsertEventAutoSeq(...args),
   getEventById: (...args: unknown[]) => mockGetEventById(...args),
   queryEvents: vi.fn(() => []),
-  updateEventCheckpoint: vi.fn(),
-  updateEventLabels: vi.fn(),
   searchEvents: vi.fn(() => []),
   getLatestCheckpointEvent: (...args: unknown[]) => mockGetLatestCheckpointEvent(...args),
-  insertDiff: vi.fn(),
-  getDiffText: vi.fn(() => null),
-  tick: vi.fn(() => ({ "test-client": 2 })),
-  deserialize: vi.fn(() => ({ "test-client": 1 })),
-  withPerf: vi.fn((_dir: string, _cat: string, _op: string, fn: () => unknown) => fn()),
 }));
 
 const mockRunGitOrThrow = vi.fn().mockResolvedValue("");
@@ -45,13 +38,7 @@ vi.mock("../git/runner.js", () => ({
 }));
 
 vi.mock("../git/refs.js", () => ({
-  getRefPrefix: vi.fn(() => "refs/adit/checkpoints"),
   getParentSha: (...args: unknown[]) => mockGetParentSha(...args),
-}));
-
-vi.mock("../snapshot/creator.js", () => ({
-  createSnapshot: vi.fn().mockResolvedValue(null),
-  getCheckpointDiff: vi.fn().mockResolvedValue(""),
 }));
 
 import { createTimelineManager } from "./manager.js";
