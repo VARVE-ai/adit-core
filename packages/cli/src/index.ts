@@ -11,12 +11,6 @@ import { Command } from "commander";
 import { initCommand } from "./commands/init.js";
 import { listCommand } from "./commands/list.js";
 import { showCommand } from "./commands/show.js";
-import {
-  revertCommand,
-  interactiveRevertCommand,
-  undoCommand,
-} from "./commands/revert.js";
-import { resumeCommand } from "./commands/resume.js";
 import { searchCommand } from "./commands/search.js";
 import {
   diffCommand,
@@ -424,40 +418,10 @@ export function createProgram(): Command {
     .option("--json", "Output as JSON")
     .action((opts) => perfClearCommand({ json: opts.json }));
 
-  // Snapshot — git checkpoint features (revert, undo, diff, env)
+  // Snapshot — diff display and environment snapshot features
   const snapshotCmd = program
     .command("snapshot")
-    .description("Git checkpoint snapshot commands (revert, undo, diff, env)");
-
-  snapshotCmd
-    .command("revert [id]")
-    .description(
-      "Revert working tree to a checkpoint (interactive picker if no ID given)",
-    )
-    .option("-y, --yes", "Skip confirmation")
-    .option("-l, --limit <n>", "Max checkpoints to show in picker", "20")
-    .action((id, opts) => {
-      if (id) {
-        revertCommand(id, { yes: opts.yes });
-      } else {
-        interactiveRevertCommand({
-          yes: opts.yes,
-          limit: parseInt(opts.limit, 10),
-        });
-      }
-    });
-
-  snapshotCmd
-    .command("undo")
-    .description("Revert to parent of last checkpoint")
-    .option("-y, --yes", "Skip confirmation")
-    .action((opts) => undoCommand({ yes: opts.yes }));
-
-  snapshotCmd
-    .command("resume [branch]")
-    .description("Resume a session from the latest checkpoint on a branch")
-    .option("-y, --yes", "Skip confirmation and force-switch branches")
-    .action((branch, opts) => resumeCommand(branch, { yes: opts.yes }));
+    .description("Diff and environment snapshot commands");
 
   snapshotCmd
     .command("diff <id>")
@@ -612,7 +576,7 @@ Commands:
   show <id>                  Show full event details
   search [options] <query>   Search timeline events
 
-  snapshot                   Manage checkpoints, diffs, and environment snapshots
+  snapshot                   Show event diffs and environment snapshots
   cloud                      Sync and connect with adit-cloud
   hook                       Manage AI platform hook integrations
   docs                       Scaffold and validate project documents
