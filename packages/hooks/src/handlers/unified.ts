@@ -9,6 +9,8 @@ import {
   getLatestEnvSnapshot,
   endSession,
   withPerf,
+  insertDiff,
+  generateId,
 } from "@varveai/adit-core";
 import {
   getChangedFiles,
@@ -18,7 +20,20 @@ import {
 } from "@varveai/adit-engine";
 import { initHookContext, type HookContext } from "../common/context.js";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const DEBUG_LOG_PATH = join(tmpdir(), "adit-hook-debug.jsonl");
 import type { NormalizedHookInput } from "../adapters/types.js";
+import {
+  extractClaudeMutationsFromTranscript,
+  extractCodexMutationsFromTranscript,
+  extractGeminiMutationsFromTranscript,
+  extractCursorMutationsFromTranscript,
+  buildDiffStat,
+  buildBoundedDiffText,
+  type AgentFileMutation,
+} from "../mutations/index.js";
 
 /**
  * Dispatch a normalized hook input to the appropriate handler.
@@ -151,7 +166,7 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
 
   // Debug: log response resolution chain to trace why "completed" is recorded
   try {
-    appendFileSync("/tmp/adit-hook-debug.jsonl", JSON.stringify({
+    appendFileSync(DEBUG_LOG_PATH, JSON.stringify({
       timestamp: new Date().toISOString(),
       phase: "stop-response-resolution",
       hookType: input.hookType,
@@ -166,13 +181,75 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     }) + "\n");
   } catch { /* best-effort */ }
 
-  await timeline.recordEvent({
+  // Extract file-edit mutations from the platform transcript.
+  // Replaces the old git working-tree scan + auto-checkpoint flow.
+  let mutations: AgentFileMutation[] = [];
+  let mutationStatJson: string | null = null;
+  const isClaudeFamily =
+    input.platformCli === "claude-code" || input.platformCli === "claude-vscode";
+  if (
+    (isClaudeFamily || input.platformCli === "codex" || input.platformCli === "gemini" || input.platformCli === "cursor") &&
+    input.transcriptPath
+  ) {
+    try {
+      let extracted;
+      if (input.platformCli === "codex") {
+        extracted = extractCodexMutationsFromTranscript(input.transcriptPath);
+      } else if (input.platformCli === "gemini") {
+        extracted = extractGeminiMutationsFromTranscript(input.transcriptPath);
+      } else if (input.platformCli === "cursor") {
+        extracted = extractCursorMutationsFromTranscript(input.transcriptPath);
+      } else {
+        extracted = extractClaudeMutationsFromTranscript(input.transcriptPath, {
+          provider: input.platformCli === "claude-vscode" ? "claude-vscode" : "claude-code",
+        });
+      }
+      if (extracted) {
+        mutations = extracted.mutations;
+        if (mutations.length > 0) {
+          mutationStatJson = JSON.stringify(buildDiffStat(mutations));
+        }
+      }
+    } catch (err) {
+      // Best-effort: hook must not fail due to transcript parse errors
+      appendFileSync(DEBUG_LOG_PATH, JSON.stringify({
+        timestamp: new Date().toISOString(),
+        phase: "mutation-extraction-failed",
+        transcriptPath: input.transcriptPath,
+        error: String(err),
+      }) + "\n");
+    }
+  }
+
+  const event = await timeline.recordEvent({
     sessionId: ctx.session.id,
     eventType: "assistant_response",
     actor: "assistant",
     promptText: lastPrompt,
     responseText,
+    diffStatJson: mutationStatJson,
   });
+
+  // Persist bounded diff_text from mutations (replaces old git checkpoint path)
+  if (mutations.length > 0) {
+    const diffText = buildBoundedDiffText(mutations);
+    if (diffText.length > 0) {
+      try {
+        insertDiff(ctx.db, {
+          id: generateId(),
+          eventId: event.id,
+          diffText,
+        });
+      } catch (err) {
+        // Best-effort; don't fail the hook over a diff write
+        appendFileSync(DEBUG_LOG_PATH, JSON.stringify({
+          timestamp: new Date().toISOString(),
+          phase: "mutation-diff-insert-failed",
+          error: String(err),
+        }) + "\n");
+      }
+    }
+  }
 
   if (ctx.config.captureEnv) {
     try {

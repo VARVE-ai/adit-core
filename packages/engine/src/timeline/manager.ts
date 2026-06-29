@@ -63,6 +63,7 @@ export interface RecordEventParams {
   toolOutputJson?: string | null;
   errorJson?: string | null;
   planTaskId?: string | null;
+  diffStatJson?: string | null;
 }
 
 export interface ListOptions {
@@ -110,6 +111,7 @@ export function createTimelineManager(
         endedAt: now,
         errorJson: params.errorJson ?? null,
         planTaskId: params.planTaskId ?? null,
+        diffStatJson: params.diffStatJson ?? null,
         clientId: config.clientId,
         vclockJson: vclock,
       });

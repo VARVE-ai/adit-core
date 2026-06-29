@@ -9,11 +9,15 @@
  */
 
 import { appendFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Platform } from "@varveai/adit-core";
 import { readStdin } from "./common/context.js";
 import { detectPlatform, detectPlatformFromPayload, getAdapter } from "./adapters/index.js";
 import { parseHookArgs, type HookPlatformArg } from "./adapters/command.js";
 import { dispatchHook } from "./handlers/unified.js";
+
+const DEBUG_LOG_PATH = join(tmpdir(), "adit-hook-debug.jsonl");
 
 // Hard safety net: kill the process after 10 seconds no matter what.
 // Hooks must never block the AI agent — this ensures we exit even if
@@ -50,7 +54,7 @@ async function main(): Promise<void> {
       command: hookArgs.hookType,
       raw,
     };
-    appendFileSync("/tmp/adit-hook-debug.jsonl", JSON.stringify(debugEntry) + "\n");
+    appendFileSync(DEBUG_LOG_PATH, JSON.stringify(debugEntry) + "\n");
   } catch { /* best-effort */ }
 
   const adapter = getAdapter(platform);
@@ -58,7 +62,7 @@ async function main(): Promise<void> {
 
   // Debug: log parsed input to see what the adapter extracted
   try {
-    appendFileSync("/tmp/adit-hook-debug.jsonl", JSON.stringify({
+    appendFileSync(DEBUG_LOG_PATH, JSON.stringify({
       timestamp: new Date().toISOString(),
       phase: "parsed",
       platform,
