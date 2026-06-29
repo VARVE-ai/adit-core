@@ -207,10 +207,11 @@ export function detectPlatforms(projectRoot: string): Platform[] {
     platforms.add("opencode");
   }
 
-  // Check for Cursor config directory
-  if (existsSync(join(projectRoot, ".cursor"))) {
-    platforms.add("cursor");
-  }
+  // Cursor is intentionally NOT auto-detected. Cursor IDE reads both
+  // `.cursor/hooks.json` AND `.claude/settings*.json` when both exist,
+  // causing duplicate hook invocations. Users must install Cursor hooks
+  // explicitly via `adit hook install cursor` if they want Cursor tracking.
+  // Detection of `.cursor/` directory alone is not enough reason to install.
 
   // Check for Codex config directory
   if (existsSync(join(projectRoot, ".codex"))) {

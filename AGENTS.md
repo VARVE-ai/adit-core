@@ -298,3 +298,76 @@ adit hook uninstall <platform>
 - Environment variables override settings for data paths, cloud sync,
   transcript upload, project-link sync, Codex binary selection, and native build
   preflight behavior.
+
+
+<claude-mem-context>
+# Memory Context
+
+# [adit-core] recent context, 2026-06-26 6:36pm GMT+8
+
+Legend: 🎯session 🔴bugfix 🟣feature 🔄refactor ✅change 🔵discovery ⚖️decision
+Format: ID TIME TYPE TITLE
+Fetch details: get_observations([IDs]) | Search: mem-search skill
+
+Stats: 50 obs (18,004t read) | 0t work
+
+### Jun 10, 2026
+6300 5:06p 🔵 FitnessBox Project Sync State Investigation Reveals Expected Duplicate Detection
+6302 5:07p 🔵 FitnessBox Sync Barrier Mechanism Blocks Incomplete Conversations
+6303 5:11p 🔵 Adit Database Schema and ID Generation Architecture Examined
+6309 5:13p 🔴 Manual Server Cursor Update Resolved FitnessBox Sync Deadlock
+### Jun 12, 2026
+6721 12:40p 🔵 ADIT System Architecture: Dedicated Sessions Table Stores Comprehensive Session Metadata
+6757 2:07p 🔵 adit init Platform Detection and Installation Process Examined
+6759 2:08p 🔵 adit init Cross-Platform Installation Unified Across Windows and Linux
+6760 2:10p 🔵 adit init OpenCode Plugin System and Codex Trust Configuration Examined
+6824 3:10p 🟣 Canonical Repository Identity Sync Added for Team Sharing
+6827 3:12p 🟣 Canonical Repository Identity Tracking for Team Sharing
+6870 4:56p 🔵 adit cloud claude Command Cloud Connection Target
+### Jun 15, 2026
+7235 5:58p 🔵 Async Session Scoring Architecture Uses Sync Push Confirmation
+7236 5:59p 🔵 Cloud Sync Session Architecture Supports Active Session Data Push
+7239 " 🔵 Event Sync Barrier Prevents Incomplete Prompt-Response Pairs from Cloud Upload
+7240 6:00p 🔵 Event Sync Window Creates Per-Session Barriers at Unanswered Prompt Boundaries
+### Jun 16, 2026
+7339 1:47p 🔴 npm Update Failed Due to Missing Dependency Package Version
+7340 " 🔵 npm update fails with missing dependency @varveai/adit-plans@0.5.3
+7341 1:48p 🔵 npm update failure caused by mismatched @varveai/adit-plans version dependency
+7342 1:49p 🔵 @varveai/adit-plans@0.5.3 exists in npm registry despite local version showing 0.0.0
+7344 1:50p 🔵 npm update failure resolved - packages properly published to public registry
+7352 2:01p 🔵 Global CLI version 0.5.3 contains sync serializer fix without event window constraint
+### Jun 17, 2026
+7490 4:04p 🔵 Sync Push API Trigger Flow and Pipeline Architecture Traced
+7492 4:05p 🔵 Comprehensive Sync Push Pipeline Architecture Traced from Hook Events to API Requests
+7493 4:08p 🔵 CLI Cloud Sync Commands and Agent Relay Architecture Discovered
+7526 5:11p 🔵 Adit Cloud Link Git Information Retrieval Investigation
+7527 5:13p 🔵 Adit Cloud Link Git Information Retrieval and Branch Sync Architecture
+7533 5:14p 🔵 Adit Cloud Link Branch Sync Timing and New Branch Detection Limitations
+### Jun 22, 2026
+8024 5:55p 🔵 AI Commit Recording Investigation Initiated
+8025 5:56p 🔵 AI-Generated Commits Indirectly Tracked Through Checkpoint System
+8027 " 🔵 AI Commits Tracked Through Cloud Sync and Checkpoint Metadata
+8029 5:57p 🔵 Database Schema Has No Dedicated Commit Tracking
+### Jun 24, 2026
+8317 3:28p 🔵 Diffs Table Data Architecture and Origins Traced
+8322 3:30p 🔵 Diff Information Dual Storage Pattern Discovered
+8327 3:49p 🔵 Git Change Detection Uses Porcelain Format for Staged and Unstaged Files
+8328 3:52p 🔵 Cloud Sync Architecture Uses Cursor-Based Incremental Push with Per-Project Batching
+8355 4:59p ⚖️ File Change Attribution Architecture Decoupled from Stop Hooks
+8357 5:01p ⚖️ File Change Attribution Plan Faces Platform Compatibility Challenges
+8365 5:06p 🔵 Current Checkpoint and Diff System Architecture Examined
+8366 " ⚖️ Tool-Level File Change Attribution Strategy Adopted Over Stop Hook Approach
+8367 5:17p 🔵 File Editing Tool Path Extraction and Hook Triggering Discussed
+### Jun 25, 2026
+8447 4:23p 🔵 Cloud Data Synchronization Architecture Investigation Initiated
+8448 4:26p 🔵 Cloud Data Synchronization Architecture Identified with Multiple Sync Mechanisms
+8461 5:07p 🔵 Cross-Platform Hook Event Normalization Architecture Examined
+8464 5:23p 🔵 Multi-Platform Transcript JSONL Format Analysis Required
+8503 6:37p ⚖️ Multi-Platform Development Reference Approach Clarified
+8504 6:38p 🔵 Codex JSONL Transcript Format Structure Examined
+8506 6:40p ⚖️ Codex Mutation Tracking Development Approach Clarified
+8507 6:41p 🟣 Codex Mutation Tracking Implemented via patch_apply_end Events
+### Jun 26, 2026
+8549 11:48a 🔵 OpenAI Codex Repository Clone Initiated
+8550 11:51a 🔵 OpenAI Codex Repository Successfully Cloned
+</claude-mem-context>

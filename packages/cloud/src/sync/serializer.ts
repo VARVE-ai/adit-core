@@ -8,6 +8,9 @@
 
 import type Database from "better-sqlite3";
 
+/** Total diff_text byte cap per push payload. Mirrors agent-file-mutation-capture-plan.md. */
+const MAX_SYNC_DIFF_BYTES = 2 * 1024 * 1024;
+
 /**
  * Server-facing record types.
  * These use snake_case field names matching the adit-cloud PostgreSQL schema.
@@ -195,10 +198,32 @@ export function buildSyncBatch(
   // 5. Diffs — keyed by event_id, only for events in this batch
   if (batch.events.length > 0 && remaining > 0) {
     const eventIds = batch.events.map((e) => e.id);
-    batch.diffs = queryDiffs(db, eventIds, cloudClientId, remaining);
+    const allDiffs = queryDiffs(db, eventIds, cloudClientId, remaining);
+    // Apply payload byte cap: drop excess diffs rather than pushing a huge
+    // payload to the server. Excess diffs will be retried on subsequent syncs
+    // where earlier batches have drained.
+    batch.diffs = applySyncByteCap(allDiffs, MAX_SYNC_DIFF_BYTES);
   }
 
   return batch;
+}
+
+/**
+ * Keep total diff_text bytes under MAX_SYNC_DIFF_BYTES by dropping trailing
+ * entries. Each dropped diff stays in the local DB and is eligible for the
+ * next sync attempt once the queue drains.
+ */
+function applySyncByteCap(diffs: SyncDiff[], cap: number): SyncDiff[] {
+  if (diffs.length === 0) return diffs;
+  const out: SyncDiff[] = [];
+  let total = 0;
+  for (const d of diffs) {
+    const size = d.diff_text.length;
+    if (total + size > cap) break;
+    total += size;
+    out.push(d);
+  }
+  return out;
 }
 
 /** Count total unsynced records across all tables */

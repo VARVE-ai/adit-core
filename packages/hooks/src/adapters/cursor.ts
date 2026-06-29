@@ -185,6 +185,9 @@ export const cursorAdapter: PlatformAdapter = {
     return {
       configPath: ".cursor/hooks.json",
       content: {
+        // Cursor requires a top-level numeric `version` field. Without it,
+        // Cursor rejects the config with "Config version must be a number".
+        version: 1,
         hooks: {
           beforeSubmitPrompt: makeHookEntry("prompt-submit"),
           stop: makeHookEntry("stop"),
