@@ -35,6 +35,15 @@ export interface PartialAssistantStreamState {
   messageId: string;
 }
 
+export interface ClaudeToolUseState {
+  messageId: string;
+  toolName: string;
+  input: unknown;
+  mode?: CliPromptMode;
+  modelId?: string;
+  usage?: Record<string, number>;
+}
+
 interface ContextCompactionToolState {
   id: string;
   completed: boolean;
@@ -49,6 +58,7 @@ export interface ClaudeSdkEventContext {
   remoteAbortSignalAborted: () => boolean;
   contextCompactionToolBySession: Map<string, ContextCompactionToolState>;
   lastAssistantMessageBySession: Map<string, string>;
+  toolUseById: Map<string, ClaudeToolUseState>;
   partialAssistantStreams: Map<string, PartialAssistantStreamState>;
   streamedTextMessageIds: Set<string>;
   streamedThinkingPartKeys: Set<string>;
@@ -233,6 +243,16 @@ export async function emitClaudeAssistantMessage(
       const toolUseId = typeof part.id === "string" ? part.id : undefined;
       const toolName = typeof part.name === "string" ? part.name : "tool";
       const input = part.input ?? {};
+      if (toolUseId) {
+        ctx.toolUseById.set(toolUseKey(sessionId, toolUseId), {
+          messageId,
+          toolName,
+          input,
+          mode,
+          modelId: eventModelId,
+          usage,
+        });
+      }
       ctx.pushEvent("tool", {
         sessionId,
         messageId,
@@ -512,11 +532,13 @@ export function emitClaudeResultUsage(
 export function emitClaudeToolResults(
   message: SDKUserMessage,
   sessionId: string,
-  ctx: Pick<ClaudeSdkEventContext, "activePromptMode" | "pushEvent">,
+  ctx: Pick<
+    ClaudeSdkEventContext,
+    "activePromptMode" | "lastAssistantMessageBySession" | "pushEvent" | "toolUseById"
+  >,
 ): void {
   const content = message.message?.content;
   if (!Array.isArray(content)) return;
-  const messageId = makeMessageId(message, sessionId);
   for (const part of content as unknown as Array<Record<string, unknown>>) {
     if (part.type !== "tool_result") continue;
     const toolUseId = typeof part.tool_use_id === "string"
@@ -524,18 +546,30 @@ export function emitClaudeToolResults(
       : typeof part.toolUseID === "string"
         ? part.toolUseID
         : "tool";
+    const toolUse = ctx.toolUseById.get(toolUseKey(sessionId, toolUseId));
+    const toolName = toolUse?.toolName ?? "tool";
+    const input = toolUse?.input ?? {};
+    const mode = toolUse?.mode ?? ctx.activePromptMode() ?? undefined;
     ctx.pushEvent("tool", {
       sessionId,
-      messageId,
+      messageId: toolUse?.messageId ??
+        ctx.lastAssistantMessageBySession.get(sessionId) ??
+        makeMessageId(message, sessionId),
+      modelId: toolUse?.modelId,
+      usage: toolUse?.usage,
       toolUseId,
-      toolName: "tool",
-      input: {},
-      tool_scope: "internal",
-      mode: ctx.activePromptMode() ?? undefined,
+      toolName,
+      input,
+      tool_scope: claudeToolScope(toolName, toolUse?.mode ?? ctx.activePromptMode(), input),
+      mode,
       inputKind: "prompt",
       output: formatToolResult(part.content),
       status: "completed",
       createdAt: Date.now(),
     });
   }
+}
+
+export function toolUseKey(sessionId: string, toolUseId: string): string {
+  return `${sessionId}\0${toolUseId}`;
 }

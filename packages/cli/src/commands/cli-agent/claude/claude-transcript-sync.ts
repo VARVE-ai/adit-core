@@ -8,7 +8,16 @@ interface TranscriptSession {
   firstPromptAt?: number;
   seenKeys: Set<string>;
   lastAssistantMessageId?: string;
+  toolUseById: Map<string, TranscriptToolUseState>;
   modelObservations: Array<{ modelId: string; observedAt: number }>;
+}
+
+interface TranscriptToolUseState {
+  messageId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  modelId?: string;
+  usage?: Record<string, number>;
 }
 
 interface NoteHookInput {
@@ -70,6 +79,7 @@ export class ClaudeTranscriptSync {
         id,
         startedAt: Date.now(),
         seenKeys: new Set<string>(),
+        toolUseById: new Map<string, TranscriptToolUseState>(),
         modelObservations: [],
       };
       this.sessions.set(id, session);
@@ -200,6 +210,13 @@ export class ClaudeTranscriptSync {
           const toolName = readString(part.name) ?? "tool";
           const toolUseId = readString(part.id) ?? `tool-${hashText(`${messageId}:${index}`)}`;
           const input = asInputRecord(part.input);
+          session.toolUseById.set(toolUseId, {
+            messageId,
+            toolName,
+            input,
+            modelId,
+            usage,
+          });
           this.pushIfNew(
             session,
             obj,
@@ -279,6 +296,7 @@ export class ClaudeTranscriptSync {
     const usage = normalizeClaudeUsage(message?.usage);
     const output = formatToolResult(part, obj);
     const isError = part.is_error === true;
+    const toolUse = session.toolUseById.get(toolUseId);
     this.pushIfNew(
       session,
       obj,
@@ -290,12 +308,12 @@ export class ClaudeTranscriptSync {
         type: "tool",
         payload: {
           sessionId: session.id,
-          messageId: makeToolResultMessageId(obj, session.id),
-          modelId,
-          usage,
+          messageId: toolUse?.messageId ?? makeToolResultMessageId(obj, session.id),
+          modelId: toolUse?.modelId ?? modelId,
+          usage: toolUse?.usage ?? usage,
           toolUseId,
-          toolName: "tool",
-          input: {},
+          toolName: toolUse?.toolName ?? "tool",
+          input: toolUse?.input ?? {},
           output: isError ? undefined : output,
           error: isError ? output || "Tool failed" : undefined,
           status: isError ? "error" : "completed",

@@ -70,6 +70,7 @@ import {
   emitClaudeResultUsage,
   emitClaudeToolResults,
   type ClaudeSdkEventContext,
+  type ClaudeToolUseState,
   type PartialAssistantStreamState,
 } from "./sdk-event-emitters.js";
 import {
@@ -217,6 +218,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private pendingRewinds = new Map<string, PendingRewindRequest>();
   private boundPendingSessionIds = new Set<string>();
   private lastAssistantMessageBySession = new Map<string, string>();
+  private toolUseById = new Map<string, ClaudeToolUseState>();
   private partialAssistantStreams = new Map<string, PartialAssistantStreamState>();
   private streamedTextMessageIds = new Set<string>();
   private streamedThinkingPartKeys = new Set<string>();
@@ -977,6 +979,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       this.startingPrompt = first;
       this.activePromptEvent = first.promptEvent;
       this.activePromptMode = first.mode;
+      this.toolUseById.clear();
       this.partialAssistantStreams.clear();
       this.streamedTextMessageIds.clear();
       this.streamedThinkingPartKeys.clear();
@@ -1215,6 +1218,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.activePromptMode = null;
     this.activePromptInput?.stream.close();
     this.activePromptInput = null;
+    this.toolUseById.clear();
     this.partialAssistantStreams.clear();
     this.streamedTextMessageIds.clear();
     this.streamedThinkingPartKeys.clear();
@@ -1396,6 +1400,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       remoteAbortSignalAborted: () => this.remoteAbortController?.signal.aborted === true,
       contextCompactionToolBySession: this.contextCompactionToolBySession,
       lastAssistantMessageBySession: this.lastAssistantMessageBySession,
+      toolUseById: this.toolUseById,
       partialAssistantStreams: this.partialAssistantStreams,
       streamedTextMessageIds: this.streamedTextMessageIds,
       streamedThinkingPartKeys: this.streamedThinkingPartKeys,

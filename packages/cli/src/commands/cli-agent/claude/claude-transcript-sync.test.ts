@@ -9,6 +9,81 @@ function tempDir(): string {
 }
 
 describe("ClaudeTranscriptSync", () => {
+  it("links tool results to the assistant message that created the tool use", () => {
+    const dir = tempDir();
+    try {
+      const transcriptPath = path.join(dir, "session.jsonl");
+      const sessionId = "11111111-1111-1111-1111-111111111111";
+      const timestamp = new Date(Date.now() + 1000).toISOString();
+      fs.writeFileSync(
+        transcriptPath,
+        [
+          JSON.stringify({
+            type: "assistant",
+            timestamp,
+            message: {
+              id: "assistant-message-1",
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: "toolu_1",
+                  name: "Read",
+                  input: { file_path: "README.md" },
+                },
+              ],
+            },
+          }),
+          JSON.stringify({
+            type: "user",
+            timestamp,
+            message: {
+              id: "tool-result-message-1",
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "toolu_1",
+                  content: "file contents",
+                },
+              ],
+            },
+          }),
+          "",
+        ].join("\n"),
+      );
+
+      const sync = new ClaudeTranscriptSync();
+      sync.noteHook({
+        eventType: "SessionStart",
+        sessionId,
+        body: {
+          session_id: sessionId,
+          transcript_path: transcriptPath,
+        },
+      });
+      sync.noteHook({
+        eventType: "UserPromptSubmit",
+        sessionId,
+        body: {
+          session_id: sessionId,
+          transcript_path: transcriptPath,
+        },
+      });
+
+      const toolEvents = sync.drainSession(sessionId).filter((event) => event.type === "tool");
+      const completed = toolEvents.find((event) => event.payload.status === "completed");
+      expect(completed?.payload).toEqual(expect.objectContaining({
+        messageId: "assistant-message-1",
+        toolUseId: "toolu_1",
+        toolName: "Read",
+        input: { file_path: "README.md" },
+      }));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("uses the observed runtime model instead of Claude transcript's provider-normalized model", () => {
     const dir = tempDir();
     try {

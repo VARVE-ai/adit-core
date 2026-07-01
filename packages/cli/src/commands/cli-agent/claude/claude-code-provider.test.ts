@@ -1582,6 +1582,98 @@ describe("ClaudeCodeProvider takeover", () => {
     }
   });
 
+  it("links Claude SDK tool results to the assistant message that created the tool use", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    mocks.query.mockImplementation((
+      input: {
+        options?: {
+          includePartialMessages?: boolean;
+        };
+      },
+    ) => {
+      if (!input.options?.includePartialMessages) {
+        return createCapabilityQuery();
+      }
+
+      return {
+        supportedCommands: vi.fn(async () => []),
+        mcpServerStatus: vi.fn(async () => []),
+        getContextUsage: vi.fn(async () => null),
+        close: mocks.remoteClose,
+        interrupt: mocks.remoteInterrupt,
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "assistant",
+            session_id: sessionId,
+            uuid: "assistant-1",
+            parent_tool_use_id: null,
+            message: {
+              id: "assistant-message-1",
+              role: "assistant",
+              model: "glm-5.2",
+              content: [
+                {
+                  type: "tool_use",
+                  id: "toolu_1",
+                  name: "Read",
+                  input: { file_path: "README.md" },
+                },
+              ],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            },
+          };
+          yield {
+            type: "user",
+            session_id: sessionId,
+            uuid: "tool-result-1",
+            message: {
+              id: "tool-result-message-1",
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "toolu_1",
+                  content: "file contents",
+                },
+              ],
+            },
+          };
+          yield {
+            type: "result",
+            session_id: sessionId,
+            usage: { input_tokens: 1, output_tokens: 1 },
+          };
+        },
+      };
+    });
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("read README");
+      await tick();
+
+      const toolEvents = events.filter((event) => event.type === "tool");
+      const completed = toolEvents.find((event) => event.payload.status === "completed");
+      expect(completed?.payload).toEqual(expect.objectContaining({
+        sessionId,
+        messageId: "assistant-message-1",
+        toolUseId: "toolu_1",
+        toolName: "Read",
+        input: { file_path: "README.md" },
+      }));
+    } finally {
+      provider.stop();
+    }
+  });
+
   it("synthesizes assistant deltas when Claude SDK only returns final text", async () => {
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
     const sessionId = "11111111-1111-1111-1111-111111111111";
