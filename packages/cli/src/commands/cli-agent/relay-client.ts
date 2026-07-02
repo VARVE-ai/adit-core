@@ -184,8 +184,11 @@ export class CliAgentRelayWebSocket {
     });
 
     socket.on("close", () => {
+      // A socket that has already been replaced by a newer connection must not
+      // clobber that connection's state when its close event arrives late.
+      if (this.socket !== socket) return;
       this.clearConnectTimer();
-      if (this.socket === socket) this.socket = null;
+      this.socket = null;
       const hadConnection = this.connectionId !== null;
       this.connectionId = null;
       this.setStatus("closed");
