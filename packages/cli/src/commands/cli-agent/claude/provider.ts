@@ -142,6 +142,10 @@ type CapabilityHydrateTarget =
 const RECLAIM_COMMAND = "/local";
 const BRANCH_REFRESH_INTERVAL_MS = 5_000;
 const CONTEXT_USAGE_REFRESH_INTERVAL_MS = 10_000;
+// The capability probe spawns a full Claude CLI process; without a deadline a
+// hung spawn (proxy issues, MCP init stalls) leaves the web command list
+// waiting forever.
+const CAPABILITY_PROBE_TIMEOUT_MS = 20_000;
 
 function stripClaudeModelArgs(args: string[]): string[] {
   const next: string[] = [];
@@ -228,6 +232,10 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private mcpServers: Array<{ name: string; status: string }> = [];
   private skills: string[] = [];
   private capabilityHydrateGeneration = 0;
+  // True while a requested capability hydrate has not yet produced a snapshot
+  // (probe still running, aborted by a prompt run, or failed). runRemoteLoop
+  // re-hydrates after each run while this is set.
+  private capabilityHydratePending = false;
   private reclaimingToLocal = false;
   private pendingLocalReclaimSessionId: string | null = null;
   private localSessionAliases = new Map<string, string>();
@@ -332,6 +340,13 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.attachReclaimInput();
     const generation = ++this.remoteLoopGeneration;
     void this.runRemoteLoop(generation);
+    // Publish whatever we already know right away so the web slash-command
+    // popup is usable while the probe spawns; the probe result replaces it.
+    if (this.slashCommandsByName.size === 0) {
+      this.applyClaudeCapabilitySnapshot({ commands: [] });
+    } else {
+      this.emitSlashCommands();
+    }
     void this.hydrateCapabilities({ owner: "web", generation });
   }
 
@@ -890,6 +905,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.stopCapabilityProbe();
     if (!this.isCapabilityHydrateTargetCurrent(target)) return;
     const hydrateGeneration = ++this.capabilityHydrateGeneration;
+    this.capabilityHydratePending = true;
     const abortController = new AbortController();
     this.capabilityProbeAbortController = abortController;
     const probe = query({
@@ -910,10 +926,17 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.capabilityProbeQuery = probe;
 
     try {
-      const [commands, mcpServers] = await Promise.all([
-        probe.supportedCommands().catch(() => [] as SlashCommand[]),
-        probe.mcpServerStatus().catch(() => []),
-      ]);
+      const probeTimeout = setTimeout(() => abortController.abort(), CAPABILITY_PROBE_TIMEOUT_MS);
+      let commands: SlashCommand[];
+      let mcpServers: unknown[];
+      try {
+        [commands, mcpServers] = await Promise.all([
+          probe.supportedCommands().catch(() => [] as SlashCommand[]),
+          probe.mcpServerStatus().catch(() => [] as unknown[]),
+        ]);
+      } finally {
+        clearTimeout(probeTimeout);
+      }
       if (
         !this.isCapabilityHydrateTargetCurrent(target) ||
         this.capabilityHydrateGeneration !== hydrateGeneration ||
@@ -921,8 +944,13 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       ) {
         return;
       }
+      const nextCommands = commands.map(commandInfoFromClaudeSlashCommand);
       this.applyClaudeCapabilitySnapshot({
-        commands: commands.map(commandInfoFromClaudeSlashCommand),
+        // A timed-out or failed probe yields no commands; keep a previously
+        // hydrated table instead of downgrading it to the native fallback.
+        ...(nextCommands.length > 0 || this.slashCommandsByName.size === 0
+          ? { commands: nextCommands }
+          : {}),
         mcpServers: mcpServers.map((server) => ({
           name: readString(asRecord(server).name) ?? "",
           status: readString(asRecord(server).status) ?? "unknown",
@@ -1177,6 +1205,16 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         this.setBusy(false);
         this.remoteQuery = null;
         this.remoteAbortController = null;
+        // Starting this run may have aborted the capability probe before it
+        // delivered a snapshot (and a failed run never sends the SDK init
+        // message that would replace it) — settle the debt now.
+        if (
+          this.capabilityHydratePending &&
+          this.ownerValue === "web" &&
+          this.remoteLoopGeneration === generation
+        ) {
+          void this.hydrateCapabilities({ owner: "web", generation });
+        }
       }
     }
   }
@@ -1586,6 +1624,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     mcpServers?: Array<{ name: string; status: string }>;
     skills?: string[];
   }): void {
+    this.capabilityHydratePending = false;
     if (input.mcpServers) this.mcpServers = input.mcpServers;
     if (input.skills) this.skills = input.skills;
     if (input.commands !== undefined) {
