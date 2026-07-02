@@ -629,7 +629,9 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
       }
 
       const relayConnected = ws.isOpen && Boolean(ws.currentConnectionId);
-      if (commandQueue.length === 0 && (!relayConnected || eventQueue.length === 0)) {
+      // Always yield while disconnected: commands cannot drain without a
+      // connection, and a zero-await iteration would starve the event loop.
+      if (!relayConnected || (commandQueue.length === 0 && eventQueue.length === 0)) {
         await relayLoopWake.wait(1500);
       }
     }
