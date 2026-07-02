@@ -84,6 +84,147 @@ describe("ClaudeTranscriptSync", () => {
     }
   });
 
+  it("emits run.aborted when the user interrupts the local CLI with ESC", () => {
+    const dir = tempDir();
+    try {
+      const transcriptPath = path.join(dir, "session.jsonl");
+      const sessionId = "11111111-1111-1111-1111-111111111111";
+      const timestamp = new Date(Date.now() + 1000).toISOString();
+      fs.writeFileSync(
+        transcriptPath,
+        [
+          JSON.stringify({
+            type: "user",
+            uuid: "prompt-1",
+            timestamp,
+            message: {
+              role: "user",
+              content: "帮我改一下登录页",
+            },
+          }),
+          JSON.stringify({
+            type: "user",
+            uuid: "interrupt-1",
+            timestamp,
+            message: {
+              role: "user",
+              content: "[Request interrupted by user]",
+            },
+          }),
+          "",
+        ].join("\n"),
+      );
+
+      const sync = new ClaudeTranscriptSync();
+      sync.noteHook({
+        eventType: "UserPromptSubmit",
+        sessionId,
+        body: {
+          session_id: sessionId,
+          transcript_path: transcriptPath,
+        },
+      });
+
+      const first = sync.drainSession(sessionId);
+      const aborted = first.filter((event) => event.type === "run.aborted");
+      expect(aborted).toHaveLength(1);
+      expect(aborted[0]?.payload).toEqual(expect.objectContaining({
+        sessionId,
+        message: "Claude run interrupted by user.",
+      }));
+
+      const second = sync.drainSession(sessionId);
+      expect(second.filter((event) => event.type === "run.aborted")).toHaveLength(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("emits run.aborted when a tool use is interrupted with ESC", () => {
+    const dir = tempDir();
+    try {
+      const transcriptPath = path.join(dir, "session.jsonl");
+      const sessionId = "11111111-1111-1111-1111-111111111111";
+      const timestamp = new Date(Date.now() + 1000).toISOString();
+      fs.writeFileSync(
+        transcriptPath,
+        [
+          JSON.stringify({
+            type: "user",
+            uuid: "interrupt-tool-1",
+            timestamp,
+            message: {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "toolu_1",
+                  is_error: true,
+                  content: "[Request interrupted by user for tool use]",
+                },
+              ],
+            },
+          }),
+          "",
+        ].join("\n"),
+      );
+
+      const sync = new ClaudeTranscriptSync();
+      sync.noteHook({
+        eventType: "UserPromptSubmit",
+        sessionId,
+        body: {
+          session_id: sessionId,
+          transcript_path: transcriptPath,
+        },
+      });
+
+      const events = sync.drainSession(sessionId);
+      expect(events.filter((event) => event.type === "run.aborted")).toHaveLength(1);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not emit run.aborted for ordinary user prompts", () => {
+    const dir = tempDir();
+    try {
+      const transcriptPath = path.join(dir, "session.jsonl");
+      const sessionId = "11111111-1111-1111-1111-111111111111";
+      const timestamp = new Date(Date.now() + 1000).toISOString();
+      fs.writeFileSync(
+        transcriptPath,
+        [
+          JSON.stringify({
+            type: "user",
+            uuid: "prompt-1",
+            timestamp,
+            message: {
+              role: "user",
+              content: "please [Request interrupted by user] — explain what this marker means",
+            },
+          }),
+          "",
+        ].join("\n"),
+      );
+
+      const sync = new ClaudeTranscriptSync();
+      sync.noteHook({
+        eventType: "UserPromptSubmit",
+        sessionId,
+        body: {
+          session_id: sessionId,
+          transcript_path: transcriptPath,
+        },
+      });
+
+      const events = sync.drainSession(sessionId);
+      expect(events.filter((event) => event.type === "run.aborted")).toHaveLength(0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("uses the observed runtime model instead of Claude transcript's provider-normalized model", () => {
     const dir = tempDir();
     try {

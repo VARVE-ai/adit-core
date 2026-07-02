@@ -21,12 +21,6 @@ export const CLAUDE_CLOUD_NATIVE_SLASH_COMMANDS = ["rewind"] as const;
 
 export const CLAUDE_CLOUD_WEB_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude.";
 
-export const CLAUDE_CLOUD_RELAY_ADIT_ENV: Readonly<Record<string, string>> = {
-  ADIT_CLOUD_AUTO_SYNC: "false",
-  ADIT_PROJECT_LINK_AUTO_SYNC: "false",
-  ADIT_TRANSCRIPT_UPLOAD: "false",
-};
-
 export function hasClaudeWorkspacePath(input: unknown): boolean {
   if (!input || typeof input !== "object" || Array.isArray(input)) return false;
   const record = input as Record<string, unknown>;
@@ -95,9 +89,6 @@ export function buildClaudeCloudRelayEnv(baseEnv: NodeJS.ProcessEnv = process.en
     COLORTERM: baseEnv.COLORTERM || "truecolor",
     FORCE_COLOR: baseEnv.FORCE_COLOR || "3",
     DISABLE_AUTOUPDATER: "1",
-    // Cloud Coding persists live conversation state through the relay websocket.
-    // Inherited ADIT hooks should keep their local timeline data until normal sync.
-    ...CLAUDE_CLOUD_RELAY_ADIT_ENV,
   };
 }
 

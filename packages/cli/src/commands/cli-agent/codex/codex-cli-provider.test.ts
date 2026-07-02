@@ -676,7 +676,7 @@ describe("CodexCliProvider takeover", () => {
     provider.stop();
   });
 
-  it("emits an empty slash list when capability hydrate fails without blocking takeover", async () => {
+  it("falls back to the standard slash commands when capability discovery fails without blocking takeover", async () => {
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
     mocks.appRequest.mockImplementation(async (method: string) => {
       if (method === "adit/capabilities/discover") {
@@ -701,7 +701,15 @@ describe("CodexCliProvider takeover", () => {
 
     expect(provider.state.owner).toBe("web");
     const slashEvent = events.find((event) => event.type === "slash-commands");
-    expect(slashEvent?.payload.commands).toEqual([]);
+    expect((slashEvent?.payload.commands as Array<{ name: string }>).map((command) => command.name)).toEqual([
+      "compact",
+      "mcp",
+      "skills",
+      "fork",
+      "model",
+      "new",
+      "clear",
+    ]);
 
     provider.stop();
   });

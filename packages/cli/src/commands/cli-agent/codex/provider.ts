@@ -40,6 +40,7 @@ import {
   type CodexSlashCommandSpec,
 } from "./capabilities.js";
 import { asRecord, delay, isMissingCodexRolloutError, pluralize, readDeltaString, readNumber, readString } from "./helpers.js";
+import { writeCliAgentErrorToTerminal } from "../terminal-error.js";
 import {
   codexInputItems,
   codexThreadModeOverrides,
@@ -705,13 +706,14 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   }
 
   private startLocal(extraArgs: string[] = []): void {
-    const wasWeb = this.ownerValue === "web";
     this.stopLocalResumeLogWatcher();
     this.stopLocalModelConfigWatcher();
     this.detachReclaimInput();
     this.finishWebPrompts(new Error("local mode active"));
     this.resetAppServerCapabilities();
-    if (wasWeb) this.emitSlashCommands();
+    // Deliberately no emitSlashCommands here: broadcasting the now-empty
+    // table would be persisted as the latest slash-commands snapshot and
+    // replayed to future viewers; the next takeover re-hydrates instead.
     this.appServer?.stop();
     this.appServer = null;
     const child = spawnCliProcess(this.opts.bin, [...extraArgs, ...this.opts.args], {
@@ -1373,6 +1375,9 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   }
 
   private pushEvent(type: string, payload: Record<string, unknown>): void {
+    if (type === "error" && this.ownerValue === "web") {
+      writeCliAgentErrorToTerminal("adit cloud codex", payload);
+    }
     this.opts.onEvent?.({ type, payload });
   }
 
@@ -1394,7 +1399,13 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private async hydrateAppServerCapabilities(): Promise<void> {
     await this.ensureAppServer();
     try {
-      const methods = await this.discoverAppServerMethods();
+      let methods = await this.discoverAppServerMethods();
+      if (methods.size === 0) {
+        // Discovery parses the supported-method list out of the app-server's
+        // error message; when that format changes we would otherwise filter
+        // out every command. Assume the standard method set instead.
+        methods = new Set(CODEX_CLOUD_SLASH_COMMAND_SPECS.map((spec) => spec.method));
+      }
       this.supportedAppServerMethods = methods;
 
       const [skills, mcpServers] = await Promise.all([
