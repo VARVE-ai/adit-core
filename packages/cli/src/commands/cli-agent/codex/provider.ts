@@ -40,6 +40,7 @@ import {
   type CodexSlashCommandSpec,
 } from "./capabilities.js";
 import { asRecord, delay, isMissingCodexRolloutError, pluralize, readDeltaString, readNumber, readString } from "./helpers.js";
+import { writeCliAgentErrorToTerminal } from "../terminal-error.js";
 import {
   codexInputItems,
   codexThreadModeOverrides,
@@ -1374,6 +1375,9 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   }
 
   private pushEvent(type: string, payload: Record<string, unknown>): void {
+    if (type === "error" && this.ownerValue === "web") {
+      writeCliAgentErrorToTerminal("adit cloud codex", payload);
+    }
     this.opts.onEvent?.({ type, payload });
   }
 

@@ -2656,7 +2656,7 @@ describe("ClaudeCodeProvider stream anomalies", () => {
 });
 
 describe("buildClaudeCloudRelayEnv", () => {
-  it("disables inherited ADIT cloud side effects for relay-managed Claude hooks", () => {
+  it("passes inherited ADIT cloud env through so relay-managed Claude hooks sync like other sessions", () => {
     const env = buildClaudeCloudRelayEnv({
       TERM: "screen-256color",
       ADIT_CLOUD_AUTO_SYNC: "true",
@@ -2666,9 +2666,10 @@ describe("buildClaudeCloudRelayEnv", () => {
 
     expect(env.TERM).toBe("screen-256color");
     expect(env.DISABLE_AUTOUPDATER).toBe("1");
-    expect(env.ADIT_CLOUD_AUTO_SYNC).toBe("false");
-    expect(env.ADIT_PROJECT_LINK_AUTO_SYNC).toBe("false");
-    expect(env.ADIT_TRANSCRIPT_UPLOAD).toBe("false");
+    expect(env.ADIT_CLOUD_AUTO_SYNC).toBe("true");
+    expect(env.ADIT_PROJECT_LINK_AUTO_SYNC).toBe("true");
+    expect(env.ADIT_TRANSCRIPT_UPLOAD).toBe("true");
+    expect(buildClaudeCloudRelayEnv({}).ADIT_CLOUD_AUTO_SYNC).toBeUndefined();
   });
 
   it("keeps color defaults for Claude child processes", () => {

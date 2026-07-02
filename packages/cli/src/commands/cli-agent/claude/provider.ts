@@ -83,7 +83,8 @@ import {
   readClaudeRewindCheckpoints,
 } from "./transcripts.js";
 import type { ClaudeRewindCheckpoint } from "./transcripts.js";
-export { CLAUDE_CLOUD_RELAY_ADIT_ENV, buildClaudeCloudRelayEnv } from "./capabilities.js";
+import { writeCliAgentErrorToTerminal } from "../terminal-error.js";
+export { buildClaudeCloudRelayEnv } from "./capabilities.js";
 export { normalizeClaudeTodoWriteInput } from "./todos.js";
 export type { ClaudeTodoItem, ClaudeTodoPriority, ClaudeTodoStatus } from "./todos.js";
 export { normalizeClaudeSdkTranscriptEntrypoints } from "./transcripts.js";
@@ -1091,7 +1092,6 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         if (!(error instanceof AbortError)) {
           const messageText = error instanceof Error ? error.message : String(error);
           this.pushEvent("error", { message: messageText });
-          process.stderr.write(`\n[adit cloud claude] SDK error: ${messageText}\n`);
         }
         this.setThinking(false);
         this.setBusy(false);
@@ -1144,7 +1144,6 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         if (!(error instanceof AbortError)) {
           const messageText = error instanceof Error ? error.message : String(error);
           this.pushEvent("error", { message: messageText });
-          process.stderr.write(`\n[adit cloud claude] SDK error: ${messageText}\n`);
         }
       } finally {
         if (
@@ -2110,6 +2109,9 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   }
 
   private pushEvent(type: string, payload: Record<string, unknown>): void {
+    if (type === "error" && this.ownerValue === "web") {
+      writeCliAgentErrorToTerminal("adit cloud claude", payload);
+    }
     this.opts.onEvent?.({ type, payload });
   }
 
