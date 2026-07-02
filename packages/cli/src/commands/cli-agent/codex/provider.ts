@@ -325,6 +325,8 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       this.resumeSessionId = sessionId;
       this.sdkSessionId = sessionId;
       this.applyStoredUsageForSession(sessionId);
+      this.setThinking(false);
+      this.setBusy(false);
       this.emitState();
       this.startLocal(["resume", sessionId]);
       return;
@@ -740,17 +742,15 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       }
     });
     child.on("exit", (code, signal) => {
-      this.setThinking(false);
-      this.setBusy(false);
-      if (this.local === child || this.suppressNextLocalExit) {
-        this.stopLocalResumeLogWatcher();
-        this.stopLocalModelConfigWatcher();
-      }
       if (this.suppressNextLocalExit) {
         this.suppressNextLocalExit = false;
         return;
       }
       if (this.local === child) {
+        this.setThinking(false);
+        this.setBusy(false);
+        this.stopLocalResumeLogWatcher();
+        this.stopLocalModelConfigWatcher();
         this.local = null;
         this.ownerValue = "stopped";
         this.emitState();

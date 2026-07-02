@@ -456,6 +456,8 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       try {
         oldLocal?.kill("SIGTERM");
       } catch {}
+      this.setThinking(false);
+      this.setBusy(false);
       this.startLocal(["--resume", sessionId]);
       return;
     }
@@ -886,13 +888,13 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       }
     });
     child.on("exit", (code, signal) => {
-      this.setThinking(false);
-      this.setBusy(false);
       if (this.suppressNextLocalExit) {
         this.suppressNextLocalExit = false;
         return;
       }
       if (this.local === child) {
+        this.setThinking(false);
+        this.setBusy(false);
         this.local = null;
         this.ownerValue = "stopped";
         this.emitState();
