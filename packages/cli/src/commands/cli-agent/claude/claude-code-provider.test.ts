@@ -2327,6 +2327,334 @@ describe("ClaudeCodeProvider steerPrompt", () => {
   });
 });
 
+describe("ClaudeCodeProvider stream anomalies", () => {
+  function mockRemoteQueryYielding(messages: Array<Record<string, unknown>>): void {
+    mocks.query.mockImplementation((
+      input: {
+        options?: {
+          includePartialMessages?: boolean;
+        };
+      },
+    ) => {
+      if (!input.options?.includePartialMessages) {
+        return createCapabilityQuery();
+      }
+      return {
+        supportedCommands: vi.fn(async () => []),
+        mcpServerStatus: vi.fn(async () => []),
+        getContextUsage: vi.fn(async () => null),
+        close: mocks.remoteClose,
+        interrupt: mocks.remoteInterrupt,
+        async *[Symbol.asyncIterator]() {
+          for (const message of messages) yield message;
+        },
+      };
+    });
+  }
+
+  it("completes server tools whose results arrive inside assistant messages", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    mockRemoteQueryYielding([
+      {
+        type: "assistant",
+        session_id: sessionId,
+        uuid: "assistant-1",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-1",
+          role: "assistant",
+          model: "glm-5.2",
+          content: [
+            { type: "server_tool_use", id: "call_web_reader", name: "webReader", input: {} },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+      {
+        type: "assistant",
+        session_id: sessionId,
+        uuid: "assistant-2",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-2",
+          role: "assistant",
+          model: "glm-5.2",
+          content: [
+            { type: "tool_result", tool_use_id: "call_web_reader", content: "page contents" },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+      {
+        type: "result",
+        session_id: sessionId,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    ]);
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("read the page");
+      await tick();
+      await tick();
+
+      const toolEvents = events.filter((event) =>
+        event.type === "tool" && event.payload.toolUseId === "call_web_reader"
+      );
+      expect(toolEvents.map((event) => event.payload.status)).toEqual(["running", "completed"]);
+      expect(toolEvents[1]?.payload).toEqual(expect.objectContaining({
+        sessionId,
+        messageId: "assistant-message-1",
+        toolName: "webReader",
+        output: "page contents",
+      }));
+      expect(events.filter((event) => event.type === "error")).toHaveLength(0);
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("pairs streamed thinking blocks with their final events by stream order", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    const streamEvent = (event: Record<string, unknown>) => ({
+      type: "stream_event",
+      session_id: sessionId,
+      parent_tool_use_id: null,
+      event,
+    });
+    const finalThinking = (thinking: string) => ({
+      type: "assistant",
+      session_id: sessionId,
+      parent_tool_use_id: null,
+      message: {
+        id: "message-1",
+        role: "assistant",
+        model: "glm-5.2",
+        content: [{ type: "thinking", thinking }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    });
+    mockRemoteQueryYielding([
+      streamEvent({
+        type: "message_start",
+        message: { id: "message-1" },
+      }),
+      streamEvent({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "segment one " },
+      }),
+      finalThinking("segment one full"),
+      streamEvent({
+        type: "content_block_delta",
+        index: 4,
+        delta: { type: "thinking_delta", thinking: "segment two " },
+      }),
+      finalThinking("segment two full"),
+      {
+        type: "assistant",
+        session_id: sessionId,
+        parent_tool_use_id: null,
+        message: {
+          id: "message-1",
+          role: "assistant",
+          model: "glm-5.2",
+          content: [{ type: "text", text: "done" }],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+      {
+        type: "result",
+        session_id: sessionId,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    ]);
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("do the thing");
+      await tick();
+      await tick();
+
+      const reasoning = events.filter((event) => event.type === "reasoning");
+      const deltas = reasoning.filter((event) => event.payload.delta === true);
+      const finals = reasoning.filter((event) => event.payload.delta !== true);
+
+      expect(deltas.map((event) => event.payload.partId)).toEqual([
+        "message-1-reasoning-0",
+        "message-1-reasoning-4",
+      ]);
+      expect(finals.map((event) => ({
+        partId: event.payload.partId,
+        replace: event.payload.replace,
+        text: event.payload.text,
+      }))).toEqual([
+        { partId: "message-1-reasoning-0", replace: true, text: "segment one full" },
+        { partId: "message-1-reasoning-4", replace: true, text: "segment two full" },
+      ]);
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("warns when a successful result follows a bare thinking tail", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    mockRemoteQueryYielding([
+      {
+        type: "assistant",
+        session_id: sessionId,
+        uuid: "assistant-1",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-1",
+          role: "assistant",
+          model: "glm-5.2",
+          content: [
+            { type: "thinking", thinking: "analyzing the brand palette" },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+      {
+        type: "result",
+        session_id: sessionId,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    ]);
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("build the page");
+      await tick();
+      await tick();
+
+      const errors = events.filter((event) => event.type === "error");
+      expect(errors).toHaveLength(1);
+      expect(errors[0]?.payload).toEqual(expect.objectContaining({
+        title: "Claude reply may be truncated",
+        sessionId,
+      }));
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("does not warn when the turn ends with reply text after thinking", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    mockRemoteQueryYielding([
+      {
+        type: "assistant",
+        session_id: sessionId,
+        uuid: "assistant-1",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-1",
+          role: "assistant",
+          model: "glm-5.2",
+          content: [
+            { type: "thinking", thinking: "analyzing" },
+            { type: "text", text: "done" },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+      {
+        type: "result",
+        session_id: sessionId,
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    ]);
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("build the page");
+      await tick();
+      await tick();
+
+      expect(events.filter((event) => event.type === "error")).toHaveLength(0);
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("emits an error when the stream ends without a result", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const sessionId = "11111111-1111-1111-1111-111111111111";
+    mockRemoteQueryYielding([
+      {
+        type: "assistant",
+        session_id: sessionId,
+        uuid: "assistant-1",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-1",
+          role: "assistant",
+          model: "glm-5.2",
+          content: [
+            { type: "text", text: "ok" },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+    ]);
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      await tick();
+      await tick();
+
+      const errors = events.filter((event) => event.type === "error");
+      expect(errors).toHaveLength(1);
+      expect(errors[0]?.payload).toEqual(expect.objectContaining({
+        title: "Claude run ended unexpectedly",
+        sessionId,
+      }));
+    } finally {
+      provider.stop();
+    }
+  });
+});
+
 describe("buildClaudeCloudRelayEnv", () => {
   it("disables inherited ADIT cloud side effects for relay-managed Claude hooks", () => {
     const env = buildClaudeCloudRelayEnv({

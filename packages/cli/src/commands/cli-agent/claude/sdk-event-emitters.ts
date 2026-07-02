@@ -35,6 +35,66 @@ export interface PartialAssistantStreamState {
   messageId: string;
 }
 
+// Pairs streamed thinking blocks with their final full-text counterparts so both
+// emit the same partId. The SDK re-indexes each final message's content array to
+// a single element (index 0), while stream deltas carry the original response
+// block index — without pairing, every thinking block after the first leaves an
+// orphaned streaming part and overwrites the first block's final text.
+export class ClaudeThinkingPartTracker {
+  private streamedKeys = new Set<string>();
+  private pendingByMessage = new Map<string, number[]>();
+  private finalOrdinals = new Map<string, number>();
+
+  clear(): void {
+    this.streamedKeys = new Set<string>();
+    this.pendingByMessage = new Map<string, number[]>();
+    this.finalOrdinals = new Map<string, number>();
+  }
+
+  notePartialThinking(
+    sessionId: string,
+    messageId: string,
+    contentBlockIndex: number,
+  ): string {
+    const key = claudeThinkingPartKey(sessionId, messageId, contentBlockIndex);
+    if (!this.streamedKeys.has(key)) {
+      this.streamedKeys.add(key);
+      const queueKey = `${sessionId}\0${messageId}`;
+      const queue = this.pendingByMessage.get(queueKey) ?? [];
+      queue.push(contentBlockIndex);
+      this.pendingByMessage.set(queueKey, queue);
+    }
+    return claudeReasoningPartId(messageId, contentBlockIndex);
+  }
+
+  takeFinalThinking(
+    sessionId: string,
+    messageId: string,
+  ): { partId: string; contentBlockIndex: number; streamed: boolean } {
+    const queueKey = `${sessionId}\0${messageId}`;
+    const queue = this.pendingByMessage.get(queueKey);
+    if (queue && queue.length > 0) {
+      const index = queue.shift() as number;
+      if (queue.length === 0) this.pendingByMessage.delete(queueKey);
+      this.streamedKeys.delete(claudeThinkingPartKey(sessionId, messageId, index));
+      const nextOrdinal = Math.max(this.finalOrdinals.get(queueKey) ?? 0, index + 1);
+      this.finalOrdinals.set(queueKey, nextOrdinal);
+      return {
+        partId: claudeReasoningPartId(messageId, index),
+        contentBlockIndex: index,
+        streamed: true,
+      };
+    }
+    const ordinal = this.finalOrdinals.get(queueKey) ?? 0;
+    this.finalOrdinals.set(queueKey, ordinal + 1);
+    return {
+      partId: claudeReasoningPartId(messageId, ordinal),
+      contentBlockIndex: ordinal,
+      streamed: false,
+    };
+  }
+}
+
 export interface ClaudeToolUseState {
   messageId: string;
   toolName: string;
@@ -61,7 +121,7 @@ export interface ClaudeSdkEventContext {
   toolUseById: Map<string, ClaudeToolUseState>;
   partialAssistantStreams: Map<string, PartialAssistantStreamState>;
   streamedTextMessageIds: Set<string>;
-  streamedThinkingPartKeys: Set<string>;
+  thinkingParts: ClaudeThinkingPartTracker;
   pushEvent: (type: string, payload: Record<string, unknown>) => void;
 }
 
@@ -198,7 +258,7 @@ export async function emitClaudeAssistantMessage(
   const mode = ctx.activePromptMode() ?? undefined;
   const usage = normalizeClaudeUsage((message.message as { usage?: unknown }).usage);
   ctx.lastAssistantMessageBySession.set(sessionId, messageId);
-  for (const [index, part] of (content as unknown as Array<Record<string, unknown>>).entries()) {
+  for (const part of content as unknown as Array<Record<string, unknown>>) {
     if (part.type === "text" && typeof part.text === "string" && part.text) {
       if (!ctx.streamedTextMessageIds.has(messageId)) {
         const completed = await emitSyntheticAssistantDeltas({
@@ -221,20 +281,19 @@ export async function emitClaudeAssistantMessage(
         createdAt: Date.now(),
       });
     } else if (part.type === "thinking" && typeof part.thinking === "string") {
+      // Consume the pairing slot even for whitespace-only blocks so later
+      // segments keep matching their streamed parts in order.
+      const taken = ctx.thinkingParts.takeFinalThinking(sessionId, messageId);
       if (!part.thinking.trim()) continue;
-      const partId = claudeReasoningPartId(messageId, index);
-      const streamed = ctx.streamedThinkingPartKeys.delete(
-        claudeThinkingPartKey(sessionId, messageId, index),
-      );
       ctx.pushEvent("reasoning", {
         sessionId,
         messageId,
-        partId,
-        contentBlockIndex: index,
+        partId: taken.partId,
+        contentBlockIndex: taken.contentBlockIndex,
         modelId: eventModelId,
         usage,
         text: part.thinking,
-        replace: streamed ? true : undefined,
+        replace: taken.streamed ? true : undefined,
         mode,
         createdAt: Date.now(),
       });
@@ -277,6 +336,11 @@ export async function emitClaudeAssistantMessage(
           createdAt,
         }, ctx);
       }
+    } else if (part.type === "tool_result") {
+      // Anthropic-compatible relays (e.g. Z.ai server tools such as webReader)
+      // return tool results inside assistant messages instead of user messages;
+      // emit the completion so the tool does not stay "running" forever.
+      emitClaudeToolResultPart(part, sessionId, messageId, ctx);
     }
   }
 }
@@ -355,9 +419,10 @@ export function emitClaudePartialAssistantMessage(
   ctx.lastAssistantMessageBySession.set(sessionId, stream.messageId);
   if (deltaType === "thinking_delta") {
     const contentBlockIndex = readNumber(event.index) ?? 0;
-    const partId = claudeReasoningPartId(stream.messageId, contentBlockIndex);
-    ctx.streamedThinkingPartKeys.add(
-      claudeThinkingPartKey(sessionId, stream.messageId, contentBlockIndex),
+    const partId = ctx.thinkingParts.notePartialThinking(
+      sessionId,
+      stream.messageId,
+      contentBlockIndex,
     );
     ctx.pushEvent("reasoning", {
       sessionId,
@@ -541,33 +606,45 @@ export function emitClaudeToolResults(
   if (!Array.isArray(content)) return;
   for (const part of content as unknown as Array<Record<string, unknown>>) {
     if (part.type !== "tool_result") continue;
-    const toolUseId = typeof part.tool_use_id === "string"
-      ? part.tool_use_id
-      : typeof part.toolUseID === "string"
-        ? part.toolUseID
-        : "tool";
-    const toolUse = ctx.toolUseById.get(toolUseKey(sessionId, toolUseId));
-    const toolName = toolUse?.toolName ?? "tool";
-    const input = toolUse?.input ?? {};
-    const mode = toolUse?.mode ?? ctx.activePromptMode() ?? undefined;
-    ctx.pushEvent("tool", {
-      sessionId,
-      messageId: toolUse?.messageId ??
-        ctx.lastAssistantMessageBySession.get(sessionId) ??
-        makeMessageId(message, sessionId),
-      modelId: toolUse?.modelId,
-      usage: toolUse?.usage,
-      toolUseId,
-      toolName,
-      input,
-      tool_scope: claudeToolScope(toolName, toolUse?.mode ?? ctx.activePromptMode(), input),
-      mode,
-      inputKind: "prompt",
-      output: formatToolResult(part.content),
-      status: "completed",
-      createdAt: Date.now(),
-    });
+    emitClaudeToolResultPart(part, sessionId, makeMessageId(message, sessionId), ctx);
   }
+}
+
+function emitClaudeToolResultPart(
+  part: Record<string, unknown>,
+  sessionId: string,
+  fallbackMessageId: string,
+  ctx: Pick<
+    ClaudeSdkEventContext,
+    "activePromptMode" | "lastAssistantMessageBySession" | "pushEvent" | "toolUseById"
+  >,
+): void {
+  const toolUseId = typeof part.tool_use_id === "string"
+    ? part.tool_use_id
+    : typeof part.toolUseID === "string"
+      ? part.toolUseID
+      : "tool";
+  const toolUse = ctx.toolUseById.get(toolUseKey(sessionId, toolUseId));
+  const toolName = toolUse?.toolName ?? "tool";
+  const input = toolUse?.input ?? {};
+  const mode = toolUse?.mode ?? ctx.activePromptMode() ?? undefined;
+  ctx.pushEvent("tool", {
+    sessionId,
+    messageId: toolUse?.messageId ??
+      ctx.lastAssistantMessageBySession.get(sessionId) ??
+      fallbackMessageId,
+    modelId: toolUse?.modelId,
+    usage: toolUse?.usage,
+    toolUseId,
+    toolName,
+    input,
+    tool_scope: claudeToolScope(toolName, toolUse?.mode ?? ctx.activePromptMode(), input),
+    mode,
+    inputKind: "prompt",
+    output: formatToolResult(part.content),
+    status: "completed",
+    createdAt: Date.now(),
+  });
 }
 
 export function toolUseKey(sessionId: string, toolUseId: string): string {

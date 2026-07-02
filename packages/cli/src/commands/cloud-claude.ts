@@ -181,12 +181,14 @@ function enqueueTranscriptEvents(
   transcriptEvents: CliAgentRelayEvent[],
   enqueueEvent: (event: CliAgentRelayEvent) => void,
   sessionId: string | null,
+  opts: { idleOnRunAborted?: boolean } = {},
 ): boolean {
   let shouldMarkIdle = false;
   for (const transcriptEvent of transcriptEvents) {
     const event = eventWithSessionId(transcriptEvent, sessionId);
     enqueueEvent(event);
     if (isTerminalClaudeErrorEvent(event)) shouldMarkIdle = true;
+    if (opts.idleOnRunAborted && event.type === "run.aborted") shouldMarkIdle = true;
   }
   return shouldMarkIdle;
 }
@@ -608,6 +610,7 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
               transcriptSync.drainSession(state.activeSessionId),
               enqueueEvent,
               state.activeSessionId,
+              { idleOnRunAborted: true },
             )
           ) {
             provider.markLocalIdle();

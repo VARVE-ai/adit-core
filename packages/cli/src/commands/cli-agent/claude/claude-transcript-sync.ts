@@ -147,6 +147,27 @@ export class ClaudeTranscriptSync {
     const usage = normalizeClaudeUsage(message?.usage);
     const events: CliAgentRelayEvent[] = [];
 
+    // Pressing ESC in the local CLI does not fire the Stop hook; the interrupt
+    // marker in the transcript is the only signal that the run ended.
+    if (type === "user" && containsUserInterruptMarker(content)) {
+      this.pushIfNew(
+        session,
+        obj,
+        "user-interrupt",
+        0,
+        "user-interrupt",
+        events,
+        {
+          type: "run.aborted",
+          payload: {
+            sessionId: session.id,
+            message: "Claude run interrupted by user.",
+            createdAt: timestamp,
+          },
+        },
+      );
+    }
+
     if (type === "assistant" && typeof content === "string") {
       session.lastAssistantMessageId = messageId;
       this.pushIfNew(
@@ -161,7 +182,7 @@ export class ClaudeTranscriptSync {
       return events;
     }
 
-    if (!Array.isArray(content)) return [];
+    if (!Array.isArray(content)) return events;
 
     const assistantTextParts: string[] = [];
     const assistantTextIndexes: number[] = [];
@@ -388,6 +409,36 @@ function usageEvent(
       createdAt,
     },
   };
+}
+
+const USER_INTERRUPT_PREFIX = "[Request interrupted by user";
+
+function containsUserInterruptMarker(content: unknown): boolean {
+  if (typeof content === "string") return isUserInterruptText(content);
+  if (!Array.isArray(content)) return false;
+  return content.some((part) => {
+    if (!isRecord(part)) return false;
+    if (part.type === "text") {
+      return typeof part.text === "string" && isUserInterruptText(part.text);
+    }
+    if (part.type === "tool_result") {
+      const inner = part.content;
+      if (typeof inner === "string") return isUserInterruptText(inner);
+      if (Array.isArray(inner)) {
+        return inner.some((item) =>
+          isRecord(item) &&
+          item.type === "text" &&
+          typeof item.text === "string" &&
+          isUserInterruptText(item.text)
+        );
+      }
+    }
+    return false;
+  });
+}
+
+function isUserInterruptText(text: string): boolean {
+  return text.trimStart().startsWith(USER_INTERRUPT_PREFIX);
 }
 
 function readString(value: unknown): string | null {

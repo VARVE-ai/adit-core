@@ -61,6 +61,7 @@ import {
   stableStateEventKey,
 } from "./sdk-messages.js";
 import {
+  ClaudeThinkingPartTracker,
   emitClaudeApiRetry,
   emitClaudeAssistantMessage,
   emitClaudeCompactBoundary,
@@ -219,9 +220,10 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private boundPendingSessionIds = new Set<string>();
   private lastAssistantMessageBySession = new Map<string, string>();
   private toolUseById = new Map<string, ClaudeToolUseState>();
+  private lastAssistantTailKind: "thinking" | "other" | null = null;
   private partialAssistantStreams = new Map<string, PartialAssistantStreamState>();
   private streamedTextMessageIds = new Set<string>();
-  private streamedThinkingPartKeys = new Set<string>();
+  private thinkingPartTracker = new ClaudeThinkingPartTracker();
   private slashCommandsByName = new Map<string, CliSlashCommandInfo>();
   private mcpServers: Array<{ name: string; status: string }> = [];
   private skills: string[] = [];
@@ -980,9 +982,10 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       this.activePromptEvent = first.promptEvent;
       this.activePromptMode = first.mode;
       this.toolUseById.clear();
+      this.lastAssistantTailKind = null;
       this.partialAssistantStreams.clear();
       this.streamedTextMessageIds.clear();
-      this.streamedThinkingPartKeys.clear();
+      this.thinkingPartTracker.clear();
       const permissionMode: PermissionMode = first.mode === "plan" ? "plan" : "bypassPermissions";
       const disallowedTools = first.mode === "build" ? [ASK_USER_QUESTION_TOOL] : undefined;
       const explicitSessionId = !resumeId && canonicalSessionId && isUuid(canonicalSessionId)
@@ -1070,6 +1073,8 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       }
 
       let observedSdkSessionId: string | null = null;
+      let sawResult = false;
+      let sawStreamError = false;
       try {
         for await (const message of this.remoteQuery) {
           if (this.remoteLoopGeneration !== generation) break;
@@ -1078,6 +1083,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
           });
           this.scheduleContextUsageRefresh(message.type === "result");
           if (message.type === "result") {
+            sawResult = true;
             const activeInput = this.activePromptInput?.stream === promptInput
               ? this.activePromptInput
               : null;
@@ -1103,6 +1109,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
           }
         }
       } catch (error) {
+        sawStreamError = true;
         if (this.startingPrompt === first) {
           this.rejectStartingPrompt(first, error instanceof Error ? error : new Error(String(error)));
         }
@@ -1112,6 +1119,22 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
           process.stderr.write(`\n[adit cloud claude] SDK error: ${messageText}\n`);
         }
       } finally {
+        if (
+          !sawResult &&
+          !sawStreamError &&
+          this.ownerValue === "web" &&
+          this.remoteLoopGeneration === generation &&
+          !abortController.signal.aborted
+        ) {
+          this.pushEvent("error", {
+            title: "Claude run ended unexpectedly",
+            message: "The Claude Code process ended before reporting a result. The run was likely cut off — send a new prompt to continue.",
+            sessionId: this.currentRunSessionId() ?? canonicalSessionId ?? resumeId ?? undefined,
+            ...(this.activeModelId ? { modelId: this.activeModelId } : {}),
+            mode: this.activePromptMode ?? first.mode,
+            createdAt: Date.now(),
+          });
+        }
         const normalizeRelatedTranscripts = () => {
           const sessionIds = new Set(
             [
@@ -1219,9 +1242,10 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.activePromptInput?.stream.close();
     this.activePromptInput = null;
     this.toolUseById.clear();
+    this.lastAssistantTailKind = null;
     this.partialAssistantStreams.clear();
     this.streamedTextMessageIds.clear();
-    this.streamedThinkingPartKeys.clear();
+    this.thinkingPartTracker.clear();
     if (this.startingPrompt) {
       this.startingPrompt.reject(error);
       this.startingPrompt = null;
@@ -1403,7 +1427,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       toolUseById: this.toolUseById,
       partialAssistantStreams: this.partialAssistantStreams,
       streamedTextMessageIds: this.streamedTextMessageIds,
-      streamedThinkingPartKeys: this.streamedThinkingPartKeys,
+      thinkingParts: this.thinkingPartTracker,
       pushEvent: (type, payload) => this.pushEvent(type, payload),
     };
   }
@@ -1460,6 +1484,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     }
 
     if (message.type === "assistant") {
+      this.noteAssistantTailKind(message as SDKAssistantMessage);
       await this.emitAssistantMessage(message as SDKAssistantMessage, sessionId);
       return sdkSessionId;
     }
@@ -1477,8 +1502,51 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     if (message.type === "result") {
       this.emitResultUsage(message, sessionId);
       this.emitResultError(message, sessionId);
+      this.emitTruncatedTurnWarning(message, sessionId);
+      this.lastAssistantTailKind = null;
     }
     return sdkSessionId;
+  }
+
+  // A turn must end with text or a tool call; ending on a bare thinking block
+  // means the model stream was cut off upstream even though the SDK reports a
+  // successful result (observed with unstable Anthropic-compatible relays).
+  private noteAssistantTailKind(message: SDKAssistantMessage): void {
+    if (readString((message as { parent_tool_use_id?: unknown }).parent_tool_use_id)) return;
+    const content = message.message?.content;
+    if (!Array.isArray(content)) return;
+    for (const part of content as unknown as Array<Record<string, unknown>>) {
+      if (part.type === "thinking") {
+        if (typeof part.thinking === "string" && part.thinking.trim()) {
+          this.lastAssistantTailKind = "thinking";
+        }
+      } else if (part.type === "text") {
+        if (typeof part.text === "string" && part.text.trim()) {
+          this.lastAssistantTailKind = "other";
+        }
+      } else if (
+        part.type === "tool_use" ||
+        part.type === "server_tool_use" ||
+        part.type === "tool_result"
+      ) {
+        this.lastAssistantTailKind = "other";
+      }
+    }
+  }
+
+  private emitTruncatedTurnWarning(message: SDKMessage, sessionId: string): void {
+    if (this.lastAssistantTailKind !== "thinking") return;
+    const result = message as { subtype?: unknown; is_error?: unknown };
+    const subtype = readString(result.subtype);
+    if (result.is_error === true || Boolean(subtype?.startsWith("error_"))) return;
+    this.pushEvent("error", {
+      title: "Claude reply may be truncated",
+      message: "The turn ended right after a thinking block, without any reply or tool call — the model stream was likely cut off. Send a follow-up prompt to continue.",
+      sessionId,
+      ...(this.activeModelId ? { modelId: this.activeModelId } : {}),
+      mode: this.activePromptMode ?? undefined,
+      createdAt: Date.now(),
+    });
   }
   private emitCompactStatus(message: SDKMessage, sessionId: string): void {
     emitClaudeCompactStatus(message, sessionId, this.sdkEventContext());
