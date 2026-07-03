@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { loadConfig, type AditConfig } from "@varveai/adit-core";
 
 export interface AditProjectInitializationPaths {
   dataDir: string;
@@ -64,4 +65,16 @@ export function requireAditProjectInitialized(
   if (isAditProjectInitialized(projectRoot)) return true;
   console.error(formatAditProjectNotInitializedMessage(command));
   return false;
+}
+
+export function loadInitializedProjectConfig(
+  command: string,
+  cwd?: string,
+): AditConfig | null {
+  const config = loadConfig(cwd);
+  if (existsSync(config.dbPath)) return config;
+
+  console.error(formatAditProjectNotInitializedMessage(command));
+  process.exitCode = 1;
+  return null;
 }

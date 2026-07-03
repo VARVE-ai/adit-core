@@ -11,17 +11,20 @@ import {
   withPerf,
   insertDiff,
   generateId,
+  type LocalRepository,
 } from "@varveai/adit-core";
 import {
-  getChangedFiles,
   createTimelineManager,
   captureEnvironment,
   diffEnvironments,
+  getCurrentBranch,
+  getHeadSha,
+  type FileChange,
 } from "@varveai/adit-engine";
 import { initHookContext, type HookContext } from "../common/context.js";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 const DEBUG_LOG_PATH = join(tmpdir(), "adit-hook-debug.jsonl");
 import type { NormalizedHookInput } from "../adapters/types.js";
@@ -128,9 +131,8 @@ async function handlePromptSubmitUnified(ctx: HookContext, input: NormalizedHook
 
   const timeline = createTimelineManager(ctx.db, ctx.config);
 
-  // Only record the prompt text. Manual-edit detection (getChangedFiles) is
-  // deferred to handleStopUnified so this blocking UserPromptSubmit hook
-  // stays fast and doesn't run `git status` on every keystroke-enter.
+  // Only record the prompt text. Per-turn file mutation extraction is deferred
+  // to handleStopUnified so this blocking UserPromptSubmit hook stays fast.
   await timeline.recordEvent({
     sessionId: ctx.session.id,
     eventType: "prompt_submit",
@@ -142,12 +144,6 @@ async function handlePromptSubmitUnified(ctx: HookContext, input: NormalizedHook
 /** Handle stop (assistant response complete) */
 async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
   const timeline = createTimelineManager(ctx.db, ctx.config);
-
-  // Use getChangedFiles directly so the result can be reused by captureEnvironment,
-  // avoiding a duplicate `git status` call.
-  const changedFiles = await withPerf(ctx.config.dataDir, "git", "getChangedFiles", () =>
-    getChangedFiles(input.cwd),
-  );
 
   const recentPrompts = await timeline.list({
     sessionId: ctx.session.id,
@@ -221,6 +217,9 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     }
   }
 
+  const changedFiles = changesFromMutations(mutations);
+  const workspaceGitState = await resolveWorkspaceGitState(ctx, input.cwd, changedFiles);
+
   const event = await timeline.recordEvent({
     sessionId: ctx.session.id,
     eventType: "assistant_response",
@@ -228,6 +227,10 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     promptText: lastPrompt,
     responseText,
     diffStatJson: mutationStatJson,
+    ...(workspaceGitState ? {
+      gitBranch: workspaceGitState.gitBranch,
+      gitHeadSha: workspaceGitState.gitHeadSha,
+    } : {}),
   });
 
   // Persist bounded diff_text from mutations (replaces old git checkpoint path)
@@ -255,11 +258,18 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     try {
       // Get previous snapshot before capturing new one
       const prevSnapshot = getLatestEnvSnapshot(ctx.db, ctx.session.id);
-      // Pass pre-computed changed files to avoid duplicate git status call
+      // Pass per-turn mutation paths when available. Workspace stop hooks must
+      // not scan the whole dirty working tree and accidentally attribute stale
+      // edits to this turn.
       await withPerf(ctx.config.dataDir, "snapshot", "captureEnvironment", () =>
-        captureEnvironment(ctx.db, ctx.config, ctx.session.id, {
-          changedFiles,
-        }),
+        captureEnvironment(
+          ctx.db,
+          ctx.config,
+          ctx.session.id,
+          ctx.config.projectType === "workspace"
+            ? { changedFiles }
+            : undefined,
+        ),
       );
 
       // Detect env drift if we have a previous snapshot
@@ -283,6 +293,109 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     }
   }
 
+}
+
+interface WorkspaceGitState {
+  gitBranch: string | null;
+  gitHeadSha: string | null;
+}
+
+function changesFromMutations(mutations: AgentFileMutation[]): FileChange[] {
+  const changes: FileChange[] = [];
+  const seen = new Set<string>();
+
+  for (const mutation of mutations) {
+    if (mutation.status !== "completed") continue;
+    const path = mutation.path.trim();
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    changes.push({
+      path,
+      status: mutationKindToFileStatus(mutation.kind),
+    });
+  }
+
+  return changes;
+}
+
+function mutationKindToFileStatus(kind: AgentFileMutation["kind"]): FileChange["status"] {
+  if (kind === "add") return "A";
+  if (kind === "delete") return "D";
+  if (kind === "rename") return "R";
+  return "M";
+}
+
+async function resolveWorkspaceGitState(
+  ctx: HookContext,
+  cwd: string,
+  changedFiles: FileChange[],
+): Promise<WorkspaceGitState | null> {
+  if (ctx.config.projectType !== "workspace") return null;
+  if (changedFiles.length === 0) return { gitBranch: null, gitHeadSha: null };
+
+  const repositories = matchedWorkspaceRepositories(ctx, cwd, changedFiles);
+  if (repositories.length === 0) return { gitBranch: null, gitHeadSha: null };
+
+  const states = await Promise.all(
+    repositories.map(async (repo) => ({
+      branch: await safeGetCurrentBranch(repo.path),
+      headSha: await safeGetHeadSha(repo.path),
+    })),
+  );
+
+  return {
+    gitBranch: joinNullable(states.map((state) => state.branch)),
+    gitHeadSha: joinNullable(states.map((state) => state.headSha)),
+  };
+}
+
+function matchedWorkspaceRepositories(
+  ctx: HookContext,
+  cwd: string,
+  changedFiles: FileChange[],
+): LocalRepository[] {
+  const matched = new Map<string, LocalRepository>();
+
+  for (const change of changedFiles) {
+    const absPath = absoluteMutationPath(cwd, change.path);
+    const repo = ctx.config.repositories.find((candidate) =>
+      isPathInsideOrEqual(absPath, resolve(candidate.path)),
+    );
+    if (repo) matched.set(repo.path, repo);
+  }
+
+  return Array.from(matched.values());
+}
+
+function absoluteMutationPath(cwd: string, path: string): string {
+  const normalized = path.replace(/\\/gu, "/");
+  return resolve(isAbsolute(normalized) ? normalized : join(cwd, normalized));
+}
+
+function isPathInsideOrEqual(path: string, parent: string): boolean {
+  const rel = relative(parent, path);
+  return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function joinNullable(values: Array<string | null>): string | null {
+  const filtered = values.filter((value): value is string => !!value);
+  return filtered.length > 0 ? filtered.join(",") : null;
+}
+
+async function safeGetCurrentBranch(cwd: string): Promise<string | null> {
+  try {
+    return await getCurrentBranch(cwd);
+  } catch {
+    return null;
+  }
+}
+
+async function safeGetHeadSha(cwd: string): Promise<string | null> {
+  try {
+    return await getHeadSha(cwd);
+  } catch {
+    return null;
+  }
 }
 
 function extractLastAssistantTextFromTranscript(transcriptPath: string): string | undefined {

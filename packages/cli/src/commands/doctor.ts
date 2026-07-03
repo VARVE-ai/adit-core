@@ -12,7 +12,6 @@
 import { existsSync, statSync } from "node:fs";
 import { execSync } from "node:child_process";
 import {
-  loadConfig,
   openDatabase,
   closeDatabase,
   queryEvents,
@@ -26,6 +25,7 @@ import {
   listAdapters,
   resolveAditHookBinary,
 } from "@varveai/adit-hooks/adapters";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 interface Check {
   name: string;
@@ -38,7 +38,8 @@ export async function doctorCommand(
   opts?: { fix?: boolean; json?: boolean },
 ): Promise<void> {
   const checks: Check[] = [];
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit doctor");
+  if (!config) return;
 
   // 1. Git repo
   const gitOk = await isGitRepo(config.projectRoot);

@@ -5,7 +5,6 @@
  */
 
 import {
-  loadConfig,
   openDatabase,
   closeDatabase,
   getEnvSnapshotById,
@@ -14,13 +13,15 @@ import {
   listEnvSnapshots,
   type EnvSnapshot,
 } from "@varveai/adit-core";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 import { createTimelineManager, diffEnvironments } from "@varveai/adit-engine";
 
 export async function diffCommand(
   eventId: string,
   opts: { maxLines?: number; offsetLines?: number; file?: string },
 ): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit snapshot diff");
+  if (!config) return;
   const db = openDatabase(config.dbPath);
   const timeline = createTimelineManager(db, config);
 
@@ -70,7 +71,8 @@ export async function promptCommand(
   eventId: string,
   opts?: { maxChars?: number; offset?: number },
 ): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit prompt");
+  if (!config) return;
   const db = openDatabase(config.dbPath);
   const timeline = createTimelineManager(db, config);
 
@@ -103,7 +105,8 @@ export async function promptCommand(
 
 /** Show environment snapshot for a specific event (legacy command) */
 export async function envCommand(eventId: string): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit snapshot env");
+  if (!config) return;
   const db = openDatabase(config.dbPath);
   const timeline = createTimelineManager(db, config);
 
@@ -132,7 +135,8 @@ export async function envCommand(eventId: string): Promise<void> {
 
 /** `adit env latest` — show the most recent env snapshot for the active session */
 export async function envLatestCommand(opts?: { json?: boolean }): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit env latest");
+  if (!config) return;
   const db = openDatabase(config.dbPath);
 
   try {
@@ -164,7 +168,8 @@ export async function envDiffCommand(
   id2: string,
   opts?: { json?: boolean },
 ): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit env diff");
+  if (!config) return;
   const db = openDatabase(config.dbPath);
 
   try {
@@ -208,7 +213,8 @@ export async function envDiffCommand(
 export async function envHistoryCommand(
   opts?: { limit?: number; json?: boolean },
 ): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit env history");
+  if (!config) return;
   const db = openDatabase(config.dbPath);
 
   try {

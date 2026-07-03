@@ -5,7 +5,11 @@
  * command handlers from @varveai/adit-cloud/project-link.
  */
 
-import { loadConfig, openDatabase, closeDatabase } from "@varveai/adit-core";
+import {
+  openDatabase,
+  closeDatabase,
+  discoverWorkspaceRepositories,
+} from "@varveai/adit-core";
 import {
   loadCloudConfig,
   loadCredentials,
@@ -14,6 +18,7 @@ import {
   CloudAuthError,
   CloudNetworkError,
   CloudApiError,
+  WorkspaceLinkPartialFailureError,
   linkCommand,
   intentCommand,
   formatIntentList,
@@ -22,16 +27,23 @@ import {
 } from "@varveai/adit-cloud";
 import type { LinkOptions, IntentOptions } from "@varveai/adit-cloud";
 import { isGitRepo } from "@varveai/adit-engine";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 /**
  * `adit cloud link` — Link this project to adit-cloud.
  */
 export async function projectLinkCliHandler(opts: LinkOptions): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit cloud link");
+  if (!config) return;
 
-  // Prerequisite: git repo
-  if (!(await isGitRepo(config.projectRoot))) {
+  // Prerequisite: git repo or initialized workspace with child repos
+  if (config.projectType !== "workspace" && !(await isGitRepo(config.projectRoot))) {
     console.error("Not a git repository. Run this from within a git project.");
+    process.exitCode = 1;
+    return;
+  }
+  if (config.projectType === "workspace" && discoverWorkspaceRepositories(config.projectRoot).length === 0) {
+    console.error("No Git repositories found one level below this workspace.");
     process.exitCode = 1;
     return;
   }
@@ -98,7 +110,12 @@ export async function projectLinkCliHandler(opts: LinkOptions): Promise<void> {
       console.log(JSON.stringify(result, null, 2));
     }
   } catch (error) {
-    if (error instanceof CloudApiError) {
+    if (error instanceof WorkspaceLinkPartialFailureError) {
+      if (opts.json) {
+        console.log(JSON.stringify(error.result, null, 2));
+      }
+      process.exitCode = 1;
+    } else if (error instanceof CloudApiError) {
       console.error(`\nServer error: ${error.status} — ${error.message}`);
       if (error.body) {
         const bodyStr =
@@ -129,7 +146,8 @@ export async function projectLinkCliHandler(opts: LinkOptions): Promise<void> {
 export async function projectIntentCliHandler(
   opts: IntentOptions,
 ): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit cloud intent");
+  if (!config) return;
 
   // Prerequisite: credentials
   const credentials = loadCredentials();

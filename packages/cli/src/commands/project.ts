@@ -7,9 +7,9 @@
 
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig } from "@varveai/adit-core";
 import { deleteCheckpointRef, listCheckpointRefs } from "@varveai/adit-engine";
 import { uninstallInstalledPlatformHooks } from "./plugin.js";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 export interface ProjectUninstallResult {
   ok: boolean;
@@ -33,7 +33,8 @@ export async function projectUninstallCommand(opts?: {
   yes?: boolean;
   json?: boolean;
 }): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit project uninstall");
+  if (!config) return;
 
   if (!opts?.yes) {
     if (opts?.json) {

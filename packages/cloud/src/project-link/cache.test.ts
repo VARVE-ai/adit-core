@@ -26,6 +26,7 @@ function tempDbPath(): string {
 function makeCache(overrides: Partial<ProjectLinkCache> = {}): ProjectLinkCache {
   return {
     projectId: "proj-abc123",
+    repositoryId: "proj-abc123",
     serverUrl: "https://cloud.example.com",
     confirmedProjectId: null,
     lastCommitSha: null,
@@ -69,6 +70,7 @@ describe("Project Link Cache", () => {
 
     expect(result).not.toBeNull();
     expect(result!.projectId).toBe("proj-abc123");
+    expect(result!.repositoryId).toBe("proj-abc123");
     expect(result!.confirmedProjectId).toBe("confirmed-123");
     expect(result!.docHashes).toEqual({ "README.md": "abc123" });
     expect(result!.qualified).toBe(false);
@@ -147,5 +149,19 @@ describe("Project Link Cache", () => {
     const r2 = getProjectLinkCache(db, cache1.projectId, "https://server2.com");
     expect(r1!.confirmedProjectId).toBeNull();
     expect(r2!.confirmedProjectId).toBe("other");
+  });
+
+  it("keeps repositories isolated for the same project and server", () => {
+    const repoA = makeCache({ repositoryId: "repo-a", lastCommitSha: "sha-a" });
+    const repoB = makeCache({ repositoryId: "repo-b", lastCommitSha: "sha-b" });
+
+    upsertProjectLinkCache(db, repoA);
+    upsertProjectLinkCache(db, repoB);
+
+    const a = getProjectLinkCache(db, repoA.projectId, repoA.serverUrl, repoA.repositoryId);
+    const b = getProjectLinkCache(db, repoB.projectId, repoB.serverUrl, repoB.repositoryId);
+
+    expect(a!.lastCommitSha).toBe("sha-a");
+    expect(b!.lastCommitSha).toBe("sha-b");
   });
 });

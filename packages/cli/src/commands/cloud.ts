@@ -13,9 +13,8 @@ import {
   loadConfig,
   openDatabase,
   closeDatabase,
-  projectNameFromRoot,
 } from "@varveai/adit-core";
-import { getRemoteUrl } from "@varveai/adit-engine";
+import { existsSync } from "node:fs";
 import {
   loadCloudConfig,
   loadCredentials,
@@ -33,12 +32,14 @@ import {
   clearSyncErrors,
   isSyncDisabled,
   DEFAULT_SERVER_URL,
-  normalizeGitHubRepoKey,
+  resolveCloudProjectContext,
+  repositoryPayloads,
 } from "@varveai/adit-cloud";
 import type { DeviceAuthOptions } from "@varveai/adit-cloud";
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import { CLI_VERSION } from "../version.js";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 /**
  * `adit cloud login` — Interactive device authorization flow.
@@ -156,6 +157,7 @@ export async function cloudLogoutCommand(): Promise<void> {
   // Clear local sync state
   const config = loadConfig();
   try {
+    if (!existsSync(config.dbPath)) return;
     const db = openDatabase(config.dbPath);
     try {
       const { clearSyncState } = await import("@varveai/adit-core");
@@ -198,7 +200,8 @@ export async function cloudSyncCommand(opts?: {
   }
 
   const serverUrl = cloudConfig.serverUrl ?? credentials.serverUrl;
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit cloud sync");
+  if (!config) return;
 
   if (!opts?.json) {
     console.log(`Syncing with ${serverUrl}...`);
@@ -207,13 +210,14 @@ export async function cloudSyncCommand(opts?: {
   const db = openDatabase(config.dbPath);
   try {
     const client = new CloudClient(serverUrl, credentials);
-    const projectName = projectNameFromRoot(config.projectRoot);
-    const remoteUrl = await getProjectRemoteUrl(config.projectRoot);
+    const projectContext = await resolveCloudProjectContext(config);
     const engine = new SyncEngine(db, client, {
-      projectId: config.projectId,
-      projectName,
-      remoteUrl,
-      canonicalRepoKey: normalizeGitHubRepoKey(remoteUrl),
+      projectId: projectContext.localProjectId,
+      projectName: projectContext.projectName,
+      projectType: projectContext.projectType,
+      repositories: repositoryPayloads(projectContext.repositories),
+      remoteUrl: projectContext.remoteUrl,
+      canonicalRepoKey: projectContext.canonicalRepoKey,
       batchSize: cloudConfig.batchSize,
       serverUrl,
       cloudClientId: credentials.clientId,
@@ -251,14 +255,6 @@ export async function cloudSyncCommand(opts?: {
   }
 }
 
-async function getProjectRemoteUrl(projectRoot: string): Promise<string | null> {
-  try {
-    return await getRemoteUrl(projectRoot);
-  } catch {
-    return null;
-  }
-}
-
 /**
  * `adit cloud status` — Show sync state and unsynced record count.
  */
@@ -267,7 +263,8 @@ export async function cloudStatusCommand(opts?: {
 }): Promise<void> {
   const cloudConfig = loadCloudConfig();
   const credentials = loadCredentials();
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit cloud status");
+  if (!config) return;
 
   const status: Record<string, unknown> = {
     serverUrl: cloudConfig.serverUrl,
@@ -602,6 +599,7 @@ export async function cloudResetCredentialsCommand(opts?: {
   // Clear local sync state
   const config = loadConfig();
   try {
+    if (!existsSync(config.dbPath)) return;
     const db = openDatabase(config.dbPath);
     try {
       const { clearSyncState } = await import("@varveai/adit-core");

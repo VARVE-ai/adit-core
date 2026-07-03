@@ -20,8 +20,7 @@
  */
 
 import type Database from "better-sqlite3";
-import { getSyncState, loadConfig, projectNameFromRoot } from "@varveai/adit-core";
-import { getRemoteUrl } from "@varveai/adit-engine";
+import { getSyncState, loadConfig } from "@varveai/adit-core";
 import { loadCloudConfig, DEFAULT_SERVER_URL } from "../config.js";
 import {
   loadCredentials,
@@ -35,9 +34,9 @@ import {
 } from "../auth/credentials.js";
 import { CloudClient } from "../http/client.js";
 import { CloudNetworkError, CloudAuthError } from "../http/errors.js";
-import { normalizeGitHubRepoKey } from "../project-link/repo-key.js";
 import { SyncEngine } from "./engine.js";
 import { countUnsyncedRecords } from "./serializer.js";
+import { repositoryPayloads, resolveCloudProjectContext } from "../project-context.js";
 
 /**
  * Trigger a background sync if credentials exist and the unsynced record
@@ -134,13 +133,16 @@ export async function triggerAutoSync(
 
   try {
     const projectRoot = options?.projectRoot ?? loadConfig().projectRoot;
-    const remoteUrl = await safeGetRemoteUrl(projectRoot);
+    const projectConfig = loadConfig(projectRoot);
+    const projectContext = await resolveCloudProjectContext(projectConfig);
     const client = new CloudClient(serverUrl, credentials);
     const engine = new SyncEngine(db, client, {
-      projectId,
-      projectName: projectNameFromRoot(projectRoot),
-      remoteUrl,
-      canonicalRepoKey: normalizeGitHubRepoKey(remoteUrl),
+      projectId: projectContext.localProjectId,
+      projectName: projectContext.projectName,
+      projectType: projectContext.projectType,
+      repositories: repositoryPayloads(projectContext.repositories),
+      remoteUrl: projectContext.remoteUrl,
+      canonicalRepoKey: projectContext.canonicalRepoKey,
       batchSize: cloudConfig.batchSize,
       serverUrl,
       cloudClientId: credentials.clientId,
@@ -176,13 +178,5 @@ export async function triggerAutoSync(
         );
       }
     }
-  }
-}
-
-async function safeGetRemoteUrl(projectRoot: string): Promise<string | null> {
-  try {
-    return await getRemoteUrl(projectRoot);
-  } catch {
-    return null;
   }
 }

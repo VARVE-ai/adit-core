@@ -50,6 +50,8 @@ export interface DiscoveredDocument {
 export interface ProjectLinkCache {
   /** Local project ID from the client config; used as the cache key. */
   projectId: string;
+  /** Local repository ID within the project; equals projectId for normal repo projects. */
+  repositoryId: string;
   serverUrl: string;
   /** Effective cloud project ID returned by the server, for display/debug only. */
   confirmedProjectId: string | null;
@@ -275,6 +277,10 @@ export interface LinkResult {
   projectId: string;
   /** Client-local project ID computed from the local repo. */
   localProjectId: string;
+  /** Client-local repository ID within the project. */
+  localRepositoryId: string;
+  /** Repository path relative to the project root. */
+  relativePath: string;
   /** Cloud project ID returned by the server. */
   serverProjectId: string;
   projectName: string;
@@ -285,10 +291,56 @@ export interface LinkResult {
   documentCount: number;
   qualified: boolean;
   score: number | null;
+  lowScoreDocumentCount?: number;
+  stubDocumentCount?: number;
+  lowestScoringDocuments?: Array<{
+    fileName: string;
+    score: number;
+    detectedType: string;
+  }>;
+  missingItems?: string[];
+  suggestions?: string[];
+  qualityFeedback?: string | null;
+  summaryPrompt?: string | null;
   /** Per-step timing breakdown */
   stepTimings: StepTiming[];
   /** Total wall-clock duration in milliseconds */
   totalDurationMs: number;
+  /** Per-repository successful results for workspace projects. */
+  repositoryResults?: WorkspaceRepositoryResult[];
+  /** Per-repository failures for workspace projects. */
+  repositoryFailures?: WorkspaceRepositoryFailure[];
+}
+
+export interface WorkspaceRepositoryResult {
+  localRepositoryId: string;
+  relativePath: string;
+  branchCount: number;
+  commitCount: number;
+  documentCount: number;
+  qualified: boolean;
+  score: number | null;
+  lowScoreDocumentCount?: number;
+  stubDocumentCount?: number;
+  lowestScoringDocuments?: Array<{
+    fileName: string;
+    score: number;
+    detectedType: string;
+  }>;
+  missingItems?: string[];
+  suggestions?: string[];
+  qualityFeedback?: string | null;
+  summaryPrompt?: string | null;
+  totalDurationMs: number;
+}
+
+export interface WorkspaceRepositoryFailure {
+  localRepositoryId: string;
+  relativePath: string;
+  step?: string;
+  message: string;
+  status?: number;
+  response?: unknown;
 }
 
 export interface IntentResult {

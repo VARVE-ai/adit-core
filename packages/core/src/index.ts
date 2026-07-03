@@ -105,6 +105,24 @@ export {
   type AditConfig,
 } from "./config/index.js";
 
+export {
+  workspaceManifestRelativePath,
+  computeRepoProjectId,
+  computeLocalRepositoryId,
+  workspaceManifestPath,
+  hasWorkspaceManifest,
+  readWorkspaceManifest,
+  ensureWorkspaceManifest,
+  findWorkspaceRoot,
+  discoverWorkspaceRepositories,
+  createRepoRepository,
+  toRepositoryPayload,
+  type ProjectType,
+  type WorkspaceManifest,
+  type LocalRepository,
+  type LocalProjectDescriptor,
+} from "./config/project.js";
+
 // Security — content-aware secret redaction
 export {
   shannonEntropy,

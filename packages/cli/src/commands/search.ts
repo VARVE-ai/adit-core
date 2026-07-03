@@ -3,12 +3,12 @@
  */
 
 import {
-  loadConfig,
   openDatabase,
   closeDatabase,
   type AditEvent,
   type EventType,
 } from "@varveai/adit-core";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 import { getEventSummary } from "../utils/summary.js";
 import { createTimelineManager } from "@varveai/adit-engine";
 
@@ -27,7 +27,8 @@ export async function searchCommand(
     json?: boolean;
   },
 ): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit search");
+  if (!config) return;
   const db = openDatabase(config.dbPath);
   const timeline = createTimelineManager(db, config);
 

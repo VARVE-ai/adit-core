@@ -240,4 +240,39 @@ export const migrations: Migration[] = [
       );
     `,
   },
+  {
+    id: 12,
+    name: "add_project_link_cache_repository_id",
+    sql: `
+      ALTER TABLE project_link_cache RENAME TO project_link_cache_old;
+
+      CREATE TABLE project_link_cache (
+        project_id TEXT NOT NULL,
+        repository_id TEXT NOT NULL,
+        server_url TEXT NOT NULL,
+        confirmed_project_id TEXT,
+        last_commit_sha TEXT,
+        last_branch_sync_at TEXT,
+        last_doc_sync_at TEXT,
+        doc_hashes_json TEXT DEFAULT '{}',
+        qualified INTEGER DEFAULT 0,
+        initialized_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, repository_id, server_url)
+      );
+
+      INSERT INTO project_link_cache (
+        project_id, repository_id, server_url, confirmed_project_id,
+        last_commit_sha, last_branch_sync_at, last_doc_sync_at,
+        doc_hashes_json, qualified, initialized_at, updated_at
+      )
+      SELECT
+        project_id, project_id, server_url, confirmed_project_id,
+        last_commit_sha, last_branch_sync_at, last_doc_sync_at,
+        doc_hashes_json, qualified, initialized_at, updated_at
+      FROM project_link_cache_old;
+
+      DROP TABLE project_link_cache_old;
+    `,
+  },
 ];

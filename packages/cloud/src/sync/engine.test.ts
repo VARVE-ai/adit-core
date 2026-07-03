@@ -257,8 +257,66 @@ describe("SyncEngine", () => {
     expect(mockClient.post).toHaveBeenCalledWith(
       "/api/sync/push",
       expect.objectContaining({
+        projectType: "repo",
         remoteUrl: "git@github.com:VARVE-ai/adit-cloud.git",
         canonicalRepoKey: "github:varve-ai/adit-cloud",
+        repositories: [expect.objectContaining({
+          localRepositoryId: "proj-001",
+          relativePath: ".",
+          repositoryUrl: "git@github.com:VARVE-ai/adit-cloud.git",
+          canonicalRepoKey: "github:varve-ai/adit-cloud",
+        })],
+      }),
+    );
+  });
+
+  it("includes workspace repository list in sync push payload", async () => {
+    const { mockClient } = createEngine();
+    const workspaceEngine = new SyncEngine({} as never, mockClient as never, {
+      projectId: "workspace-001",
+      projectName: "workspace",
+      projectType: "workspace",
+      repositories: [
+        {
+          localRepositoryId: "repo-api",
+          relativePath: "api",
+          displayName: "api",
+          repositoryUrl: "git@github.com:VARVE-ai/api.git",
+          canonicalRepoKey: "github:varve-ai/api",
+        },
+        {
+          localRepositoryId: "repo-web",
+          relativePath: "web",
+          displayName: "web",
+          repositoryUrl: "git@github.com:VARVE-ai/web.git",
+          canonicalRepoKey: "github:varve-ai/web",
+        },
+      ],
+      batchSize: 500,
+      serverUrl: "https://cloud.example.com",
+      cloudClientId: "client-001",
+    });
+    mockBuildSyncBatch.mockReturnValue({ events: [{}], sessions: [] } as never);
+    mockBatchRecordCount.mockReturnValue(1);
+    mockClient.post.mockResolvedValue({
+      accepted: 1,
+      duplicates: 0,
+      conflicts: [],
+      newSyncCursor: "cursor-1",
+      newSyncVersion: 1,
+    });
+
+    await workspaceEngine.sync();
+
+    expect(mockClient.post).toHaveBeenCalledWith(
+      "/api/sync/push",
+      expect.objectContaining({
+        localProjectId: "workspace-001",
+        projectType: "workspace",
+        repositories: [
+          expect.objectContaining({ localRepositoryId: "repo-api", relativePath: "api" }),
+          expect.objectContaining({ localRepositoryId: "repo-web", relativePath: "web" }),
+        ],
       }),
     );
   });

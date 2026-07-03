@@ -47,8 +47,8 @@ export async function initHookContext(
   if (!session) {
     const id = generateId();
     const now = new Date().toISOString();
-    const branch = await getCurrentBranch(cwd);
-    const remoteUrl = await getRemoteUrl(cwd);
+    const branch = await safeGetCurrentBranch(cwd);
+    const remoteUrl = await safeGetRemoteUrl(cwd);
 
     insertSession(db, {
       id,
@@ -75,6 +75,22 @@ export async function initHookContext(
   }
 
   return { db, config, session };
+}
+
+async function safeGetCurrentBranch(cwd: string): Promise<string | null> {
+  try {
+    return await getCurrentBranch(cwd);
+  } catch {
+    return null;
+  }
+}
+
+async function safeGetRemoteUrl(cwd: string): Promise<string | null> {
+  try {
+    return await getRemoteUrl(cwd);
+  } catch {
+    return null;
+  }
 }
 
 /** Read hook input from stdin (Claude Code sends JSON) */

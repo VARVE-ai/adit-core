@@ -7,6 +7,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // ---- Mocks ----
 
@@ -26,13 +29,14 @@ vi.mock("@varveai/adit-core", () => ({
 }));
 
 vi.mock("@varveai/adit-engine", () => ({
-  getChangedFiles: vi.fn().mockResolvedValue([]),
   createTimelineManager: vi.fn(() => ({
     recordEvent: mockRecordEvent,
     list: mockList,
   })),
   captureEnvironment: vi.fn().mockResolvedValue("env-001"),
   diffEnvironments: vi.fn().mockReturnValue({ changes: [], severity: "none" }),
+  getCurrentBranch: vi.fn().mockResolvedValue("main"),
+  getHeadSha: vi.fn().mockResolvedValue("head-sha-123"),
 }));
 
 vi.mock("@varveai/adit-cloud", () => ({
@@ -57,12 +61,13 @@ vi.mock("../common/context.js", () => ({
 
 import { dispatchHook } from "./unified.js";
 import { endSession } from "@varveai/adit-core";
-import { getChangedFiles } from "@varveai/adit-engine";
+import { getCurrentBranch, getHeadSha } from "@varveai/adit-engine";
 import { triggerAutoSync, triggerTranscriptUpload } from "@varveai/adit-cloud";
 import type { NormalizedHookInput } from "../adapters/types.js";
 
 const mockEndSession = vi.mocked(endSession);
-const mockGetChangedFiles = vi.mocked(getChangedFiles);
+const mockGetCurrentBranch = vi.mocked(getCurrentBranch);
+const mockGetHeadSha = vi.mocked(getHeadSha);
 const mockTriggerAutoSync = vi.mocked(triggerAutoSync);
 const mockTriggerTranscriptUpload = vi.mocked(triggerTranscriptUpload);
 
@@ -118,8 +123,6 @@ describe("dispatchHook", () => {
   });
 
   it("routes stop and records assistant_response event", async () => {
-    mockGetChangedFiles.mockResolvedValue([]);
-
     const input: NormalizedHookInput = {
       cwd: "/test",
       hookType: "stop",
@@ -140,8 +143,6 @@ describe("dispatchHook", () => {
   });
 
   it("does not force-sync on stop so threshold and time triggers control pushing", async () => {
-    mockGetChangedFiles.mockResolvedValue([]);
-
     const input: NormalizedHookInput = {
       cwd: "/test",
       hookType: "stop",
@@ -154,6 +155,224 @@ describe("dispatchHook", () => {
       expect.anything(),
       "proj-001",
       { projectRoot: "/test" },
+    );
+  });
+
+  it("records null workspace git state when stop has no turn mutations", async () => {
+    const { initHookContext } = await import("../common/context.js");
+    vi.mocked(initHookContext).mockResolvedValueOnce({
+      db: { close: vi.fn() } as never,
+      config: {
+        projectId: "workspace-001",
+        projectRoot: "/workspace",
+        dataDir: "/tmp/adit-test",
+        clientId: "client-001",
+        dbPath: "/tmp/test.db",
+        captureEnv: false,
+        projectType: "workspace",
+        repositories: [{
+          localRepositoryId: "repo-core",
+          relativePath: "adit-core",
+          displayName: "adit-core",
+          repositoryUrl: null,
+          canonicalRepoKey: null,
+          path: "/workspace/adit-core",
+        }],
+      },
+      session: { id: "sess-001" } as never,
+    });
+
+    await dispatchHook({
+      cwd: "/workspace",
+      hookType: "stop",
+      stopReason: "completed",
+    });
+
+    expect(mockRecordEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "assistant_response",
+        gitBranch: null,
+        gitHeadSha: null,
+      }),
+    );
+    expect(mockGetCurrentBranch).not.toHaveBeenCalled();
+    expect(mockGetHeadSha).not.toHaveBeenCalled();
+  });
+
+  it("records workspace repository git state from turn mutations", async () => {
+    const transcriptDir = mkdtempSync(join(tmpdir(), "adit-hook-transcript-"));
+    const transcriptPath = join(transcriptDir, "019efde3-72c7-7f82-9f7c-5f3d63cee24f.jsonl");
+    const { initHookContext } = await import("../common/context.js");
+
+    try {
+      writeFileSync(
+        transcriptPath,
+        [
+          JSON.stringify({
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "edit workspace repos" }],
+            },
+          }),
+          JSON.stringify({
+            type: "event_msg",
+            payload: {
+              type: "patch_apply_end",
+              call_id: "call_patch",
+              success: true,
+              status: "completed",
+              changes: {
+                "/workspace/adit-cloud/src/a.ts": {
+                  type: "update",
+                  unified_diff: "@@ -1,1 +1,1 @@\n-old\n+new\n",
+                },
+                "/workspace/adit-cloud/src/b.ts": {
+                  type: "update",
+                  unified_diff: "@@ -1,1 +1,1 @@\n-old\n+new\n",
+                },
+                "/workspace/adit-core/src/c.ts": {
+                  type: "update",
+                  unified_diff: "@@ -1,1 +1,1 @@\n-old\n+new\n",
+                },
+              },
+            },
+          }),
+        ].join("\n"),
+      );
+
+      vi.mocked(initHookContext).mockResolvedValueOnce({
+        db: { close: vi.fn() } as never,
+        config: {
+          projectId: "workspace-001",
+          projectRoot: "/workspace",
+          dataDir: "/tmp/adit-test",
+          clientId: "client-001",
+          dbPath: "/tmp/test.db",
+          captureEnv: false,
+          projectType: "workspace",
+          repositories: [
+            {
+              localRepositoryId: "repo-cloud",
+              relativePath: "adit-cloud",
+              displayName: "adit-cloud",
+              repositoryUrl: null,
+              canonicalRepoKey: null,
+              path: "/workspace/adit-cloud",
+            },
+            {
+              localRepositoryId: "repo-core",
+              relativePath: "adit-core",
+              displayName: "adit-core",
+              repositoryUrl: null,
+              canonicalRepoKey: null,
+              path: "/workspace/adit-core",
+            },
+          ],
+        },
+        session: { id: "sess-001" } as never,
+      });
+      mockGetCurrentBranch.mockImplementation(async (cwd) =>
+        cwd.endsWith("adit-cloud") ? "cloud-branch" : "core-branch",
+      );
+      mockGetHeadSha.mockImplementation(async (cwd) =>
+        cwd.endsWith("adit-cloud") ? "cloud-sha" : "core-sha",
+      );
+
+      await dispatchHook({
+        cwd: "/workspace",
+        hookType: "stop",
+        stopReason: "completed",
+        platformCli: "codex",
+        transcriptPath,
+      });
+    } finally {
+      rmSync(transcriptDir, { recursive: true, force: true });
+    }
+
+    expect(mockRecordEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "assistant_response",
+        gitBranch: "cloud-branch,core-branch",
+        gitHeadSha: "cloud-sha,core-sha",
+      }),
+    );
+  });
+
+  it("records workspace git state from Codex Bash writes in a child repo cwd", async () => {
+    const transcriptDir = mkdtempSync(join(tmpdir(), "adit-hook-transcript-"));
+    const transcriptPath = join(transcriptDir, "019efde3-72c7-7f82-9f7c-5f3d63cee24f.jsonl");
+    const { initHookContext } = await import("../common/context.js");
+
+    try {
+      writeFileSync(
+        transcriptPath,
+        [
+          JSON.stringify({
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "generate file with bash" }],
+            },
+          }),
+          JSON.stringify({
+            type: "event_msg",
+            payload: {
+              type: "exec_command_end",
+              call_id: "call_bash",
+              command: ["/bin/zsh", "-lc", "printf hi > src/generated.ts"],
+              cwd: "/workspace/adit-core",
+              parsed_cmd: [{ type: "unknown", cmd: "printf hi > src/generated.ts" }],
+              exit_code: 0,
+              status: "completed",
+            },
+          }),
+        ].join("\n"),
+      );
+
+      vi.mocked(initHookContext).mockResolvedValueOnce({
+        db: { close: vi.fn() } as never,
+        config: {
+          projectId: "workspace-001",
+          projectRoot: "/workspace",
+          dataDir: "/tmp/adit-test",
+          clientId: "client-001",
+          dbPath: "/tmp/test.db",
+          captureEnv: false,
+          projectType: "workspace",
+          repositories: [{
+            localRepositoryId: "repo-core",
+            relativePath: "adit-core",
+            displayName: "adit-core",
+            repositoryUrl: null,
+            canonicalRepoKey: null,
+            path: "/workspace/adit-core",
+          }],
+        },
+        session: { id: "sess-001" } as never,
+      });
+      mockGetCurrentBranch.mockResolvedValueOnce("core-branch");
+      mockGetHeadSha.mockResolvedValueOnce("core-sha");
+
+      await dispatchHook({
+        cwd: "/workspace",
+        hookType: "stop",
+        stopReason: "completed",
+        platformCli: "codex",
+        transcriptPath,
+      });
+    } finally {
+      rmSync(transcriptDir, { recursive: true, force: true });
+    }
+
+    expect(mockRecordEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "assistant_response",
+        gitBranch: "core-branch",
+        gitHeadSha: "core-sha",
+      }),
     );
   });
 

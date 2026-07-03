@@ -64,6 +64,8 @@ export interface RecordEventParams {
   errorJson?: string | null;
   planTaskId?: string | null;
   diffStatJson?: string | null;
+  gitBranch?: string | null;
+  gitHeadSha?: string | null;
 }
 
 export interface ListOptions {
@@ -85,8 +87,10 @@ export function createTimelineManager(
     async recordEvent(params: RecordEventParams): Promise<AditEvent> {
       const id = generateId();
       const now = new Date().toISOString();
-      const branch = await getCurrentBranch(cwd);
-      const headSha = await getHeadSha(cwd);
+      const hasGitBranchOverride = Object.prototype.hasOwnProperty.call(params, "gitBranch");
+      const hasGitHeadShaOverride = Object.prototype.hasOwnProperty.call(params, "gitHeadSha");
+      const branch = hasGitBranchOverride ? params.gitBranch ?? null : await getCurrentBranch(cwd);
+      const headSha = hasGitHeadShaOverride ? params.gitHeadSha ?? null : await getHeadSha(cwd);
       const vclock = serialize(createClock(config.clientId));
 
       // Use insertEventAutoSeq to atomically allocate the sequence number

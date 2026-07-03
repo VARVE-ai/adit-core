@@ -7,6 +7,12 @@
 
 // Config
 export { loadCloudConfig, DEFAULT_SERVER_URL, type CloudConfig, type ProjectLinkConfig } from "./config.js";
+export {
+  resolveCloudProjectContext,
+  repositoryPayloads,
+  type CloudProjectContext,
+  type CloudRepository,
+} from "./project-context.js";
 
 // Auth
 export {
@@ -76,6 +82,7 @@ export { type TranscriptUploadConfig } from "./config.js";
 // Project Link
 export {
   linkCommand,
+  WorkspaceLinkPartialFailureError,
   intentCommand,
   formatIntentList,
   formatIntentDetail,
@@ -96,6 +103,8 @@ export {
   upsertProjectLinkCache,
   clearProjectLinkCache,
   type LinkResult,
+  type WorkspaceRepositoryResult,
+  type WorkspaceRepositoryFailure,
   type IntentResult,
   type LinkOptions,
   type IntentOptions,

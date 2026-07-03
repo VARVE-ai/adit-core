@@ -83,11 +83,16 @@ export function createProgram(): Command {
       "-f, --force",
       "Force reinstall hooks (removes existing ADIT hooks first)",
     )
+    .option(
+      "--workspace",
+      "Initialize a workspace root that contains Git repositories in child directories",
+    )
     .action(withUpdateWarning("init", (opts) =>
       initCommand({
         cwd: process.cwd(),
         platform: opts.platform,
         force: opts.force,
+        workspace: opts.workspace,
       }),
     ));
 

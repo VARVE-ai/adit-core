@@ -12,6 +12,7 @@ import type { ProjectLinkCache } from "./types.js";
 /** Row shape from the project_link_cache table */
 interface CacheRow {
   project_id: string;
+  repository_id: string;
   server_url: string;
   confirmed_project_id: string | null;
   last_commit_sha: string | null;
@@ -28,10 +29,13 @@ export function getProjectLinkCache(
   db: Database.Database,
   projectId: string,
   serverUrl: string,
+  repositoryId = projectId,
 ): ProjectLinkCache | null {
   const row = db
-    .prepare("SELECT * FROM project_link_cache WHERE project_id = ? AND server_url = ?")
-    .get(projectId, serverUrl) as CacheRow | undefined;
+    .prepare(
+      "SELECT * FROM project_link_cache WHERE project_id = ? AND repository_id = ? AND server_url = ?",
+    )
+    .get(projectId, repositoryId, serverUrl) as CacheRow | undefined;
 
   if (!row) return null;
 
@@ -44,6 +48,7 @@ export function getProjectLinkCache(
 
   return {
     projectId: row.project_id,
+    repositoryId: row.repository_id,
     serverUrl: row.server_url,
     confirmedProjectId: row.confirmed_project_id,
     lastCommitSha: row.last_commit_sha,
@@ -63,11 +68,11 @@ export function upsertProjectLinkCache(
 ): void {
   db.prepare(`
     INSERT INTO project_link_cache (
-      project_id, server_url, confirmed_project_id,
+      project_id, repository_id, server_url, confirmed_project_id,
       last_commit_sha, last_branch_sync_at, last_doc_sync_at,
       doc_hashes_json, qualified, initialized_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT (project_id, server_url) DO UPDATE SET
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (project_id, repository_id, server_url) DO UPDATE SET
       confirmed_project_id = excluded.confirmed_project_id,
       last_commit_sha = excluded.last_commit_sha,
       last_branch_sync_at = excluded.last_branch_sync_at,
@@ -77,6 +82,7 @@ export function upsertProjectLinkCache(
       updated_at = excluded.updated_at
   `).run(
     cache.projectId,
+    cache.repositoryId,
     cache.serverUrl,
     cache.confirmedProjectId,
     cache.lastCommitSha,
@@ -94,7 +100,15 @@ export function clearProjectLinkCache(
   db: Database.Database,
   projectId: string,
   serverUrl: string,
+  repositoryId?: string,
 ): void {
+  if (repositoryId) {
+    db.prepare(
+      "DELETE FROM project_link_cache WHERE project_id = ? AND repository_id = ? AND server_url = ?",
+    ).run(projectId, repositoryId, serverUrl);
+    return;
+  }
+
   db.prepare("DELETE FROM project_link_cache WHERE project_id = ? AND server_url = ?")
     .run(projectId, serverUrl);
 }
@@ -105,12 +119,13 @@ export function updateCachedCommitSha(
   projectId: string,
   serverUrl: string,
   sha: string,
+  repositoryId = projectId,
 ): void {
   db.prepare(`
     UPDATE project_link_cache
     SET last_commit_sha = ?, updated_at = ?
-    WHERE project_id = ? AND server_url = ?
-  `).run(sha, new Date().toISOString(), projectId, serverUrl);
+    WHERE project_id = ? AND repository_id = ? AND server_url = ?
+  `).run(sha, new Date().toISOString(), projectId, repositoryId, serverUrl);
 }
 
 /** Update cached document hashes after upload */
@@ -119,16 +134,18 @@ export function updateCachedDocHashes(
   projectId: string,
   serverUrl: string,
   hashes: Record<string, string>,
+  repositoryId = projectId,
 ): void {
   db.prepare(`
     UPDATE project_link_cache
     SET doc_hashes_json = ?, last_doc_sync_at = ?, updated_at = ?
-    WHERE project_id = ? AND server_url = ?
+    WHERE project_id = ? AND repository_id = ? AND server_url = ?
   `).run(
     JSON.stringify(hashes),
     new Date().toISOString(),
     new Date().toISOString(),
     projectId,
+    repositoryId,
     serverUrl,
   );
 }
@@ -139,15 +156,17 @@ export function updateCachedMetadata(
   projectId: string,
   serverUrl: string,
   hashes: Record<string, string>,
+  repositoryId = projectId,
 ): void {
   db.prepare(`
     UPDATE project_link_cache
     SET doc_hashes_json = ?, updated_at = ?
-    WHERE project_id = ? AND server_url = ?
+    WHERE project_id = ? AND repository_id = ? AND server_url = ?
   `).run(
     JSON.stringify(hashes),
     new Date().toISOString(),
     projectId,
+    repositoryId,
     serverUrl,
   );
 }
@@ -158,10 +177,11 @@ export function updateCachedQualified(
   projectId: string,
   serverUrl: string,
   qualified: boolean,
+  repositoryId = projectId,
 ): void {
   db.prepare(`
     UPDATE project_link_cache
     SET qualified = ?, updated_at = ?
-    WHERE project_id = ? AND server_url = ?
-  `).run(qualified ? 1 : 0, new Date().toISOString(), projectId, serverUrl);
+    WHERE project_id = ? AND repository_id = ? AND server_url = ?
+  `).run(qualified ? 1 : 0, new Date().toISOString(), projectId, repositoryId, serverUrl);
 }

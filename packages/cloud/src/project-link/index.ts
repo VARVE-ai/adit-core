@@ -6,7 +6,7 @@
  */
 
 // Command handlers
-export { linkCommand } from "./link-command.js";
+export { linkCommand, WorkspaceLinkPartialFailureError } from "./link-command.js";
 export { intentCommand, formatIntentList, formatIntentDetail } from "./intent-command.js";
 
 // Auto-sync
@@ -64,5 +64,7 @@ export type {
   LinkOptions,
   IntentOptions,
   LinkResult,
+  WorkspaceRepositoryResult,
+  WorkspaceRepositoryFailure,
   IntentResult,
 } from "./types.js";

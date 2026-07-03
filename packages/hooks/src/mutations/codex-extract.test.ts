@@ -128,6 +128,43 @@ describe("extractCodexMutationsFromTranscript", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("extracts concrete Bash write targets from the latest Codex turn", () => {
+    const dir = tempDir();
+    try {
+      const transcriptPath = join(dir, "019efde3-72c7-7f82-9f7c-5f3d63cee24f.jsonl");
+      writeJsonl(transcriptPath, [
+        userMessage("old turn"),
+        execCommandEnd("old_call", "printf old > packages/old.txt"),
+        userMessage("write files"),
+        execCommandEnd(
+          "call_shell",
+          "printf hi > packages/core/src/generated.ts\nsips input.png -o packages/cloud/out.png",
+        ),
+      ]);
+
+      const result = extractCodexMutationsFromTranscript(transcriptPath);
+
+      expect(result?.mutations).toMatchObject([
+        {
+          provider: "codex",
+          toolUseId: "call_shell",
+          toolName: "Bash",
+          path: "/project/packages/core/src/generated.ts",
+          kind: "update",
+          status: "completed",
+          source: "codex-bash-output",
+          omitted: { reason: "unavailable" },
+        },
+        {
+          path: "/project/packages/cloud/out.png",
+          source: "codex-bash-output",
+        },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 function userMessage(text: string): unknown {
@@ -154,6 +191,22 @@ function patchApplyEnd(callId: string, changes: Record<string, unknown>): unknow
       stderr: "",
       success: true,
       changes,
+      status: "completed",
+    },
+  };
+}
+
+function execCommandEnd(callId: string, command: string): unknown {
+  return {
+    timestamp: "2026-06-25T08:28:21.484Z",
+    type: "event_msg",
+    payload: {
+      type: "exec_command_end",
+      call_id: callId,
+      command: ["/bin/zsh", "-lc", command],
+      cwd: "/project",
+      parsed_cmd: [{ type: "unknown", cmd: command }],
+      exit_code: 0,
       status: "completed",
     },
   };

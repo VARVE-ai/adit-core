@@ -7,6 +7,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import type { AgentFileMutation, MutationKind } from "./types.js";
 import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES, MAX_EVENT_DIFF_BYTES } from "./constants.js";
 
@@ -38,6 +39,22 @@ interface CodexPatchChange {
   move_path?: string | null;
 }
 
+interface ExecCommandEndPayload extends Record<string, unknown> {
+  type: "exec_command_end";
+  call_id?: string;
+  status?: string;
+  exit_code?: number;
+  cwd?: string;
+  command?: unknown;
+  parsed_cmd?: unknown;
+}
+
+interface ParsedCommand {
+  type?: string;
+  path?: unknown;
+  cmd?: unknown;
+}
+
 export function extractCodexMutationsFromTranscript(
   transcriptPath: string,
 ): CodexExtractResult | null {
@@ -50,8 +67,11 @@ export function extractCodexMutationsFromTranscript(
 
   for (let index = turnBounds.start; index < turnBounds.end; index++) {
     const payload = asRecord(entries[index]?.payload);
-    if (!isPatchApplyPayload(payload)) continue;
-    mutations.push(...mutationsFromPatchApply(payload));
+    if (isPatchApplyPayload(payload)) {
+      mutations.push(...mutationsFromPatchApply(payload));
+    } else if (isExecCommandEndPayload(payload)) {
+      mutations.push(...mutationsFromExecCommandEnd(payload));
+    }
   }
 
   return {
@@ -238,6 +258,152 @@ function assignStats(mutation: AgentFileMutation, diff: string): void {
 
 function isPatchApplyPayload(value: Record<string, unknown> | null): value is PatchApplyPayload {
   return value?.type === "patch_apply_end";
+}
+
+function isExecCommandEndPayload(
+  value: Record<string, unknown> | null,
+): value is ExecCommandEndPayload {
+  return value?.type === "exec_command_end";
+}
+
+function mutationsFromExecCommandEnd(payload: ExecCommandEndPayload): AgentFileMutation[] {
+  if (!isSuccessfulExecCommand(payload)) return [];
+
+  const toolUseId = readString(payload.call_id) ?? "codex-bash";
+  const paths = extractWrittenPathsFromExecCommand(payload);
+  return paths.map((path) => ({
+    provider: "codex",
+    toolUseId,
+    toolName: "Bash",
+    path,
+    kind: "update",
+    status: "completed",
+    source: "codex-bash-output",
+    omitted: { reason: "unavailable" },
+  }));
+}
+
+function isSuccessfulExecCommand(payload: ExecCommandEndPayload): boolean {
+  if (payload.status === "completed") return true;
+  return typeof payload.exit_code === "number" && payload.exit_code === 0;
+}
+
+function extractWrittenPathsFromExecCommand(payload: ExecCommandEndPayload): string[] {
+  const paths = new Set<string>();
+  const cwd = readString(payload.cwd);
+
+  for (const command of readParsedCommands(payload.parsed_cmd)) {
+    if (isReadOnlyParsedCommand(command)) continue;
+    addPath(paths, readString(command.path), cwd);
+  }
+
+  const commandText = execCommandText(payload.command);
+  if (commandText) {
+    extractShellWriteTargets(commandText).forEach((path) => addPath(paths, path, cwd));
+  }
+
+  return Array.from(paths);
+}
+
+function readParsedCommands(value: unknown): ParsedCommand[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => asRecord(item) as ParsedCommand | null)
+    .filter((item): item is ParsedCommand => !!item);
+}
+
+function isReadOnlyParsedCommand(command: ParsedCommand): boolean {
+  return command.type === "read" ||
+    command.type === "list_files" ||
+    command.type === "search";
+}
+
+function execCommandText(command: unknown): string | null {
+  if (typeof command === "string") return command;
+  if (!Array.isArray(command)) return null;
+  const parts = command.filter((part): part is string => typeof part === "string");
+  if (parts.length === 0) return null;
+  return parts.at(-1) ?? null;
+}
+
+function extractShellWriteTargets(command: string): string[] {
+  const targets = new Set<string>();
+  for (const line of command.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    extractRedirectionTargets(trimmed).forEach((path) => addPath(targets, path, null));
+    extractOptionTargets(trimmed).forEach((path) => addPath(targets, path, null));
+    extractKnownWriteCallTargets(trimmed).forEach((path) => addPath(targets, path, null));
+  }
+  return Array.from(targets);
+}
+
+function extractRedirectionTargets(command: string): string[] {
+  const paths: string[] = [];
+  const pattern = /(?:^|[\s;|&])(?:\d*)>{1,2}\s*(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu;
+  for (const match of command.matchAll(pattern)) {
+    const path = match[1] ?? match[2] ?? match[3];
+    if (path && isLikelyFilePath(path)) paths.push(path);
+  }
+  return paths;
+}
+
+function extractOptionTargets(command: string): string[] {
+  const paths: string[] = [];
+  const optionPattern = /(?:\s|^)(?:--out|--output)\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu;
+  for (const match of command.matchAll(optionPattern)) {
+    const path = match[1] ?? match[2] ?? match[3];
+    if (path && isPathLikeOptionTarget(path)) paths.push(path);
+  }
+
+  const shortOutputPattern =
+    /\b(?:sips|curl)\b[^\n;&|]*\s-o\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu;
+  for (const match of command.matchAll(shortOutputPattern)) {
+    const path = match[1] ?? match[2] ?? match[3];
+    if (path && isLikelyFilePath(path)) paths.push(path);
+  }
+  return paths;
+}
+
+function extractKnownWriteCallTargets(command: string): string[] {
+  const paths: string[] = [];
+  const patterns = [
+    /\bwriteFile(?:Sync)?\(\s*["']([^"']+)["']/gu,
+    /\bPath\(\s*["']([^"']+)["']\s*\)\.write_(?:text|bytes)\(/gu,
+    /\bopen\(\s*["']([^"']+)["']\s*,\s*["'][^"']*[wa][^"']*["']/gu,
+    /\b(?:touch|rm|unlink)\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu,
+    /\b(?:cp|mv)\s+(?:"[^"]+"|'[^']+'|[^\s;&|]+)\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of command.matchAll(pattern)) {
+      const path = match.slice(1).find((value) => value);
+      if (path && isLikelyFilePath(path)) paths.push(path);
+    }
+  }
+
+  return paths;
+}
+
+function addPath(paths: Set<string>, path: string | null, cwd: string | null): void {
+  if (!path || !isLikelyFilePath(path)) return;
+  const absolutePath = cwd && !isAbsolute(path)
+    ? resolve(join(cwd, path))
+    : path;
+  paths.add(normalizePath(absolutePath));
+}
+
+function isLikelyFilePath(path: string): boolean {
+  if (!path || path === "." || path === "..") return false;
+  if (path.startsWith("-")) return false;
+  if (path.includes("$(") || path.includes("`")) return false;
+  if (path === "/dev/null" || /^&?\d+$/u.test(path)) return false;
+  return true;
+}
+
+function isPathLikeOptionTarget(path: string): boolean {
+  return isLikelyFilePath(path) &&
+    (path.includes("/") || path.includes("\\") || path.includes("."));
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

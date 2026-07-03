@@ -43,6 +43,10 @@ vi.mock("../git/refs.js", () => ({
 
 import { createTimelineManager } from "./manager.js";
 import type { AditConfig } from "@varveai/adit-core";
+import { getCurrentBranch, getHeadSha } from "../git/runner.js";
+
+const mockGetCurrentBranch = vi.mocked(getCurrentBranch);
+const mockGetHeadSha = vi.mocked(getHeadSha);
 
 const fakeDb = {} as never;
 const fakeConfig: AditConfig = {
@@ -50,6 +54,15 @@ const fakeConfig: AditConfig = {
   dataDir: "/tmp/adit-test",
   dbPath: "/tmp/test.db",
   projectId: "proj-001",
+  projectType: "repo",
+  repositories: [{
+    localRepositoryId: "proj-001",
+    relativePath: ".",
+    displayName: "test-project",
+    repositoryUrl: null,
+    canonicalRepoKey: null,
+    path: "/test-project",
+  }],
   clientId: "test-client",
   captureEnv: false,
 };
@@ -107,6 +120,35 @@ describe("TimelineManager.recordEvent", () => {
         actor: "user",
       }),
     ).rejects.toThrow("Failed to retrieve event after insert: evt-new-001");
+  });
+
+  it("uses explicit git branch and head overrides, including null", async () => {
+    mockGetEventById.mockReturnValue({
+      id: "evt-new-001",
+      sessionId: "sess-001",
+      sequence: 1,
+      eventType: "assistant_response",
+      actor: "assistant",
+    });
+
+    const tm = createTimelineManager(fakeDb, fakeConfig);
+    await tm.recordEvent({
+      sessionId: "sess-001",
+      eventType: "assistant_response",
+      actor: "assistant",
+      gitBranch: null,
+      gitHeadSha: "workspace-sha",
+    });
+
+    expect(mockGetCurrentBranch).not.toHaveBeenCalled();
+    expect(mockGetHeadSha).not.toHaveBeenCalled();
+    expect(mockInsertEventAutoSeq).toHaveBeenCalledWith(
+      fakeDb,
+      expect.objectContaining({
+        gitBranch: null,
+        gitHeadSha: "workspace-sha",
+      }),
+    );
   });
 });
 
