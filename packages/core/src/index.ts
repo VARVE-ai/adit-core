@@ -48,13 +48,8 @@ export {
   queryEvents,
   getEventsBySession,
   updateEventStatus,
-  updateEventCheckpoint,
   updateEventLabels,
-  allocateSequence,
   searchEvents,
-  getLatestCheckpointEvent,
-  getLatestCheckpointByBranch,
-  getRecentCheckpointsExcludingBranch,
   clearEvents,
   countEvents,
   insertDiff,
@@ -122,20 +117,6 @@ export {
   type LocalRepository,
   type LocalProjectDescriptor,
 } from "./config/project.js";
-
-// Security — content-aware secret redaction
-export {
-  shannonEntropy,
-  redactContent,
-  redactObject,
-  shouldSkipField,
-  builtinPatterns,
-  defaultSkipFields,
-  type RedactionResult,
-  type SecretDetection,
-  type RedactionConfig,
-  type SecretPattern,
-} from "./security/content-redaction.js";
 
 // Performance logging
 export {

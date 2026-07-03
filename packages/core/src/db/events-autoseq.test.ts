@@ -17,7 +17,6 @@ import {
   insertEventAutoSeq,
   getEventById,
   getEventsBySession,
-  allocateSequence,
   insertEvent,
 } from "./events.js";
 
@@ -132,11 +131,11 @@ describe("insertEventAutoSeq", () => {
   });
 
   it("correctly continues after manually inserted events", () => {
-    // Insert one event using the old pattern
+    // Insert one event with an explicitly chosen sequence
     insertEvent(db, {
       id: "evt-manual-001",
       sessionId,
-      sequence: allocateSequence(db, sessionId),
+      sequence: 1,
       eventType: "prompt_submit",
       actor: "user",
       startedAt: new Date().toISOString(),

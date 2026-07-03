@@ -1,9 +1,7 @@
 /**
  * Tests for the timeline manager.
  *
- * Verifies the code review fixes:
- * - revertTo uses git checkout (not git reset --hard)
- * - undo uses git checkout (not git reset --hard)
+ * Verifies:
  * - recordEvent uses insertEventAutoSeq (not allocateSequence + insertEvent)
  * - recordEvent throws explicit error if post-insert re-fetch returns null
  */
@@ -12,8 +10,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const mockInsertEventAutoSeq = vi.fn();
 const mockGetEventById = vi.fn();
-const mockGetLatestCheckpointEvent = vi.fn();
-const mockGetParentSha = vi.fn();
 
 vi.mock("@varveai/adit-core", () => ({
   generateId: vi.fn(() => "evt-new-001"),
@@ -23,22 +19,12 @@ vi.mock("@varveai/adit-core", () => ({
   getEventById: (...args: unknown[]) => mockGetEventById(...args),
   queryEvents: vi.fn(() => []),
   searchEvents: vi.fn(() => []),
-  getLatestCheckpointEvent: (...args: unknown[]) => mockGetLatestCheckpointEvent(...args),
+  getDiffText: vi.fn(() => null),
 }));
-
-const mockRunGitOrThrow = vi.fn().mockResolvedValue("");
-
-const mockShaExists = vi.fn().mockResolvedValue(true);
 
 vi.mock("../git/runner.js", () => ({
   getHeadSha: vi.fn().mockResolvedValue("head-sha-123"),
   getCurrentBranch: vi.fn().mockResolvedValue("main"),
-  runGitOrThrow: (...args: unknown[]) => mockRunGitOrThrow(...args),
-  shaExists: (...args: unknown[]) => mockShaExists(...args),
-}));
-
-vi.mock("../git/refs.js", () => ({
-  getParentSha: (...args: unknown[]) => mockGetParentSha(...args),
 }));
 
 import { createTimelineManager } from "./manager.js";
@@ -150,128 +136,5 @@ describe("TimelineManager.recordEvent", () => {
       }),
     );
   });
-});
 
-describe("TimelineManager.revertTo", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("uses git checkout instead of git reset --hard", async () => {
-    mockGetEventById.mockReturnValue({
-      id: "evt-001",
-      checkpointSha: "checkpoint-sha-abc",
-    });
-
-    const tm = createTimelineManager(fakeDb, fakeConfig);
-    await tm.revertTo("evt-001");
-
-    // Should use checkout -- . to avoid moving HEAD
-    expect(mockRunGitOrThrow).toHaveBeenCalledWith(
-      ["checkout", "checkpoint-sha-abc", "--", "."],
-      { cwd: "/test-project" },
-    );
-
-    // Should NOT use reset --hard
-    const calls = mockRunGitOrThrow.mock.calls;
-    for (const call of calls) {
-      expect(call[0]).not.toContain("reset");
-    }
-  });
-
-  it("throws when event not found", async () => {
-    mockGetEventById.mockReturnValue(null);
-
-    const tm = createTimelineManager(fakeDb, fakeConfig);
-
-    await expect(tm.revertTo("nonexistent")).rejects.toThrow("Event not found");
-  });
-
-  it("throws when event has no checkpoint", async () => {
-    mockGetEventById.mockReturnValue({
-      id: "evt-001",
-      checkpointSha: null,
-    });
-
-    const tm = createTimelineManager(fakeDb, fakeConfig);
-
-    await expect(tm.revertTo("evt-001")).rejects.toThrow("has no checkpoint");
-  });
-});
-
-describe("TimelineManager.undo", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("uses git checkout instead of git reset --hard", async () => {
-    mockGetLatestCheckpointEvent.mockReturnValue({
-      id: "evt-latest",
-      checkpointSha: "latest-sha",
-    });
-    mockGetParentSha.mockResolvedValue("parent-sha-xyz");
-
-    const tm = createTimelineManager(fakeDb, fakeConfig);
-    await tm.undo();
-
-    // Should use checkout -- . to avoid moving HEAD
-    expect(mockRunGitOrThrow).toHaveBeenCalledWith(
-      ["checkout", "parent-sha-xyz", "--", "."],
-      { cwd: "/test-project" },
-    );
-
-    // Should NOT use reset --hard
-    const calls = mockRunGitOrThrow.mock.calls;
-    for (const call of calls) {
-      expect(call[0]).not.toContain("reset");
-    }
-  });
-
-  it("throws when no checkpoints exist", async () => {
-    mockGetLatestCheckpointEvent.mockReturnValue(null);
-
-    const tm = createTimelineManager(fakeDb, fakeConfig);
-
-    await expect(tm.undo()).rejects.toThrow("No checkpoints to undo");
-  });
-
-  it("falls back to HEAD when parent of latest checkpoint not found", async () => {
-    mockGetLatestCheckpointEvent.mockReturnValue({
-      id: "evt-latest",
-      checkpointSha: "latest-sha",
-    });
-    mockGetParentSha.mockResolvedValue(null);
-
-    const tm = createTimelineManager(fakeDb, fakeConfig);
-    await tm.undo();
-
-    // Should fall back to HEAD when parent is unreachable
-    expect(mockRunGitOrThrow).toHaveBeenCalledWith(
-      ["checkout", "head-sha-123", "--", "."],
-      { cwd: "/test-project" },
-    );
-  });
-
-  it("throws when checkpoint SHA is unreachable in revertTo", async () => {
-    mockGetEventById.mockReturnValue({
-      id: "evt-001",
-      checkpointSha: "unreachable-sha",
-    });
-    mockShaExists.mockResolvedValue(false);
-
-    const tm = createTimelineManager(fakeDb, fakeConfig);
-
-    await expect(tm.revertTo("evt-001")).rejects.toThrow("no longer reachable");
-
-    // Restore for other tests
-    mockShaExists.mockResolvedValue(true);
-  });
 });

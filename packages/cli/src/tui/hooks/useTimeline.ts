@@ -36,7 +36,6 @@ export interface TimelineState {
 export interface TimelineFilters {
   actor?: Actor;
   eventType?: EventType;
-  hasCheckpoint?: boolean;
   searchQuery?: string;
 }
 
@@ -93,7 +92,6 @@ export function useTimeline(): UseTimelineResult {
         events = queryEvents(db, {
           eventType: filters.eventType,
           actor: filters.actor,
-          hasCheckpoint: filters.hasCheckpoint,
           limit: DEFAULT_LIMIT,
         });
       }

@@ -68,7 +68,7 @@ export function createProgram(): Command {
 
   program
     .name("adit")
-    .description("AI Development Intent Tracker — The Transparent Time Machine")
+    .description("AI Development Intent Tracker — a flight recorder for AI-assisted development")
     .version(CLI_VERSION);
   configureTopLevelHelp(program);
 
@@ -77,7 +77,7 @@ export function createProgram(): Command {
     .description("Initialize ADIT in the current project")
     .option(
       "-p, --platform <platform>",
-      "Target platform (claude-code, opencode, cursor, copilot, codex)",
+      "Target platform (claude-code, opencode, cursor, codex, gemini)",
     )
     .option(
       "-f, --force",
@@ -103,7 +103,6 @@ export function createProgram(): Command {
     .option("-l, --limit <n>", "Number of entries to show", "20")
     .option("-a, --actor <actor>", "Filter by actor (assistant|user|tool)")
     .option("-t, --type <type>", "Filter by event type")
-    .option("-c, --checkpoints", "Only show checkpoint events")
     .option("-q, --query <text>", "Search by text")
     .option("-e, --expand", "Show expanded summaries")
     .option(
@@ -116,7 +115,6 @@ export function createProgram(): Command {
         limit: parseInt(opts.limit, 10),
         actor: opts.actor,
         type: opts.type,
-        checkpoints: opts.checkpoints,
         query: opts.query,
         expand: opts.expand,
         sort: opts.sort ? opts.sort.toUpperCase() : undefined,
@@ -139,7 +137,6 @@ export function createProgram(): Command {
     .option("--from <date>", "Start date (ISO 8601)")
     .option("--to <date>", "End date (ISO 8601)")
     .option("--branch <branch>", "Filter by git branch")
-    .option("--has-checkpoint", "Only events with checkpoints")
     .option("--format <fmt>", "Output format (json)")
     .option("--json", "Output as JSON")
     .action((query, opts) =>
@@ -150,7 +147,6 @@ export function createProgram(): Command {
         from: opts.from,
         to: opts.to,
         branch: opts.branch,
-        hasCheckpoint: opts.hasCheckpoint,
         format: opts.format,
         json: opts.json,
       }),

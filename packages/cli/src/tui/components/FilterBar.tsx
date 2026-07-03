@@ -61,11 +61,6 @@ export function FilterBar({
           </Text>
         ))}
       </Box>
-      {filters.hasCheckpoint && (
-        <Text color="green" bold>
-          Showing only checkpoint events
-        </Text>
-      )}
     </Box>
   );
 }

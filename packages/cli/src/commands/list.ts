@@ -17,7 +17,6 @@ export interface ListCommandOptions {
   limit?: number;
   actor?: string;
   type?: string;
-  checkpoints?: boolean;
   query?: string;
   expand?: boolean;
   sort?: SortField;
@@ -39,7 +38,6 @@ export async function listCommand(opts: ListCommandOptions): Promise<void> {
       events = await timeline.list({
         actor: opts.actor as Actor | undefined,
         eventType: opts.type as EventType | undefined,
-        hasCheckpoint: opts.checkpoints,
         limit: opts.limit ?? 50,
       });
     }
