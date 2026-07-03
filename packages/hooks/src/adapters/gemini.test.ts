@@ -346,17 +346,20 @@ describe("Gemini CLI Hook Chaining", () => {
     expect(settings.permissions).toEqual({ allow: ["read", "write"] });
   });
 
-  it("handles corrupted settings file gracefully", async () => {
+  it("refuses to overwrite a corrupted settings file", async () => {
     const geminiDir = join(projectRoot, ".gemini");
     mkdirSync(geminiDir, { recursive: true });
-    writeFileSync(join(geminiDir, "settings.json"), "{ invalid json }}}");
+    const settingsPath = join(geminiDir, "settings.json");
+    writeFileSync(settingsPath, "{ invalid json }}}");
 
-    // Should not throw — starts fresh
-    await geminiAdapter.installHooks(projectRoot, "npx adit-hook");
+    // Must throw instead of silently rebuilding the file — the corrupt
+    // file may hold the user's own settings.
+    await expect(
+      geminiAdapter.installHooks(projectRoot, "npx adit-hook"),
+    ).rejects.toThrow("invalid JSON");
 
-    const settings = readSettings(projectRoot);
-    const hooks = settings.hooks as Record<string, unknown[]>;
-    expect(hooks.AfterAgent).toBeDefined();
+    // The corrupted file is left untouched for the user to fix.
+    expect(readFileSync(settingsPath, "utf-8")).toBe("{ invalid json }}}");
   });
 
   it("uninstallHooks removes only ADIT entries, preserves others", async () => {

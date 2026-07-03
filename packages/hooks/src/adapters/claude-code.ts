@@ -177,7 +177,9 @@ export const claudeCodeAdapter: PlatformAdapter = {
         hooks: [{
           type: "command",
           command: buildAditHookCommand(aditBinaryPath, "claude", hookType),
-          timeout: 10000,
+          // Claude Code hook timeouts are in seconds. adit-hook self-kills
+          // after 10s, so this is a matching outer guard — not 10000s.
+          timeout: 10,
         }],
       },
     ];
@@ -287,10 +289,18 @@ export const claudeCodeAdapter: PlatformAdapter = {
     let settings: Record<string, unknown> = {};
 
     if (existsSync(settingsPath)) {
-      try {
-        settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-      } catch {
-        // Start fresh if settings are invalid
+      const raw = readFileSync(settingsPath, "utf-8");
+      // An empty file has no user data to protect — treat it as a fresh
+      // install. Anything else must parse; refuse to overwrite a file we
+      // cannot parse, as it may hold the user's own permissions/env config.
+      if (raw.trim().length > 0) {
+        try {
+          settings = JSON.parse(raw);
+        } catch {
+          throw new Error(
+            `${settingsPath} contains invalid JSON. Fix or remove it, then re-run the install.`,
+          );
+        }
       }
     }
 

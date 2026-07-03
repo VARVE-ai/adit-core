@@ -194,17 +194,20 @@ describe("Claude Code Hook Chaining", () => {
     expect(settings.model).toBe("claude-sonnet-4-20250514");
   });
 
-  it("handles corrupted settings file gracefully", async () => {
+  it("refuses to overwrite a corrupted settings file", async () => {
     const claudeDir = join(projectRoot, ".claude");
     mkdirSync(claudeDir, { recursive: true });
-    writeFileSync(join(claudeDir, "settings.local.json"), "{ invalid json }}}");
+    const settingsPath = join(claudeDir, "settings.local.json");
+    writeFileSync(settingsPath, "{ invalid json }}}");
 
-    // Should not throw — starts fresh
-    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+    // Must throw instead of silently rebuilding the file — the corrupt
+    // file may hold the user's own permissions/env config.
+    await expect(
+      claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook"),
+    ).rejects.toThrow("invalid JSON");
 
-    const settings = readSettings(projectRoot);
-    const hooks = settings.hooks as Record<string, unknown[]>;
-    expect(hooks.Stop).toBeDefined();
+    // The corrupted file is left untouched for the user to fix.
+    expect(readFileSync(settingsPath, "utf-8")).toBe("{ invalid json }}}");
   });
 
   it("uninstallHooks removes only ADIT entries, preserves others", async () => {

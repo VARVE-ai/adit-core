@@ -274,10 +274,18 @@ export const cursorAdapter: PlatformAdapter = {
     let hooksConfig: Record<string, unknown> = {};
 
     if (existsSync(hooksPath)) {
-      try {
-        hooksConfig = JSON.parse(readFileSync(hooksPath, "utf-8"));
-      } catch {
-        // Start fresh if hooks are invalid
+      const raw = readFileSync(hooksPath, "utf-8");
+      // An empty file has no user data to protect — treat it as a fresh
+      // install. Anything else must parse; refuse to overwrite a file we
+      // cannot parse, as it may hold other tools' hook config.
+      if (raw.trim().length > 0) {
+        try {
+          hooksConfig = JSON.parse(raw);
+        } catch {
+          throw new Error(
+            `${hooksPath} contains invalid JSON. Fix or remove it, then re-run the install.`,
+          );
+        }
       }
     }
 

@@ -205,7 +205,9 @@ export function installClaudeHooks(opts: {
         )
       );
     });
-    filtered.push({ hooks: [{ type: "command", command, timeout: 5000 }] });
+    // Claude Code hook timeouts are in seconds; the hook script self-kills
+    // after 3.5s, so 10s is a matching outer guard — not 5000s (~83 min).
+    filtered.push({ hooks: [{ type: "command", command, timeout: 10 }] });
     hooks[eventName] = filtered;
   }
   existing.statusLine = {
