@@ -115,6 +115,16 @@ export interface SyncBatch {
   diffs: SyncDiff[];
 }
 
+export interface BuildSyncBatchResult {
+  batch: SyncBatch;
+  /**
+   * True when the diff byte cap trimmed trailing events from this batch.
+   * The caller should keep looping even though the batch is smaller than
+   * the batch size — the trimmed events are still unsynced.
+   */
+  diffByteCapApplied: boolean;
+}
+
 /**
  * Build a sync batch of records after the given cursor.
  *
@@ -134,7 +144,7 @@ export function buildSyncBatch(
   projectId: string,
   cloudClientId: string,
   batchSize: number,
-): SyncBatch {
+): BuildSyncBatchResult {
   const batch: SyncBatch = {
     sessions: [],
     events: [],
@@ -195,35 +205,95 @@ export function buildSyncBatch(
     remaining -= batch.plans.length;
   }
 
-  // 5. Diffs — keyed by event_id, only for events in this batch
-  if (batch.events.length > 0 && remaining > 0) {
+  // 5. Diffs — keyed by event_id, only for events in this batch.
+  //    Diffs are exempt from the record-count budget: an event whose diffs
+  //    were dropped never retries them (the cursor moves past the event),
+  //    so every shipped event must carry ALL of its diffs. Payload size is
+  //    bounded by the byte cap, which trims trailing EVENTS (not just
+  //    diffs) so trimmed events stay before the cursor and retry next
+  //    batch. Count stays bounded in practice (≤1 diff per assistant turn)
+  //    and the server does not enforce a per-push record limit.
+  let diffByteCapApplied = false;
+  if (batch.events.length > 0) {
     const eventIds = batch.events.map((e) => e.id);
-    const allDiffs = queryDiffs(db, eventIds, cloudClientId, remaining);
-    // Apply payload byte cap: drop excess diffs rather than pushing a huge
-    // payload to the server. Excess diffs will be retried on subsequent syncs
-    // where earlier batches have drained.
-    batch.diffs = applySyncByteCap(allDiffs, MAX_SYNC_DIFF_BYTES);
+    const allDiffs = queryDiffs(db, eventIds, cloudClientId);
+    diffByteCapApplied = applyDiffByteCap(batch, allDiffs, MAX_SYNC_DIFF_BYTES);
   }
 
-  return batch;
+  return { batch, diffByteCapApplied };
 }
 
+const DIFF_TRUNCATION_MARKER = "\n… [truncated by adit sync: diff exceeds batch byte cap]";
+
 /**
- * Keep total diff_text bytes under MAX_SYNC_DIFF_BYTES by dropping trailing
- * entries. Each dropped diff stays in the local DB and is eligible for the
- * next sync attempt once the queue drains.
+ * Attach diffs to the batch while keeping total diff_text bytes under the
+ * cap. Events are trimmed as a suffix so every shipped event carries all of
+ * its diffs. If the very first event's diffs alone exceed the cap, its
+ * diff_text is truncated (with a marker) so the batch always makes progress.
+ *
+ * Returns true when trailing events were trimmed (caller should keep
+ * looping even though the batch is smaller than the batch size).
  */
-function applySyncByteCap(diffs: SyncDiff[], cap: number): SyncDiff[] {
-  if (diffs.length === 0) return diffs;
-  const out: SyncDiff[] = [];
-  let total = 0;
-  for (const d of diffs) {
-    const size = d.diff_text.length;
-    if (total + size > cap) break;
-    total += size;
-    out.push(d);
+function applyDiffByteCap(
+  batch: SyncBatch,
+  diffs: SyncDiff[],
+  cap: number,
+): boolean {
+  if (diffs.length === 0) {
+    batch.diffs = [];
+    return false;
   }
-  return out;
+
+  const diffsByEvent = new Map<string, SyncDiff[]>();
+  for (const diff of diffs) {
+    const list = diffsByEvent.get(diff.event_id);
+    if (list) {
+      list.push(diff);
+    } else {
+      diffsByEvent.set(diff.event_id, [diff]);
+    }
+  }
+
+  const keptDiffs: SyncDiff[] = [];
+  let total = 0;
+  let cutIndex = batch.events.length;
+
+  for (let i = 0; i < batch.events.length; i++) {
+    const eventDiffs = diffsByEvent.get(batch.events[i].id) ?? [];
+    const size = eventDiffs.reduce((sum, d) => sum + d.diff_text.length, 0);
+
+    if (total + size > cap) {
+      if (i === 0) {
+        // A single event's diffs exceed the cap on their own. Truncate the
+        // diff text so this event still ships — otherwise the sync would
+        // stall on it forever.
+        let budget = cap;
+        for (const diff of eventDiffs) {
+          if (diff.diff_text.length > budget) {
+            diff.diff_text =
+              diff.diff_text.slice(0, Math.max(0, budget - DIFF_TRUNCATION_MARKER.length)) +
+              DIFF_TRUNCATION_MARKER;
+          }
+          budget = Math.max(0, budget - diff.diff_text.length);
+          keptDiffs.push(diff);
+        }
+        cutIndex = 1;
+      } else {
+        cutIndex = i;
+      }
+      break;
+    }
+
+    total += size;
+    keptDiffs.push(...eventDiffs);
+  }
+
+  const trimmed = cutIndex < batch.events.length;
+  if (trimmed) {
+    batch.events = batch.events.slice(0, cutIndex);
+  }
+  batch.diffs = keptDiffs;
+  return trimmed;
 }
 
 /** Count total unsynced records across all tables */
@@ -500,16 +570,18 @@ function queryDiffs(
   db: Database.Database,
   eventIds: string[],
   cloudClientId: string,
-  limit: number,
 ): SyncDiff[] {
   if (eventIds.length === 0) return [];
 
+  // No LIMIT: every diff belonging to a shipped event must ship with it
+  // (see the diff exemption note in buildSyncBatch). An arbitrary cutoff
+  // here would orphan the excess diffs permanently.
   const placeholders = eventIds.map(() => "?").join(",");
-  const sql = `SELECT * FROM diffs WHERE event_id IN (${placeholders}) LIMIT ?`;
+  const sql = `SELECT * FROM diffs WHERE event_id IN (${placeholders}) ORDER BY event_id ASC`;
 
   const rows = db
     .prepare(sql)
-    .all(...eventIds, limit) as Record<string, unknown>[];
+    .all(...eventIds) as Record<string, unknown>[];
 
   return rows.map((r) => ({
     id: r.id as string,

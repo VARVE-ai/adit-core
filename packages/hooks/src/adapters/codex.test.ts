@@ -221,17 +221,20 @@ describe("Codex CLI Hook Chaining", () => {
     expect(hooksConfig.model).toBe("gpt-4");
   });
 
-  it("handles corrupted hooks file gracefully", async () => {
+  it("refuses to overwrite a corrupted hooks file", async () => {
     const codexDir = join(projectRoot, ".codex");
     mkdirSync(codexDir, { recursive: true });
-    writeFileSync(join(codexDir, "hooks.json"), "{ invalid json }}}");
+    const hooksPath = join(codexDir, "hooks.json");
+    writeFileSync(hooksPath, "{ invalid json }}}");
 
-    // Should not throw — starts fresh
-    await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+    // Must throw instead of silently rebuilding the file — the corrupt
+    // file may hold other tools' hook config.
+    await expect(
+      codexAdapter.installHooks(projectRoot, "npx adit-hook"),
+    ).rejects.toThrow("invalid JSON");
 
-    const hooksConfig = readHooks(projectRoot);
-    const hooks = hooksConfig.hooks as Record<string, unknown[]>;
-    expect(hooks.Stop).toBeDefined();
+    // The corrupted file is left untouched for the user to fix.
+    expect(readFileSync(hooksPath, "utf-8")).toBe("{ invalid json }}}");
   });
 
   it("uninstallHooks removes only ADIT entries, preserves others", async () => {

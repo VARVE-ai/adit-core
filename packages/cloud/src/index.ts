@@ -39,7 +39,7 @@ export {
 } from "./auth/device-auth.js";
 
 // HTTP
-export { CloudClient, type RefreshTokenStatus } from "./http/client.js";
+export { CloudClient, type CloudClientOptions, type RefreshTokenStatus } from "./http/client.js";
 export {
   CloudAuthError,
   CloudNetworkError,

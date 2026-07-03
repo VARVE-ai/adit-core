@@ -88,7 +88,7 @@ describe("SyncEngine", () => {
   it("does nothing when no records to sync", async () => {
     const { engine, mockClient } = createEngine();
     mockBatchRecordCount.mockReturnValue(0);
-    mockBuildSyncBatch.mockReturnValue({ events: [], sessions: [], envSnapshots: [] } as never);
+    mockBuildSyncBatch.mockReturnValue({ batch: { events: [], sessions: [], envSnapshots: [] }, diffByteCapApplied: false } as never);
 
     const result = await engine.sync();
 
@@ -100,7 +100,7 @@ describe("SyncEngine", () => {
 
   it("pushes a single batch and stops when count < batchSize", async () => {
     const { engine, mockClient } = createEngine({ batchSize: 500 });
-    mockBuildSyncBatch.mockImplementation(() => ({ events: [{}], sessions: [] }) as never);
+    mockBuildSyncBatch.mockImplementation(() => ({ batch: { events: [{}], sessions: [] }, diffByteCapApplied: false }) as never);
     let callCount = 0;
     mockBatchRecordCount.mockImplementation(() => {
       callCount++;
@@ -130,7 +130,7 @@ describe("SyncEngine", () => {
   it("pushes multiple batches when first batch is full", async () => {
     const { engine, mockClient } = createEngine({ batchSize: 100 });
 
-    mockBuildSyncBatch.mockImplementation(() => ({ events: [{}], sessions: [] }) as never);
+    mockBuildSyncBatch.mockImplementation(() => ({ batch: { events: [{}], sessions: [] }, diffByteCapApplied: false }) as never);
     let callCount = 0;
     mockBatchRecordCount.mockImplementation(() => {
       callCount++;
@@ -162,7 +162,7 @@ describe("SyncEngine", () => {
 
   it("breaks on duplicate-only batch with unchanged cursor (infinite loop guard)", async () => {
     const { engine, mockClient } = createEngine({ batchSize: 100 });
-    mockBuildSyncBatch.mockReturnValue({ events: [{}], sessions: [] } as never);
+    mockBuildSyncBatch.mockReturnValue({ batch: { events: [{}], sessions: [] }, diffByteCapApplied: false } as never);
     mockBatchRecordCount.mockReturnValue(100); // always full
 
     // Server returns all duplicates and doesn't advance cursor
@@ -184,7 +184,7 @@ describe("SyncEngine", () => {
 
   it("continues when cursor advances even with all duplicates", async () => {
     const { engine, mockClient } = createEngine({ batchSize: 100 });
-    mockBuildSyncBatch.mockReturnValue({ events: [{}], sessions: [] } as never);
+    mockBuildSyncBatch.mockReturnValue({ batch: { events: [{}], sessions: [] }, diffByteCapApplied: false } as never);
     mockBatchRecordCount
       .mockReturnValueOnce(100)
       .mockReturnValueOnce(0); // stops on second call
@@ -208,7 +208,7 @@ describe("SyncEngine", () => {
     const { engine, mockClient } = createEngine({ batchSize: 100 });
 
     let batchCall = 0;
-    mockBuildSyncBatch.mockImplementation(() => ({ events: [{}], sessions: [] }) as never);
+    mockBuildSyncBatch.mockImplementation(() => ({ batch: { events: [{}], sessions: [] }, diffByteCapApplied: false }) as never);
     mockBatchRecordCount.mockImplementation(() => {
       batchCall++;
       if (batchCall === 1) return 100;
@@ -242,7 +242,7 @@ describe("SyncEngine", () => {
       remoteUrl: "git@github.com:VARVE-ai/adit-cloud.git",
       canonicalRepoKey: "github:varve-ai/adit-cloud",
     });
-    mockBuildSyncBatch.mockReturnValue({ events: [{}], sessions: [] } as never);
+    mockBuildSyncBatch.mockReturnValue({ batch: { events: [{}], sessions: [] }, diffByteCapApplied: false } as never);
     mockBatchRecordCount.mockReturnValue(1);
     mockClient.post.mockResolvedValue({
       accepted: 1,
@@ -296,7 +296,7 @@ describe("SyncEngine", () => {
       serverUrl: "https://cloud.example.com",
       cloudClientId: "client-001",
     });
-    mockBuildSyncBatch.mockReturnValue({ events: [{}], sessions: [] } as never);
+    mockBuildSyncBatch.mockReturnValue({ batch: { events: [{}], sessions: [] }, diffByteCapApplied: false } as never);
     mockBatchRecordCount.mockReturnValue(1);
     mockClient.post.mockResolvedValue({
       accepted: 1,
@@ -336,7 +336,7 @@ describe("SyncEngine", () => {
         },
       });
 
-      mockBuildSyncBatch.mockReturnValue({ events: [{}], sessions: [] } as never);
+      mockBuildSyncBatch.mockReturnValue({ batch: { events: [{}], sessions: [] }, diffByteCapApplied: false } as never);
       let callCount = 0;
       mockBatchRecordCount.mockImplementation(() => {
         callCount++;
@@ -383,7 +383,7 @@ describe("SyncEngine", () => {
         },
       });
 
-      mockBuildSyncBatch.mockReturnValue({ events: [{}], sessions: [] } as never);
+      mockBuildSyncBatch.mockReturnValue({ batch: { events: [{}], sessions: [] }, diffByteCapApplied: false } as never);
       let callCount = 0;
       mockBatchRecordCount.mockImplementation(() => {
         callCount++;
@@ -435,7 +435,7 @@ describe("SyncEngine", () => {
         },
       });
 
-      mockBuildSyncBatch.mockReturnValue({ events: [{}], sessions: [] } as never);
+      mockBuildSyncBatch.mockReturnValue({ batch: { events: [{}], sessions: [] }, diffByteCapApplied: false } as never);
       mockBatchRecordCount.mockReturnValue(1);
       mockClient.post.mockResolvedValue({
         accepted: 1,
@@ -464,7 +464,7 @@ describe("SyncEngine", () => {
         lastSyncedAt: "2025-01-01T00:00:00Z",
       });
 
-      mockBuildSyncBatch.mockReturnValue({ events: [{}], sessions: [] } as never);
+      mockBuildSyncBatch.mockReturnValue({ batch: { events: [{}], sessions: [] }, diffByteCapApplied: false } as never);
       let callCount = 0;
       mockBatchRecordCount.mockImplementation(() => {
         callCount++;
@@ -495,7 +495,7 @@ describe("SyncEngine", () => {
     it("passes localProjectId as query param to getRemoteStatus", async () => {
       const { engine, mockClient } = createEngine();
       mockBatchRecordCount.mockReturnValue(0);
-      mockBuildSyncBatch.mockReturnValue({ events: [], sessions: [] } as never);
+      mockBuildSyncBatch.mockReturnValue({ batch: { events: [], sessions: [] }, diffByteCapApplied: false } as never);
 
       await engine.sync();
 

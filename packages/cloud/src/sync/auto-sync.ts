@@ -135,7 +135,12 @@ export async function triggerAutoSync(
     const projectRoot = options?.projectRoot ?? loadConfig().projectRoot;
     const projectConfig = loadConfig(projectRoot);
     const projectContext = await resolveCloudProjectContext(projectConfig);
-    const client = new CloudClient(serverUrl, credentials);
+    // Tight budget: the hook process is hard-killed after 10s, so a dead
+    // request must not eat the whole window in backoff loops.
+    const client = new CloudClient(serverUrl, credentials, {
+      timeoutMs: 5_000,
+      maxRetries: 1,
+    });
     const engine = new SyncEngine(db, client, {
       projectId: projectContext.localProjectId,
       projectName: projectContext.projectName,

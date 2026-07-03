@@ -215,7 +215,7 @@ export class SyncEngine {
 
       // 3. Push batches until no more records
       while (true) {
-        const batch = buildSyncBatch(
+        const { batch, diffByteCapApplied } = buildSyncBatch(
           this.db,
           cursor,
           lastSyncedAt,
@@ -280,8 +280,9 @@ export class SyncEngine {
           break;
         }
 
-        // If batch was smaller than limit, we're done
-        if (count < this.batchSize) break;
+        // If batch was smaller than limit, we're done — unless the diff
+        // byte cap trimmed trailing events, which are still unsynced.
+        if (count < this.batchSize && !diffByteCapApplied) break;
       }
 
 

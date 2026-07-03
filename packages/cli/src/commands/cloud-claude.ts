@@ -31,6 +31,14 @@ interface CloudClaudeOptions {
   arg?: string[];
 }
 
+/**
+ * Upper bound for events buffered while the relay is disconnected.
+ * Long offline periods with an active local session would otherwise
+ * grow the queue without limit. Oldest events are dropped first so
+ * the panel converges to recent state after reconnect.
+ */
+const MAX_EVENT_QUEUE = 10_000;
+
 function createRelayLoopWake() {
   let wakeCurrent: (() => void) | null = null;
   return {
@@ -414,8 +422,18 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
   const seenCommandIds = new Set<string>();
   const transcriptSync = new ClaudeTranscriptSync();
   const relayLoopWake = createRelayLoopWake();
+  let droppedQueuedEvents = 0;
   const enqueueEvent = (event: CliAgentRelayEvent): void => {
     eventQueue.push(event);
+    if (eventQueue.length > MAX_EVENT_QUEUE) {
+      eventQueue.splice(0, eventQueue.length - MAX_EVENT_QUEUE);
+      droppedQueuedEvents += 1;
+      if (droppedQueuedEvents === 1 || droppedQueuedEvents % 1000 === 0) {
+        notices.line(
+          `warning: relay event queue exceeded ${MAX_EVENT_QUEUE} while disconnected — dropped ${droppedQueuedEvents} oldest event(s) so far.`,
+        );
+      }
+    }
     relayLoopWake.wake();
   };
 

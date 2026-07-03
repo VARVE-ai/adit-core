@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type Database from "better-sqlite3";
 import {
   closeDatabase,
+  insertDiff,
   insertEvent,
   insertSession,
   openDatabase,
@@ -106,7 +107,7 @@ describe("sync serializer", () => {
       responseText: "Later session started",
     });
 
-    const batch = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
+    const { batch } = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
 
     expect(batch.sessions.map((s) => s.id)).toEqual([firstSessionId, laterSessionId]);
     expect(batch.events.map((e) => e.id)).toEqual([
@@ -144,7 +145,7 @@ describe("sync serializer", () => {
       responseText: "done",
     });
 
-    const batch = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
+    const { batch } = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
 
     expect(batch.events.map((e) => e.id)).toEqual([
       "01H000000000000000000000010",
@@ -180,12 +181,113 @@ describe("sync serializer", () => {
       responseText: "done",
     });
 
-    const batch = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
+    const { batch } = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
 
     expect(batch.events.map((e) => e.id)).toEqual([
       "01H000000000000000000000010",
       "01H000000000000000000000020",
       "01H000000000000000000000030",
     ]);
+  });
+
+  it("trims trailing events when their diffs exceed the byte cap so diffs are never orphaned", () => {
+    const sessionId = "01H000000000000000000000001";
+    insertTestSession(db, sessionId);
+
+    const bigDiff = "x".repeat(1_200_000); // two of these exceed the 2MB cap
+    for (let i = 1; i <= 3; i++) {
+      const eventId = `01H0000000000000000000000${i}0`;
+      insertTestEvent(db, {
+        id: eventId,
+        sessionId,
+        eventType: "assistant_response",
+        sequence: i,
+        responseText: `turn ${i}`,
+      });
+      insertDiff(db, {
+        id: `01H0000000000000000000000${i}D`,
+        eventId,
+        diffText: bigDiff,
+      });
+    }
+
+    const first = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
+
+    // Only the first event fits under the cap; it ships WITH its diff.
+    expect(first.diffByteCapApplied).toBe(true);
+    expect(first.batch.events.map((e) => e.id)).toEqual(["01H000000000000000000000010"]);
+    expect(first.batch.diffs.map((d) => d.event_id)).toEqual(["01H000000000000000000000010"]);
+
+    // The trimmed events are picked up by the next batch (cursor = last shipped event).
+    const second = buildSyncBatch(
+      db,
+      "01H000000000000000000000010",
+      null,
+      PROJECT_ID,
+      CLOUD_CLIENT_ID,
+      500,
+    );
+    expect(second.batch.events.map((e) => e.id)).toEqual(["01H000000000000000000000020"]);
+    expect(second.batch.diffs.map((d) => d.event_id)).toEqual(["01H000000000000000000000020"]);
+  });
+
+  it("ships diffs even when the record-count budget is exhausted", () => {
+    const sessionId = "01H000000000000000000000001";
+    insertTestSession(db, sessionId);
+
+    insertTestEvent(db, {
+      id: "01H000000000000000000000010",
+      sessionId,
+      eventType: "assistant_response",
+      sequence: 1,
+      responseText: "turn 1",
+    });
+    insertDiff(db, {
+      id: "01H00000000000000000000001D",
+      eventId: "01H000000000000000000000010",
+      diffText: "small diff",
+    });
+
+    // batchSize 2: the session + event consume the whole record budget,
+    // leaving remaining=0 at the diff step. Diffs are exempt from the
+    // count budget — dropping them here would orphan them forever.
+    const { batch } = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 2);
+
+    expect(batch.events.map((e) => e.id)).toEqual(["01H000000000000000000000010"]);
+    expect(batch.diffs.map((d) => d.event_id)).toEqual(["01H000000000000000000000010"]);
+  });
+
+  it("truncates a single oversized diff instead of stalling on it", () => {
+    const sessionId = "01H000000000000000000000001";
+    insertTestSession(db, sessionId);
+
+    insertTestEvent(db, {
+      id: "01H000000000000000000000010",
+      sessionId,
+      eventType: "assistant_response",
+      sequence: 1,
+      responseText: "huge turn",
+    });
+    insertDiff(db, {
+      id: "01H00000000000000000000001D",
+      eventId: "01H000000000000000000000010",
+      diffText: "y".repeat(3_000_000), // exceeds the 2MB cap on its own
+    });
+
+    const { batch, diffByteCapApplied } = buildSyncBatch(
+      db,
+      null,
+      null,
+      PROJECT_ID,
+      CLOUD_CLIENT_ID,
+      500,
+    );
+
+    // The event still ships, with its diff truncated to fit the cap.
+    expect(diffByteCapApplied).toBe(false);
+    expect(batch.events.map((e) => e.id)).toEqual(["01H000000000000000000000010"]);
+    expect(batch.diffs).toHaveLength(1);
+    expect(batch.diffs[0].diff_text.length).toBeLessThanOrEqual(2 * 1024 * 1024);
+    expect(batch.diffs[0].diff_text.endsWith("[truncated by adit sync: diff exceeds batch byte cap]")).toBe(true);
   });
 });

@@ -14,24 +14,17 @@ import {
   getEventById,
   queryEvents,
   searchEvents,
-  getLatestCheckpointEvent,
   getDiffText,
   type AditEvent,
   type EventType,
   type Actor,
   type AditConfig,
 } from "@varveai/adit-core";
-import { getHeadSha, getCurrentBranch, shaExists, runGitOrThrow } from "../git/runner.js";
+import { getHeadSha, getCurrentBranch } from "../git/runner.js";
 
 export interface TimelineManager {
   /** Record a new event in the timeline */
   recordEvent(params: RecordEventParams): Promise<AditEvent>;
-
-  /** Revert working tree to a checkpoint */
-  revertTo(eventId: string): Promise<void>;
-
-  /** Undo the last checkpoint */
-  undo(): Promise<void>;
 
   /** Search events by text */
   search(query: string, limit?: number): Promise<AditEvent[]>;
@@ -72,7 +65,6 @@ export interface ListOptions {
   sessionId?: string;
   eventType?: EventType;
   actor?: Actor;
-  hasCheckpoint?: boolean;
   limit?: number;
 }
 
@@ -127,77 +119,6 @@ export function createTimelineManager(
       return event;
     },
 
-    async revertTo(eventId: string): Promise<void> {
-      const event = getEventById(db, eventId);
-      if (!event) throw new Error(`Event not found: ${eventId}`);
-      if (!event.checkpointSha) {
-        throw new Error(`Event ${eventId} has no checkpoint`);
-      }
-
-      // Verify the checkpoint commit object is reachable (may have been
-      // garbage collected if the ref was deleted after a squash merge).
-      const reachable = await shaExists(cwd, event.checkpointSha);
-      if (!reachable) {
-        throw new Error(
-          `Checkpoint ${event.checkpointSha.substring(0, 8)} is no longer reachable in the git object store. ` +
-          `The checkpoint ref may have been deleted and the object garbage collected.`,
-        );
-      }
-
-      // Use checkout to restore working tree content from the checkpoint
-      // WITHOUT moving the branch pointer. git reset --hard would move HEAD
-      // to the ADIT-internal checkpoint commit, corrupting branch history.
-      await runGitOrThrow(
-        ["checkout", event.checkpointSha, "--", "."],
-        { cwd },
-      );
-    },
-
-    async undo(): Promise<void> {
-      const latest = getLatestCheckpointEvent(db);
-      if (!latest?.checkpointSha) {
-        throw new Error("No checkpoints to undo");
-      }
-
-      // Find the target SHA to restore to. Try the git parent first;
-      // if that fails (e.g., after a squash merge where the parent commit
-      // is unreachable), fall back to the previous checkpoint in the DB
-      // by sequence order, or HEAD as a last resort.
-      let targetSha: string | null = null;
-
-      // Attempt 1: git parent of latest checkpoint commit
-      const parentResult = await import("../git/refs.js").then((m) =>
-        m.getParentSha(cwd, latest.checkpointSha!),
-      );
-      if (parentResult && (await shaExists(cwd, parentResult))) {
-        targetSha = parentResult;
-      }
-
-      // Attempt 2: previous checkpoint in DB sequence
-      if (!targetSha) {
-        const allCheckpoints = queryEvents(db, { hasCheckpoint: true, limit: 2 });
-        // allCheckpoints is ordered by started_at DESC; [0] is latest, [1] is previous
-        const previous = allCheckpoints.find((e) => e.id !== latest.id);
-        if (previous?.checkpointSha && (await shaExists(cwd, previous.checkpointSha))) {
-          targetSha = previous.checkpointSha;
-        }
-      }
-
-      // Attempt 3: fall back to HEAD
-      if (!targetSha) {
-        targetSha = await getHeadSha(cwd);
-      }
-
-      if (!targetSha) {
-        throw new Error("Cannot find a valid target to undo to");
-      }
-
-      // Use checkout to restore working tree content from the target
-      // WITHOUT moving the branch pointer. git reset --hard would move HEAD
-      // to the ADIT-internal checkpoint commit, corrupting branch history.
-      await runGitOrThrow(["checkout", targetSha, "--", "."], { cwd });
-    },
-
     async search(query: string, limit = 20): Promise<AditEvent[]> {
       return searchEvents(db, query, limit);
     },
@@ -207,7 +128,6 @@ export function createTimelineManager(
         sessionId: opts?.sessionId,
         eventType: opts?.eventType,
         actor: opts?.actor,
-        hasCheckpoint: opts?.hasCheckpoint,
         limit: opts?.limit ?? 50,
       });
     },

@@ -312,16 +312,20 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
     expect(fullConfig.settings).toEqual({ theme: "dark" });
   });
 
-  it("handles corrupted hooks file gracefully", async () => {
+  it("refuses to overwrite a corrupted hooks file", async () => {
     const cursorDir = join(projectRoot, ".cursor");
     mkdirSync(cursorDir, { recursive: true });
-    writeFileSync(join(cursorDir, "hooks.json"), "{ invalid json }}}");
+    const hooksPath = join(cursorDir, "hooks.json");
+    writeFileSync(hooksPath, "{ invalid json }}}");
 
-    // Should not throw — starts fresh
-    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
+    // Must throw instead of silently rebuilding the file — the corrupt
+    // file may hold other tools' hook config.
+    await expect(
+      cursorAdapter.installHooks(projectRoot, "npx adit-hook"),
+    ).rejects.toThrow("invalid JSON");
 
-    const hooks = readHooks(projectRoot);
-    expect(hooks.stop).toBeDefined();
+    // The corrupted file is left untouched for the user to fix.
+    expect(readFileSync(hooksPath, "utf-8")).toBe("{ invalid json }}}");
   });
 
   it("uninstallHooks removes only ADIT entries, preserves others", async () => {
