@@ -103,7 +103,6 @@ import {
   CodexCliProvider,
   codexThreadModeOverrides,
   codexTurnModeOverrides,
-  formatCodexTerminalNotice,
   normalizeCodexReclaimInput,
   promptInputForCodexMode,
 } from "./provider.js";
@@ -247,20 +246,6 @@ describe("normalizeCodexReclaimInput", () => {
   it("decodes CSI-u Ctrl+C left by Codex terminal mode", () => {
     expect(normalizeCodexReclaimInput("\x1b[99;5u")).toBe("\u0003");
     expect(normalizeCodexReclaimInput("\x1b[99;1:5u")).toBe("\u0003");
-  });
-});
-
-describe("formatCodexTerminalNotice", () => {
-  it("clears stale TUI content when writing notices to a TTY", () => {
-    expect(formatCodexTerminalNotice("[adit cloud codex] taken over", true)).toBe(
-      "\r\x1b[2K\r\n\r\x1b[2K[adit cloud codex] taken over\x1b[0K\r\n\r\x1b[2K",
-    );
-  });
-
-  it("keeps plain newlines for non-TTY output", () => {
-    expect(formatCodexTerminalNotice("[adit cloud codex] taken over\n", false)).toBe(
-      "\n[adit cloud codex] taken over\n",
-    );
   });
 });
 

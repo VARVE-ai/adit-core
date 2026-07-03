@@ -2,10 +2,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { loadConfig, findGitRoot, projectNameFromRoot } from "@varveai/adit-core";
 import {
-  CloudApiError,
-  CloudAuthError,
   CloudClient,
-  CloudNetworkError,
   DEFAULT_SERVER_URL,
   loadCloudConfig,
   loadCredentials,
@@ -21,6 +18,7 @@ import {
 } from "./cli-agent/claude/hooks-bootstrap.js";
 import { startCliAgentHookServer, type HookServer } from "./cli-agent/hook-server.js";
 import { CliAgentRelayWebSocket } from "./cli-agent/relay-client.js";
+import { createRelayNotices, createRelayStatusReporter } from "./cli-agent/relay-console.js";
 import { requireAditProjectInitialized } from "./project-initialization.js";
 import type {
   CliAgentRelayEvent,
@@ -191,21 +189,6 @@ function enqueueTranscriptEvents(
     if (opts.idleOnRunAborted && event.type === "run.aborted") shouldMarkIdle = true;
   }
   return shouldMarkIdle;
-}
-
-function printCloudError(prefix: string, error: unknown): void {
-  if (error instanceof CloudAuthError) {
-    console.error(`${prefix}: authentication failed. Run 'adit cloud login' again.`);
-    console.error(error.message);
-  } else if (error instanceof CloudNetworkError) {
-    console.error(`${prefix}: cannot reach adit-cloud.`);
-    console.error(error.message);
-  } else if (error instanceof CloudApiError) {
-    console.error(`${prefix}: cloud API error (${error.status}).`);
-    console.error(error.message);
-  } else {
-    console.error(`${prefix}: ${error instanceof Error ? error.message : String(error)}`);
-  }
 }
 
 async function processCommand(
@@ -406,11 +389,19 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
   const terminalId = randomUUID();
   const projectName = projectNameFromRoot(config.projectRoot);
   const panelName = projectName;
+  const notices = createRelayNotices("claude");
+  const relayStatus = createRelayStatusReporter({
+    notices,
+    projectName,
+    projectRoot: config.projectRoot,
+    terminalId,
+    serverUrl,
+  });
 
   try {
     await client.get("/api/sync/status");
   } catch (error) {
-    printCloudError("Unable to verify cloud login", error);
+    notices.cloudError("unable to verify cloud login", error);
     process.exitCode = 1;
     return;
   }
@@ -434,11 +425,11 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
         cwd: config.projectRoot,
       });
       if (installedPersistentHooks) {
-        console.log("Installed ADIT Claude Code hooks for local timeline tracking.");
+        notices.line("Installed ADIT Claude Code hooks for local timeline tracking.");
       }
     } catch (error) {
-      console.error(
-        `[adit cloud claude] warning: failed to install persistent ADIT Claude Code hooks: ${error instanceof Error ? error.message : String(error)}`,
+      notices.line(
+        `warning: failed to install persistent ADIT Claude Code hooks: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 
@@ -462,6 +453,7 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
       cwd: config.projectRoot,
       hookSettingsPath: installedHooks.settingsPath,
       onEvent: enqueueEvent,
+      notices,
     });
 
     const ws = new CliAgentRelayWebSocket({
@@ -476,12 +468,7 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
         panelName,
       },
       onHello: (info) => {
-        console.log(`Connected ${config.projectRoot} to adit-cloud Coding.`);
-        console.log(`Terminal: ${terminalId}`);
-        console.log(`Connection: ${info.connectionId}`);
-        if (info.panelId) console.log(`Panel: ${info.panelName ?? panelName} (${info.panelId})`);
-        console.log("Local Claude Code owns the session until the Coding page takes over.");
-        console.log("When Web owns the session, type /local in this terminal to reclaim it.");
+        relayStatus.helloOk({ ...info, owner: provider?.state.owner ?? "stopped" });
       },
       onCommand: (command) => {
         enqueueCommand({
@@ -495,7 +482,10 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
         // Server archived our panel; reconnect will get a fresh one.
       },
       onError: (error) => {
-        printCloudError("[adit cloud claude] websocket relay", error);
+        relayStatus.relayError(error);
+      },
+      onReconnectScheduled: (attempt, delayMs) => {
+        relayStatus.retryScheduled(attempt, delayMs);
       },
     });
 
@@ -571,7 +561,7 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
       if (stopping) return;
       stopping = true;
       process.exitCode = exitCode;
-      console.log(`\n[adit cloud claude] received ${signal}, shutting down...`);
+      notices.shutdown(signal);
       cleanupResources();
       setTimeout(() => process.exit(exitCode), 100);
     };
@@ -581,11 +571,11 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
     process.on("SIGHUP", () => cleanup("SIGHUP"));
     process.on("exit", cleanupResources);
     process.on("uncaughtException", (error) => {
-      printCloudError("[adit cloud claude] uncaught exception", error);
+      notices.cloudError("uncaught exception", error);
       cleanup("uncaughtException", 1);
     });
     process.on("unhandledRejection", (error) => {
-      printCloudError("[adit cloud claude] unhandled rejection", error);
+      notices.cloudError("unhandled rejection", error);
       cleanup("unhandledRejection", 1);
     });
 
@@ -625,16 +615,18 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
           ws.connect();
         }
       } catch (error) {
-        printCloudError("[adit cloud claude] relay loop", error);
+        notices.cloudError("relay loop", error);
       }
 
       const relayConnected = ws.isOpen && Boolean(ws.currentConnectionId);
-      if (commandQueue.length === 0 && (!relayConnected || eventQueue.length === 0)) {
+      // Always yield while disconnected: commands cannot drain without a
+      // connection, and a zero-await iteration would starve the event loop.
+      if (!relayConnected || (commandQueue.length === 0 && eventQueue.length === 0)) {
         await relayLoopWake.wait(1500);
       }
     }
   } catch (error) {
-    printCloudError("Failed to start Claude Coding relay", error);
+    notices.cloudError("failed to start Claude Coding relay", error);
     provider?.stop();
     try {
       installedHooks?.cleanup();
