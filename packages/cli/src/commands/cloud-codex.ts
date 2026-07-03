@@ -1,10 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { loadConfig, findGitRoot, projectNameFromRoot } from "@varveai/adit-core";
 import {
-  CloudApiError,
-  CloudAuthError,
   CloudClient,
-  CloudNetworkError,
   DEFAULT_SERVER_URL,
   loadCloudConfig,
   loadCredentials,
@@ -22,6 +19,11 @@ import {
 } from "./cli-agent/codex/hooks-bootstrap.js";
 import { startCliAgentHookServer, type HookServer } from "./cli-agent/hook-server.js";
 import { CliAgentRelayWebSocket } from "./cli-agent/relay-client.js";
+import {
+  createRelayNotices,
+  createRelayStatusReporter,
+  type RelayNotices,
+} from "./cli-agent/relay-console.js";
 import { requireAditProjectInitialized } from "./project-initialization.js";
 import type {
   CliAgentRelayEvent,
@@ -126,31 +128,10 @@ function withHooksEnabled(args: string[]): string[] {
   return hasHooksFlag ? args : ["--enable", "hooks", ...args];
 }
 
-function isAditDebugEnabled(): boolean {
-  const value = process.env.ADIT_DEBUG?.trim().toLowerCase();
-  return Boolean(value && value !== "0" && value !== "false" && value !== "off");
-}
-
 const CODEX_CLOUD_HOOK_MARKER = "from=adit-cloud-codex-env";
 
-function writeCodexDebugLines(lines: string[]): void {
-  if (!isAditDebugEnabled()) return;
-  for (const line of lines) console.error(`[adit cloud codex] debug: ${line}`);
-}
-
-function printCloudError(prefix: string, error: unknown): void {
-  if (error instanceof CloudAuthError) {
-    console.error(`${prefix}: authentication failed. Run 'adit cloud login' again.`);
-    console.error(error.message);
-  } else if (error instanceof CloudNetworkError) {
-    console.error(`${prefix}: cannot reach adit-cloud.`);
-    console.error(error.message);
-  } else if (error instanceof CloudApiError) {
-    console.error(`${prefix}: cloud API error (${error.status}).`);
-    console.error(error.message);
-  } else {
-    console.error(`${prefix}: ${error instanceof Error ? error.message : String(error)}`);
-  }
+function writeCodexDebugLines(notices: RelayNotices, lines: string[]): void {
+  for (const line of lines) notices.debug(line);
 }
 
 async function processCommand(
@@ -353,6 +334,7 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
     return;
   }
 
+  const notices = createRelayNotices("codex");
   const codexSelection = selectCodexExecutable(opts?.bin);
   const codexExecutable = codexSelection.executable;
   if (!codexExecutable) {
@@ -361,7 +343,7 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
     process.exitCode = 1;
     return;
   }
-  writeCodexDebugLines(codexSelection.debugLines);
+  writeCodexDebugLines(notices, codexSelection.debugLines);
   if (!codexSelection.supportsAppServer) {
     console.error(`Codex CLI does not expose 'app-server': ${codexSelection.bin}`);
     console.error("Upgrade Codex CLI to the latest version and try again.");
@@ -369,11 +351,11 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
     return;
   }
   if (!opts?.bin && codexSelection.source !== "PATH") {
-    writeCodexDebugLines([
+    writeCodexDebugLines(notices, [
       `Using Codex CLI from ${codexExecutable} (${codexSelection.source})`,
     ]);
   }
-  writeCodexDebugLines(codexBinaryMismatchDebugLines(codexExecutable));
+  writeCodexDebugLines(notices, codexBinaryMismatchDebugLines(codexExecutable));
 
   const cloudConfig = loadCloudConfig();
   const serverUrl = cloudConfig.serverUrl ?? credentials.serverUrl ?? DEFAULT_SERVER_URL;
@@ -381,11 +363,18 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
   const terminalId = randomUUID();
   const projectName = projectNameFromRoot(config.projectRoot);
   const panelName = projectName;
+  const relayStatus = createRelayStatusReporter({
+    notices,
+    projectName,
+    projectRoot: config.projectRoot,
+    terminalId,
+    serverUrl,
+  });
 
   try {
     await client.get("/api/sync/status");
   } catch (error) {
-    printCloudError("Unable to verify cloud login", error);
+    notices.cloudError("unable to verify cloud login", error);
     process.exitCode = 1;
     return;
   }
@@ -415,11 +404,11 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
       cwd: config.projectRoot,
     });
     if (installedPersistentHooks) {
-      console.log("Installed ADIT Codex hooks for local timeline tracking.");
+      notices.line("Installed ADIT Codex hooks for local timeline tracking.");
     }
   } catch (error) {
-    console.error(
-      `[adit cloud codex] warning: failed to install persistent ADIT Codex hooks: ${error instanceof Error ? error.message : String(error)}`,
+    notices.line(
+      `warning: failed to install persistent ADIT Codex hooks: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 
@@ -438,6 +427,7 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
       hookEndpoint: hookServer.endpoint,
       hookMarker: CODEX_CLOUD_HOOK_MARKER,
       onEvent: enqueueEvent,
+      notices,
     });
 
     const ws = new CliAgentRelayWebSocket({
@@ -452,12 +442,7 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
         panelName,
       },
       onHello: (info) => {
-        console.log(`Connected ${config.projectRoot} to adit-cloud Coding.`);
-        console.log(`Terminal: ${terminalId}`);
-        console.log(`Connection: ${info.connectionId}`);
-        if (info.panelId) console.log(`Panel: ${info.panelName ?? panelName} (${info.panelId})`);
-        console.log("Local Codex CLI owns the session until the Coding page takes over.");
-        console.log("When Web owns the session, type /local in this terminal to reclaim it.");
+        relayStatus.helloOk({ ...info, owner: provider?.state.owner ?? "stopped" });
       },
       onCommand: (command) => {
         const enqueued = enqueueCommand({
@@ -471,7 +456,10 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
         // Server archived our panel; reconnect will get a fresh one.
       },
       onError: (error) => {
-        printCloudError("[adit cloud codex] websocket relay", error);
+        relayStatus.relayError(error);
+      },
+      onReconnectScheduled: (attempt, delayMs) => {
+        relayStatus.retryScheduled(attempt, delayMs);
       },
     });
 
@@ -532,7 +520,7 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
     const cleanup = (signal: string) => {
       if (stopping) return;
       stopping = true;
-      console.log(`\n[adit cloud codex] received ${signal}, shutting down...`);
+      notices.shutdown(signal);
       provider?.stop();
       ws.close();
       try {
@@ -576,7 +564,7 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
           ws.connect();
         }
       } catch (error) {
-        printCloudError("[adit cloud codex] relay loop", error);
+        notices.cloudError("relay loop", error);
       }
 
       const relayConnected = ws.isOpen && Boolean(ws.currentConnectionId);
@@ -587,7 +575,7 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
       }
     }
   } catch (error) {
-    printCloudError("Failed to start Codex Coding relay", error);
+    notices.cloudError("failed to start Codex Coding relay", error);
     provider?.stop();
     try {
       installedHooks?.cleanup();

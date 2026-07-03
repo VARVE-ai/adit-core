@@ -84,6 +84,11 @@ import {
 } from "./transcripts.js";
 import type { ClaudeRewindCheckpoint } from "./transcripts.js";
 import { writeCliAgentErrorToTerminal } from "../terminal-error.js";
+import {
+  RECLAIM_COMMAND,
+  createRelayNotices,
+  type RelayNotices,
+} from "../relay-console.js";
 export { buildClaudeCloudRelayEnv } from "./capabilities.js";
 export { normalizeClaudeTodoWriteInput } from "./todos.js";
 export type { ClaudeTodoItem, ClaudeTodoPriority, ClaudeTodoStatus } from "./todos.js";
@@ -134,13 +139,13 @@ interface ClaudeCodeProviderOptions {
   cwd: string;
   hookSettingsPath?: string;
   onEvent?: (event: CliAgentRelayEvent) => void;
+  notices?: RelayNotices;
 }
 
 type CapabilityHydrateTarget =
   | { owner: "local"; child: ChildProcess }
   | { owner: "web"; generation: number };
 
-const RECLAIM_COMMAND = "/local";
 const BRANCH_REFRESH_INTERVAL_MS = 5_000;
 const CONTEXT_USAGE_REFRESH_INTERVAL_MS = 10_000;
 // The capability probe spawns a full Claude CLI process; without a deadline a
@@ -243,9 +248,11 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private reclaimBuffer = "";
   private reclaimAttached = false;
   private suppressNextLocalExit = false;
+  private readonly notices: RelayNotices;
 
   constructor(private readonly opts: ClaudeCodeProviderOptions) {
     super();
+    this.notices = opts.notices ?? createRelayNotices("claude");
     this.startLocal();
   }
 
@@ -335,9 +342,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.pendingLocalReclaimSessionId = null;
     this.localSessionAliases.clear();
     this.emitState();
-    process.stderr.write(
-      `\n[adit cloud claude] Web has taken over Claude Code. Type ${RECLAIM_COMMAND} here to reclaim local control.\n`,
-    );
+    this.notices.takenOverByWeb();
     this.attachReclaimInput();
     const generation = ++this.remoteLoopGeneration;
     void this.runRemoteLoop(generation);
@@ -357,7 +362,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.reclaimingToLocal = true;
     this.detachReclaimInput();
     this.stopCapabilityProbe();
-    process.stderr.write("\n[adit cloud claude] releasing Web control back to local Claude CLI...\n");
+    this.notices.releasingToLocal();
     this.remoteLoopGeneration++;
     await this.finishActiveRunAsAborted({
       errorMessage: "Web control released to local CLI",
@@ -879,7 +884,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
     child.on("error", (error) => {
       this.pushEvent("error", { message: error.message });
-      process.stderr.write(`\n[adit cloud claude] failed to start Claude CLI: ${error.message}\n`);
+      this.notices.notice(`Failed to start Claude CLI: ${error.message}`);
       if (this.local === child) {
         this.local = null;
         this.ownerValue = "stopped";
@@ -962,7 +967,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     } catch (error) {
       if (!abortController.signal.aborted) {
         const message = error instanceof Error ? error.message : String(error);
-        process.stderr.write(`\n[adit cloud claude] capability hydrate failed: ${message}\n`);
+        this.notices.debug(`capability hydrate failed: ${message}`);
       }
     } finally {
       if (this.capabilityProbeQuery === probe) {
@@ -1975,9 +1980,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       return;
     }
     if (text.includes("\n") || text.includes("\r")) {
-      process.stderr.write(
-        `[adit cloud claude] Web owns this session. Type ${RECLAIM_COMMAND} to reclaim.\n`,
-      );
+      this.notices.webOwnsReminder();
     }
   };
 
@@ -2112,7 +2115,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
   private pushEvent(type: string, payload: Record<string, unknown>): void {
     if (type === "error" && this.ownerValue === "web") {
-      writeCliAgentErrorToTerminal("adit cloud claude", payload);
+      writeCliAgentErrorToTerminal("adit claude", payload);
     }
     this.opts.onEvent?.({ type, payload });
   }

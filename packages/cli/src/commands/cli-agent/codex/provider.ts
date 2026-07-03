@@ -54,10 +54,14 @@ import {
 import {
   applyReclaimText,
   normalizeCodexReclaimInput,
-  restoreTerminalForCodexReclaim,
   stopLocalCodexProcess,
-  writeCodexTerminalNotice,
 } from "./terminal.js";
+import {
+  RECLAIM_COMMAND,
+  createRelayNotices,
+  restoreTerminalForReclaim,
+  type RelayNotices,
+} from "../relay-console.js";
 import {
   buildCodexContextUsage,
   isSameContextUsage,
@@ -69,7 +73,7 @@ import {
 import { emitCodexThreadItem } from "./thread-items.js";
 export { promptInputForCodexMode, codexThreadModeOverrides, codexTurnModeOverrides } from "./input-mode.js";
 export type { CodexPromptMode } from "./input-mode.js";
-export { formatCodexTerminalNotice, normalizeCodexReclaimInput } from "./terminal.js";
+export { normalizeCodexReclaimInput } from "./terminal.js";
 import { spawnCliProcess } from "../cli-process.js";
 import {
   isCodexThreadSavedForCwd,
@@ -98,9 +102,9 @@ interface CodexCliProviderOptions {
   hookEndpoint?: string;
   hookMarker?: string;
   onEvent?: (event: CliAgentRelayEvent) => void;
+  notices?: RelayNotices;
 }
 
-const RECLAIM_COMMAND = "/local";
 const BRANCH_REFRESH_INTERVAL_MS = 5_000;
 
 export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
@@ -145,9 +149,11 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private codexMcpServers: Array<Record<string, unknown>> = [];
   private localResumeLogWatcher: CodexResumeLogWatcher | null = null;
   private localModelConfigWatcher: CodexModelConfigWatcher | null = null;
+  private readonly notices: RelayNotices;
 
   constructor(private readonly opts: CodexCliProviderOptions) {
     super();
+    this.notices = opts.notices ?? createRelayNotices("codex");
     this.startLocal();
   }
 
@@ -248,17 +254,14 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
 
     this.ownerValue = "web";
     this.emitState();
-    restoreTerminalForCodexReclaim();
-    writeCodexTerminalNotice(
-      `[adit cloud codex] Web has taken over Codex CLI. Type ${RECLAIM_COMMAND} here to reclaim local control.`,
-    );
+    this.notices.takenOverByWeb();
     this.attachReclaimInput();
   }
 
   async releaseToLocal(): Promise<void> {
     if (this.ownerValue !== "web") return;
     this.detachReclaimInput();
-    process.stderr.write("\n[adit cloud codex] releasing Web control back to local Codex CLI...\n");
+    this.notices.releasingToLocal();
     await this.finishActiveRunAsAborted({
       errorMessage: "Web control released to local CLI",
       eventMessage: "Web control released to local CLI.",
@@ -731,7 +734,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
 
     child.on("error", (error) => {
       this.pushEvent("error", { message: error.message });
-      process.stderr.write(`\n[adit cloud codex] failed to start Codex CLI: ${error.message}\n`);
+      this.notices.notice(`Failed to start Codex CLI: ${error.message}`);
       if (this.local === child) {
         this.local = null;
         this.stopLocalResumeLogWatcher();
@@ -1376,7 +1379,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
 
   private pushEvent(type: string, payload: Record<string, unknown>): void {
     if (type === "error" && this.ownerValue === "web") {
-      writeCliAgentErrorToTerminal("adit cloud codex", payload);
+      writeCliAgentErrorToTerminal("adit codex", payload);
     }
     this.opts.onEvent?.({ type, payload });
   }
@@ -1623,7 +1626,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.reclaimAttached = true;
     this.reclaimBuffer = "";
     try {
-      restoreTerminalForCodexReclaim();
+      restoreTerminalForReclaim();
       process.stdin.setEncoding("utf8");
       process.stdin.resume();
       process.stdin.on("data", this.onReclaimInput);
@@ -1663,9 +1666,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       return;
     }
     if (text.includes("\n") || text.includes("\r")) {
-      writeCodexTerminalNotice(
-        `[adit cloud codex] Web owns this session. Type ${RECLAIM_COMMAND} to reclaim.\n`,
-      );
+      this.notices.webOwnsReminder();
     }
   };
 }

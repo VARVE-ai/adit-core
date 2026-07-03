@@ -1,30 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 
-export const CLEAR_TERMINAL_LINE = "\r\x1b[2K";
-
-export const CLEAR_TO_END_OF_LINE = "\x1b[0K";
-
 export const LOCAL_CLI_EXIT_WAIT_MS = 750;
-
-export const TERMINAL_RECLAIM_RESET = [
-  "\x1b[?1004l", // Focus in/out reporting.
-  "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l", // Mouse modes.
-  "\x1b[?2004l", // Bracketed paste.
-  "\x1b[?1l", // Application cursor keys.
-  "\x1b[=0u\x1b[<u\x1b[<u\x1b[<u", // Kitty/CSI-u keyboard protocol.
-  "\x1b[>4;0m", // xterm modifyOtherKeys.
-  "\x1b[?25h", // Cursor visible.
-].join("");
-
-export function writeCodexTerminalNotice(message: string): void {
-  process.stderr.write(formatCodexTerminalNotice(message));
-}
-
-export function formatCodexTerminalNotice(message: string, isTTY = Boolean(process.stderr.isTTY)): string {
-  const text = message.replace(/\r?\n$/u, "");
-  if (!isTTY) return `\n${text}\n`;
-  return `${CLEAR_TERMINAL_LINE}\r\n${CLEAR_TERMINAL_LINE}${text}${CLEAR_TO_END_OF_LINE}\r\n${CLEAR_TERMINAL_LINE}`;
-}
 
 export async function stopLocalCodexProcess(child: ChildProcess | null): Promise<void> {
   if (!child) return;
@@ -52,19 +28,6 @@ export function waitForChildExit(child: ChildProcess, timeoutMs: number): Promis
     child.once("exit", finish);
     child.once("close", finish);
   });
-}
-
-export function restoreTerminalForCodexReclaim(): void {
-  try {
-    if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
-      process.stdin.setRawMode(false);
-    }
-  } catch {}
-  try {
-    if (process.stderr.isTTY) {
-      process.stderr.write(TERMINAL_RECLAIM_RESET);
-    }
-  } catch {}
 }
 
 export function normalizeCodexReclaimInput(text: string): string {
