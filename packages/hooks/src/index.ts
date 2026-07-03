@@ -8,16 +8,12 @@
  * All errors are caught and swallowed — hooks must never block the AI agent.
  */
 
-import { appendFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { Platform } from "@varveai/adit-core";
 import { readStdin } from "./common/context.js";
+import { debugLog } from "./common/debug-log.js";
 import { detectPlatform, detectPlatformFromPayload, getAdapter } from "./adapters/index.js";
 import { parseHookArgs, type HookPlatformArg } from "./adapters/command.js";
 import { dispatchHook } from "./handlers/unified.js";
-
-const DEBUG_LOG_PATH = join(tmpdir(), "adit-hook-debug.jsonl");
 
 // Hard safety net: kill the process after 10 seconds no matter what.
 // Hooks must never block the AI agent — this ensures we exit even if
@@ -37,42 +33,35 @@ async function main(): Promise<void> {
     platform = detectPlatformFromPayload(raw) ?? "other";
   }
 
-  // Debug: log raw hook data to /tmp/adit-hook-debug.jsonl
-  try {
-    const debugEntry = {
-      timestamp: new Date().toISOString(),
-      argv: process.argv,
-      env: {
-        CODEX: process.env.CODEX,
-        CLAUDE_CODE: process.env.CLAUDE_CODE,
-        CURSOR: process.env.CURSOR,
-        GEMINI: process.env.GEMINI,
-        GEMINI_SESSION_ID: process.env.GEMINI_SESSION_ID,
-        GEMINI_PROJECT_DIR: process.env.GEMINI_PROJECT_DIR,
-      },
-      detectedPlatform: platform,
-      command: hookArgs.hookType,
-      raw,
-    };
-    appendFileSync(DEBUG_LOG_PATH, JSON.stringify(debugEntry) + "\n");
-  } catch { /* best-effort */ }
+  // Debug: log raw hook data (only when ADIT_DEBUG is set)
+  debugLog({
+    argv: process.argv,
+    env: {
+      CODEX: process.env.CODEX,
+      CLAUDE_CODE: process.env.CLAUDE_CODE,
+      CURSOR: process.env.CURSOR,
+      GEMINI: process.env.GEMINI,
+      GEMINI_SESSION_ID: process.env.GEMINI_SESSION_ID,
+      GEMINI_PROJECT_DIR: process.env.GEMINI_PROJECT_DIR,
+    },
+    detectedPlatform: platform,
+    command: hookArgs.hookType,
+    raw,
+  });
 
   const adapter = getAdapter(platform);
   const input = adapter.parseInput(raw, hookArgs.hookType);
 
   // Debug: log parsed input to see what the adapter extracted
-  try {
-    appendFileSync(DEBUG_LOG_PATH, JSON.stringify({
-      timestamp: new Date().toISOString(),
-      phase: "parsed",
-      platform,
-      hookType: input.hookType,
-      lastAssistantMessage: input.lastAssistantMessage,
-      stopReason: input.stopReason,
-      transcriptPath: input.transcriptPath,
-      rawKeys: Object.keys(raw),
-    }) + "\n");
-  } catch { /* best-effort */ }
+  debugLog({
+    phase: "parsed",
+    platform,
+    hookType: input.hookType,
+    lastAssistantMessage: input.lastAssistantMessage,
+    stopReason: input.stopReason,
+    transcriptPath: input.transcriptPath,
+    rawKeys: Object.keys(raw),
+  });
 
   await dispatchHook(input);
 }

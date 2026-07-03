@@ -22,11 +22,9 @@ import {
   type FileChange,
 } from "@varveai/adit-engine";
 import { initHookContext, type HookContext } from "../common/context.js";
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { debugLog } from "../common/debug-log.js";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
-
-const DEBUG_LOG_PATH = join(tmpdir(), "adit-hook-debug.jsonl");
 import type { NormalizedHookInput } from "../adapters/types.js";
 import {
   extractClaudeMutationsFromTranscript,
@@ -161,21 +159,18 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
   const responseText = recoveredAssistantMessage ?? input.stopReason ?? "completed";
 
   // Debug: log response resolution chain to trace why "completed" is recorded
-  try {
-    appendFileSync(DEBUG_LOG_PATH, JSON.stringify({
-      timestamp: new Date().toISOString(),
-      phase: "stop-response-resolution",
-      hookType: input.hookType,
-      platformCli: input.platformCli,
-      hasLastAssistantMessage: !!input.lastAssistantMessage,
-      hasTranscriptPath: !!input.transcriptPath,
-      transcriptRecoveryResult: recoveredAssistantMessage ? "found" : "not-found",
-      stopReason: input.stopReason,
-      finalResponseText: responseText,
-      rawPlatformDataKeys: input.rawPlatformData ? Object.keys(input.rawPlatformData) : [],
-      rawPlatformData: input.rawPlatformData,
-    }) + "\n");
-  } catch { /* best-effort */ }
+  debugLog({
+    phase: "stop-response-resolution",
+    hookType: input.hookType,
+    platformCli: input.platformCli,
+    hasLastAssistantMessage: !!input.lastAssistantMessage,
+    hasTranscriptPath: !!input.transcriptPath,
+    transcriptRecoveryResult: recoveredAssistantMessage ? "found" : "not-found",
+    stopReason: input.stopReason,
+    finalResponseText: responseText,
+    rawPlatformDataKeys: input.rawPlatformData ? Object.keys(input.rawPlatformData) : [],
+    rawPlatformData: input.rawPlatformData,
+  });
 
   // Extract file-edit mutations from the platform transcript.
   // Replaces the old git working-tree scan + auto-checkpoint flow.
@@ -208,12 +203,11 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
       }
     } catch (err) {
       // Best-effort: hook must not fail due to transcript parse errors
-      appendFileSync(DEBUG_LOG_PATH, JSON.stringify({
-        timestamp: new Date().toISOString(),
+      debugLog({
         phase: "mutation-extraction-failed",
         transcriptPath: input.transcriptPath,
         error: String(err),
-      }) + "\n");
+      });
     }
   }
 
@@ -245,11 +239,10 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
         });
       } catch (err) {
         // Best-effort; don't fail the hook over a diff write
-        appendFileSync(DEBUG_LOG_PATH, JSON.stringify({
-          timestamp: new Date().toISOString(),
+        debugLog({
           phase: "mutation-diff-insert-failed",
           error: String(err),
-        }) + "\n");
+        });
       }
     }
   }
