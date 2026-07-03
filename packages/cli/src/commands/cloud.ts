@@ -119,6 +119,7 @@ export async function cloudLoginCommand(opts?: {
     console.log("Authenticated successfully.");
     console.log(`Client ID: ${tokenResponse.clientId}`);
     console.log("Credentials saved to ~/.adit/cloud-credentials.json");
+    printUploadDisclosure();
   } catch (error) {
     if (error instanceof CloudApiError) {
       console.error(`Login failed: ${error.message}`);
@@ -563,6 +564,24 @@ export async function cloudAuthTokenCommand(
   clearSyncErrors();
 
   console.log("Credentials saved to ~/.adit/cloud-credentials.json");
+  printUploadDisclosure();
+}
+
+/**
+ * Tell the user exactly what logging in opts them into. Being logged in
+ * is the implicit switch for several background uploads — that must not
+ * be a surprise discovered later.
+ */
+function printUploadDisclosure(): void {
+  console.log();
+  console.log("While logged in, ADIT automatically uploads to this server:");
+  console.log("  - Timeline events (prompts, responses, tool activity — as-is, unredacted)");
+  console.log("  - Session transcripts        disable: adit cloud transcript disable");
+  console.log("  - Project docs & git metadata on session start");
+  console.log("                               disable: ADIT_PROJECT_LINK_AUTO_SYNC=false");
+  console.log("  - Environment snapshots      disable: ADIT_CAPTURE_ENV=false");
+  console.log();
+  console.log("Disable all auto-sync with ADIT_CLOUD_AUTO_SYNC=false, or run 'adit cloud logout'.");
 }
 
 /**
