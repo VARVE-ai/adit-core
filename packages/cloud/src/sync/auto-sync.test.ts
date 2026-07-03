@@ -31,17 +31,51 @@ vi.mock("../auth/credentials.js", () => ({
   incrementSyncErrors: vi.fn(() => false),
   clearSyncErrors: vi.fn(),
   isSyncDisabled: vi.fn(() => false),
+  recordAuthFailure: vi.fn(),
 }));
 
 vi.mock("@varveai/adit-core", () => ({
   getSyncState: vi.fn(),
-  loadConfig: vi.fn(() => ({
-    clientId: "test-client",
-    projectRoot: "C:\\Users\\edy\\item\\windows-project",
-  })),
+  // Must return a full AditConfig shape: resolveCloudProjectContext (real,
+  // unmocked) maps over config.repositories, so a partial config makes
+  // triggerAutoSync throw inside its fail-open catch and sync never runs.
+  loadConfig: vi.fn((cwd?: string) => {
+    const projectRoot = cwd ?? "C:\\Users\\edy\\item\\windows-project";
+    return {
+      clientId: "test-client",
+      projectRoot,
+      dataDir: `${projectRoot}/.adit`,
+      dbPath: `${projectRoot}/.adit/adit.sqlite`,
+      projectId: "proj-local-1",
+      projectType: "repo",
+      refPrefix: "refs/adit/checkpoints",
+      captureEnv: true,
+      repositories: [{
+        localRepositoryId: "proj-local-1",
+        relativePath: ".",
+        displayName: "",
+        repositoryUrl: null,
+        canonicalRepoKey: null,
+        path: projectRoot,
+      }],
+    };
+  }),
   projectNameFromRoot: vi.fn((projectRoot: string) =>
     projectRoot.replace(/[\\/]+$/u, "").split(/[\\/]+/u).at(-1) ?? "",
   ),
+  toRepositoryPayload: vi.fn((repository: {
+    localRepositoryId: string;
+    relativePath: string;
+    displayName: string;
+    repositoryUrl?: string | null;
+    canonicalRepoKey?: string | null;
+  }) => ({
+    localRepositoryId: repository.localRepositoryId,
+    relativePath: repository.relativePath,
+    displayName: repository.displayName,
+    ...(repository.repositoryUrl ? { repositoryUrl: repository.repositoryUrl } : {}),
+    ...(repository.canonicalRepoKey ? { canonicalRepoKey: repository.canonicalRepoKey } : {}),
+  })),
 }));
 
 vi.mock("@varveai/adit-engine", () => ({

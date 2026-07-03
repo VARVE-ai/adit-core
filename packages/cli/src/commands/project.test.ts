@@ -37,12 +37,18 @@ describe("project uninstall command", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.exitCode = undefined;
+    // dbPath must be present and "exist": projectUninstallCommand runs the
+    // loadInitializedProjectConfig guard first, which checks existsSync(dbPath)
+    // and silently early-returns (via console.error) when it's missing.
     mocks.loadConfig.mockReturnValue({
       projectRoot: "/repo",
       dataDir: "/repo/.adit",
+      dbPath: "/repo/.adit/adit.sqlite",
     });
     mocks.existsSync.mockImplementation((path: string) =>
-      path === "/repo/.adit" || path === "/repo/.claude/skills/generate-docs.md"
+      path === "/repo/.adit" ||
+      path === "/repo/.adit/adit.sqlite" ||
+      path === "/repo/.claude/skills/generate-docs.md"
     );
     mocks.listCheckpointRefs.mockResolvedValue([
       { stepId: "evt-1", sha: "abc" },
