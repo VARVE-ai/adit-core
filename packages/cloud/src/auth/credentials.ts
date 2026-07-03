@@ -120,29 +120,104 @@ function refreshLockPath(): string {
   return join(homedir(), ".adit", REFRESH_LOCK_FILE);
 }
 
+/**
+ * Best-effort locked read-modify-write of the credentials file.
+ *
+ * Reuses the refresh lock file so counter/diagnostic updates can never
+ * interleave with a token refresh — an unlocked write here could save a
+ * stale in-memory token set and roll back freshly rotated tokens.
+ * If the lock is currently held, the update is skipped: losing one
+ * counter increment is preferable to clobbering fresh credentials.
+ *
+ * The mutate callback receives freshly loaded credentials and returns
+ * the updated set, or null to skip writing.
+ */
+function tryLockedCredentialsUpdate(
+  mutate: (creds: CloudCredentials) => CloudCredentials | null,
+): boolean {
+  const path = refreshLockPath();
+  let fd: number;
+  try {
+    mkdirSync(join(homedir(), ".adit"), { recursive: true });
+    try {
+      fd = openSync(path, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
+      // Steal only stale locks (holder died mid-refresh); otherwise skip.
+      try {
+        const stat = statSync(path);
+        if (Date.now() - stat.mtimeMs <= REFRESH_LOCK_STALE_MS) return false;
+        unlinkSync(path);
+        fd = openSync(path, "wx", 0o600);
+      } catch {
+        return false;
+      }
+    }
+  } catch {
+    return false;
+  }
+
+  try {
+    writeSync(fd, `${process.pid} ${new Date().toISOString()}\n`);
+    const creds = loadCredentials();
+    if (!creds) return false;
+    const next = mutate(creds);
+    if (next) saveCredentials(next);
+    return next !== null;
+  } catch {
+    return false;
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // best-effort
+    }
+    try {
+      unlinkSync(path);
+    } catch {
+      // best-effort
+    }
+  }
+}
+
 /** Record the most recent auth failure for diagnostics in `adit cloud status`. */
 export function recordAuthFailure(
   failure: Omit<CloudAuthFailure, "at"> & { at?: string },
 ): void {
+  tryLockedCredentialsUpdate((creds) => withAuthFailure(creds, failure));
+}
+
+/**
+ * Unlocked variant for callers that already hold the credentials refresh
+ * lock (e.g. CloudClient.refreshToken error paths). Calling the locked
+ * variant there would fail to acquire the lock and silently skip.
+ */
+export function recordAuthFailureUnlocked(
+  failure: Omit<CloudAuthFailure, "at"> & { at?: string },
+): void {
   const creds = loadCredentials();
   if (!creds) return;
-  saveCredentials({
+  saveCredentials(withAuthFailure(creds, failure));
+}
+
+function withAuthFailure(
+  creds: CloudCredentials,
+  failure: Omit<CloudAuthFailure, "at"> & { at?: string },
+): CloudCredentials {
+  return {
     ...creds,
     lastAuthFailure: {
       ...failure,
       at: failure.at ?? new Date().toISOString(),
     },
-  });
+  };
 }
 
 /** Clear the stored auth failure after a successful authenticated request. */
 export function clearAuthFailure(): void {
-  const creds = loadCredentials();
-  if (!creds?.lastAuthFailure) return;
-  saveCredentials({
-    ...creds,
-    lastAuthFailure: undefined,
-  });
+  tryLockedCredentialsUpdate((creds) =>
+    creds.lastAuthFailure ? { ...creds, lastAuthFailure: undefined } : null,
+  );
 }
 
 /** Run a refresh operation under a local file lock shared across hook processes. */
@@ -233,42 +308,44 @@ const CIRCUIT_BREAKER_WINDOW_MS = 60 * 60 * 1000;
  * Returns true if sync is now disabled (threshold reached within window).
  */
 export function incrementSyncErrors(threshold = 5): boolean {
-  const creds = loadCredentials();
-  if (!creds) return false;
+  let disabled = false;
 
-  const now = new Date().toISOString();
-  let count = creds.syncErrorCount ?? 0;
-  let firstErrorAt = creds.firstSyncErrorAt ?? now;
+  tryLockedCredentialsUpdate((creds) => {
+    const now = new Date().toISOString();
+    let count = creds.syncErrorCount ?? 0;
+    let firstErrorAt = creds.firstSyncErrorAt ?? now;
 
-  // If the first error is outside the window, reset the counter
-  const elapsed = Date.now() - new Date(firstErrorAt).getTime();
-  if (elapsed > CIRCUIT_BREAKER_WINDOW_MS) {
-    count = 0;
-    firstErrorAt = now;
-  }
+    // If the first error is outside the window, reset the counter
+    const elapsed = Date.now() - new Date(firstErrorAt).getTime();
+    if (elapsed > CIRCUIT_BREAKER_WINDOW_MS) {
+      count = 0;
+      firstErrorAt = now;
+    }
 
-  count += 1;
-  const disabled = count >= threshold;
+    count += 1;
+    disabled = count >= threshold;
 
-  saveCredentials({
-    ...creds,
-    syncErrorCount: count,
-    syncDisabled: disabled,
-    firstSyncErrorAt: firstErrorAt,
+    return {
+      ...creds,
+      syncErrorCount: count,
+      syncDisabled: disabled,
+      firstSyncErrorAt: firstErrorAt,
+    };
   });
+
   return disabled;
 }
 
 /** Reset sync error counter and re-enable sync. */
 export function clearSyncErrors(): void {
-  const creds = loadCredentials();
-  if (!creds) return;
-  if (!creds.syncErrorCount && !creds.syncDisabled) return;
-  saveCredentials({
-    ...creds,
-    syncErrorCount: 0,
-    syncDisabled: false,
-    firstSyncErrorAt: undefined,
+  tryLockedCredentialsUpdate((creds) => {
+    if (!creds.syncErrorCount && !creds.syncDisabled) return null;
+    return {
+      ...creds,
+      syncErrorCount: 0,
+      syncDisabled: false,
+      firstSyncErrorAt: undefined,
+    };
   });
 }
 

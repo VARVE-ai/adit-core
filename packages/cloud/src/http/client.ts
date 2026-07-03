@@ -11,14 +11,27 @@ import {
   isTokenExpired,
   loadCredentials,
   recordAuthFailure,
+  recordAuthFailureUnlocked,
   saveCredentials,
   withCredentialsRefreshLock,
 } from "../auth/credentials.js";
 import { CloudAuthError, CloudNetworkError, CloudApiError } from "./errors.js";
 
-const MAX_RETRIES = 5;
+const DEFAULT_MAX_RETRIES = 5;
 const MAX_REDIRECTS = 5;
 const INITIAL_BACKOFF_MS = 2000;
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+export interface CloudClientOptions {
+  /** Per-request timeout in milliseconds (default: 30s) */
+  timeoutMs?: number;
+  /**
+   * Max retries after the first attempt (default: 5). Hook-triggered
+   * callers should pass a tight budget — the hook process is killed
+   * after 10 seconds, so long backoff loops are wasted work.
+   */
+  maxRetries?: number;
+}
 
 interface TokenRefreshResponse {
   accessToken?: string;
@@ -49,10 +62,22 @@ export interface RefreshTokenStatus {
 export class CloudClient {
   private credentials: CloudCredentials;
   private readonly serverUrl: string;
+  private readonly timeoutMs: number;
+  private readonly maxRetries: number;
 
-  constructor(serverUrl: string, credentials: CloudCredentials) {
+  constructor(
+    serverUrl: string,
+    credentials: CloudCredentials,
+    options?: CloudClientOptions,
+  ) {
     this.serverUrl = serverUrl.replace(/\/$/, "");
     this.credentials = credentials;
+    this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
+  }
+
+  private requestSignal(): AbortSignal {
+    return AbortSignal.timeout(this.timeoutMs);
   }
 
   /** GET request with auth */
@@ -69,7 +94,11 @@ export class CloudClient {
       Authorization: `Bearer ${this.credentials.accessToken}`,
     };
 
-    const response = await fetch(url, { method: "HEAD", headers });
+    const response = await fetch(url, {
+      method: "HEAD",
+      headers,
+      signal: this.requestSignal(),
+    });
 
     if (response.status === 401 || response.status === 403) {
       if (this.credentials.authType === "token") {
@@ -85,6 +114,7 @@ export class CloudClient {
           headers: {
             Authorization: `Bearer ${this.credentials.accessToken}`,
           },
+          signal: this.requestSignal(),
         });
         if (!retry.ok) {
           if (retry.status === 401 || retry.status === 403) {
@@ -159,6 +189,7 @@ export class CloudClient {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ refreshToken: this.credentials.refreshToken }),
+        signal: this.requestSignal(),
       });
       const body = await readResponseBody(response);
       const record = asRecord(body);
@@ -204,7 +235,7 @@ export class CloudClient {
     let lastError: Error | undefined;
     let currentUrl = `${this.serverUrl}${path}`;
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       if (attempt > 0) {
         const backoffMs = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
         await sleep(backoffMs);
@@ -221,6 +252,7 @@ export class CloudClient {
           method,
           headers,
           body: body !== undefined ? JSON.stringify(body) : undefined,
+          signal: this.requestSignal(),
         });
 
         if (response.status === 401 && this.credentials.authType === "token") {
@@ -306,7 +338,7 @@ export class CloudClient {
     }
 
     throw new CloudNetworkError(
-      `Request failed after ${MAX_RETRIES} retries: ${method} ${path}`,
+      `Request failed after ${this.maxRetries} retries: ${method} ${path}`,
       lastError,
     );
   }
@@ -350,13 +382,15 @@ export class CloudClient {
           body: JSON.stringify({
             refreshToken: this.credentials.refreshToken,
           }),
+          signal: this.requestSignal(),
         });
 
         const data = await readResponseBody(response);
         if (!response.ok) {
           const code = readBodyCode(data);
           const message = `Token refresh failed: ${response.status}. Please re-authenticate with 'adit cloud login'.`;
-          recordAuthFailure({
+          // Unlocked: we are already inside the credentials refresh lock.
+          recordAuthFailureUnlocked({
             stage: "refresh",
             message,
             status: response.status,
@@ -370,7 +404,7 @@ export class CloudClient {
         const refreshToken = readString(tokenData.refreshToken);
         if (!accessToken || !refreshToken) {
           const message = "Token refresh failed: response missing accessToken or refreshToken.";
-          recordAuthFailure({ stage: "refresh", message, code: "malformed_refresh_response" });
+          recordAuthFailureUnlocked({ stage: "refresh", message, code: "malformed_refresh_response" });
           throw new CloudAuthError(message);
         }
 
@@ -388,7 +422,7 @@ export class CloudClient {
       } catch (error) {
         if (error instanceof CloudAuthError) throw error;
         const message = `Token refresh failed: ${error instanceof Error ? error.message : String(error)}`;
-        recordAuthFailure({ stage: "refresh", message });
+        recordAuthFailureUnlocked({ stage: "refresh", message });
         throw new CloudAuthError(message);
       }
     });
@@ -421,7 +455,8 @@ function resolveExpiresAt(data: TokenRefreshResponse): string {
   }
 
   const message = "Token refresh failed: response missing valid expiresAt or expiresIn.";
-  recordAuthFailure({ stage: "refresh", message, code: "malformed_refresh_response" });
+  // Unlocked: resolveExpiresAt is only called from refreshToken, inside the lock.
+  recordAuthFailureUnlocked({ stage: "refresh", message, code: "malformed_refresh_response" });
   throw new CloudAuthError(message);
 }
 
