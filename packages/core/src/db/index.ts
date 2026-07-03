@@ -64,6 +64,12 @@ export {
 } from "./sync-state.js";
 
 export {
+  getSessionRepoHeads,
+  upsertSessionRepoHead,
+  type SessionRepoHead,
+} from "./session-repo-heads.js";
+
+export {
   upsertTranscriptUpload,
   getTranscriptUpload,
   getTranscriptUploadById,

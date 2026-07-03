@@ -275,4 +275,17 @@ export const migrations: Migration[] = [
       DROP TABLE project_link_cache_old;
     `,
   },
+  {
+    id: 13,
+    name: "create_session_repo_heads",
+    sql: `
+      CREATE TABLE IF NOT EXISTS session_repo_heads (
+        session_id    TEXT NOT NULL REFERENCES sessions(id),
+        relative_path TEXT NOT NULL,
+        last_sha      TEXT NOT NULL,
+        updated_at    TEXT NOT NULL,
+        PRIMARY KEY (session_id, relative_path)
+      );
+    `,
+  },
 ];

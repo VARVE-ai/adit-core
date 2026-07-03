@@ -81,6 +81,8 @@ export {
   markTranscriptUploadFailed,
   resetTranscriptUpload,
   countActiveTranscriptUploads,
+  getSessionRepoHeads,
+  upsertSessionRepoHead,
 } from "./db/index.js";
 
 export type {
@@ -94,6 +96,7 @@ export type {
   TranscriptUpload,
   TranscriptUploadStatus,
   UpsertTranscriptUploadInput,
+  SessionRepoHead,
 } from "./db/index.js";
 
 // Config

@@ -22,6 +22,10 @@ import {
   type FileChange,
 } from "@varveai/adit-engine";
 import { initHookContext, type HookContext } from "../common/context.js";
+import {
+  detectAndRecordCommits,
+  initializeSessionRepoBaselines,
+} from "../common/commit-attribution.js";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -254,6 +258,11 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     }
   }
 
+  // Attribute commits made during this turn (fail-open inside).
+  await withPerf(ctx.config.dataDir, "git", "commitAttribution", () =>
+    detectAndRecordCommits(ctx, timeline),
+  );
+
   if (ctx.config.captureEnv) {
     try {
       // Get previous snapshot before capturing new one
@@ -446,6 +455,9 @@ async function recoverAssistantMessageFromTranscript(transcriptPath?: string): P
 async function handleSessionStart(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
   const timeline = createTimelineManager(ctx.db, ctx.config);
 
+  // Seed per-repo HEAD baselines so first-turn commits are attributable.
+  await initializeSessionRepoBaselines(ctx);
+
   // Record session start event with platform metadata
   const metadata: Record<string, unknown> = {};
   if (input.model) metadata.model = input.model;
@@ -498,6 +510,12 @@ async function handleSessionEnd(ctx: HookContext, input: NormalizedHookInput): P
       // Fail-open
     }
   }
+
+  // Sweep commits from the final turn before the session closes.
+  const timeline = createTimelineManager(ctx.db, ctx.config);
+  await withPerf(ctx.config.dataDir, "git", "commitAttribution", () =>
+    detectAndRecordCommits(ctx, timeline),
+  );
 
   // Mark session as completed with end reason
   const status = input.sessionEndReason === "error" ? "error" : "completed";
