@@ -264,6 +264,7 @@ describe("ensurePersistentClaudeHooksInstalled", () => {
 
       expect(installed).toBe(true);
       const settings = readFileSync(join(dir, ".claude", "settings.local.json"), "utf8");
+      const fixedRootArg = `--project-root-b64 ${encodeProjectRoot(dir)}`;
 
       for (const hookType of [
         "prompt-submit",
@@ -275,7 +276,9 @@ describe("ensurePersistentClaudeHooksInstalled", () => {
         "subagent-start",
         "subagent-stop",
       ]) {
-        expect(settings).toContain(`node /tmp/adit-hook --platform claude ${hookType}`);
+        expect(settings).toContain(
+          `node /tmp/adit-hook --platform claude ${fixedRootArg} ${hookType}`,
+        );
       }
       expect(existsSync(join(dir, ".claude", "commands", "adit.md"))).toBe(true);
     } finally {
@@ -303,3 +306,7 @@ describe("ensurePersistentClaudeHooksInstalled", () => {
     }
   });
 });
+
+function encodeProjectRoot(projectRoot: string): string {
+  return Buffer.from(projectRoot, "utf8").toString("base64url");
+}

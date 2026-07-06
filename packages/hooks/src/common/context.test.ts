@@ -42,9 +42,10 @@ describe("initHookContext", () => {
 
   beforeEach(() => {
     dir = tempDir();
-    dbPath = join(dir, "adit.sqlite");
+    mkdirSync(join(dir, ".adit"), { recursive: true });
+    dbPath = join(dir, ".adit", "adit.sqlite");
     process.env.ADIT_PROJECT_ROOT = dir;
-    process.env.ADIT_DATA_DIR = dir;
+    process.env.ADIT_DATA_DIR = join(dir, ".adit");
     process.env.ADIT_DB_PATH = dbPath;
     process.env.ADIT_CLIENT_ID = clientId;
     db = openDatabase(dbPath);

@@ -316,11 +316,18 @@ describe("ensurePersistentCodexHooksInstalled", () => {
       const hooks = readFileSync(join(dir, ".codex", "hooks.json"), "utf8");
       const config = readFileSync(join(dir, ".codex", "config.toml"), "utf8");
       const userConfig = readFileSync(join(codexHome, "config.toml"), "utf8");
+      const fixedRootArg = `--project-root-b64 ${encodeProjectRoot(dir)}`;
 
-      expect(hooks).toContain("node /tmp/adit-hook --platform codex session-start");
-      expect(hooks).toContain("node /tmp/adit-hook --platform codex prompt-submit");
-      expect(hooks).toContain("node /tmp/adit-hook --platform codex stop");
-      expect(hooks).toContain("node /tmp/adit-hook --platform codex notification");
+      expect(hooks).toContain(
+        `node /tmp/adit-hook --platform codex ${fixedRootArg} session-start`,
+      );
+      expect(hooks).toContain(
+        `node /tmp/adit-hook --platform codex ${fixedRootArg} prompt-submit`,
+      );
+      expect(hooks).toContain(`node /tmp/adit-hook --platform codex ${fixedRootArg} stop`);
+      expect(hooks).toContain(
+        `node /tmp/adit-hook --platform codex ${fixedRootArg} notification`,
+      );
       expect(config).toContain("hooks = true");
       expect(userConfig).toContain("# >>> adit-codex-hooks project=");
     } finally {
@@ -362,3 +369,7 @@ describe("ensurePersistentCodexHooksInstalled", () => {
     }
   });
 });
+
+function encodeProjectRoot(projectRoot: string): string {
+  return Buffer.from(projectRoot, "utf8").toString("base64url");
+}
