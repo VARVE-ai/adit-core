@@ -73,14 +73,14 @@ export function EnvScreen({
         ))}
 
       <Text bold dimColor>{""}Dependencies</Text>
-      <Box flexDirection="row">
+      <Text wrap="truncate">
         <Text dimColor>Lock file:{"  "}</Text>
         <Text>{snapshot.depLockPath ?? "none"}</Text>
-      </Box>
-      <Box flexDirection="row">
+      </Text>
+      <Text wrap="truncate">
         <Text dimColor>Lock hash:{"  "}</Text>
         <Text>{snapshot.depLockHash ?? "n/a"}</Text>
-      </Box>
+      </Text>
       {pkgMgr && (
         <Box flexDirection="row">
           <Text dimColor>Pkg mgr:{"   "}</Text>
@@ -91,20 +91,20 @@ export function EnvScreen({
       )}
 
       <Text bold dimColor>{""}System</Text>
-      <Box flexDirection="row">
+      <Text wrap="truncate">
         <Text dimColor>OS:{"        "}</Text>
         <Text>{snapshot.osInfo ?? "unknown"}</Text>
-      </Box>
+      </Text>
       {system && (
         <>
           <Box flexDirection="row">
             <Text dimColor>Arch:{"      "}</Text>
             <Text>{String(system.arch ?? "unknown")}</Text>
           </Box>
-          <Box flexDirection="row">
+          <Text wrap="truncate">
             <Text dimColor>CPU:{"       "}</Text>
             <Text>{String(system.cpuModel ?? "unknown")}</Text>
-          </Box>
+          </Text>
         </>
       )}
       {container && (

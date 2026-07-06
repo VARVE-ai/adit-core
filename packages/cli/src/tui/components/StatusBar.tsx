@@ -39,10 +39,10 @@ export function StatusBar({
       width="100%"
       paddingX={1}
     >
-      <Text dimColor>
+      <Text dimColor wrap="truncate">
         {sessionInfo} | Events: {eventCount}{sortLabel}
       </Text>
-      <Text dimColor>{hints}</Text>
+      <Text dimColor wrap="truncate">{hints}</Text>
     </Box>
   );
 }

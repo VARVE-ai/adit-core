@@ -10,11 +10,13 @@ import type { AditEvent } from "@varveai/adit-core";
 interface DiffScreenProps {
   event: AditEvent | null;
   getDiff: (eventId: string) => string | null;
+  height: number;
 }
 
 export function DiffScreen({
   event,
   getDiff,
+  height,
 }: DiffScreenProps): React.ReactElement {
   const [diffText, setDiffText] = useState<string | null>(null);
 
@@ -48,7 +50,8 @@ export function DiffScreen({
 
   return (
     <Box flexDirection="column" width="100%">
-      <DiffView diffText={diffText} title={title} />
+      {/* title (1) + footer with margin (2) */}
+      <DiffView diffText={diffText} title={title} maxLines={Math.max(height - 3, 3)} />
       <Box paddingX={1} marginTop={1}>
         <Text dimColor>[Esc] back to timeline</Text>
       </Box>
