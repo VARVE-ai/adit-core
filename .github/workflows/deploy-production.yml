@@ -124,7 +124,9 @@ jobs:
           done < /tmp/adit-package-names.txt
 
       - name: Build packages
-        run: pnpm build
+        run: |
+          rm -rf packages/*/dist packages/*/tsconfig.tsbuildinfo
+          pnpm build
 
       - name: Run tests
         run: pnpm test
