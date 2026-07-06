@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { loadConfig, findGitRoot, projectNameFromRoot } from "@varveai/adit-core";
+import { projectNameFromRoot } from "@varveai/adit-core";
 import {
   CloudClient,
   DEFAULT_SERVER_URL,
@@ -19,7 +19,7 @@ import {
 import { startCliAgentHookServer, type HookServer } from "./cli-agent/hook-server.js";
 import { CliAgentRelayWebSocket } from "./cli-agent/relay-client.js";
 import { createRelayNotices, createRelayStatusReporter } from "./cli-agent/relay-console.js";
-import { requireAditProjectInitialized } from "./project-initialization.js";
+import { loadInitializedGitOrWorkspaceProjectConfig } from "./project-initialization.js";
 import type {
   CliAgentRelayEvent,
   PromptImageAttachment,
@@ -363,18 +363,9 @@ async function drainCommandQueue(input: {
 }
 
 export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<void> {
-  const gitRoot = findGitRoot(process.cwd());
-  if (!gitRoot) {
-    console.error("Not inside a git project. Run this from the project you want to connect.");
-    process.exitCode = 1;
-    return;
-  }
-  if (!requireAditProjectInitialized(gitRoot, "adit cloud claude")) {
-    process.exitCode = 1;
-    return;
-  }
+  const config = loadInitializedGitOrWorkspaceProjectConfig("adit cloud claude");
+  if (!config) return;
 
-  const config = loadConfig(gitRoot);
   const credentials = loadCredentials();
   if (!credentials) {
     console.error("Not logged in. Run 'adit cloud login' first.");

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   findGitRoot: vi.fn(),
   loadConfig: vi.fn(),
   projectNameFromRoot: vi.fn(),
+  readWorkspaceManifest: vi.fn(),
   loadCredentials: vi.fn(),
   ensurePersistentClaudeHooksInstalled: vi.fn(),
   ensurePersistentCodexHooksInstalled: vi.fn(),
@@ -18,6 +19,7 @@ vi.mock("@varveai/adit-core", () => ({
   findGitRoot: mocks.findGitRoot,
   loadConfig: mocks.loadConfig,
   projectNameFromRoot: mocks.projectNameFromRoot,
+  readWorkspaceManifest: mocks.readWorkspaceManifest,
 }));
 
 vi.mock("@varveai/adit-cloud", () => {
@@ -97,6 +99,7 @@ describe("cloud agent initialization guard", () => {
     process.exitCode = undefined;
     projectRoot = mkdtempSync(join(tmpdir(), "adit-cloud-uninit-"));
     mocks.findGitRoot.mockReturnValue(projectRoot);
+    mocks.readWorkspaceManifest.mockReturnValue(null);
     mocks.projectNameFromRoot.mockReturnValue("project");
     mocks.resolveExecutable.mockReturnValue("/usr/local/bin/claude");
     mocks.selectCodexExecutable.mockReturnValue({
@@ -162,5 +165,41 @@ describe("cloud agent initialization guard", () => {
       "Then retry:",
       "  adit cloud codex",
     ].join("\n"));
+  });
+
+  it("allows cloud codex from an initialized workspace root without a git repository", async () => {
+    mocks.findGitRoot.mockReturnValue(null);
+    mocks.readWorkspaceManifest.mockReturnValue({
+      workspaceId: "workspace-id",
+      createdAt: "2026-07-06T00:00:00.000Z",
+    });
+    mkdirSync(join(projectRoot, ".adit"), { recursive: true });
+    writeFileSync(join(projectRoot, ".adit", "adit.sqlite"), "");
+    mocks.loadConfig.mockReturnValue({
+      projectRoot,
+      dataDir: join(projectRoot, ".adit"),
+      dbPath: join(projectRoot, ".adit", "adit.sqlite"),
+      clientId: "client",
+      projectId: "workspace-id",
+      projectType: "workspace",
+      repositories: [],
+      refPrefix: "refs/adit/checkpoints",
+      captureEnv: true,
+    });
+    mocks.loadCredentials.mockReturnValue(null);
+
+    const originalCwd = process.cwd();
+    process.chdir(projectRoot);
+    const resolvedProjectRoot = process.cwd();
+    try {
+      await cloudCodexCommand({ bin: "codex" });
+    } finally {
+      process.chdir(originalCwd);
+    }
+
+    expect(mocks.loadConfig).toHaveBeenCalledWith(resolvedProjectRoot);
+    expect(mocks.loadCredentials).toHaveBeenCalled();
+    expect(mocks.ensurePersistentCodexHooksInstalled).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith("Not logged in. Run 'adit cloud login' first.");
   });
 });

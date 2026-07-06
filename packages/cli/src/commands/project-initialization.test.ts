@@ -1,12 +1,15 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ensureWorkspaceManifest } from "@varveai/adit-core";
 import {
   formatAditProjectNotInitializedMessage,
   getAditProjectInitializationStatus,
   isAditProjectInitialized,
+  resolveGitOrWorkspaceProjectRoot,
 } from "./project-initialization.js";
+import * as core from "@varveai/adit-core";
 
 describe("ADIT project initialization checks", () => {
   let projectRoot: string;
@@ -80,5 +83,36 @@ describe("ADIT project initialization checks", () => {
       "Then retry:",
       "  adit cloud claude",
     ].join("\n"));
+  });
+
+  it("resolves a workspace root even when it is not a Git repository", () => {
+    ensureWorkspaceManifest(projectRoot);
+
+    expect(resolveGitOrWorkspaceProjectRoot(projectRoot)).toBe(projectRoot);
+  });
+
+  it("does not inherit a parent workspace from a non-Git child directory", () => {
+    ensureWorkspaceManifest(projectRoot);
+    const child = join(projectRoot, "scratch");
+    mkdirSync(child);
+
+    expect(resolveGitOrWorkspaceProjectRoot(child)).toBeNull();
+  });
+
+  it("preserves Windows absolute workspace paths when checking workspace manifests", () => {
+    const windowsRoot = "C:\\Users\\edy\\item\\workspace";
+    const gitRootSpy = vi.spyOn(core, "findGitRoot").mockReturnValue(null);
+    const manifestSpy = vi.spyOn(core, "readWorkspaceManifest").mockReturnValue({
+      workspaceId: "workspace-id",
+      createdAt: "2026-07-06T00:00:00.000Z",
+    });
+
+    try {
+      expect(resolveGitOrWorkspaceProjectRoot(windowsRoot)).toBe(windowsRoot);
+      expect(manifestSpy).toHaveBeenCalledWith(windowsRoot);
+    } finally {
+      gitRootSpy.mockRestore();
+      manifestSpy.mockRestore();
+    }
   });
 });
