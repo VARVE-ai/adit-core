@@ -16,7 +16,12 @@ import type {
   ValidationResult,
   AditHookType,
 } from "./types.js";
-import { buildAditHookCommand, isAditHookCommand, isFixedProjectRootHookCommand } from "./command.js";
+import {
+  buildAditHookCommand,
+  classifyAditHookEntries,
+  describeHookValidation,
+  isAditHookCommand,
+} from "./command.js";
 
 const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "UserPromptSubmit", aditHandler: "prompt-submit" },
@@ -223,6 +228,8 @@ export const claudeCodeAdapter: PlatformAdapter = {
     let hooksDetail = "No hook configuration found";
     const requiredHooks = HOOK_MAPPINGS.map((m) => m.platformEvent);
     const missingHooks: string[] = [];
+    const staleHooks: string[] = [];
+    const stalePinnedRoots = new Set<string>();
 
     for (const settingsPath of settingsFiles) {
       if (!existsSync(settingsPath)) continue;
@@ -236,28 +243,23 @@ export const claudeCodeAdapter: PlatformAdapter = {
             missingHooks.push(hookName);
             continue;
           }
-          const hasAdit = entries.some(
-            (entry: { command?: string; hooks?: Array<{ command?: string }> }) => {
-              if (
-                typeof entry.command === "string" &&
-                isFixedProjectRootHookCommand(entry.command, projectRoot)
-              ) return true;
-              if (Array.isArray(entry.hooks)) {
-                return entry.hooks.some((h) =>
-                  typeof h.command === "string" &&
-                  isFixedProjectRootHookCommand(h.command, projectRoot)
-                );
-              }
-              return false;
-            },
-          );
-          if (!hasAdit) missingHooks.push(hookName);
+          const { status, stalePinnedRoots: roots } = classifyAditHookEntries(entries, projectRoot);
+          if (status === "absent") missingHooks.push(hookName);
+          if (status === "stale") {
+            staleHooks.push(hookName);
+            roots.forEach((root) => stalePinnedRoots.add(root));
+          }
         }
 
-        hooksFound = missingHooks.length === 0;
-        hooksDetail = hooksFound
-          ? `All hooks registered in ${settingsPath}`
-          : `Missing hooks: ${missingHooks.join(", ")}`;
+        const summary = describeHookValidation({
+          configPath: settingsPath,
+          projectRoot,
+          missingHooks,
+          staleHooks,
+          stalePinnedRoots: Array.from(stalePinnedRoots),
+        });
+        hooksFound = summary.ok;
+        hooksDetail = summary.detail;
         break;
       } catch {
         hooksDetail = `Failed to parse ${settingsPath}`;

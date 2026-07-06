@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { claudeCodeAdapter } from "./claude-code.js";
+import { encodeProjectRoot } from "./command.js";
 
 /** Create a unique temp directory for each test */
 function tempProjectRoot(): string {
@@ -381,6 +382,30 @@ describe("Claude Code Hook Chaining", () => {
     const result = await claudeCodeAdapter.validateInstallation(projectRoot);
 
     expect(result.valid).toBe(false);
-    expect(result.checks.find((c) => c.name === "Hook configuration")?.ok).toBe(false);
+    const hookCheck = result.checks.find((c) => c.name === "Hook configuration");
+    expect(hookCheck?.ok).toBe(false);
+    // Stale commands silently no-op at runtime — doctor must say how to fix,
+    // not report them as missing.
+    expect(hookCheck?.detail).toContain("Stale ADIT hooks");
+    expect(hookCheck?.detail).toContain("re-run `adit init`");
+    expect(hookCheck?.detail).not.toContain("Missing hooks");
+  });
+
+  it("validateInstallation hints at a moved project when the pinned root differs", async () => {
+    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+    const settingsPath = join(projectRoot, ".claude", "settings.local.json");
+    const movedRoot = "/somewhere/else";
+    const rewritten = readFileSync(settingsPath, "utf-8").replaceAll(
+      encodeProjectRoot(projectRoot),
+      encodeProjectRoot(movedRoot),
+    );
+    writeFileSync(settingsPath, rewritten);
+
+    const result = await claudeCodeAdapter.validateInstallation(projectRoot);
+
+    expect(result.valid).toBe(false);
+    const hookCheck = result.checks.find((c) => c.name === "Hook configuration");
+    expect(hookCheck?.detail).toContain("project moved?");
+    expect(hookCheck?.detail).toContain(movedRoot);
   });
 });
