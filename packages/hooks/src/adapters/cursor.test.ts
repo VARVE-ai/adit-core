@@ -61,12 +61,13 @@ describe("Cursor Adapter - Hook Generation", () => {
   });
 
   it("includes explicit platform argument in commands", () => {
-    const config = cursorAdapter.generateHookConfig("npx adit-hook");
+    const config = cursorAdapter.generateHookConfig("npx adit-hook", "/project");
     const hooks = config.content.hooks as Record<string, unknown[]>;
 
     for (const [, entries] of Object.entries(hooks)) {
       const entry = (entries as Array<{ command: string }>)[0];
       expect(entry.command).toContain("--platform cursor");
+      expect(entry.command).toContain("--project-root-b64");
       expect(entry.command).not.toMatch(/^CURSOR=1 /);
     }
   });
@@ -404,6 +405,33 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
     const result = await cursorAdapter.validateInstallation(projectRoot);
     expect(result.valid).toBe(true);
     expect(result.checks.every((c) => c.ok)).toBe(true);
+  });
+
+  it("validateInstallation marks old ADIT hook commands as needing upgrade", async () => {
+    writeHooks(projectRoot, {
+      hooks: {
+        beforeSubmitPrompt: [
+          { command: "CURSOR=1 npx adit-hook prompt-submit", type: "command" },
+        ],
+        stop: [
+          { command: "CURSOR=1 npx adit-hook stop", type: "command" },
+        ],
+        sessionStart: [
+          { command: "CURSOR=1 npx adit-hook session-start", type: "command" },
+        ],
+        sessionEnd: [
+          { command: "CURSOR=1 npx adit-hook session-end", type: "command" },
+        ],
+        afterAgentResponse: [
+          { command: "CURSOR=1 npx adit-hook notification", type: "command" },
+        ],
+      },
+    });
+
+    const result = await cursorAdapter.validateInstallation(projectRoot);
+
+    expect(result.valid).toBe(false);
+    expect(result.checks.find((c) => c.name === "Hook configuration")?.ok).toBe(false);
   });
 
   it("migrates legacy Claude Code format entries during install", async () => {

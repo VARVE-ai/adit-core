@@ -1,3 +1,7 @@
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import { describe, it, expect } from "vitest";
 import { getAdapter, listAdapters, detectPlatform, detectPlatformFromPayload, registerAdapter } from "./registry.js";
 import { claudeCodeAdapter } from "./claude-code.js";
@@ -399,13 +403,16 @@ describe("OpenCode Adapter", () => {
   });
 
   it("generateHookConfig produces plugin file content", () => {
-    const config = opencodeAdapter.generateHookConfig("npx adit-hook");
+    const config = opencodeAdapter.generateHookConfig("npx adit-hook", "/project");
     expect(config.configPath).toBe(".opencode/plugins/adit.js");
     expect(config.content.plugin).toBeDefined();
 
     const pluginContent = config.content.plugin as string;
     expect(pluginContent).toContain("@varveai/adit-auto-generated");
     expect(pluginContent).toContain("adit-hook");
+    expect(pluginContent).toContain("--platform");
+    expect(pluginContent).toContain("opencode");
+    expect(pluginContent).toContain("--project-root-b64");
     expect(pluginContent).toContain("OPENCODE");
     // Core hooks
     expect(pluginContent).toContain("chat.message");
@@ -453,6 +460,28 @@ describe("OpenCode Adapter", () => {
     const result = await opencodeAdapter.validateInstallation("/nonexistent/path");
     expect(result.valid).toBe(false);
     expect(result.checks.some((c) => !c.ok && c.detail.includes("Not found"))).toBe(true);
+  });
+
+  it("validateInstallation marks old OpenCode plugin as needing upgrade", async () => {
+    const projectRoot = join(tmpdir(), `adit-opencode-test-${randomBytes(8).toString("hex")}`);
+    try {
+      mkdirSync(join(projectRoot, ".opencode", "plugins"), { recursive: true });
+      mkdirSync(join(projectRoot, ".opencode", "commands"), { recursive: true });
+      mkdirSync(join(projectRoot, ".opencode", "tools"), { recursive: true });
+      writeFileSync(
+        join(projectRoot, ".opencode", "plugins", "adit.js"),
+        "// @varveai/adit-auto-generated\nconst ADIT_BASE_ARGS = [];\n",
+      );
+      writeFileSync(join(projectRoot, ".opencode", "commands", "adit.md"), "");
+      writeFileSync(join(projectRoot, ".opencode", "tools", "adit.ts"), "");
+
+      const result = await opencodeAdapter.validateInstallation(projectRoot);
+
+      expect(result.valid).toBe(false);
+      expect(result.checks.find((c) => c.name === "ADIT plugin")?.ok).toBe(false);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
   });
 });
 

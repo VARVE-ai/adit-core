@@ -63,7 +63,7 @@ async function main(): Promise<void> {
     rawKeys: Object.keys(raw),
   });
 
-  await dispatchHook(input);
+  await dispatchHook(input, { projectRoot: hookArgs.projectRoot });
 }
 
 function resolvePlatformArg(platform: HookPlatformArg | null): Platform | null {

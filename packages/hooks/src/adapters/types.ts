@@ -25,7 +25,7 @@ export interface PlatformAdapter {
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput;
 
   /** Generate platform-specific hook configuration */
-  generateHookConfig(aditBinaryPath: string): PlatformHookConfig;
+  generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig;
 
   /** Validate that the platform is properly configured */
   validateInstallation(projectRoot: string): Promise<ValidationResult>;

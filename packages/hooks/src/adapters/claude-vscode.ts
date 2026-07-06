@@ -31,8 +31,8 @@ export const claudeVscodeAdapter: PlatformAdapter = {
     return input;
   },
 
-  generateHookConfig(aditBinaryPath: string) {
-    return claudeCodeAdapter.generateHookConfig(aditBinaryPath);
+  generateHookConfig(aditBinaryPath: string, projectRoot?: string) {
+    return claudeCodeAdapter.generateHookConfig(aditBinaryPath, projectRoot);
   },
 
   async validateInstallation(projectRoot: string) {

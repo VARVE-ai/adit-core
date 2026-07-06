@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { codexAdapter } from "./codex.js";
+import { encodeProjectRoot } from "./command.js";
 import { codexHookTrustMarkerForPath } from "./codex-trust.js";
 
 /** Create a unique temp directory for each test */
@@ -573,23 +574,25 @@ describe("Codex CLI Hook Chaining", () => {
 
   describe("generateHookConfig", () => {
     it("generates correct hook configuration", () => {
-      const config = codexAdapter.generateHookConfig("npx adit-hook");
+      const projectRoot = "/project with spaces";
+      const fixedRootArg = `--project-root-b64 ${encodeProjectRoot(projectRoot)}`;
+      const config = codexAdapter.generateHookConfig("npx adit-hook", projectRoot);
 
       expect(config).toEqual({
         configPath: ".codex/hooks.json",
         content: {
           hooks: {
             SessionStart: [
-              { matcher: "startup|resume", hooks: [{ type: "command", command: "npx adit-hook --platform codex session-start", timeout: 30 }] }
+              { matcher: "startup|resume", hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} session-start`, timeout: 30 }] }
             ],
             UserPromptSubmit: [
-              { hooks: [{ type: "command", command: "npx adit-hook --platform codex prompt-submit", timeout: 30 }] }
+              { hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} prompt-submit`, timeout: 30 }] }
             ],
             Stop: [
-              { hooks: [{ type: "command", command: "npx adit-hook --platform codex stop", timeout: 30 }] }
+              { hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} stop`, timeout: 30 }] }
             ],
             PostToolUse: [
-              { matcher: "Bash", hooks: [{ type: "command", command: "npx adit-hook --platform codex notification", timeout: 30 }] }
+              { matcher: "Bash", hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} notification`, timeout: 30 }] }
             ]
           }
         }
@@ -651,9 +654,34 @@ describe("Codex CLI Hook Chaining", () => {
       const result = await codexAdapter.validateInstallation(projectRoot);
 
       expect(result.valid).toBe(false);
-      expect(result.checks[1].ok).toBe(true);
+      expect(result.checks[1].ok).toBe(false);
       expect(result.checks[2].name).toBe("Codex hooks feature");
       expect(result.checks[2].ok).toBe(false);
+    });
+
+    it("detects old ADIT hook commands as needing upgrade", async () => {
+      writeHooks(projectRoot, {
+        hooks: {
+          SessionStart: [
+            { matcher: "startup|resume", hooks: [{ type: "command", command: "CODEX=1 npx adit-hook session-start", timeout: 30 }] },
+          ],
+          UserPromptSubmit: [
+            { hooks: [{ type: "command", command: "CODEX=1 npx adit-hook prompt-submit", timeout: 30 }] },
+          ],
+          Stop: [
+            { hooks: [{ type: "command", command: "CODEX=1 npx adit-hook stop", timeout: 30 }] },
+          ],
+          PostToolUse: [
+            { matcher: "Bash", hooks: [{ type: "command", command: "CODEX=1 npx adit-hook notification", timeout: 30 }] },
+          ],
+        },
+      });
+
+      const result = await codexAdapter.validateInstallation(projectRoot);
+
+      expect(result.valid).toBe(false);
+      expect(result.checks[1].name).toBe("Hook configuration");
+      expect(result.checks[1].ok).toBe(false);
     });
 
     it("detects missing .codex directory", async () => {

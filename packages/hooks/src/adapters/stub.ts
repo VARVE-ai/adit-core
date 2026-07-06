@@ -42,7 +42,7 @@ export function createStubAdapter(
       return notSupported("parseInput");
     },
 
-    generateHookConfig(_aditBinaryPath: string): PlatformHookConfig {
+    generateHookConfig(_aditBinaryPath: string, _projectRoot?: string): PlatformHookConfig {
       return notSupported("generateHookConfig");
     },
 

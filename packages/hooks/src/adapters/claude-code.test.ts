@@ -65,6 +65,7 @@ describe("Claude Code Hook Chaining", () => {
     const stopEntries = hooks.Stop as Array<{ hooks: Array<{ command: string }> }>;
     expect(stopEntries).toHaveLength(1);
     expect(stopEntries[0].hooks[0].command).toContain("adit-hook");
+    expect(stopEntries[0].hooks[0].command).toContain("--project-root-b64");
   });
 
   it("preserves other tools' hooks when installing ADIT hooks", async () => {
@@ -345,5 +346,41 @@ describe("Claude Code Hook Chaining", () => {
     const result = await claudeCodeAdapter.validateInstallation(projectRoot);
     expect(result.valid).toBe(true);
     expect(result.checks.every((c) => c.ok)).toBe(true);
+  });
+
+  it("validateInstallation marks old ADIT hook commands as needing upgrade", async () => {
+    writeSettings(projectRoot, {
+      hooks: {
+        UserPromptSubmit: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook prompt-submit" }] },
+        ],
+        Stop: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook stop" }] },
+        ],
+        SessionStart: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook session-start" }] },
+        ],
+        SessionEnd: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook session-end" }] },
+        ],
+        TaskCompleted: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook task-completed" }] },
+        ],
+        Notification: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook notification" }] },
+        ],
+        SubagentStart: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook subagent-start" }] },
+        ],
+        SubagentStop: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook subagent-stop" }] },
+        ],
+      },
+    });
+
+    const result = await claudeCodeAdapter.validateInstallation(projectRoot);
+
+    expect(result.valid).toBe(false);
+    expect(result.checks.find((c) => c.name === "Hook configuration")?.ok).toBe(false);
   });
 });

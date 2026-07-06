@@ -3,7 +3,13 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { buildAditHookCommand, isAditHookCommand, parseHookArgs } from "./command.js";
+import {
+  buildAditHookCommand,
+  encodeProjectRoot,
+  isAditHookCommand,
+  isFixedProjectRootHookCommand,
+  parseHookArgs,
+} from "./command.js";
 
 describe("Hook Command Helpers", () => {
   it("builds commands with explicit platform arguments", () => {
@@ -12,10 +18,33 @@ describe("Hook Command Helpers", () => {
     expect(command).toBe("npx adit-hook --platform codex stop");
   });
 
+  it("builds commands with a fixed project root argument", () => {
+    const projectRoot = "/Users/me/Project With Spaces";
+    const command = buildAditHookCommand("npx adit-hook", "codex", "stop", projectRoot);
+
+    expect(command).toBe(
+      `npx adit-hook --platform codex --project-root-b64 ${encodeProjectRoot(projectRoot)} stop`,
+    );
+    expect(isFixedProjectRootHookCommand(command, projectRoot)).toBe(true);
+  });
+
+  it("round-trips Windows project roots without shell-sensitive quoting", () => {
+    const projectRoot = "C:\\Users\\Me\\Adit Projects\\workspace";
+    const command = buildAditHookCommand("adit-hook.cmd", "cursor", "session-start", projectRoot);
+    const args = command.split(" ").slice(1);
+
+    expect(parseHookArgs(args)).toEqual({
+      platform: "cursor",
+      hookType: "session-start",
+      projectRoot,
+    });
+  });
+
   it("parses platform flag before hook type", () => {
     expect(parseHookArgs(["--platform", "cursor", "prompt-submit"])).toEqual({
       platform: "cursor",
       hookType: "prompt-submit",
+      projectRoot: null,
     });
   });
 
@@ -23,6 +52,7 @@ describe("Hook Command Helpers", () => {
     expect(parseHookArgs(["stop", "--platform=gemini"])).toEqual({
       platform: "gemini",
       hookType: "stop",
+      projectRoot: null,
     });
   });
 
@@ -30,6 +60,17 @@ describe("Hook Command Helpers", () => {
     expect(parseHookArgs(["session-start"])).toEqual({
       platform: null,
       hookType: "session-start",
+      projectRoot: null,
+    });
+  });
+
+  it("parses project root in equals form", () => {
+    const projectRoot = "/repo";
+
+    expect(parseHookArgs(["stop", `--project-root-b64=${encodeProjectRoot(projectRoot)}`])).toEqual({
+      platform: null,
+      hookType: "stop",
+      projectRoot,
     });
   });
 

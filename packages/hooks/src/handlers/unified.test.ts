@@ -99,6 +99,39 @@ describe("dispatchHook", () => {
     );
   });
 
+  it("passes fixed project root to hook context", async () => {
+    const { initHookContext } = await import("../common/context.js");
+    const input: NormalizedHookInput = {
+      cwd: "/workspace/packages/api",
+      hookType: "prompt-submit",
+      platformCli: "codex",
+      platformSessionId: "codex-session",
+      prompt: "Fix it",
+    };
+
+    await dispatchHook(input, { projectRoot: "/workspace" });
+
+    expect(initHookContext).toHaveBeenCalledWith(
+      "/workspace/packages/api",
+      "codex",
+      "codex-session",
+      { projectRoot: "/workspace" },
+    );
+  });
+
+  it("skips fail-open when hook context returns null", async () => {
+    const { initHookContext } = await import("../common/context.js");
+    vi.mocked(initHookContext).mockResolvedValueOnce(null);
+
+    await dispatchHook({
+      cwd: "/missing",
+      hookType: "prompt-submit",
+      prompt: "test",
+    });
+
+    expect(mockRecordEvent).not.toHaveBeenCalled();
+  });
+
   it("does not trigger cloud auto-sync on prompt-submit", async () => {
     const input: NormalizedHookInput = {
       cwd: "/test",

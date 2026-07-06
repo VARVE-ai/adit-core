@@ -16,7 +16,7 @@ import type {
   ValidationResult,
   AditHookType,
 } from "./types.js";
-import { buildAditHookCommand, isAditHookCommand } from "./command.js";
+import { buildAditHookCommand, isAditHookCommand, isFixedProjectRootHookCommand } from "./command.js";
 
 const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "SessionStart", aditHandler: "session-start" },
@@ -71,12 +71,12 @@ export const geminiAdapter: PlatformAdapter = {
     };
   },
 
-  generateHookConfig(aditBinaryPath: string): PlatformHookConfig {
+  generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
     const makeHookEntry = (hookType: AditHookType) => [
       {
         hooks: [{
           type: "command",
-          command: buildAditHookCommand(aditBinaryPath, "gemini", hookType),
+          command: buildAditHookCommand(aditBinaryPath, "gemini", hookType, projectRoot),
           timeout: 5000,
         }],
       },
@@ -131,9 +131,15 @@ export const geminiAdapter: PlatformAdapter = {
             }
             const hasAdit = entries.some(
               (entry: { command?: string; hooks?: Array<{ command?: string }> }) => {
-                if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return true;
+                if (
+                  typeof entry.command === "string" &&
+                  isFixedProjectRootHookCommand(entry.command, projectRoot)
+                ) return true;
                 if (Array.isArray(entry.hooks)) {
-                  return entry.hooks.some((h) => typeof h.command === "string" && isAditHookCommand(h.command));
+                  return entry.hooks.some((h) =>
+                    typeof h.command === "string" &&
+                    isFixedProjectRootHookCommand(h.command, projectRoot)
+                  );
                 }
                 return false;
               },
@@ -188,7 +194,7 @@ export const geminiAdapter: PlatformAdapter = {
       }
     }
 
-    const hookConfig = this.generateHookConfig(aditBinaryPath);
+    const hookConfig = this.generateHookConfig(aditBinaryPath, projectRoot);
     const existingHooks = (settings.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 

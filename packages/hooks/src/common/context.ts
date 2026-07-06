@@ -21,6 +21,7 @@ import {
 } from "@varveai/adit-core";
 import type Database from "better-sqlite3";
 import { getCurrentBranch, getRemoteUrl } from "@varveai/adit-engine";
+import { existsSync } from "node:fs";
 
 export interface HookContext {
   db: Database.Database;
@@ -28,13 +29,23 @@ export interface HookContext {
   session: AditSession;
 }
 
+export interface HookContextOptions {
+  projectRoot?: string | null;
+}
+
 /** Initialize the hook context (DB + session) */
 export async function initHookContext(
   cwd: string,
   platform: Platform,
   platformSessionId?: string,
-): Promise<HookContext> {
-  const config = loadConfig(cwd);
+  options: HookContextOptions = {},
+): Promise<HookContext | null> {
+  const projectRoot = options.projectRoot ?? null;
+  if (!projectRoot) return null;
+
+  const config = loadHookConfig(projectRoot);
+  if (!existsSync(config.dbPath)) return null;
+
   const db = openDatabase(config.dbPath);
 
   // Get or create session — prefer platform session ID lookup
@@ -75,6 +86,31 @@ export async function initHookContext(
   }
 
   return { db, config, session };
+}
+
+function loadHookConfig(projectRoot: string): AditConfig {
+  const originalProjectRoot = process.env.ADIT_PROJECT_ROOT;
+  const originalDataDir = process.env.ADIT_DATA_DIR;
+  const originalDbPath = process.env.ADIT_DB_PATH;
+  process.env.ADIT_PROJECT_ROOT = projectRoot;
+  delete process.env.ADIT_DATA_DIR;
+  delete process.env.ADIT_DB_PATH;
+
+  try {
+    return loadConfig(projectRoot);
+  } finally {
+    restoreEnv("ADIT_PROJECT_ROOT", originalProjectRoot);
+    restoreEnv("ADIT_DATA_DIR", originalDataDir);
+    restoreEnv("ADIT_DB_PATH", originalDbPath);
+  }
+}
+
+function restoreEnv(key: "ADIT_PROJECT_ROOT" | "ADIT_DATA_DIR" | "ADIT_DB_PATH", value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
 }
 
 async function safeGetCurrentBranch(cwd: string): Promise<string | null> {

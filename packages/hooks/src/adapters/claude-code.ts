@@ -16,7 +16,7 @@ import type {
   ValidationResult,
   AditHookType,
 } from "./types.js";
-import { buildAditHookCommand, isAditHookCommand } from "./command.js";
+import { buildAditHookCommand, isAditHookCommand, isFixedProjectRootHookCommand } from "./command.js";
 
 const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "UserPromptSubmit", aditHandler: "prompt-submit" },
@@ -171,12 +171,12 @@ export const claudeCodeAdapter: PlatformAdapter = {
     };
   },
 
-  generateHookConfig(aditBinaryPath: string): PlatformHookConfig {
+  generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
     const makeHookEntry = (hookType: AditHookType) => [
       {
         hooks: [{
           type: "command",
-          command: buildAditHookCommand(aditBinaryPath, "claude", hookType),
+          command: buildAditHookCommand(aditBinaryPath, "claude", hookType, projectRoot),
           // Claude Code hook timeouts are in seconds. adit-hook self-kills
           // after 10s, so this is a matching outer guard — not 10000s.
           timeout: 10,
@@ -238,9 +238,15 @@ export const claudeCodeAdapter: PlatformAdapter = {
           }
           const hasAdit = entries.some(
             (entry: { command?: string; hooks?: Array<{ command?: string }> }) => {
-              if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return true;
+              if (
+                typeof entry.command === "string" &&
+                isFixedProjectRootHookCommand(entry.command, projectRoot)
+              ) return true;
               if (Array.isArray(entry.hooks)) {
-                return entry.hooks.some((h) => typeof h.command === "string" && isAditHookCommand(h.command));
+                return entry.hooks.some((h) =>
+                  typeof h.command === "string" &&
+                  isFixedProjectRootHookCommand(h.command, projectRoot)
+                );
               }
               return false;
             },
@@ -304,7 +310,7 @@ export const claudeCodeAdapter: PlatformAdapter = {
       }
     }
 
-    const hookConfig = this.generateHookConfig(aditBinaryPath);
+    const hookConfig = this.generateHookConfig(aditBinaryPath, projectRoot);
     const existingHooks = (settings.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 

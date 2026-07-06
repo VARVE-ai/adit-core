@@ -23,7 +23,7 @@ import type {
   ValidationResult,
   AditHookType,
 } from "./types.js";
-import { buildAditHookCommand, isAditHookCommand } from "./command.js";
+import { buildAditHookCommand, isAditHookCommand, isFixedProjectRootHookCommand } from "./command.js";
 import {
   ADIT_CODEX_HOOK_TRUST_BLOCK,
   buildCodexHookStatesForEntries,
@@ -115,12 +115,12 @@ export const codexAdapter: PlatformAdapter = {
     };
   },
 
-  generateHookConfig(aditBinaryPath: string): PlatformHookConfig {
+  generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
     const makeHookEntry = (hookType: AditHookType) => [
       {
         hooks: [{
           type: "command",
-          command: buildAditHookCommand(aditBinaryPath, "codex", hookType),
+          command: buildAditHookCommand(aditBinaryPath, "codex", hookType, projectRoot),
           timeout: HOOK_TIMEOUT,
         }],
       },
@@ -130,7 +130,7 @@ export const codexAdapter: PlatformAdapter = {
         matcher,
         hooks: [{
           type: "command",
-          command: buildAditHookCommand(aditBinaryPath, "codex", hookType),
+          command: buildAditHookCommand(aditBinaryPath, "codex", hookType, projectRoot),
           timeout: HOOK_TIMEOUT,
         }],
       },
@@ -182,9 +182,15 @@ export const codexAdapter: PlatformAdapter = {
             }
             const hasAdit = entries.some(
               (entry: { command?: string; hooks?: Array<{ command?: string }> }) => {
-                if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return true;
+                if (
+                  typeof entry.command === "string" &&
+                  isFixedProjectRootHookCommand(entry.command, projectRoot)
+                ) return true;
                 if (Array.isArray(entry.hooks)) {
-                  return entry.hooks.some((h) => typeof h.command === "string" && isAditHookCommand(h.command));
+                  return entry.hooks.some((h) =>
+                    typeof h.command === "string" &&
+                    isFixedProjectRootHookCommand(h.command, projectRoot)
+                  );
                 }
                 return false;
               },
@@ -223,7 +229,7 @@ export const codexAdapter: PlatformAdapter = {
       ? buildCodexHookStatesForEntries({
         hooksPath,
         hooks: readHooksForTrust(hooksPath),
-        matchesEntry: (entry) => entryContainsAditHook(entry),
+        matchesEntry: (entry) => entryContainsFixedRootAditHook(entry, projectRoot),
       })
       : [];
     const untrustedStates = findUntrustedCodexHookStates(trustConfig, hookStates);
@@ -268,7 +274,7 @@ export const codexAdapter: PlatformAdapter = {
       }
     }
 
-    const hookConfig = this.generateHookConfig(aditBinaryPath);
+    const hookConfig = this.generateHookConfig(aditBinaryPath, projectRoot);
     const existingHooks = (hooksConfig.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 
@@ -402,6 +408,20 @@ function entryContainsAditHook(entry: unknown): boolean {
   if (typeof raw.command === "string" && isAditHookCommand(raw.command)) return true;
   return Array.isArray(raw.hooks) &&
     raw.hooks.some((hook) => typeof hook.command === "string" && isAditHookCommand(hook.command));
+}
+
+function entryContainsFixedRootAditHook(entry: unknown, projectRoot: string): boolean {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  const raw = entry as { command?: string; hooks?: Array<{ command?: string }> };
+  if (
+    typeof raw.command === "string" &&
+    isFixedProjectRootHookCommand(raw.command, projectRoot)
+  ) return true;
+  return Array.isArray(raw.hooks) &&
+    raw.hooks.some((hook) =>
+      typeof hook.command === "string" &&
+      isFixedProjectRootHookCommand(hook.command, projectRoot)
+    );
 }
 
 function readTextFile(path: string): string | null {

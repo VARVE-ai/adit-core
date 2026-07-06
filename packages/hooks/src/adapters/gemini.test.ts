@@ -189,10 +189,11 @@ describe("Gemini CLI Hook Chaining", () => {
     });
 
     it("uses explicit platform argument and timeout 5000", () => {
-      const config = geminiAdapter.generateHookConfig("npx adit-hook");
+      const config = geminiAdapter.generateHookConfig("npx adit-hook", "/project");
 
       const entry = config.content.hooks.SessionStart[0];
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("--platform gemini");
+      expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("--project-root-b64");
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).not.toContain("GEMINI=1");
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("npx adit-hook");
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("session-start");
@@ -458,5 +459,35 @@ describe("Gemini CLI Hook Chaining", () => {
     const result = await geminiAdapter.validateInstallation(projectRoot);
     expect(result.valid).toBe(true);
     expect(result.checks.every((c) => c.ok)).toBe(true);
+  });
+
+  it("validateInstallation marks old ADIT hook commands as needing upgrade", async () => {
+    writeSettings(projectRoot, {
+      hooks: {
+        SessionStart: [
+          { hooks: [{ type: "command", command: "GEMINI=1 npx adit-hook session-start" }] },
+        ],
+        BeforeAgent: [
+          { hooks: [{ type: "command", command: "GEMINI=1 npx adit-hook prompt-submit" }] },
+        ],
+        AfterAgent: [
+          { hooks: [{ type: "command", command: "GEMINI=1 npx adit-hook stop" }] },
+        ],
+        SessionEnd: [
+          { hooks: [{ type: "command", command: "GEMINI=1 npx adit-hook session-end" }] },
+        ],
+        AfterTool: [
+          { hooks: [{ type: "command", command: "GEMINI=1 npx adit-hook notification" }] },
+        ],
+        Notification: [
+          { hooks: [{ type: "command", command: "GEMINI=1 npx adit-hook notification" }] },
+        ],
+      },
+    });
+
+    const result = await geminiAdapter.validateInstallation(projectRoot);
+
+    expect(result.valid).toBe(false);
+    expect(result.checks.find((c) => c.name === "Hook configuration")?.ok).toBe(false);
   });
 });

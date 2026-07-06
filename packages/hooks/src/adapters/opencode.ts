@@ -25,6 +25,7 @@ import type {
   ValidationResult,
   AditHookType,
 } from "./types.js";
+import { encodeProjectRoot } from "./command.js";
 
 const PLUGIN_FILENAME = "adit.js";
 
@@ -336,12 +337,15 @@ function isAditPlugin(content: string): boolean {
  * The active session ID is tracked via session.created/deleted, and a
  * sessionEndFired flag prevents duplicate session-end calls.
  */
-function generatePluginContent(aditBinaryPath: string): string {
+function generatePluginContent(aditBinaryPath: string, projectRoot?: string): string {
   // Split the binary path into command + args for spawning.
   // e.g. 'node "/path/to/index.js"' → ["node", "/path/to/index.js"]
   const parts = aditBinaryPath.match(/"[^"]*"|\S+/g) ?? [aditBinaryPath];
   const cmd = parts[0];
   const baseArgs = parts.slice(1).map((p) => p.replace(/^"|"$/g, ""));
+  if (projectRoot) {
+    baseArgs.push("--platform", "opencode", "--project-root-b64", encodeProjectRoot(projectRoot));
+  }
 
   return `// @varveai/adit-auto-generated — ADIT plugin for OpenCode
 // Do not edit manually. Reinstall with: adit plugin install opencode
@@ -861,11 +865,11 @@ export const opencodeAdapter: PlatformAdapter = {
     };
   },
 
-  generateHookConfig(aditBinaryPath: string): PlatformHookConfig {
+  generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
     return {
       configPath: `.opencode/plugins/${PLUGIN_FILENAME}`,
       content: {
-        plugin: generatePluginContent(aditBinaryPath),
+        plugin: generatePluginContent(aditBinaryPath, projectRoot),
       },
     };
   },
@@ -890,9 +894,11 @@ export const opencodeAdapter: PlatformAdapter = {
     if (existsSync(pluginPath)) {
       try {
         const content = readFileSync(pluginPath, "utf-8");
-        if (isAditPlugin(content)) {
+        if (isAditPlugin(content) && isFixedRootAditPlugin(content, projectRoot)) {
           pluginOk = true;
           pluginDetail = `ADIT plugin installed at ${pluginPath}`;
+        } else if (isAditPlugin(content)) {
+          pluginDetail = `${pluginPath} is an old ADIT plugin and needs reinstall`;
         } else {
           pluginDetail = `${pluginPath} exists but is not an ADIT plugin`;
         }
@@ -937,7 +943,7 @@ export const opencodeAdapter: PlatformAdapter = {
     mkdirSync(pluginsDir, { recursive: true });
 
     const pluginPath = join(pluginsDir, PLUGIN_FILENAME);
-    const content = generatePluginContent(aditBinaryPath);
+    const content = generatePluginContent(aditBinaryPath, projectRoot);
     writeFileSync(pluginPath, content);
 
     // Install slash command
@@ -990,3 +996,8 @@ export const opencodeAdapter: PlatformAdapter = {
     }
   },
 };
+
+function isFixedRootAditPlugin(content: string, projectRoot: string): boolean {
+  return content.includes("--project-root-b64") &&
+    content.includes(encodeProjectRoot(projectRoot));
+}

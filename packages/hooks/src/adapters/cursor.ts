@@ -16,7 +16,7 @@ import type {
   ValidationResult,
   AditHookType,
 } from "./types.js";
-import { buildAditHookCommand, isAditHookCommand } from "./command.js";
+import { buildAditHookCommand, isAditHookCommand, isFixedProjectRootHookCommand } from "./command.js";
 
 /**
  * Read the tail of a file (last N bytes) and split into lines.
@@ -171,12 +171,12 @@ export const cursorAdapter: PlatformAdapter = {
     };
   },
 
-  generateHookConfig(aditBinaryPath: string): PlatformHookConfig {
+  generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
     // Cursor uses flat format: { command, type, timeout }
     // Timeout is in SECONDS (not milliseconds like Claude Code)
     const makeHookEntry = (hookType: AditHookType) => [
       {
-        command: buildAditHookCommand(aditBinaryPath, "cursor", hookType),
+        command: buildAditHookCommand(aditBinaryPath, "cursor", hookType, projectRoot),
         type: "command",
         timeout: 10,
       },
@@ -232,9 +232,15 @@ export const cursorAdapter: PlatformAdapter = {
             }
             const hasAdit = entries.some(
               (entry: { command?: string; hooks?: Array<{ command?: string }> }) => {
-                if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return true;
+                if (
+                  typeof entry.command === "string" &&
+                  isFixedProjectRootHookCommand(entry.command, projectRoot)
+                ) return true;
                 if (Array.isArray(entry.hooks)) {
-                  return entry.hooks.some((h) => typeof h.command === "string" && isAditHookCommand(h.command));
+                  return entry.hooks.some((h) =>
+                    typeof h.command === "string" &&
+                    isFixedProjectRootHookCommand(h.command, projectRoot)
+                  );
                 }
                 return false;
               },
@@ -289,7 +295,7 @@ export const cursorAdapter: PlatformAdapter = {
       }
     }
 
-    const hookConfig = this.generateHookConfig(aditBinaryPath);
+    const hookConfig = this.generateHookConfig(aditBinaryPath, projectRoot);
     const existingHooks = (hooksConfig.hooks as Record<string, unknown[]>) ?? {};
 
     // Clean up legacy Claude Code format entries (from previous ADIT versions

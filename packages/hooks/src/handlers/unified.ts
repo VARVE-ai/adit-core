@@ -44,8 +44,22 @@ import {
  * Dispatch a normalized hook input to the appropriate handler.
  * This is the single entry point for all platform hook events.
  */
-export async function dispatchHook(input: NormalizedHookInput): Promise<void> {
-  const ctx = await initHookContext(input.cwd, input.platformCli ?? "other", input.platformSessionId);
+export interface DispatchHookOptions {
+  projectRoot?: string | null;
+}
+
+export async function dispatchHook(
+  input: NormalizedHookInput,
+  options: DispatchHookOptions = {},
+): Promise<void> {
+  const ctx = await initHookContext(
+    input.cwd,
+    input.platformCli ?? "other",
+    input.platformSessionId,
+    { projectRoot: options.projectRoot },
+  );
+  if (!ctx) return;
+
   const dataDir = ctx.config.dataDir;
 
   try {
