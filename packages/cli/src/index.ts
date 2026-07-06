@@ -124,6 +124,7 @@ export function createProgram(): Command {
 
   program
     .command("show <id>")
+    .usage("<id>")
     .description("Show full event details")
     .action((id) => showCommand(id));
 

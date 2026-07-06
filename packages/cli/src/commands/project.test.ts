@@ -70,6 +70,23 @@ describe("project uninstall command", () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it("does not mention legacy checkpoint refs in the confirmation prompt", async () => {
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((msg?: unknown) => {
+      logs.push(String(msg));
+    });
+    try {
+      await projectUninstallCommand();
+    } finally {
+      spy.mockRestore();
+    }
+
+    const output = logs.join("\n");
+    expect(output).toContain("remove installed ADIT hooks and delete the local .adit/ data directory");
+    expect(output).not.toContain("checkpoint refs");
+    expect(output).not.toContain("refs/adit/checkpoints");
+  });
+
   it("removes hooks, init-generated files, data directory, and checkpoint refs", async () => {
     const result = await uninstallProject("/repo", "/repo/.adit");
 
@@ -117,5 +134,23 @@ describe("project uninstall command", () => {
       generatedFilesRemoved: 1,
       checkpointRefsRemoved: 2,
     }));
+  });
+
+  it("silently removes legacy checkpoint refs in human-readable uninstall output", async () => {
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((msg?: unknown) => {
+      logs.push(String(msg));
+    });
+    try {
+      await projectUninstallCommand({ yes: true });
+    } finally {
+      spy.mockRestore();
+    }
+
+    const output = logs.join("\n");
+    expect(mocks.deleteCheckpointRef).toHaveBeenCalledWith("/repo", "evt-1");
+    expect(mocks.deleteCheckpointRef).toHaveBeenCalledWith("/repo", "evt-2");
+    expect(output).not.toContain("checkpoint ref");
+    expect(output).not.toContain("refs/adit/checkpoints");
   });
 });
