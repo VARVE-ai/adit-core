@@ -74,7 +74,7 @@ import { emitCodexThreadItem } from "./thread-items.js";
 export { promptInputForCodexMode, codexThreadModeOverrides, codexTurnModeOverrides } from "./input-mode.js";
 export type { CodexPromptMode } from "./input-mode.js";
 export { normalizeCodexReclaimInput } from "./terminal.js";
-import { spawnCliProcess } from "../cli-process.js";
+import { killCliProcessTree, spawnCliProcess } from "../cli-process.js";
 import {
   isCodexThreadSavedForCwd,
   startCodexResumeLogWatcher,
@@ -321,9 +321,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       this.local = null;
       this.stopLocalResumeLogWatcher();
       this.stopLocalModelConfigWatcher();
-      try {
-        oldLocal?.kill("SIGTERM");
-      } catch {}
+      killCliProcessTree(oldLocal);
       this.activeSessionId = sessionId;
       this.resumeSessionId = sessionId;
       this.sdkSessionId = sessionId;
@@ -698,9 +696,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.detachReclaimInput();
     this.appServer?.stop();
     this.appServer = null;
-    try {
-      this.local?.kill("SIGTERM");
-    } catch {}
+    killCliProcessTree(this.local);
     this.stopLocalResumeLogWatcher();
     this.stopLocalModelConfigWatcher();
     this.local = null;
@@ -725,6 +721,9 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       cwd: this.opts.cwd,
       env: this.buildEnv(),
       stdio: "inherit",
+      // The interactive TUI must stay attached to the user's console;
+      // CREATE_NO_WINDOW children can lose keyboard input on Windows.
+      windowsHide: false,
     });
     this.local = child;
     this.ownerValue = "local";

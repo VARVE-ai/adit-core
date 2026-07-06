@@ -29,7 +29,7 @@ import type {
   CliSlashCommandInfo,
   CliRewindResponse,
 } from "../types.js";
-import { spawnCliProcess } from "../cli-process.js";
+import { killCliProcessTree, spawnCliProcess } from "../cli-process.js";
 import { spawnClaudeCliProcess } from "./cli-process.js";
 import {
   ASK_USER_QUESTION_TOOL,
@@ -333,9 +333,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.suppressNextLocalExit = true;
     const oldLocal = this.local;
     this.local = null;
-    try {
-      oldLocal?.kill("SIGTERM");
-    } catch {}
+    killCliProcessTree(oldLocal);
 
     this.ownerValue = "web";
     this.reclaimingToLocal = false;
@@ -458,9 +456,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       this.suppressNextLocalExit = true;
       const oldLocal = this.local;
       this.local = null;
-      try {
-        oldLocal?.kill("SIGTERM");
-      } catch {}
+      killCliProcessTree(oldLocal);
       this.setThinking(false);
       this.setBusy(false);
       this.startLocal(["--resume", sessionId]);
@@ -846,9 +842,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.detachReclaimInput();
     this.pendingLocalReclaimSessionId = null;
     this.localSessionAliases.clear();
-    try {
-      this.local?.kill("SIGTERM");
-    } catch {}
+    killCliProcessTree(this.local);
     this.local = null;
     this.ownerValue = "stopped";
     this.setThinking(false);
@@ -876,6 +870,9 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       cwd: this.opts.cwd,
       env: this.buildEnv(),
       stdio: "inherit",
+      // The interactive TUI must stay attached to the user's console;
+      // CREATE_NO_WINDOW children can lose keyboard input on Windows.
+      windowsHide: false,
     });
     this.local = child;
     this.ownerValue = "local";
@@ -1966,8 +1963,9 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
   private onReclaimInput = (chunk: string | Buffer) => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    if (text === "\u0003") {
+    if (text.includes("\u0003")) {
       this.stop();
+      this.emit("exit", { code: null, signal: "SIGINT" });
       return;
     }
     this.reclaimBuffer += text;

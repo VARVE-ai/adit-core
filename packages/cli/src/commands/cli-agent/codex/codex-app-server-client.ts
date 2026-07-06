@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
-import { spawnCliProcess } from "../cli-process.js";
+import { killCliProcessTree, spawnCliProcess } from "../cli-process.js";
 
 export interface CodexJsonRpcMessage {
   id?: string | number;
@@ -152,9 +152,7 @@ export class CodexAppServerClient extends EventEmitter {
     try {
       child?.stdin?.end();
     } catch {}
-    try {
-      child?.kill("SIGTERM");
-    } catch {}
+    killCliProcessTree(child);
   }
 
   private send(message: Record<string, unknown>): void {

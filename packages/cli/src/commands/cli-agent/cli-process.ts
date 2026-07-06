@@ -49,9 +49,11 @@ export function spawnCliProcess(
   args: string[],
   options: SpawnOptions = {},
 ): ChildProcess {
-  return spawn(command, args, {
+  const shell = options.shell ?? shouldUseWindowsShell(command);
+  const invocation = prepareWindowsShellInvocation(command, args, shell);
+  return spawn(invocation.command, invocation.args, {
     ...options,
-    shell: options.shell ?? shouldUseWindowsShell(command),
+    shell,
     windowsHide: options.windowsHide ?? true,
   });
 }
@@ -61,11 +63,72 @@ export function spawnCliSync(
   args: string[],
   options: SpawnSyncOptions = {},
 ): ReturnType<typeof spawnSync> {
-  return spawnSync(command, args, {
+  const shell = options.shell ?? shouldUseWindowsShell(command);
+  const invocation = prepareWindowsShellInvocation(command, args, shell);
+  return spawnSync(invocation.command, invocation.args, {
     ...options,
-    shell: options.shell ?? shouldUseWindowsShell(command),
+    shell,
     windowsHide: options.windowsHide ?? true,
   });
+}
+
+/**
+ * Kill a Windows process tree by root pid via `taskkill /T`. Returns false
+ * when unavailable (non-Windows, bad pid, taskkill missing/failed) so callers
+ * can fall back to a plain kill().
+ */
+export function taskkillTree(pid: number | undefined): boolean {
+  if (process.platform !== "win32") return false;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    const result = spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Terminate a spawned CLI, including its descendants on Windows. `.cmd`/`.bat`
+ * shims run under a cmd.exe shell, so killing only the direct child leaves the
+ * real CLI (e.g. claude.exe) alive and still reading the console — which is
+ * what broke `/local` reclaim on Windows. On other platforms this is exactly
+ * `child.kill(signal)`.
+ */
+export function killCliProcessTree(
+  child: ChildProcess | null | undefined,
+  signal: NodeJS.Signals = "SIGTERM",
+): void {
+  if (!child) return;
+  const exited = child.exitCode != null || child.signalCode != null;
+  if (!exited && taskkillTree(child.pid)) return;
+  try {
+    child.kill(signal);
+  } catch {}
+}
+
+// With shell:true Node concatenates args into the cmd.exe command line without
+// any quoting (DEP0190), so paths containing spaces split apart. Do the join
+// ourselves with quotes. Only `shell: true` (cmd.exe) on Windows is handled;
+// custom shell strings pass through untouched.
+function prepareWindowsShellInvocation(
+  command: string,
+  args: string[],
+  shell: boolean | string | undefined,
+): { command: string; args: string[] } {
+  if (shell !== true || process.platform !== "win32" || args.length === 0) {
+    return { command, args };
+  }
+  const joined = [command, ...args]
+    .map((token) => {
+      if (token === "") return '""';
+      return /[ \t]/.test(token) ? `"${token}"` : token;
+    })
+    .join(" ");
+  return { command: joined, args: [] };
 }
 
 export function shouldUseWindowsShell(command: string): boolean {

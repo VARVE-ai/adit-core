@@ -1,13 +1,12 @@
 import type { ChildProcess } from "node:child_process";
+import { killCliProcessTree } from "../cli-process.js";
 
 export const LOCAL_CLI_EXIT_WAIT_MS = 750;
 
 export async function stopLocalCodexProcess(child: ChildProcess | null): Promise<void> {
   if (!child) return;
   const exited = waitForChildExit(child, LOCAL_CLI_EXIT_WAIT_MS);
-  try {
-    child.kill("SIGTERM");
-  } catch {}
+  killCliProcessTree(child);
   await exited;
 }
 

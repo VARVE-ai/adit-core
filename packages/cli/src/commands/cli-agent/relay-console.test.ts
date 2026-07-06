@@ -61,8 +61,8 @@ describe("createRelayNotices", () => {
     notices.webOwnsReminder();
     expect(restoreTerminal).toHaveBeenCalledTimes(1);
     expect(output).toEqual([
-      "\n[adit codex] Web has taken over this session — type /local here to reclaim.\n",
-      "\n[adit codex] Web owns this session — type /local here to reclaim.\n",
+      "\n[adit codex] Web has taken over this session — type /local + Enter here to reclaim.\n",
+      "\n[adit codex] Web owns this session — type /local + Enter here to reclaim.\n",
     ]);
   });
 
@@ -152,7 +152,7 @@ describe("createRelayStatusReporter", () => {
     expect(output).toEqual([
       "[adit claude] Connected test-coding2 → adit-cloud Coding\n",
       "[adit claude] Local Claude Code owns this session — if the web page takes over, " +
-        "type /local here to reclaim.\n",
+        "type /local + Enter here to reclaim.\n",
     ]);
 
     output.length = 0;

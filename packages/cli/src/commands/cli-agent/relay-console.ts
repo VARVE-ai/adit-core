@@ -122,10 +122,10 @@ export function createRelayNotices(tool: RelayTool, opts: RelayNoticesOptions = 
     },
     takenOverByWeb(): void {
       restoreTerminal();
-      notice(`Web has taken over this session — type ${RECLAIM_COMMAND} here to reclaim.`);
+      notice(`Web has taken over this session — type ${RECLAIM_COMMAND} + Enter here to reclaim.`);
     },
     webOwnsReminder(): void {
-      notice(`Web owns this session — type ${RECLAIM_COMMAND} here to reclaim.`);
+      notice(`Web owns this session — type ${RECLAIM_COMMAND} + Enter here to reclaim.`);
     },
     releasingToLocal(): void {
       notice(`Releasing web control — restarting local ${subject}…`);
@@ -180,9 +180,9 @@ export function createRelayStatusReporter(opts: RelayStatusReporterOptions): Rel
 
   const ownerLine = (owner: CliAgentOwner): string =>
     owner === "web"
-      ? `Web owns this session — type ${RECLAIM_COMMAND} here to reclaim.`
+      ? `Web owns this session — type ${RECLAIM_COMMAND} + Enter here to reclaim.`
       : `Local ${notices.subject} owns this session — if the web page takes over, ` +
-        `type ${RECLAIM_COMMAND} here to reclaim.`;
+        `type ${RECLAIM_COMMAND} + Enter here to reclaim.`;
 
   return {
     helloOk(info: RelayHelloStatus): void {
