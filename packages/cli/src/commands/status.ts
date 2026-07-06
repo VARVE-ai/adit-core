@@ -174,16 +174,23 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
   }
 
   // 4. Git info
-  const [branch, headSha, dirty] = await Promise.all([
-    getCurrentBranch(config.projectRoot),
-    getHeadSha(config.projectRoot),
-    hasUncommittedChanges(config.projectRoot),
-  ]);
-  status.git = {
-    branch,
-    head: headSha?.substring(0, 8) ?? null,
-    dirty,
-  };
+  if (config.projectType === "workspace") {
+    status.git = {
+      workspace: true,
+      repositories: config.repositories.length,
+    };
+  } else {
+    const [branch, headSha, dirty] = await Promise.all([
+      getCurrentBranch(config.projectRoot),
+      getHeadSha(config.projectRoot),
+      hasUncommittedChanges(config.projectRoot),
+    ]);
+    status.git = {
+      branch,
+      head: headSha?.substring(0, 8) ?? null,
+      dirty,
+    };
+  }
 
   // ──────────────────────────────────────────────
   // Output
@@ -215,11 +222,17 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
       }
     | undefined;
   const failedTranscripts = (status.failedTranscripts as number) ?? 0;
-  const git = status.git as {
-    branch: string | null;
-    head: string | null;
-    dirty: boolean;
-  };
+  const git = status.git as
+    | {
+        workspace: true;
+        repositories: number;
+      }
+    | {
+        workspace?: false;
+        branch: string | null;
+        head: string | null;
+        dirty: boolean;
+      };
 
   // ── Status line ──────────────────────────────
   console.log();
@@ -227,13 +240,15 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
   const hooksList = hooksStatus.installed.length > 0
     ? hooksStatus.installed.join(", ")
     : null;
-  const branchLabel = git.branch ? pc.cyan(git.branch) : pc.yellow("detached");
+  const branchLabel = git.workspace
+    ? pc.cyan("workspace")
+    : git.branch ? pc.cyan(git.branch) : pc.yellow("detached");
 
   console.log(
     joinDim([
       `${statusDot(isActive)} ${pc.bold(isActive ? "Active" : "Idle")}`,
       hooksList,
-      `branch ${branchLabel}`,
+      git.workspace ? `${git.repositories} repos` : `branch ${branchLabel}`,
     ]),
   );
 
@@ -268,15 +283,22 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
   console.log(sectionHeader("Git", ruleWidth));
   console.log();
 
-  const headShort = git.head ?? "unknown";
-  const treeStatus = git.dirty
-    ? pc.yellow("dirty")
-    : pc.green("clean");
-  console.log(joinDim([
-    `branch ${branchLabel}`,
-    headShort,
-    treeStatus,
-  ]));
+  if (git.workspace) {
+    console.log(joinDim([
+      "workspace",
+      `${git.repositories} repositories`,
+    ]));
+  } else {
+    const headShort = git.head ?? "unknown";
+    const treeStatus = git.dirty
+      ? pc.yellow("dirty")
+      : pc.green("clean");
+    console.log(joinDim([
+      `branch ${branchLabel}`,
+      headShort,
+      treeStatus,
+    ]));
+  }
 
   // ── Sync ─────────────────────────────────────
   console.log();
