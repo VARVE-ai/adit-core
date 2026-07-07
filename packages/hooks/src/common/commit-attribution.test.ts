@@ -14,8 +14,12 @@ import { join } from "node:path";
 import {
   openDatabase,
   insertSession,
+  insertEventAutoSeq,
+  generateId,
   getSessionRepoHeads,
   type LocalRepository,
+  type EventType,
+  type Actor,
 } from "@varveai/adit-core";
 import type Database from "better-sqlite3";
 import {
@@ -34,6 +38,18 @@ function commitFile(cwd: string, name: string, message: string): string {
   writeFileSync(join(cwd, name), `${message}\n`);
   git(cwd, "add", ".");
   git(cwd, "commit", "-m", message);
+  return git(cwd, "rev-parse", "HEAD");
+}
+
+/** Commit with a forged committer date — the reflog entry inherits it. */
+function commitFileAt(cwd: string, name: string, message: string, isoDate: string): string {
+  writeFileSync(join(cwd, name), `${message}\n`);
+  git(cwd, "add", ".");
+  execFileSync("git", ["commit", "-m", message], {
+    cwd,
+    encoding: "utf-8",
+    env: { ...process.env, GIT_COMMITTER_DATE: isoDate, GIT_AUTHOR_DATE: isoDate },
+  });
   return git(cwd, "rev-parse", "HEAD");
 }
 
@@ -76,7 +92,10 @@ describe("commit attribution", () => {
     recorded = [];
     ctx = {
       db,
-      session: { id: SESSION_ID } as HookContext["session"],
+      session: {
+        id: SESSION_ID,
+        startedAt: new Date().toISOString(),
+      } as HookContext["session"],
       config: {
         projectRoot: repoDir,
         dataDir: join(dir, ".adit"),
@@ -96,9 +115,25 @@ describe("commit attribution", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  // Mirrors the real TimelineManager just enough for attribution: events are
+  // persisted so the session-level dedupe (hasGitCommitEvent) sees them.
   const timeline = () => ({
     recordEvent: async (params: Record<string, unknown>) => {
       recorded.push(params);
+      insertEventAutoSeq(db, {
+        id: generateId(),
+        sessionId: SESSION_ID,
+        eventType: params.eventType as EventType,
+        actor: params.actor as Actor,
+        responseText: (params.responseText as string) ?? null,
+        toolInputJson: (params.toolInputJson as string) ?? null,
+        gitBranch: (params.gitBranch as string) ?? null,
+        gitHeadSha: (params.gitHeadSha as string) ?? null,
+        startedAt: new Date().toISOString(),
+        status: "success",
+        clientId: "client-1",
+        vclockJson: "{}",
+      });
       return params;
     },
   });
@@ -337,6 +372,49 @@ describe("commit attribution", () => {
     expect(shas).toContain(sideSha);
     expect(shas).toContain(mainSha);
     expect(shas).toContain(mergeSha);
+  });
+
+  it("does not re-attribute an already recorded commit after branch round-trips", async () => {
+    await initializeSessionRepoBaselines(ctx); // baseline = seed
+    git(repoDir, "checkout", "-qb", "feature");
+    const shaA = commitFile(repoDir, "a1.txt", "feat: A");
+    await detectAndRecordCommits(ctx, timeline()); // records A, baseline -> A
+    expect(recorded.map((r) => r.gitHeadSha)).toEqual([shaA]);
+
+    // Pure checkout back to main: baseline legally moves BACKWARD to seed.
+    git(repoDir, "checkout", "-q", "main");
+    await detectAndRecordCommits(ctx, timeline());
+    expect(recorded).toHaveLength(1);
+
+    // Back to feature and commit B: seed..HEAD now contains A again, and
+    // reflog still holds "commit: A" within the scan window.
+    git(repoDir, "checkout", "-q", "feature");
+    const shaB = commitFile(repoDir, "b1.txt", "feat: B");
+    await detectAndRecordCommits(ctx, timeline());
+
+    const shas = recorded.map((r) => r.gitHeadSha);
+    expect(shas.filter((sha) => sha === shaA)).toHaveLength(1);
+    expect(shas).toContain(shaB);
+  });
+
+  it("does not claim commits created by an earlier session when moving through their branch", async () => {
+    // A previous session committed A on feature an hour ago (forged reflog
+    // timestamp), then ended. The current session starts on main.
+    const past = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    git(repoDir, "checkout", "-qb", "feature");
+    const shaA = commitFileAt(repoDir, "prev.txt", "feat: previous session work", past);
+    git(repoDir, "checkout", "-q", "main");
+
+    await initializeSessionRepoBaselines(ctx); // baseline = main seed
+
+    // Current session checks out feature and commits B: baseline..HEAD now
+    // contains BOTH A and B, and the reflog still holds "commit: A".
+    git(repoDir, "checkout", "-q", "feature");
+    const shaB = commitFile(repoDir, "cur.txt", "feat: current session work");
+    await detectAndRecordCommits(ctx, timeline());
+
+    expect(recorded.map((r) => r.gitHeadSha)).toEqual([shaB]);
+    expect(recorded.map((r) => r.gitHeadSha)).not.toContain(shaA);
   });
 
   it("stays silent but advances the baseline when the reflog is unavailable", async () => {

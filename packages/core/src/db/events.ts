@@ -352,6 +352,28 @@ export function countEvents(
   return row.cnt;
 }
 
+/**
+ * Whether this session already attributed the given commit.
+ * Guards against re-attribution when the per-repo baseline legally moves
+ * backward (e.g. a pure checkout to an ancestor) and a later turn's
+ * baseline..HEAD range contains commits from earlier turns again.
+ */
+export function hasGitCommitEvent(
+  db: Database.Database,
+  sessionId: string,
+  commitSha: string,
+): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 FROM events
+       WHERE session_id = ? AND event_type = 'git_commit'
+         AND git_head_sha = ? AND deleted_at IS NULL
+       LIMIT 1`,
+    )
+    .get(sessionId, commitSha);
+  return row !== undefined;
+}
+
 function rowToEvent(row: Record<string, unknown>): AditEvent {
   return {
     id: row.id as string,

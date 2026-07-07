@@ -53,6 +53,7 @@ export {
   searchEvents,
   clearEvents,
   countEvents,
+  hasGitCommitEvent,
   insertDiff,
   getDiffByEventId,
   getDiffText,

@@ -23,6 +23,7 @@ export {
   searchEvents,
   clearEvents,
   countEvents,
+  hasGitCommitEvent,
   type InsertEventInput,
   type EventQueryOptions,
 } from "./events.js";

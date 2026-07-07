@@ -14,6 +14,7 @@
 
 import {
   getSessionRepoHeads,
+  hasGitCommitEvent,
   upsertSessionRepoHead,
   type LocalRepository,
 } from "@varveai/adit-core";
@@ -124,7 +125,7 @@ async function detectForRepo(
   // HEAD also advances on pull/checkout/fetch/reset — those move through
   // remote history that this session did NOT create and must never be
   // attributed (recorded attribution is displayed as fact).
-  const createdShas = await listLocallyCreatedShas(repo.path);
+  const createdShas = await listLocallyCreatedShas(repo.path, ctx.session.startedAt);
   if (createdShas.size === 0) {
     // Pure pull/checkout/etc: silently accept the new HEAD as the
     // observation point so the same remote commits are never re-scanned.
@@ -139,8 +140,16 @@ async function detectForRepo(
   // Result layer: commits still reachable from HEAD and not in the baseline
   // history. Intersecting drops created-then-discarded shas (commit + reset)
   // and guards the reflog window when the baseline entry cannot be found.
+  // Dedupe against events already written by this session: a pure checkout
+  // legally moves the baseline backward (feature tip → main tip), so a later
+  // turn's baseline..HEAD can contain commits attributed in earlier turns
+  // while their reflog entries are still inside the scan window.
   const rangeCommits = await listRangeCommits(repo.path, baseline, head);
-  const commits = rangeCommits.filter((commit) => createdShas.has(commit.sha));
+  const commits = rangeCommits.filter(
+    (commit) =>
+      createdShas.has(commit.sha) &&
+      !hasGitCommitEvent(ctx.db, ctx.session.id, commit.sha),
+  );
   const branch = await safeBranch(repo.path);
 
   for (const commit of commits) {
@@ -173,34 +182,55 @@ async function detectForRepo(
 }
 
 /**
- * Collect shas produced by local commit-creating actions from the recent
- * HEAD reflog window.
+ * Collect shas produced by local commit-creating actions during this
+ * session, from the recent HEAD reflog window.
+ *
+ * Entries older than the session start are dropped: a fresh session whose
+ * baseline..HEAD range happens to contain commits created by an EARLIER
+ * session (checkout onto a branch the previous session committed to) must
+ * not claim them — it merely moved through that history. Reflog timestamps
+ * are second-precision; entries within the session's starting second are
+ * kept, a sub-second window that cannot precede a real agent turn.
  *
  * The whole window is scanned deliberately — no early stop at the baseline
  * entry. The baseline sha can reappear mid-turn (checkout back to the
  * branch tip, reset to baseline) and would truncate the window; turn
  * correctness comes from the caller intersecting with rev-list
- * baseline..HEAD, which already excludes anything from earlier turns
- * (their commits are in the baseline's history) and anything discarded.
+ * baseline..HEAD plus the per-session dedupe against already-written
+ * git_commit events.
  *
  * When the reflog is unavailable (core.logAllRefUpdates=false) this returns
  * an empty set: better to miss an attribution (cloud-side inference still
- * provides a weak match) than to record remote history as fact.
+ * provides a weak match) than to record history as fact.
  */
-async function listLocallyCreatedShas(cwd: string): Promise<Set<string>> {
+async function listLocallyCreatedShas(
+  cwd: string,
+  sessionStartedAt: string,
+): Promise<Set<string>> {
   const result = await runGit(
-    ["reflog", "--format=%H%x01%gs", `--max-count=${REFLOG_SCAN_LIMIT}`],
+    ["reflog", "--date=unix", "--format=%H%x01%gd%x01%gs", `--max-count=${REFLOG_SCAN_LIMIT}`],
     { cwd },
   );
   if (result.exitCode !== 0) return new Set();
 
+  const startedAtSec = Math.floor(Date.parse(sessionStartedAt) / 1000);
   const created = new Set<string>();
   for (const line of result.stdout.split("\n")) {
-    const [sha, action] = line.split("\x01");
-    if (!sha || !action) continue;
+    const [sha, selector, action] = line.split("\x01");
+    if (!sha || !selector || !action) continue;
+    const entrySec = parseReflogEpoch(selector);
+    if (entrySec !== null && Number.isFinite(startedAtSec) && entrySec < startedAtSec) {
+      continue; // created before this session existed
+    }
     if (isCreationAction(action)) created.add(sha.trim());
   }
   return created;
+}
+
+/** Parse the epoch out of a --date=unix reflog selector like "HEAD@{1720255140}". */
+function parseReflogEpoch(selector: string): number | null {
+  const match = selector.match(/@\{(\d+)\}/u);
+  return match ? Number(match[1]) : null;
 }
 
 /** Rebase step markers that rewrite/create commits; start/finish/abort move HEAD only. */
