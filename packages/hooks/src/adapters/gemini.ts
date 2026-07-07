@@ -31,8 +31,8 @@ const HOOK_MAPPINGS: HookMapping[] = [
   // Shell commands only (matcher is regex-tested against the tool name).
   // File edits are extracted from the transcript at stop; matching all
   // tools would record a notification event for every read-only call.
-  // TODO: verify on a real machine that Gemini's shell tool is named
-  // run_shell_command before shipping.
+  // Gemini's shell tool is named run_shell_command (verified against the
+  // installed gemini-cli 0.41.2 bundle: TOOL_NAME_MAPPING maps Bash to it).
   { platformEvent: "AfterTool", aditHandler: "notification", matcher: "run_shell_command" },
   { platformEvent: "Notification", aditHandler: "notification" },
 ];
