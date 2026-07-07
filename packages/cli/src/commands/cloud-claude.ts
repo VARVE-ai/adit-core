@@ -123,15 +123,20 @@ function readHookModel(body: Record<string, unknown>): string | null {
 }
 
 export function isLocalIdleHook(eventType: string, body: Record<string, unknown>): boolean {
+  // SubagentStop is deliberately NOT an idle signal: it fires mid-turn when a
+  // Task subagent finishes while the main agent keeps working. Treating it as
+  // idle let the web panel take over (killing the CLI) in the middle of a turn.
   if (
     eventType === "Stop" ||
     eventType === "StopFailure" ||
-    eventType === "SubagentStop" ||
     eventType === "SessionEnd"
   ) {
     return true;
   }
   if (eventType !== "Notification") return false;
+  // Error-ish notifications stay an idle signal: permission denials and
+  // safety blocks stall the turn without ever firing Stop. Tradeoff: a
+  // mid-turn tool-failure notification can mark idle early.
   const text = [
     readString(body.message),
     readString(body.title),
@@ -534,15 +539,16 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
           }
         }
       }
-      if (isLocalIdleHook(event.type, body)) {
-        if (isLocalOwner) {
-          transcriptSync.scheduleDrain(rawSessionId, (transcriptEvent) => {
-            const mappedEvent = eventWithSessionId(transcriptEvent, sessionId);
-            enqueueEvent(mappedEvent);
-            if (isTerminalClaudeErrorEvent(mappedEvent)) provider?.markLocalIdle();
-          });
-          provider?.markLocalIdle();
-        }
+      // SubagentStop is a transcript-freshness signal (drain), not a turn
+      // boundary — the main agent is usually still working.
+      const isIdleHook = isLocalIdleHook(event.type, body);
+      if ((isIdleHook || event.type === "SubagentStop") && isLocalOwner) {
+        transcriptSync.scheduleDrain(rawSessionId, (transcriptEvent) => {
+          const mappedEvent = eventWithSessionId(transcriptEvent, sessionId);
+          enqueueEvent(mappedEvent);
+          if (isTerminalClaudeErrorEvent(mappedEvent)) provider?.markLocalIdle();
+        });
+        if (isIdleHook) provider?.markLocalIdle();
       }
     });
 

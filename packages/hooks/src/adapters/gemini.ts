@@ -82,7 +82,10 @@ export const geminiAdapter: PlatformAdapter = {
         hooks: [{
           type: "command",
           command: buildAditHookCommand(aditBinaryPath, "gemini", hookType, projectRoot),
-          timeout: 5000,
+          // Gemini CLI hook timeouts are in MILLISECONDS (default 60000),
+          // unlike Claude Code/Codex/Cursor which use seconds. 10s matches
+          // the adit-hook self-kill guard.
+          timeout: 10000,
         }],
       },
     ];

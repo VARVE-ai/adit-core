@@ -102,11 +102,12 @@ describe("Adapter Registry", () => {
 
 describe("Claude Code Adapter", () => {
   it("has correct hook mappings", () => {
-    expect(claudeCodeAdapter.hookMappings).toHaveLength(8);
+    expect(claudeCodeAdapter.hookMappings).toHaveLength(9);
 
     const mappings = claudeCodeAdapter.hookMappings.map((m) => m.platformEvent);
     expect(mappings).toContain("UserPromptSubmit");
     expect(mappings).toContain("Stop");
+    expect(mappings).toContain("StopFailure");
     expect(mappings).toContain("SessionStart");
     expect(mappings).toContain("SessionEnd");
     expect(mappings).toContain("TaskCompleted");
@@ -499,7 +500,7 @@ describe("Claude Code VS Code Adapter", () => {
 
   it("shares hook mappings with claude-code adapter", () => {
     expect(claudeVscodeAdapter.hookMappings).toBe(claudeCodeAdapter.hookMappings);
-    expect(claudeVscodeAdapter.hookMappings).toHaveLength(8);
+    expect(claudeVscodeAdapter.hookMappings).toHaveLength(9);
   });
 
   it("parseInput overrides platformCli to claude-vscode", () => {

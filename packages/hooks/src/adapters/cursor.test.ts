@@ -2,8 +2,7 @@
  * Tests for Cursor adapter.
  *
  * Validates hook generation in Cursor's native flat format,
- * install/uninstall chaining, stdin field mapping, and
- * legacy Claude Code format migration.
+ * install/uninstall chaining, and stdin field mapping.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -49,7 +48,8 @@ describe("Cursor Adapter - Hook Generation", () => {
     expect(hooks.stop).toBeDefined();
     expect(hooks.sessionStart).toBeDefined();
     expect(hooks.sessionEnd).toBeDefined();
-    expect(hooks.afterAgentResponse).toBeDefined();
+    // afterAgentResponse duplicates stop-side transcript extraction
+    expect(hooks.afterAgentResponse).toBeUndefined();
 
     // Verify flat format (no nested "hooks" array)
     const stopEntry = hooks.stop[0] as { command: string; type: string; timeout: number };
@@ -184,7 +184,7 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
     expect(hooks.stop).toBeDefined();
     expect(hooks.sessionStart).toBeDefined();
     expect(hooks.sessionEnd).toBeDefined();
-    expect(hooks.afterAgentResponse).toBeDefined();
+    expect(hooks.afterAgentResponse).toBeUndefined();
 
     // Each event should have exactly one flat entry
     const stopEntries = hooks.stop as Array<{ command: string; type: string; timeout: number }>;
@@ -422,9 +422,6 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
         sessionEnd: [
           { command: "CURSOR=1 npx adit-hook session-end", type: "command" },
         ],
-        afterAgentResponse: [
-          { command: "CURSOR=1 npx adit-hook notification", type: "command" },
-        ],
       },
     });
 
@@ -434,50 +431,7 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
     expect(result.checks.find((c) => c.name === "Hook configuration")?.ok).toBe(false);
   });
 
-  it("migrates legacy Claude Code format entries during install", async () => {
-    // Simulate old ADIT install with Claude Code format event names + nested structure
-    writeHooks(projectRoot, {
-      hooks: {
-        UserPromptSubmit: [
-          { hooks: [{ type: "command", command: "CURSOR=1 npx adit-hook prompt-submit", timeout: 10000 }] },
-        ],
-        Stop: [
-          { hooks: [{ type: "command", command: "CURSOR=1 npx adit-hook stop", timeout: 10000 }] },
-        ],
-        SessionStart: [
-          { hooks: [{ type: "command", command: "CURSOR=1 npx adit-hook session-start", timeout: 10000 }] },
-        ],
-        SessionEnd: [
-          { hooks: [{ type: "command", command: "CURSOR=1 npx adit-hook session-end", timeout: 10000 }] },
-        ],
-        Notification: [
-          { hooks: [{ type: "command", command: "CURSOR=1 npx adit-hook notification", timeout: 10000 }] },
-        ],
-      },
-    });
-
-    // Reinstall with new format
-    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
-
-    const hooks = readHooks(projectRoot);
-
-    // Legacy keys should be gone
-    expect(hooks.UserPromptSubmit).toBeUndefined();
-    expect(hooks.Stop).toBeUndefined();
-    expect(hooks.SessionStart).toBeUndefined();
-    expect(hooks.SessionEnd).toBeUndefined();
-    expect(hooks.Notification).toBeUndefined();
-
-    // New Cursor-native keys should be present with flat format
-    expect(hooks.beforeSubmitPrompt).toBeDefined();
-    expect(hooks.stop).toBeDefined();
-    expect(hooks.sessionStart).toBeDefined();
-    expect(hooks.sessionEnd).toBeDefined();
-    expect(hooks.afterAgentResponse).toBeDefined();
-  });
-
-  it("uninstallHooks also cleans up legacy Claude Code format entries", async () => {
-    // Simulate old ADIT install
+  it("uninstallHooks removes ADIT entries under any event key, including nested format", async () => {
     writeHooks(projectRoot, {
       hooks: {
         UserPromptSubmit: [
@@ -655,17 +609,4 @@ describe("Cursor Adapter - parseInput stop fields", () => {
     }
   });
 
-  it("maps notification fields from afterAgentResponse", () => {
-    const raw = {
-      conversation_id: "conv-123",
-      workspace_roots: ["/path/to/project"],
-      message: "Agent completed the task",
-      notification_type: "agent_response",
-    };
-
-    const input = cursorAdapter.parseInput(raw, "notification");
-
-    expect(input.notificationMessage).toBe("Agent completed the task");
-    expect(input.notificationType).toBe("agent_response");
-  });
 });

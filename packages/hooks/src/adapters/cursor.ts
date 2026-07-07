@@ -118,7 +118,9 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "stop", aditHandler: "stop" },
   { platformEvent: "sessionStart", aditHandler: "session-start" },
   { platformEvent: "sessionEnd", aditHandler: "session-end" },
-  { platformEvent: "afterAgentResponse", aditHandler: "notification" },
+  // afterAgentResponse is deliberately NOT registered: it fires once per
+  // assistant message segment and its text duplicates what the stop handler
+  // already extracts from the transcript.
 ];
 
 /** Map Cursor platform events to ADIT hook types (derived from HOOK_MAPPINGS) */
@@ -166,9 +168,6 @@ export const cursorAdapter: PlatformAdapter = {
       lastAssistantMessage: aditHookType === "stop" && transcriptPath
         ? extractLastAssistantMessage(transcriptPath)
         : undefined,
-      // Notification (from afterAgentResponse)
-      notificationMessage: raw.message as string | undefined,
-      notificationType: raw.notification_type as string | undefined,
       // Session lifecycle
       sessionSource: raw.composer_mode as string | undefined,
       sessionEndReason: raw.reason as string | undefined,
@@ -198,7 +197,6 @@ export const cursorAdapter: PlatformAdapter = {
           stop: makeHookEntry("stop"),
           sessionStart: makeHookEntry("session-start"),
           sessionEnd: makeHookEntry("session-end"),
-          afterAgentResponse: makeHookEntry("notification"),
         },
       },
     };
@@ -298,30 +296,6 @@ export const cursorAdapter: PlatformAdapter = {
 
     const hookConfig = this.generateHookConfig(aditBinaryPath, projectRoot);
     const existingHooks = (hooksConfig.hooks as Record<string, unknown[]>) ?? {};
-
-    // Clean up legacy Claude Code format entries (from previous ADIT versions
-    // that used Claude Code event names: UserPromptSubmit, Stop, etc.)
-    const legacyEventKeys = ["UserPromptSubmit", "Stop", "SessionStart", "SessionEnd", "Notification"];
-    for (const legacyKey of legacyEventKeys) {
-      if (Array.isArray(existingHooks[legacyKey])) {
-        existingHooks[legacyKey] = existingHooks[legacyKey].filter(
-          (raw) => {
-            const entry = raw as { command?: string; hooks?: Array<{ command?: string }> };
-            if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return false;
-            if (Array.isArray(entry.hooks)) {
-              return !entry.hooks.some(
-                (h) => typeof h.command === "string" && isAditHookCommand(h.command),
-              );
-            }
-            return true;
-          },
-        );
-        if (existingHooks[legacyKey].length === 0) {
-          delete existingHooks[legacyKey];
-        }
-      }
-    }
-
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 
     // Merge hook entries per event key: preserve other tools' hooks,
@@ -381,11 +355,8 @@ export const cursorAdapter: PlatformAdapter = {
       const hooksConfig = JSON.parse(readFileSync(hooksPath, "utf-8"));
       if (!hooksConfig.hooks) return;
 
-      // Also clean up legacy Claude Code format event keys
-      const allEventKeys = [...Object.keys(hooksConfig.hooks), "UserPromptSubmit", "Stop", "SessionStart", "SessionEnd", "Notification"];
-
       // Remove ADIT hook entries
-      for (const hookName of allEventKeys) {
+      for (const hookName of Object.keys(hooksConfig.hooks)) {
         const entries = hooksConfig.hooks[hookName];
         if (!Array.isArray(entries)) continue;
 

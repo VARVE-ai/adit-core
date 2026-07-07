@@ -26,6 +26,10 @@ import {
 const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "UserPromptSubmit", aditHandler: "prompt-submit" },
   { platformEvent: "Stop", aditHandler: "stop" },
+  // StopFailure fires when a turn ends with an API error (Stop does not).
+  // Route it through the stop handler so edits made before the failure are
+  // still extracted from the transcript.
+  { platformEvent: "StopFailure", aditHandler: "stop" },
   { platformEvent: "SessionStart", aditHandler: "session-start" },
   { platformEvent: "SessionEnd", aditHandler: "session-end" },
   { platformEvent: "TaskCompleted", aditHandler: "task-completed" },
@@ -142,8 +146,8 @@ export const claudeCodeAdapter: PlatformAdapter = {
       toolName: raw.tool_name as string | undefined,
       toolInput: raw.tool_input as Record<string, unknown> | undefined,
       toolOutput: raw.tool_output as Record<string, unknown> | undefined,
-      // Stop
-      stopReason: raw.stop_reason as string | undefined,
+      // Stop / StopFailure (StopFailure carries `error` instead of stop_reason)
+      stopReason: (raw.stop_reason ?? raw.error) as string | undefined,
       lastAssistantMessage: raw.last_assistant_message as string | undefined,
       stopHookActive: raw.stop_hook_active as boolean | undefined,
       // Task completed
@@ -195,6 +199,7 @@ export const claudeCodeAdapter: PlatformAdapter = {
         hooks: {
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
+          StopFailure: makeHookEntry("stop"),
           SessionStart: makeHookEntry("session-start"),
           SessionEnd: makeHookEntry("session-end"),
           TaskCompleted: makeHookEntry("task-completed"),

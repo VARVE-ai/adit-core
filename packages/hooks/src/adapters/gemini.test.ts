@@ -188,7 +188,7 @@ describe("Gemini CLI Hook Chaining", () => {
       expect(config.content.hooks.Notification).toBeDefined();
     });
 
-    it("uses explicit platform argument and timeout 5000", () => {
+    it("uses explicit platform argument and a 10s millisecond timeout", () => {
       const config = geminiAdapter.generateHookConfig("npx adit-hook", "/project");
 
       const entry = config.content.hooks.SessionStart[0];
@@ -197,7 +197,9 @@ describe("Gemini CLI Hook Chaining", () => {
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).not.toContain("GEMINI=1");
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("npx adit-hook");
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("session-start");
-      expect((entry as { hooks: Array<{ command: string }> }).hooks[0].timeout).toBe(5000);
+      // Gemini timeouts are milliseconds — 10000 = 10s, matching the
+      // adit-hook self-kill guard (NOT seconds like other platforms).
+      expect((entry as { hooks: Array<{ command: string }> }).hooks[0].timeout).toBe(10000);
     });
   });
 
