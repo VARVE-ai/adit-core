@@ -23,6 +23,9 @@ import type { HookContext } from "./context.js";
 /** Upper bound of commits attributed per repo per turn (runaway guard) */
 const MAX_COMMITS_PER_TURN = 50;
 
+/** How many HEAD reflog entries to scan when locating the turn window */
+const REFLOG_SCAN_LIMIT = 200;
+
 interface TimelineRecorder {
   recordEvent(params: {
     sessionId: string;
@@ -117,7 +120,27 @@ async function detectForRepo(
 
   if (baseline === head) return;
 
-  const commits = await listRangeCommits(repo.path, baseline, head);
+  // Action layer: shas produced by local commit-creating actions this turn.
+  // HEAD also advances on pull/checkout/fetch/reset — those move through
+  // remote history that this session did NOT create and must never be
+  // attributed (recorded attribution is displayed as fact).
+  const createdShas = await listLocallyCreatedShas(repo.path);
+  if (createdShas.size === 0) {
+    // Pure pull/checkout/etc: silently accept the new HEAD as the
+    // observation point so the same remote commits are never re-scanned.
+    upsertSessionRepoHead(ctx.db, {
+      sessionId: ctx.session.id,
+      relativePath: repo.relativePath,
+      lastSha: head,
+    });
+    return;
+  }
+
+  // Result layer: commits still reachable from HEAD and not in the baseline
+  // history. Intersecting drops created-then-discarded shas (commit + reset)
+  // and guards the reflog window when the baseline entry cannot be found.
+  const rangeCommits = await listRangeCommits(repo.path, baseline, head);
+  const commits = rangeCommits.filter((commit) => createdShas.has(commit.sha));
   const branch = await safeBranch(repo.path);
 
   for (const commit of commits) {
@@ -147,6 +170,66 @@ async function detectForRepo(
     relativePath: repo.relativePath,
     lastSha: head,
   });
+}
+
+/**
+ * Collect shas produced by local commit-creating actions from the recent
+ * HEAD reflog window.
+ *
+ * The whole window is scanned deliberately — no early stop at the baseline
+ * entry. The baseline sha can reappear mid-turn (checkout back to the
+ * branch tip, reset to baseline) and would truncate the window; turn
+ * correctness comes from the caller intersecting with rev-list
+ * baseline..HEAD, which already excludes anything from earlier turns
+ * (their commits are in the baseline's history) and anything discarded.
+ *
+ * When the reflog is unavailable (core.logAllRefUpdates=false) this returns
+ * an empty set: better to miss an attribution (cloud-side inference still
+ * provides a weak match) than to record remote history as fact.
+ */
+async function listLocallyCreatedShas(cwd: string): Promise<Set<string>> {
+  const result = await runGit(
+    ["reflog", "--format=%H%x01%gs", `--max-count=${REFLOG_SCAN_LIMIT}`],
+    { cwd },
+  );
+  if (result.exitCode !== 0) return new Set();
+
+  const created = new Set<string>();
+  for (const line of result.stdout.split("\n")) {
+    const [sha, action] = line.split("\x01");
+    if (!sha || !action) continue;
+    if (isCreationAction(action)) created.add(sha.trim());
+  }
+  return created;
+}
+
+/** Rebase step markers that rewrite/create commits; start/finish/abort move HEAD only. */
+const REBASE_CREATION_STEP = /\((pick|squash|fixup|edit|reword|continue)\):/u;
+const REBASE_MOTION_STEP = /\((start|finish|abort)\):/u;
+
+/**
+ * Reflog actions that create commits locally. Everything else — checkout,
+ * reset, clone, fetch, fast-forward pull/merge — moves HEAD without
+ * creating anything and must not attribute.
+ *
+ * Notes pinned by real-repo probing:
+ * - Action prefixes are NOT fixed verbs: pull records its full command line
+ *   ("pull -q --rebase origin main (pick): ..."), so rebase steps must be
+ *   matched by their "(step):" marker, prefix-independent.
+ * - "(start)" points at the UPSTREAM TIP — during `pull --rebase` that is a
+ *   remote commit inside baseline..HEAD, so motion steps stay excluded.
+ * - merge's verb carries the branch name; real merges and fast-forwards
+ *   differ only in the suffix after the colon.
+ * - Conflict-resolution merges land as "commit (merge): ...".
+ */
+function isCreationAction(action: string): boolean {
+  if (action.startsWith("commit")) return true; // commit: / (amend) / (initial) / (merge)
+  if (action.startsWith("cherry-pick:")) return true;
+  if (action.startsWith("revert:")) return true;
+  if (REBASE_MOTION_STEP.test(action)) return false;
+  if (REBASE_CREATION_STEP.test(action)) return true;
+  if (action.startsWith("merge ") && !action.endsWith(": Fast-forward")) return true;
+  return false;
 }
 
 /**

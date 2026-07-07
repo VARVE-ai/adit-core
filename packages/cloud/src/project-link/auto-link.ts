@@ -129,17 +129,32 @@ export async function triggerProjectLinkSync(
       args.push("--skip-docs");
     }
 
-    const child = spawn(
-      npxCommand(),
-      args,
-      {
-        cwd: projectRoot,
-        stdio: ["ignore", "ignore", "ignore"],
-        detached: true,
-        shell: process.platform === "win32",
-        windowsHide: true,
-      },
-    );
+    // Windows needs a shell to resolve npx.cmd, but Node deprecated passing
+    // an args array alongside shell:true (DEP0190 — warning lands on the
+    // hook's stderr). Build a single quoted command line there instead;
+    // POSIX keeps the args-array form with no shell.
+    const useShell = process.platform === "win32";
+    const child = useShell
+      ? spawn(
+          [npxCommand(), ...args].map(quoteForWindowsShell).join(" "),
+          {
+            cwd: projectRoot,
+            stdio: ["ignore", "ignore", "ignore"],
+            detached: true,
+            shell: true,
+            windowsHide: true,
+          },
+        )
+      : spawn(
+          npxCommand(),
+          args,
+          {
+            cwd: projectRoot,
+            stdio: ["ignore", "ignore", "ignore"],
+            detached: true,
+            windowsHide: true,
+          },
+        );
     child.unref();
     child.on("error", () => {
       // fail-open
@@ -147,6 +162,12 @@ export async function triggerProjectLinkSync(
   } catch {
     // fail-open — spawn itself may throw (e.g. npx not found)
   }
+}
+
+/** Quote an argument for cmd.exe when composing a single shell command line. */
+function quoteForWindowsShell(arg: string): string {
+  if (arg.length > 0 && !/[\s"^&|<>()%!]/u.test(arg)) return arg;
+  return `"${arg.replace(/"/gu, '""')}"`;
 }
 
 export async function collectGitRefsFingerprint(projectRoot: string): Promise<string | null> {

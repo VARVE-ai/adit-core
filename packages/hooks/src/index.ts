@@ -68,9 +68,15 @@ function resolvePlatformArg(platform: HookPlatformArg | null): Platform | null {
   return platform;
 }
 
-// Fail-open: catch everything, always exit 0.
-// .finally() ensures the process exits immediately even when lingering
-// handles (stdin listeners, network connections, timers) would keep it alive.
+// Fail-open: catch everything, always exit code 0 (Claude Code treats some
+// non-zero hook exit codes as blocking). Prefer a natural exit — calling
+// process.exit() while libuv handles are still closing asserts on Windows.
+// readStdin pauses stdin and unrefs its timer, so the loop normally drains
+// within milliseconds. The short net below catches any unexpected lingering
+// handle without riding the 10s hard net into the platform hook timeout.
 main()
   .catch(() => {})
-  .finally(() => process.exit(0));
+  .finally(() => {
+    process.exitCode = 0;
+    setTimeout(() => process.exit(0), 1_500).unref();
+  });

@@ -140,6 +140,10 @@ export async function readStdin(): Promise<Record<string, unknown>> {
     const finish = <T>(fn: (value: T) => void, value: T): void => {
       if (settled) return;
       settled = true;
+      // Release the stdin handle so the process can exit naturally instead
+      // of relying on process.exit() while libuv handles are still closing
+      // (which asserts on Windows).
+      process.stdin.pause();
       fn(value);
     };
 
@@ -159,6 +163,7 @@ export async function readStdin(): Promise<Record<string, unknown>> {
     // Hard timeout — always fires after 3 seconds regardless of data state.
     // If data was received but stdin never closed (e.g. parent process didn't
     // close the pipe), try to parse whatever we have instead of hanging forever.
+    // unref'd so a completed read doesn't keep the process alive for 3s.
     setTimeout(() => {
       if (data) {
         try {
@@ -169,6 +174,6 @@ export async function readStdin(): Promise<Record<string, unknown>> {
       } else {
         finish(reject, new Error("No stdin data received"));
       }
-    }, 3000);
+    }, 3000).unref();
   });
 }

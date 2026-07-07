@@ -186,4 +186,148 @@ describe("commit attribution", () => {
     expect(recorded).toHaveLength(0);
     expect(getSessionRepoHeads(db, SESSION_ID)).toHaveLength(0);
   });
+
+  // ── HEAD movement that must NOT attribute (pull/checkout/etc.) ───────────
+
+  /** Clone the seeded repo as a "remote" and add commits the local doesn't have. */
+  function makeRemoteAhead(commitCount: number): { remoteDir: string; shas: string[] } {
+    const remoteDir = join(dir, "remote-src");
+    execFileSync("git", ["clone", "-q", repoDir, remoteDir]);
+    git(remoteDir, "config", "user.email", "remote@adit.dev");
+    git(remoteDir, "config", "user.name", "Remote");
+    const shas: string[] = [];
+    for (let i = 1; i <= commitCount; i++) {
+      shas.push(commitFile(remoteDir, `remote-${i}.txt`, `remote commit ${i}`));
+    }
+    git(repoDir, "remote", "add", "origin", remoteDir);
+    git(repoDir, "fetch", "-q", "origin");
+    return { remoteDir, shas };
+  }
+
+  it("does not attribute remote history from a fast-forward pull", async () => {
+    await initializeSessionRepoBaselines(ctx);
+    makeRemoteAhead(2);
+
+    git(repoDir, "pull", "-q", "origin", "main");
+    await detectAndRecordCommits(ctx, timeline());
+
+    expect(recorded).toHaveLength(0);
+    // Baseline still advances so the same remote commits are never re-scanned.
+    expect(getSessionRepoHeads(db, SESSION_ID)[0].lastSha).toBe(
+      git(repoDir, "rev-parse", "HEAD"),
+    );
+  });
+
+  it("does not attribute commits reached by checking out a remote branch", async () => {
+    await initializeSessionRepoBaselines(ctx);
+    const { remoteDir } = makeRemoteAhead(0);
+    git(remoteDir, "checkout", "-qb", "feature/r");
+    commitFile(remoteDir, "r1.txt", "remote feature 1");
+    commitFile(remoteDir, "r2.txt", "remote feature 2");
+    git(repoDir, "fetch", "-q", "origin");
+
+    git(repoDir, "checkout", "-qb", "feature/r", "origin/feature/r");
+    await detectAndRecordCommits(ctx, timeline());
+
+    expect(recorded).toHaveLength(0);
+    expect(getSessionRepoHeads(db, SESSION_ID)[0].lastSha).toBe(
+      git(repoDir, "rev-parse", "HEAD"),
+    );
+  });
+
+  it("attributes only the local commits in a mixed pull-plus-commit turn", async () => {
+    await initializeSessionRepoBaselines(ctx);
+    const { shas: remoteShas } = makeRemoteAhead(2);
+
+    git(repoDir, "pull", "-q", "origin", "main");
+    const local1 = commitFile(repoDir, "l1.txt", "feat: local one");
+    const local2 = commitFile(repoDir, "l2.txt", "feat: local two");
+    await detectAndRecordCommits(ctx, timeline());
+
+    expect(recorded.map((r) => r.gitHeadSha)).toEqual([local1, local2]);
+    for (const remoteSha of remoteShas) {
+      expect(recorded.map((r) => r.gitHeadSha)).not.toContain(remoteSha);
+    }
+  });
+
+  it("attributes only the merge commit for a no-ff merge, not the merged history", async () => {
+    await initializeSessionRepoBaselines(ctx);
+    makeRemoteAhead(2);
+
+    git(repoDir, "merge", "-q", "--no-ff", "origin/main", "-m", "merge remote work");
+    await detectAndRecordCommits(ctx, timeline());
+
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].gitHeadSha).toBe(git(repoDir, "rev-parse", "HEAD"));
+    expect(recorded[0].responseText).toBe("merge remote work");
+  });
+
+  it("attributes only the rewritten local commit after pull --rebase", async () => {
+    await initializeSessionRepoBaselines(ctx);
+    const { shas: remoteShas } = makeRemoteAhead(2);
+    const localBefore = commitFile(repoDir, "mine.txt", "feat: my local work");
+
+    git(repoDir, "pull", "-q", "--rebase", "origin", "main");
+    await detectAndRecordCommits(ctx, timeline());
+
+    const rewritten = git(repoDir, "rev-parse", "HEAD");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].gitHeadSha).toBe(rewritten);
+    expect(rewritten).not.toBe(localBefore);
+    for (const remoteSha of remoteShas) {
+      expect(recorded.map((r) => r.gitHeadSha)).not.toContain(remoteSha);
+    }
+  });
+
+  it("does not attribute commits discarded by reset before the turn ended", async () => {
+    await initializeSessionRepoBaselines(ctx);
+    const kept = commitFile(repoDir, "k.txt", "feat: kept");
+    commitFile(repoDir, "d.txt", "feat: discarded");
+    git(repoDir, "reset", "-q", "--hard", kept);
+
+    await detectAndRecordCommits(ctx, timeline());
+
+    expect(recorded.map((r) => r.gitHeadSha)).toEqual([kept]);
+  });
+
+  it("attributes the conflict-resolution merge commit (commit (merge) action)", async () => {
+    await initializeSessionRepoBaselines(ctx);
+    git(repoDir, "checkout", "-qb", "side");
+    const sideSha = commitFile(repoDir, "seed.txt", "side change");
+    git(repoDir, "checkout", "-q", "main");
+    const mainSha = commitFile(repoDir, "seed.txt", "main change");
+
+    let conflicted = false;
+    try {
+      git(repoDir, "merge", "side");
+    } catch {
+      conflicted = true; // expected: both sides edited seed.txt
+    }
+    expect(conflicted).toBe(true);
+    writeFileSync(join(repoDir, "seed.txt"), "resolved\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "--no-edit");
+    const mergeSha = git(repoDir, "rev-parse", "HEAD");
+
+    await detectAndRecordCommits(ctx, timeline());
+
+    // All three were created locally this turn: both branch commits and the
+    // conflict-resolution merge commit (reflog action "commit (merge)").
+    const shas = recorded.map((r) => r.gitHeadSha);
+    expect(shas).toHaveLength(3);
+    expect(shas).toContain(sideSha);
+    expect(shas).toContain(mainSha);
+    expect(shas).toContain(mergeSha);
+  });
+
+  it("stays silent but advances the baseline when the reflog is unavailable", async () => {
+    await initializeSessionRepoBaselines(ctx);
+    const sha = commitFile(repoDir, "n.txt", "feat: no reflog");
+    rmSync(join(repoDir, ".git", "logs"), { recursive: true, force: true });
+
+    await detectAndRecordCommits(ctx, timeline());
+
+    expect(recorded).toHaveLength(0);
+    expect(getSessionRepoHeads(db, SESSION_ID)[0].lastSha).toBe(sha);
+  });
 });

@@ -132,19 +132,21 @@ describe("triggerProjectLinkSync", () => {
     expect(child.unref).toHaveBeenCalledOnce();
   });
 
-  it("uses the Windows npx command shim when spawning the detached link process", async () => {
+  it("spawns a single quoted command line on Windows (avoids DEP0190)", async () => {
     setPlatform("win32");
 
     await triggerProjectLinkSync(fakeDb, "proj_123", "C:\\workspace");
 
     expect(mockSpawn).toHaveBeenCalledOnce();
-    const [cmd, args, opts] = mockSpawn.mock.calls[0];
-    expect(cmd).toBe("npx.cmd");
-    expect(args).toEqual(["adit", "cloud", "link", "--json", "--skip-qualify"]);
+    // shell:true with an args array is deprecated (DEP0190) and its warning
+    // lands on the hook's stderr — Windows must get one composed string.
+    const [cmd, opts] = mockSpawn.mock.calls[0];
+    expect(cmd).toBe("npx.cmd adit cloud link --json --skip-qualify");
     expect(opts).toEqual(expect.objectContaining({
       cwd: "C:\\workspace",
       shell: true,
       windowsHide: true,
+      detached: true,
     }));
   });
 
