@@ -33,7 +33,7 @@ export {
   type CodexHookState,
 } from "./codex-trust.js";
 export { geminiAdapter } from "./gemini.js";
-export { getAdapter, listAdapters, registerAdapter, detectPlatform, detectPlatformFromPayload, detectPlatforms } from "./registry.js";
+export { getAdapter, listAdapters, registerAdapter, detectPlatform, detectPlatforms } from "./registry.js";
 
 /**
  * Resolve the absolute path to the adit-hook binary for reliable invocation.

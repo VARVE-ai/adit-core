@@ -69,7 +69,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "BeforeAgent");
+      const result = geminiAdapter.parseInput(raw, "prompt-submit");
 
       expect(result.hookType).toBe("prompt-submit");
       expect(result.platformCli).toBe("gemini");
@@ -91,7 +91,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "AfterAgent");
+      const result = geminiAdapter.parseInput(raw, "stop");
 
       expect(result.hookType).toBe("stop");
       expect(result.platformSessionId).toBe("session123");
@@ -112,7 +112,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "AfterTool");
+      const result = geminiAdapter.parseInput(raw, "notification");
 
       expect(result.hookType).toBe("notification");
       expect(result.toolName).toBe("readFile");
@@ -132,7 +132,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "Notification");
+      const result = geminiAdapter.parseInput(raw, "notification");
 
       expect(result.hookType).toBe("notification");
       expect(result.notificationType).toBe("info");
@@ -150,7 +150,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "SessionStart");
+      const result = geminiAdapter.parseInput(raw, "session-start");
 
       expect(result.hookType).toBe("session-start");
       expect(result.sessionSource).toBe("startup");
@@ -166,7 +166,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "SessionEnd");
+      const result = geminiAdapter.parseInput(raw, "session-end");
 
       expect(result.hookType).toBe("session-end");
       expect(result.sessionEndReason).toBe("exit");

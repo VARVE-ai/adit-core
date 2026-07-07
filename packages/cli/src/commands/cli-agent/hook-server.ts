@@ -18,12 +18,11 @@ function readString(value: unknown): string | null {
 }
 
 function readSessionId(body: Record<string, unknown>): string | null {
+  // Claude and Codex hook payloads both carry session_id; the transcript
+  // filename is a fallback for payloads that omit it (e.g. statusLine).
   return (
     readString(body.session_id) ??
-    readString(body.sessionId) ??
-    readString(body.thread_id) ??
-    readString(body.threadId) ??
-    (readString(body.transcript_path) ?? readString(body.transcriptPath))
+    readString(body.transcript_path)
       ?.match(/([0-9a-f-]{8}-[0-9a-f-]{4}-[0-9a-f-]{4}-[0-9a-f-]{4}-[0-9a-f-]{12})\.jsonl$/i)?.[1] ??
     null
   );

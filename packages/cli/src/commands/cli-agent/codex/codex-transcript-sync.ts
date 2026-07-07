@@ -569,12 +569,12 @@ function readString(value: unknown): string | null {
 }
 
 function readSessionId(body: Record<string, unknown>): string | null {
+  // `sessionId` is injected by the relay hook-server; `session_id` is
+  // Codex's own payload field. Transcript filename is the last resort.
   return (
     readString(body.sessionId) ??
     readString(body.session_id) ??
-    readString(body.threadId) ??
-    readString(body.thread_id) ??
-    (readString(body.transcript_path) ?? readString(body.transcriptPath))
+    readString(body.transcript_path)
       ?.match(/([0-9a-f-]{8}-[0-9a-f-]{4}-[0-9a-f-]{4}-[0-9a-f-]{4}-[0-9a-f-]{12})\.jsonl$/i)?.[1] ??
     null
   );

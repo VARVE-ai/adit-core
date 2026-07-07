@@ -7,9 +7,9 @@
  * Handles installation into .codex/hooks.json.
  *
  * Key differences from Claude Code:
- * - Timeout is in **seconds** (not milliseconds)
  * - SessionStart uses matcher "startup|resume"
  * - PostToolUse uses matcher "Bash"
+ * - Hooks must be trusted via [hooks.state] entries in $CODEX_HOME/config.toml
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -50,50 +50,23 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "PostToolUse", aditHandler: "notification", matcher: "Bash" },
 ];
 
-/** Map Codex CLI platform events to ADIT hook types (derived from HOOK_MAPPINGS) */
-const PLATFORM_TO_ADIT: Record<string, AditHookType> = Object.fromEntries(
-  HOOK_MAPPINGS.map((m) => [m.platformEvent, m.aditHandler]),
-) as Record<string, AditHookType>;
-
-function readStringField(
-  raw: Record<string, unknown>,
-  ...keys: string[]
-): string | undefined {
-  for (const key of keys) {
-    const value = raw[key];
-    if (typeof value === "string") return value;
-  }
-  return undefined;
-}
-
-function readObjectField(
-  raw: Record<string, unknown>,
-  ...keys: string[]
-): Record<string, unknown> | undefined {
-  for (const key of keys) {
-    const value = raw[key];
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-      return value as Record<string, unknown>;
-    }
-  }
-  return undefined;
-}
-
 export const codexAdapter: PlatformAdapter = {
   platform: "codex" as Platform,
   displayName: "Codex",
   hookMappings: HOOK_MAPPINGS,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {
-    const aditHookType = PLATFORM_TO_ADIT[hookType] ?? (hookType as AditHookType);
+    const aditHookType = hookType as AditHookType;
     const cwd = (raw.cwd as string) ?? process.cwd();
 
+    // Field names follow Codex's hook schema (hooks/src/schema.rs):
+    // snake_case, session_id on every event, tool_response for results.
     return {
       cwd,
       hookType: aditHookType,
       platformCli: "codex",
-      platformSessionId: readStringField(raw, "session_id", "sessionId", "thread_id", "threadId"),
-      transcriptPath: readStringField(raw, "transcript_path", "transcriptPath"),
+      platformSessionId: raw.session_id as string | undefined,
+      transcriptPath: raw.transcript_path as string | undefined,
       // Prompt
       prompt: raw.prompt as string | undefined,
       // Stop
@@ -101,16 +74,9 @@ export const codexAdapter: PlatformAdapter = {
       lastAssistantMessage: raw.last_assistant_message as string | undefined,
       stopHookActive: raw.stop_hook_active as boolean | undefined,
       // Tool use (from PostToolUse)
-      toolName: readStringField(raw, "tool_name", "toolName", "tool", "name"),
-      toolInput: readObjectField(raw, "tool_input", "toolInput", "input"),
-      toolOutput: readObjectField(
-        raw,
-        "tool_response",
-        "toolResponse",
-        "tool_output",
-        "toolOutput",
-        "output",
-      ),
+      toolName: raw.tool_name as string | undefined,
+      toolInput: raw.tool_input as Record<string, unknown> | undefined,
+      toolOutput: raw.tool_response as Record<string, unknown> | undefined,
       // Session lifecycle
       sessionSource: raw.source as string | undefined,
       sessionEndReason: raw.reason as string | undefined,
@@ -217,15 +183,6 @@ export const codexAdapter: PlatformAdapter = {
       detail: hooksDetail,
     });
 
-    const configPath = join(projectRoot, ".codex", "config.toml");
-    const projectConfig = readTextFile(configPath);
-    const featureEnabled = projectConfig !== null && hasTomlBooleanFeature(projectConfig, "hooks");
-    checks.push({
-      name: "Codex hooks feature",
-      ok: featureEnabled,
-      detail: featureEnabled ? `Enabled in ${configPath}` : "Missing [features] hooks = true",
-    });
-
     const trustConfigPath = resolveCodexHookTrustConfigPath();
     const trustConfig = readTextFile(trustConfigPath);
     const hookStates = hooksFound
@@ -308,8 +265,8 @@ export const codexAdapter: PlatformAdapter = {
     hooksConfig.hooks = mergedHooks;
     writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2) + "\n");
 
-    const configPath = join(codexDir, "config.toml");
-    writeFileSync(configPath, enableCodexHooksFeature(readTextFile(configPath) ?? ""));
+    // The hooks feature is stable and enabled by default on Codex >= 0.124
+    // (ADIT's baseline), so no [features] toggle is written here.
 
     const hookStates = buildCodexHookStatesForEntries({
       hooksPath,
@@ -321,10 +278,6 @@ export const codexAdapter: PlatformAdapter = {
       marker: codexHookTrustMarkerForPath(hooksPath),
       states: hookStates,
     });
-  },
-
-  getResumeCommand(_projectRoot: string): string | null {
-    return "codex --continue";
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {
@@ -433,61 +386,4 @@ function readTextFile(path: string): string | null {
   } catch {
     return null;
   }
-}
-
-function enableTomlBooleanFeature(text: string, key: string): string {
-  const lines = text ? text.replace(/\s+$/u, "").split(/\r?\n/u) : [];
-  const featureHeaderIndex = lines.findIndex((line) => /^\s*\[features\]\s*$/u.test(line));
-  if (featureHeaderIndex < 0) {
-    if (lines.length > 0) lines.push("");
-    lines.push("[features]", `${key} = true`);
-    return `${lines.join("\n")}\n`;
-  }
-
-  let insertIndex = lines.length;
-  for (let index = featureHeaderIndex + 1; index < lines.length; index++) {
-    if (/^\s*\[[^\]]+\]\s*$/u.test(lines[index] ?? "")) {
-      insertIndex = index;
-      break;
-    }
-    if (new RegExp(`^\\s*${escapeRegExp(key)}\\s*=`, "u").test(lines[index] ?? "")) {
-      lines[index] = `${key} = true`;
-      return `${lines.join("\n")}\n`;
-    }
-  }
-
-  lines.splice(insertIndex, 0, `${key} = true`);
-  return `${lines.join("\n")}\n`;
-}
-
-function enableCodexHooksFeature(text: string): string {
-  const cleaned = text
-    .split(/\r?\n/u)
-    .filter((line) => !/^\s*codex_hooks\s*=/u.test(line))
-    .join("\n")
-    .replace(/\s+$/u, "");
-  return enableTomlBooleanFeature(cleaned, "hooks");
-}
-
-function hasTomlBooleanFeature(text: string, key: string): boolean {
-  const lines = text.split(/\r?\n/u);
-  let inFeatures = false;
-  for (const line of lines) {
-    if (/^\s*\[features\]\s*$/u.test(line)) {
-      inFeatures = true;
-      continue;
-    }
-    if (/^\s*\[[^\]]+\]\s*$/u.test(line)) {
-      inFeatures = false;
-      continue;
-    }
-    if (inFeatures && new RegExp(`^\\s*${escapeRegExp(key)}\\s*=\\s*true\\s*(?:#.*)?$`, "u").test(line)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }

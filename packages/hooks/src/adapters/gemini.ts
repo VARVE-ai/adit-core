@@ -32,18 +32,13 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "Notification", aditHandler: "notification" },
 ];
 
-/** Map Gemini CLI platform events to ADIT hook types (derived from HOOK_MAPPINGS) */
-const PLATFORM_TO_ADIT: Record<string, AditHookType> = Object.fromEntries(
-  HOOK_MAPPINGS.map((m) => [m.platformEvent, m.aditHandler]),
-) as Record<string, AditHookType>;
-
 export const geminiAdapter: PlatformAdapter = {
   platform: "gemini" as Platform,
   displayName: "Gemini CLI",
   hookMappings: HOOK_MAPPINGS,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {
-    const aditHookType = PLATFORM_TO_ADIT[hookType] ?? (hookType as AditHookType);
+    const aditHookType = hookType as AditHookType;
     const cwd = (raw.cwd as string) ?? process.cwd();
 
     return {
@@ -228,10 +223,6 @@ export const geminiAdapter: PlatformAdapter = {
 
     settings.hooks = mergedHooks;
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-  },
-
-  getResumeCommand(_projectRoot: string): string | null {
-    return "gemini";
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {

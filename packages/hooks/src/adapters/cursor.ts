@@ -123,18 +123,13 @@ const HOOK_MAPPINGS: HookMapping[] = [
   // already extracts from the transcript.
 ];
 
-/** Map Cursor platform events to ADIT hook types (derived from HOOK_MAPPINGS) */
-const PLATFORM_TO_ADIT: Record<string, AditHookType> = Object.fromEntries(
-  HOOK_MAPPINGS.map((m) => [m.platformEvent, m.aditHandler]),
-) as Record<string, AditHookType>;
-
 export const cursorAdapter: PlatformAdapter = {
   platform: "cursor" as Platform,
   displayName: "Cursor",
   hookMappings: HOOK_MAPPINGS,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {
-    const aditHookType = PLATFORM_TO_ADIT[hookType] ?? (hookType as AditHookType);
+    const aditHookType = hookType as AditHookType;
 
     // Cursor sends workspace_roots as array; fall back to CURSOR_PROJECT_DIR env
     const workspaceRoots = raw.workspace_roots as string[] | undefined;
@@ -324,10 +319,6 @@ export const cursorAdapter: PlatformAdapter = {
 
     hooksConfig.hooks = mergedHooks;
     writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2) + "\n");
-  },
-
-  getResumeCommand(_projectRoot: string): string | null {
-    return null;
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {

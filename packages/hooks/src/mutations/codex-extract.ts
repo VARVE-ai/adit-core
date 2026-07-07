@@ -9,7 +9,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { AgentFileMutation, MutationKind } from "./types.js";
-import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES, MAX_EVENT_DIFF_BYTES } from "./constants.js";
+import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES } from "./constants.js";
 
 interface CodexRawEntry {
   type?: string;
@@ -423,5 +423,3 @@ function normalizePath(path: string): string {
 function sessionIdFromPath(transcriptPath: string): string | undefined {
   return transcriptPath.match(/([0-9a-f-]{36})\.jsonl$/i)?.[1];
 }
-
-export const CODEX_EVENT_DIFF_LIMIT = MAX_EVENT_DIFF_BYTES;

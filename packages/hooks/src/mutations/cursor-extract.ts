@@ -277,5 +277,3 @@ function assignStats(m: AgentFileMutation, diff: string): void {
   m.additions = additions;
   m.deletions = deletions;
 }
-
-export const CURSOR_EVENT_DIFF_LIMIT = 512 * 1024;
