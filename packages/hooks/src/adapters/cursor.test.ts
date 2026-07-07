@@ -491,6 +491,17 @@ describe("Cursor Adapter - extractLastAssistantMessage", () => {
     expect(result).toBe("Hi there!");
   });
 
+  it("extracts assistant text from the type-shaped format (Cursor CLI stream-json)", () => {
+    const transcriptPath = join(tempDir, "transcript.jsonl");
+    writeFileSync(transcriptPath, [
+      JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "hello" }] } }),
+      JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Typed shape reply" }] } }),
+    ].join("\n") + "\n");
+
+    const result = extractLastAssistantMessage(transcriptPath);
+    expect(result).toBe("Typed shape reply");
+  });
+
   it("extracts multi-block assistant message", () => {
     const transcriptPath = join(tempDir, "transcript.jsonl");
     writeFileSync(transcriptPath, [

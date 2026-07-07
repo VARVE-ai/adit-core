@@ -188,6 +188,15 @@ describe("Gemini CLI Hook Chaining", () => {
       expect(config.content.hooks.Notification).toBeDefined();
     });
 
+    it("limits AfterTool to shell commands via matcher", () => {
+      const config = geminiAdapter.generateHookConfig("npx adit-hook");
+      const entry = config.content.hooks.AfterTool[0] as { matcher?: string };
+      expect(entry.matcher).toBe("run_shell_command");
+      // Other events carry no matcher
+      const sessionEntry = config.content.hooks.SessionStart[0] as { matcher?: string };
+      expect(sessionEntry.matcher).toBeUndefined();
+    });
+
     it("uses explicit platform argument and a 10s millisecond timeout", () => {
       const config = geminiAdapter.generateHookConfig("npx adit-hook", "/project");
 

@@ -13,7 +13,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { Platform } from "@varveai/adit-core";
 import type {
   PlatformAdapter,
@@ -203,8 +203,22 @@ export const codexAdapter: PlatformAdapter = {
           : `${untrustedStates.length} hook(s) need review in Codex. Run 'adit plugin install codex' or open /hooks.`,
     });
 
+    // Codex only loads project-scoped hooks in trusted workspaces (>= 0.122).
+    // Advisory: reinstalling cannot fix this — the user must trust the
+    // project inside Codex — so it must not fail `valid` (that would make
+    // ensurePersistentCodexHooksInstalled reinstall on every start).
+    const workspaceTrusted = isCodexWorkspaceTrusted(trustConfig, projectRoot);
+    checks.push({
+      name: "Codex workspace trust",
+      ok: workspaceTrusted,
+      advisory: true,
+      detail: workspaceTrusted
+        ? `Workspace trusted in ${trustConfigPath}`
+        : "Project is not trusted in Codex — project hooks will not load. Open the project in codex and trust it.",
+    });
+
     return {
-      valid: checks.every((c) => c.ok),
+      valid: checks.filter((c) => !c.advisory).every((c) => c.ok),
       checks,
     };
   },
@@ -386,4 +400,36 @@ function readTextFile(path: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Check whether the project is a trusted Codex workspace.
+ *
+ * Codex records `[projects."<abs path>"]` tables with `trust_level =
+ * "trusted"` in $CODEX_HOME/config.toml. Line-based parse of the same file
+ * the trust states live in.
+ */
+function isCodexWorkspaceTrusted(configText: string | null, projectRoot: string): boolean {
+  if (!configText) return false;
+  const wanted = resolve(projectRoot);
+  let inWantedProject = false;
+  for (const line of configText.split(/\r?\n/u)) {
+    const header = line.match(/^\s*\[projects\.("(?:\\.|[^"\\])*")\]\s*$/u);
+    if (header?.[1]) {
+      try {
+        inWantedProject = resolve(JSON.parse(header[1]) as string) === wanted;
+      } catch {
+        inWantedProject = false;
+      }
+      continue;
+    }
+    if (/^\s*\[[^\]]+\]\s*$/u.test(line)) {
+      inWantedProject = false;
+      continue;
+    }
+    if (inWantedProject && /^\s*trust_level\s*=\s*"trusted"\s*(?:#.*)?$/u.test(line)) {
+      return true;
+    }
+  }
+  return false;
 }

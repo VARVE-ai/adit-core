@@ -22,6 +22,10 @@ import {
   describeHookValidation,
   isAditHookCommand,
 } from "./command.js";
+import {
+  assistantTextFromTranscriptEntry,
+  type TranscriptEntryLike,
+} from "../common/transcript-entry.js";
 
 /**
  * Read the tail of a file (last N bytes) and split into lines.
@@ -76,21 +80,9 @@ export function extractLastAssistantMessage(transcriptPath: string): string | un
     const findAssistantText = (lines: string[]): string | undefined => {
       for (let i = lines.length - 1; i >= 0; i--) {
         try {
-          const entry = JSON.parse(lines[i]) as {
-            role?: string;
-            message?: { content?: Array<{ type?: string; text?: string }> };
-          };
-          if (entry.role !== "assistant") continue;
-
-          const content = entry.message?.content;
-          if (!Array.isArray(content)) continue;
-
-          const texts = content
-            .filter((c): c is { type: string; text: string } => c.type === "text" && typeof c.text === "string")
-            .map((c) => c.text)
-            .filter((t) => t.trim().length > 0);
-
-          if (texts.length > 0) return texts.join("\n");
+          const entry = JSON.parse(lines[i]) as TranscriptEntryLike;
+          const text = assistantTextFromTranscriptEntry(entry);
+          if (text) return text;
         } catch {
           // Skip malformed lines
         }

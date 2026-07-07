@@ -41,6 +41,7 @@ export {
   getActiveSession,
   getSessionByPlatformSessionId,
   endSession,
+  endStaleSessions,
   listSessions,
   insertEvent,
   insertEventAutoSeq,

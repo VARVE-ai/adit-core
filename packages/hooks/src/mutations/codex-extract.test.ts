@@ -165,6 +165,34 @@ describe("extractCodexMutationsFromTranscript", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("records rm/unlink targets as deletions", () => {
+    const dir = tempDir();
+    try {
+      const transcriptPath = join(dir, "019efde3-72c7-7f82-9f7c-5f3d63cee24f.jsonl");
+      writeJsonl(transcriptPath, [
+        userMessage("clean up"),
+        execCommandEnd("call_rm", "rm packages/core/src/tmp.ts\ntouch packages/core/src/kept.ts"),
+      ]);
+
+      const result = extractCodexMutationsFromTranscript(transcriptPath);
+
+      expect(result?.mutations).toMatchObject([
+        {
+          path: "/project/packages/core/src/tmp.ts",
+          kind: "delete",
+          source: "codex-bash-output",
+        },
+        {
+          path: "/project/packages/core/src/kept.ts",
+          kind: "update",
+          source: "codex-bash-output",
+        },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 function userMessage(text: string): unknown {

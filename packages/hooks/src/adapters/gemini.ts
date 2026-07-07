@@ -28,7 +28,12 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "BeforeAgent", aditHandler: "prompt-submit" },
   { platformEvent: "AfterAgent", aditHandler: "stop" },
   { platformEvent: "SessionEnd", aditHandler: "session-end" },
-  { platformEvent: "AfterTool", aditHandler: "notification" },
+  // Shell commands only (matcher is regex-tested against the tool name).
+  // File edits are extracted from the transcript at stop; matching all
+  // tools would record a notification event for every read-only call.
+  // TODO: verify on a real machine that Gemini's shell tool is named
+  // run_shell_command before shipping.
+  { platformEvent: "AfterTool", aditHandler: "notification", matcher: "run_shell_command" },
   { platformEvent: "Notification", aditHandler: "notification" },
 ];
 
@@ -72,17 +77,17 @@ export const geminiAdapter: PlatformAdapter = {
   },
 
   generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
-    const makeHookEntry = (hookType: AditHookType) => [
-      {
-        hooks: [{
-          type: "command",
-          command: buildAditHookCommand(aditBinaryPath, "gemini", hookType, projectRoot),
-          // Gemini CLI hook timeouts are in MILLISECONDS (default 60000),
-          // unlike Claude Code/Codex/Cursor which use seconds. 10s matches
-          // the adit-hook self-kill guard.
-          timeout: 10000,
-        }],
-      },
+    const makeHook = (hookType: AditHookType) => ({
+      type: "command",
+      command: buildAditHookCommand(aditBinaryPath, "gemini", hookType, projectRoot),
+      // Gemini CLI hook timeouts are in MILLISECONDS (default 60000),
+      // unlike Claude Code/Codex/Cursor which use seconds. 10s matches
+      // the adit-hook self-kill guard.
+      timeout: 10000,
+    });
+    const makeHookEntry = (hookType: AditHookType) => [{ hooks: [makeHook(hookType)] }];
+    const makeMatcherEntry = (matcher: string, hookType: AditHookType) => [
+      { matcher, hooks: [makeHook(hookType)] },
     ];
 
     return {
@@ -93,7 +98,7 @@ export const geminiAdapter: PlatformAdapter = {
           BeforeAgent: makeHookEntry("prompt-submit"),
           AfterAgent: makeHookEntry("stop"),
           SessionEnd: makeHookEntry("session-end"),
-          AfterTool: makeHookEntry("notification"),
+          AfterTool: makeMatcherEntry("run_shell_command", "notification"),
           Notification: makeHookEntry("notification"),
         },
       },

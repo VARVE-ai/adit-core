@@ -113,6 +113,13 @@ export interface ValidationCheck {
   name: string;
   ok: boolean;
   detail: string;
+  /**
+   * Advisory checks flag problems reinstalling cannot fix (e.g. the user
+   * must trust the workspace inside the CLI). They are excluded from
+   * `valid` so installers don't loop on them; doctors should surface them
+   * as warnings.
+   */
+  advisory?: boolean;
 }
 
 /** All ADIT hook types */

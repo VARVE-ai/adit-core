@@ -381,7 +381,7 @@ describe("Codex CLI Hook Chaining", () => {
 
     const result = await codexAdapter.validateInstallation(projectRoot);
     expect(result.valid).toBe(true);
-    expect(result.checks.every((c) => c.ok)).toBe(true);
+    expect(result.checks.filter((c) => !c.advisory).every((c) => c.ok)).toBe(true);
   });
 
   describe("Hook mappings", () => {
@@ -583,13 +583,34 @@ describe("Codex CLI Hook Chaining", () => {
       const result = await codexAdapter.validateInstallation(projectRoot);
 
       expect(result.valid).toBe(true);
-      expect(result.checks.length).toBe(3);
+      expect(result.checks.length).toBe(4);
       expect(result.checks[0].name).toBe(".codex directory");
       expect(result.checks[0].ok).toBe(true);
       expect(result.checks[1].name).toBe("Hook configuration");
       expect(result.checks[1].ok).toBe(true);
       expect(result.checks[2].name).toBe("Codex hook trust");
       expect(result.checks[2].ok).toBe(true);
+      // Advisory: the workspace is not trusted in this fresh CODEX_HOME,
+      // but that must NOT fail validation (reinstall cannot fix it and
+      // ensurePersistentCodexHooksInstalled would loop).
+      expect(result.checks[3].name).toBe("Codex workspace trust");
+      expect(result.checks[3].ok).toBe(false);
+      expect(result.checks[3].advisory).toBe(true);
+    });
+
+    it("reports workspace trust when the project is trusted in Codex", async () => {
+      await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+      const userConfigPath = join(codexHome, "config.toml");
+      writeFileSync(
+        userConfigPath,
+        `${readFileSync(userConfigPath, "utf-8")}\n[projects.${JSON.stringify(projectRoot)}]\ntrust_level = "trusted"\n`,
+      );
+
+      const result = await codexAdapter.validateInstallation(projectRoot);
+
+      expect(result.valid).toBe(true);
+      const trustCheck = result.checks.find((c) => c.name === "Codex workspace trust");
+      expect(trustCheck?.ok).toBe(true);
     });
 
     it("detects ADIT hooks that still need Codex review", async () => {
