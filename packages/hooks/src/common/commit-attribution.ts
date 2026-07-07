@@ -214,12 +214,15 @@ const REBASE_MOTION_STEP = /\((start|finish|abort)\):/u;
  *
  * Notes pinned by real-repo probing:
  * - Action prefixes are NOT fixed verbs: pull records its full command line
- *   ("pull -q --rebase origin main (pick): ..."), so rebase steps must be
- *   matched by their "(step):" marker, prefix-independent.
+ *   ("pull -q --rebase origin main (pick): ...", "pull -q --no-rebase origin
+ *   main: Merge made by ..."), so rebase steps are matched by their
+ *   "(step):" marker and merges by their result phrase — never by prefix.
  * - "(start)" points at the UPSTREAM TIP — during `pull --rebase` that is a
  *   remote commit inside baseline..HEAD, so motion steps stay excluded.
- * - merge's verb carries the branch name; real merges and fast-forwards
- *   differ only in the suffix after the colon.
+ * - Merge commits (from `git merge` or a merge-type pull) always end with
+ *   the fixed phrase ": Merge made by the '<strategy>' strategy." (reflog
+ *   messages are not localized). Fast-forwards say ": Fast-forward" and
+ *   create nothing.
  * - Conflict-resolution merges land as "commit (merge): ...".
  */
 function isCreationAction(action: string): boolean {
@@ -228,7 +231,7 @@ function isCreationAction(action: string): boolean {
   if (action.startsWith("revert:")) return true;
   if (REBASE_MOTION_STEP.test(action)) return false;
   if (REBASE_CREATION_STEP.test(action)) return true;
-  if (action.startsWith("merge ") && !action.endsWith(": Fast-forward")) return true;
+  if (action.includes(": Merge made by ")) return true;
   return false;
 }
 

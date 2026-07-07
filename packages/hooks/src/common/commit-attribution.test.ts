@@ -262,6 +262,25 @@ describe("commit attribution", () => {
     expect(recorded[0].responseText).toBe("merge remote work");
   });
 
+  it("attributes the merge commit of a diverged pull --no-rebase, not the pulled history", async () => {
+    await initializeSessionRepoBaselines(ctx);
+    const { shas: remoteShas } = makeRemoteAhead(2);
+    // Local commit on top of the baseline so the pull cannot fast-forward.
+    const localSha = commitFile(repoDir, "diverge.txt", "feat: local diverging work");
+
+    git(repoDir, "pull", "-q", "--no-rebase", "origin", "main", "--no-edit");
+    const mergeSha = git(repoDir, "rev-parse", "HEAD");
+    await detectAndRecordCommits(ctx, timeline());
+
+    // Exactly the two locally created commits: the diverging commit and the
+    // merge commit produced by the pull ("pull ...: Merge made by ...").
+    const shas = recorded.map((r) => r.gitHeadSha);
+    expect(shas).toEqual([localSha, mergeSha]);
+    for (const remoteSha of remoteShas) {
+      expect(shas).not.toContain(remoteSha);
+    }
+  });
+
   it("attributes only the rewritten local commit after pull --rebase", async () => {
     await initializeSessionRepoBaselines(ctx);
     const { shas: remoteShas } = makeRemoteAhead(2);
