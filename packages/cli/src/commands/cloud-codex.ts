@@ -176,7 +176,13 @@ async function processCommand(
     if (!pendingSessionId && sessionId && provider.state.activeSessionId !== sessionId) {
       await provider.switchSession(sessionId);
     }
-    await provider.sendPrompt(text ?? "", { mode, pendingSessionId, localMessageId, attachments });
+    await provider.sendPrompt(text ?? "", {
+      mode,
+      pendingSessionId,
+      localMessageId,
+      attachments,
+      sessionId,
+    });
     return;
   }
 
@@ -191,8 +197,13 @@ async function processCommand(
       await provider.steerPrompt(text ?? "", { sessionId, localMessageId, mode, attachments });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (/not currently accepting steering input/i.test(message)) {
-        await provider.sendPrompt(text ?? "", { mode, localMessageId, attachments });
+      // Downgrade to a regular prompt only when it still targets the session
+      // the user typed into — otherwise late input from a switched-away
+      // session would silently start a turn in the newly active one.
+      const targetsActiveSession =
+        !sessionId || provider.state.activeSessionId === sessionId;
+      if (/not currently accepting steering input/i.test(message) && targetsActiveSession) {
+        await provider.sendPrompt(text ?? "", { mode, localMessageId, attachments, sessionId });
         return;
       }
       throw error;

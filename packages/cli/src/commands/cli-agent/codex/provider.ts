@@ -91,6 +91,8 @@ interface PendingPrompt {
   mode: CodexPromptMode;
   pendingSessionId: string | null;
   localMessageId: string | null;
+  /** Session the prompt was addressed to when enqueued; null means "whatever is active". */
+  targetSessionId: string | null;
   resolve: () => void;
   reject: (error: Error) => void;
 }
@@ -358,6 +360,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       pendingSessionId?: string | null;
       localMessageId?: string | null;
       attachments?: PromptImageAttachment[];
+      sessionId?: string | null;
     } = {},
   ): Promise<void> {
     if (this.ownerValue !== "web") {
@@ -376,6 +379,9 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
         mode: opts.mode === "plan" ? "plan" : "build",
         pendingSessionId: opts.pendingSessionId ?? null,
         localMessageId: opts.localMessageId ?? null,
+        targetSessionId: opts.pendingSessionId
+          ? null
+          : opts.sessionId ?? this.activeSessionId ?? this.resumeSessionId,
         resolve,
         reject,
       });
@@ -799,6 +805,23 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     if (this.promptActive || this.busyValue || this.ownerValue !== "web") return;
     const item = this.promptQueue.shift();
     if (!item) return;
+    if (
+      item.targetSessionId &&
+      item.targetSessionId !== (this.activeSessionId ?? this.resumeSessionId)
+    ) {
+      const error = Object.assign(
+        new Error("Codex session changed before the prompt could start"),
+        { statusCode: 409 },
+      );
+      item.reject(error);
+      this.pushEvent("error", {
+        message: error.message,
+        sessionId: item.targetSessionId,
+        createdAt: Date.now(),
+      });
+      void this.drainPromptQueue();
+      return;
+    }
     this.promptActive = true;
     this.activePromptMode = item.mode;
     try {
@@ -832,6 +855,11 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       item.reject(error instanceof Error ? error : new Error(String(error)));
       this.pushEvent("error", {
         message: error instanceof Error ? error.message : String(error),
+        sessionId: item.targetSessionId ??
+          item.pendingSessionId ??
+          this.activeSessionId ??
+          this.resumeSessionId ??
+          undefined,
         createdAt: Date.now(),
       });
     } finally {
@@ -869,7 +897,11 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       onNotification: (message) => this.handleAppNotification(message),
       onServerRequest: (message) => this.handleAppServerRequest(message),
       onError: (error) => {
-        this.pushEvent("error", { message: error.message, createdAt: Date.now() });
+        this.pushEvent("error", {
+          message: error.message,
+          sessionId: this.activeSessionId ?? this.resumeSessionId ?? undefined,
+          createdAt: Date.now(),
+        });
       },
     });
     this.appServer = client;
@@ -917,6 +949,16 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     await this.applyActiveModelToThread(resumedId, preferredModelId);
   }
 
+  /**
+   * Turn-level notifications may arrive late from a thread we already
+   * switched away from; only the current thread may mutate shared state.
+   * A missing threadId (older app-server builds) is treated as current.
+   */
+  private isCurrentThreadNotification(threadId: string | null): boolean {
+    if (!threadId) return true;
+    return threadId === this.activeSessionId || threadId === this.resumeSessionId;
+  }
+
   private handleAppNotification(message: CodexJsonRpcMessage): void {
     const method = message.method;
     const params = asRecord(message.params) ?? {};
@@ -934,6 +976,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     }
 
     if (method === "thread/status/changed") {
+      if (!this.isCurrentThreadNotification(readString(params.threadId))) return;
       const status = asRecord(params.status);
       const active = status?.type === "active";
       this.setBusy(active);
@@ -955,8 +998,10 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     }
 
     if (method === "turn/started") {
-      const sessionId = readString(params.threadId) ?? this.activeSessionId ?? this.resumeSessionId;
+      const threadId = readString(params.threadId);
+      const sessionId = threadId ?? this.activeSessionId ?? this.resumeSessionId;
       if (sessionId) this.emptyThreadIds.delete(sessionId);
+      if (!this.isCurrentThreadNotification(threadId)) return;
       this.activeTurnId = readString(asRecord(params.turn)?.id) ?? this.activeTurnId;
       this.setBusy(true);
       this.setThinking(true);
@@ -964,15 +1009,18 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     }
 
     if (method === "turn/completed") {
+      const threadId = readString(params.threadId);
       const turn = asRecord(params.turn);
       const status = readString(turn?.status);
       if (status === "failed") {
         const error = asRecord(turn?.error);
         this.pushEvent("error", {
           message: readString(error?.message) ?? "Codex turn failed",
+          sessionId: threadId ?? this.activeSessionId ?? this.resumeSessionId ?? undefined,
           createdAt: Date.now(),
         });
       }
+      if (!this.isCurrentThreadNotification(threadId)) return;
       this.activeTurnId = null;
       this.activePromptMode = null;
       this.setThinking(false);
@@ -1256,7 +1304,15 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       if (sessionId && turnId) {
         try {
           await this.appServer?.request("turn/interrupt", { threadId: sessionId, turnId });
-        } catch {}
+        } catch (interruptError) {
+          this.pushNotice({
+            title: "Interrupt failed",
+            text: `Codex did not confirm interrupting the running turn: ${
+              interruptError instanceof Error ? interruptError.message : String(interruptError)
+            }`,
+            sessionId,
+          });
+        }
       }
       emitAbortEvent();
     })();

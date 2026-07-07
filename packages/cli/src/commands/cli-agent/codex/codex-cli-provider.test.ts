@@ -1728,3 +1728,90 @@ describe("CodexCliProvider steerPrompt", () => {
     provider.stop();
   });
 });
+
+describe("CodexCliProvider thread isolation", () => {
+  it("ignores turn lifecycle notifications from a thread that is no longer active", async () => {
+    const threadA = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    const threadB = "019e2110-d96f-7e40-882e-b524fa9148e5";
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+    });
+    provider.noteLocalSession(threadA);
+    await provider.takeover();
+    await provider.sendPrompt("first");
+    expect(provider.state.busy).toBe(true);
+
+    await provider.switchSession(threadB);
+    expect(provider.state.busy).toBe(false);
+    await provider.sendPrompt("second");
+    expect(provider.state.busy).toBe(true);
+
+    // A late completion from the abandoned thread must not clear the new run.
+    mocks.appServerOptions?.onNotification?.({
+      method: "turn/completed",
+      params: { threadId: threadA, turn: { id: "turn-stale", status: "completed" } },
+    });
+    expect(provider.state.busy).toBe(true);
+
+    mocks.appServerOptions?.onNotification?.({
+      method: "turn/completed",
+      params: { threadId: threadB, turn: { id: "turn-1", status: "completed" } },
+    });
+    expect(provider.state.busy).toBe(false);
+
+    // A stale busy status must not resurrect activity either.
+    mocks.appServerOptions?.onNotification?.({
+      method: "thread/status/changed",
+      params: { threadId: threadA, status: { type: "active" } },
+    });
+    expect(provider.state.busy).toBe(false);
+
+    provider.stop();
+  });
+
+  it("rejects a queued prompt when the active session changed before it started", async () => {
+    const threadA = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    const threadB = "019e2110-d96f-7e40-882e-b524fa9148e5";
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+    provider.noteLocalSession(threadA);
+    await provider.takeover();
+    await provider.sendPrompt("first");
+
+    const second = provider.sendPrompt("second");
+    const secondSettled = second.then(
+      () => null,
+      (error: Error) => error,
+    );
+
+    // The app-server announces a different thread (e.g. rebuilt externally),
+    // then the running turn completes and the queue drains.
+    mocks.appServerOptions?.onNotification?.({
+      method: "thread/started",
+      params: { thread: { id: threadB } },
+    });
+    mocks.appServerOptions?.onNotification?.({
+      method: "turn/completed",
+      params: { threadId: threadB, turn: { id: "turn-1", status: "completed" } },
+    });
+
+    const error = await secondSettled;
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error?.message)).toMatch(/session changed/i);
+    const turnStarts = mocks.appRequest.mock.calls.filter(([method]) => method === "turn/start");
+    expect(turnStarts).toHaveLength(1);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "error",
+      payload: expect.objectContaining({ sessionId: threadA }),
+    }));
+
+    provider.stop();
+  });
+});
