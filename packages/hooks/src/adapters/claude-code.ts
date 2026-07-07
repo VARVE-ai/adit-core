@@ -52,8 +52,8 @@ description: ADIT — manage cloud project linking and development intents
 
 Parse the requested action above and follow the **first matching rule**:
 
-1. Action is \`link\` (with optional flags) → run \`npx adit cloud link\` with the appropriate flags mapped from the arguments: \`--force\`, \`--skip-docs\`, \`--skip-commits\`, \`--dry-run\`.
-2. Action is \`intent\` (with optional flags) → run \`npx adit cloud intent\` with the appropriate flags mapped from the arguments: \`--id <value>\`, \`--state <value>\`. Add \`--json\` for structured output.
+1. Action is \`link\` (with optional flags) → run \`adit cloud link\` with the appropriate flags mapped from the arguments: \`--force\`, \`--skip-docs\`, \`--skip-commits\`, \`--dry-run\`.
+2. Action is \`intent\` (with optional flags) → run \`adit cloud intent\` with the appropriate flags mapped from the arguments: \`--id <value>\`, \`--state <value>\`. Add \`--json\` for structured output.
 3. No action, empty arguments, or unrecognized action → display the **Help** section below as your response. Do not run any commands.
 
 ---
@@ -95,7 +95,7 @@ Shows intents (development plans) and tasks from the connected adit-cloud projec
 - \`/adit intent\` — list all intents
 - \`/adit intent --state execution\` — show active intents
 
-> **Tip:** Not logged in? Run \`npx adit cloud login\` in your terminal first.
+> **Tip:** Not logged in? Run \`adit cloud login\` in your terminal first.
 `,
 };
 

@@ -285,8 +285,8 @@ describe("linkCommand workspace repository requests", () => {
       }],
       feedback: {
         missing: ["Architecture overview"],
-        suggestions: ["Run /generate-docs to fill missing sections"],
-        summaryPrompt: "Use /generate-docs, then re-run link.",
+        suggestions: ["Ask your AI agent to read .adit/prompts/generate-docs.md and follow it to fill missing sections."],
+        summaryPrompt: "Read .adit/prompts/generate-docs.md, fill the docs, then re-run link.",
       },
     });
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -306,7 +306,7 @@ describe("linkCommand workspace repository requests", () => {
       expect(output).toContain("Document scores:");
       expect(output).toContain("Missing:");
       expect(output).toContain("Suggestions:");
-      expect(output).toContain("Use /generate-docs, then re-run link.");
+      expect(output).toContain("Read .adit/prompts/generate-docs.md, fill the docs, then re-run link.");
       expect(output).toContain("Project link complete!");
       expect(output).not.toContain("Workspace link complete!");
       expect(output).not.toContain("Quality feedback:");
@@ -582,8 +582,8 @@ describe("linkCommand workspace repository requests", () => {
       }],
       feedback: {
         missing: ["Architecture overview"],
-        suggestions: ["Run /generate-docs to fill missing sections"],
-        summaryPrompt: "Use /generate-docs, then re-run link.",
+        suggestions: ["Ask your AI agent to read .adit/prompts/generate-docs.md and follow it to fill missing sections."],
+        summaryPrompt: "Read .adit/prompts/generate-docs.md, fill the docs, then re-run link.",
       },
     });
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -607,13 +607,13 @@ describe("linkCommand workspace repository requests", () => {
       expect(output).toContain("AI prompt");
       expect(output).toContain("a           0.41 needs docs");
       expect(output).toContain("1 docs below 60%; 1 placeholders; worst README.md…");
-      expect(output).toContain("/generate-docs a");
+      expect(output).toContain("Fill docs for a");
       expect(output).toContain("AI prompt is not a shell command.");
       expect(output).toContain("Enter it in the AI agent opened at the workspace root.");
-      expect(output).toContain("The path after /generate-docs selects the repository;");
+      expect(output).toContain("following .adit/prompts/generate-docs.md;");
       expect(output).toContain("generated docs stay in their existing locations.");
       expect(result.repositoryResults?.[0]?.qualityFeedback).toContain("Document scores:");
-      expect(result.repositoryResults?.[0]?.summaryPrompt).toBe("Use /generate-docs, then re-run link.");
+      expect(result.repositoryResults?.[0]?.summaryPrompt).toBe("Read .adit/prompts/generate-docs.md, fill the docs, then re-run link.");
       expect(result.repositoryResults?.[0]?.lowScoreDocumentCount).toBe(1);
       expect(result.repositoryResults?.[0]?.stubDocumentCount).toBe(1);
       expect(result.repositoryResults?.[0]?.missingItems).toEqual(["Architecture overview"]);

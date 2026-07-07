@@ -245,7 +245,7 @@ export async function docsValidateCommand(
 
   if (!allPass) {
     console.log();
-    console.log(pc.red("  Documents below threshold. Run " + pc.bold("/generate-docs") + pc.red(" in your AI coding tool to auto-fill.")));
+    console.log(pc.red("  Documents below threshold. Ask your AI agent to read " + pc.bold(".adit/prompts/generate-docs.md") + pc.red(" and follow it to fill them.")));
     console.log(pc.red("  Then re-run 'adit docs validate' to check scores."));
   }
 

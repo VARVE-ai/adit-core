@@ -628,8 +628,8 @@ async function linkRepositoryCommand(
             log(`    [OK]   ${doc.sourcePath} — score ${scorePct}% (type: ${result.detectedType})`);
           }
         }
-        log("  Tip: Use 'adit docs validate' for a detailed report, or run your");
-        log("       AI coding tool's generate-docs skill to fill in missing sections.");
+        log("  Tip: Use 'adit docs validate' for a detailed report, or ask your AI");
+        log("       agent to follow .adit/prompts/generate-docs.md to fill missing sections.");
       }
     }
 
@@ -937,7 +937,8 @@ function logWorkspaceQualityFeedback(result: LinkResult, log: (message?: unknown
   log("  Quality shows the cloud score and pass status for each repository.");
   log("  Needs attention explains why docs still need work: low scores, placeholders, worst file, or missing content.");
   log("  AI prompt is not a shell command. Enter it in the AI agent opened at the workspace root.");
-  log("  The path after /generate-docs selects the repository; generated docs stay in their existing locations.");
+  log("  Each prompt asks the agent to fill that repository's documents following .adit/prompts/generate-docs.md;");
+  log("  generated docs stay in their existing locations.");
   log("  After the docs are updated, re-run adit cloud link.");
 }
 
@@ -948,7 +949,7 @@ function formatQualityTable(repositories: WorkspaceRepositoryResult[]): string {
     formatScoreCell(repository),
     String(repository.documentCount),
     truncateCell(formatIssueCell(repository), 50),
-    truncateCell(`/generate-docs ${repository.relativePath}`, 36),
+    truncateCell(`Fill docs for ${repository.relativePath}`, 36),
   ]);
   const widths = headers.map((header, index) =>
     Math.max(header.length, ...rows.map((row) => row[index]?.length ?? 0)),

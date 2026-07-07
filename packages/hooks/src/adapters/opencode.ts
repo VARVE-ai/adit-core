@@ -85,7 +85,7 @@ Shows intents (development plans) and tasks from the connected adit-cloud projec
 - \`/adit intent\` — list all intents
 - \`/adit intent --state execution\` — show active intents
 
-> **Tip:** Not logged in? Run \`npx adit cloud login\` in your terminal first.
+> **Tip:** Not logged in? Run \`adit cloud login\` in your terminal first.
 `,
 };
 
@@ -121,7 +121,7 @@ function generateToolsContent(): string {
     '    if (args.skipCommits) flags.push("--skip-commits");',
     '    if (args.dryRun) flags.push("--dry-run");',
     "",
-    '    const cmd = ["npx", "adit", "cloud", "link", ...flags];',
+    '    const cmd = ["adit", "cloud", "link", ...flags];',
     "    const result = await Bun.$`${cmd}`.cwd(context.directory).nothrow().quiet();",
     "    const stdout = result.stdout.toString().trim();",
     "    const stderr = result.stderr.toString().trim();",
@@ -179,7 +179,7 @@ function generateToolsContent(): string {
     '    if (args.id) flags.push("--id", args.id);',
     '    if (args.state) flags.push("--state", args.state);',
     "",
-    '    const cmd = ["npx", "adit", "cloud", "intent", ...flags];',
+    '    const cmd = ["adit", "cloud", "intent", ...flags];',
     "    const result = await Bun.$`${cmd}`.cwd(context.directory).nothrow().quiet();",
     "    const stdout = result.stdout.toString().trim();",
     "    const stderr = result.stderr.toString().trim();",

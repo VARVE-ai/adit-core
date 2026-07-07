@@ -1,6 +1,6 @@
-import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -105,5 +105,42 @@ describe("initCommand workspace mode", () => {
     expect(existsSync(join(root, "api", ".adit", "adit.sqlite"))).toBe(true);
     expect(existsSync(join(root, "api", ".adit", "workspace.json"))).toBe(false);
     expect(readFileSync(manifestPath, "utf-8")).toBe(manifestBefore);
+  });
+
+  it("writes the generate-docs prompt and refreshes it on re-init", async () => {
+    mkdirSync(join(root, ".git"), { recursive: true });
+    mocks.isGitRepo.mockResolvedValue(true);
+
+    await initCommand({ cwd: root });
+
+    const promptPath = join(root, ".adit", "prompts", "generate-docs.md");
+    expect(existsSync(promptPath)).toBe(true);
+    expect(readFileSync(promptPath, "utf-8")).toContain("adit docs validate");
+
+    // adit owns this copy — re-init overwrites in-place edits
+    writeFileSync(promptPath, "user edits");
+    await initCommand({ cwd: root });
+    expect(readFileSync(promptPath, "utf-8")).not.toBe("user edits");
+  });
+
+  it("preserves legacy per-platform generate-docs files", async () => {
+    mkdirSync(join(root, ".git"), { recursive: true });
+    mocks.isGitRepo.mockResolvedValue(true);
+    const legacyFiles = [
+      join(root, ".claude", "skills", "generate-docs.md"),
+      join(root, ".opencode", "commands", "generate-docs.md"),
+      join(root, ".cursor", "rules", "generate-docs.mdc"),
+    ];
+    for (const file of legacyFiles) {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, "old skill");
+    }
+
+    await initCommand({ cwd: root });
+
+    for (const file of legacyFiles) {
+      expect(existsSync(file)).toBe(true);
+      expect(readFileSync(file, "utf-8")).toBe("old skill");
+    }
   });
 });

@@ -81,8 +81,8 @@ export function formatQualityFeedback(response: QualifyResponse): string | null 
       }
     }
   } else if (hasLowScoreDocs) {
-    lines.push("  Tip: Use /generate-docs in your AI coding tool to auto-fill");
-    lines.push("       document content from your codebase. Then re-run link.");
+    lines.push("  Tip: Ask your AI agent to read .adit/prompts/generate-docs.md and");
+    lines.push("       follow it to fill document content. Then re-run link.");
   }
 
   return lines.length > 0 ? lines.join("\n") : null;

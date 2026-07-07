@@ -28,3 +28,7 @@ export { renderApiReferenceTemplate } from "./templates/doc-api-reference.js";
 export { renderDataModelTemplate } from "./templates/doc-data-model.js";
 export { renderBusinessContextTemplate } from "./templates/doc-business-context.js";
 export { renderConventionsTemplate } from "./templates/doc-conventions.js";
+export {
+  renderGenerateDocsPrompt,
+  GENERATE_DOCS_PROMPT_PATH,
+} from "./templates/prompt-generate-docs.js";
