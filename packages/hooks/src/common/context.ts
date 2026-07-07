@@ -48,12 +48,14 @@ export async function initHookContext(
 
   const db = openDatabase(config.dbPath);
 
-  // Get or create session — prefer platform session ID lookup
+  // Get or create session — prefer platform session ID lookup. The
+  // sessionless fallback is platform-scoped so events without a session id
+  // never attach to another CLI's active session.
   let session: AditSession | null = null;
   if (platformSessionId) {
     session = getSessionByPlatformSessionId(db, platformSessionId);
   } else {
-    session = getActiveSession(db, config.projectId, config.clientId);
+    session = getActiveSession(db, config.projectId, config.clientId, platform);
   }
   if (!session) {
     const id = generateId();
@@ -81,7 +83,7 @@ export async function initHookContext(
     if (platformSessionId) {
       session = getSessionByPlatformSessionId(db, platformSessionId)!;
     } else {
-      session = getActiveSession(db, config.projectId, config.clientId)!;
+      session = getActiveSession(db, config.projectId, config.clientId, platform)!;
     }
   }
 

@@ -171,7 +171,7 @@ describe("CodexTranscriptSync", () => {
     }
   });
 
-  it("treats Codex thread_id hook payloads as session IDs", () => {
+  it("reads session_id from Codex hook payloads", () => {
     const dir = tempDir();
     try {
       const transcriptPath = join(dir, "019e0d36-9fd9-7c40-add5-01d6d8bc49d3.jsonl");
@@ -191,7 +191,7 @@ describe("CodexTranscriptSync", () => {
 
       expect(sync.noteHook({
         eventType: "SessionStart",
-        body: { thread_id: sessionId, transcriptPath },
+        body: { session_id: sessionId, transcript_path: transcriptPath },
       })).toBe(sessionId);
 
       appendFileSync(transcriptPath, `${JSON.stringify({

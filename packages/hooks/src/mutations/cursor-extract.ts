@@ -20,6 +20,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import type { AgentFileMutation, MutationKind, MutationSource } from "./types.js";
 import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES } from "./constants.js";
+import { transcriptEntryRole } from "../common/transcript-entry.js";
 
 const CURSOR_FILE_EDIT_TOOLS = new Set(["Write", "StrReplace", "Edit", "Overwrite"]);
 
@@ -67,7 +68,7 @@ export function extractCursorMutationsFromTranscript(
   let toolIndex = 0;
   for (let i = bounds.start; i < bounds.end; i++) {
     const e = entries[i];
-    if (e?.role !== "assistant") continue;
+    if (!e || transcriptEntryRole(e) !== "assistant") continue;
     const content = e.message?.content;
     if (!Array.isArray(content)) continue;
     for (const blk of content) {
@@ -105,7 +106,8 @@ function findLatestTurnBounds(entries: RawEntry[]): { start: number; end: number
   if (lastEnd === -1) {
     let start = -1;
     for (let i = entries.length - 1; i >= 0; i--) {
-      if (entries[i]?.role === "user") {
+      const entry = entries[i];
+      if (entry && transcriptEntryRole(entry) === "user") {
         start = i;
         break;
       }
@@ -277,5 +279,3 @@ function assignStats(m: AgentFileMutation, diff: string): void {
   m.additions = additions;
   m.deletions = deletions;
 }
-
-export const CURSOR_EVENT_DIFF_LIMIT = 512 * 1024;

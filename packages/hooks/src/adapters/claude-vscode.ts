@@ -50,9 +50,4 @@ export const claudeVscodeAdapter: PlatformAdapter = {
   async uninstallHooks(projectRoot: string): Promise<void> {
     return claudeCodeAdapter.uninstallHooks(projectRoot);
   },
-
-  getResumeCommand(_projectRoot: string): string | null {
-    // VS Code extension does not have a command-line resume mechanism
-    return null;
-  },
 };

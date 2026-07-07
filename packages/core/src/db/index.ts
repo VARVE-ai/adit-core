@@ -7,6 +7,7 @@ export {
   getActiveSession,
   getSessionByPlatformSessionId,
   endSession,
+  endStaleSessions,
   listSessions,
   type CreateSessionInput,
 } from "./sessions.js";

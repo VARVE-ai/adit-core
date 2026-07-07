@@ -69,7 +69,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "BeforeAgent");
+      const result = geminiAdapter.parseInput(raw, "prompt-submit");
 
       expect(result.hookType).toBe("prompt-submit");
       expect(result.platformCli).toBe("gemini");
@@ -91,7 +91,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "AfterAgent");
+      const result = geminiAdapter.parseInput(raw, "stop");
 
       expect(result.hookType).toBe("stop");
       expect(result.platformSessionId).toBe("session123");
@@ -112,7 +112,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "AfterTool");
+      const result = geminiAdapter.parseInput(raw, "notification");
 
       expect(result.hookType).toBe("notification");
       expect(result.toolName).toBe("readFile");
@@ -132,7 +132,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "Notification");
+      const result = geminiAdapter.parseInput(raw, "notification");
 
       expect(result.hookType).toBe("notification");
       expect(result.notificationType).toBe("info");
@@ -150,7 +150,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "SessionStart");
+      const result = geminiAdapter.parseInput(raw, "session-start");
 
       expect(result.hookType).toBe("session-start");
       expect(result.sessionSource).toBe("startup");
@@ -166,7 +166,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "SessionEnd");
+      const result = geminiAdapter.parseInput(raw, "session-end");
 
       expect(result.hookType).toBe("session-end");
       expect(result.sessionEndReason).toBe("exit");
@@ -188,7 +188,16 @@ describe("Gemini CLI Hook Chaining", () => {
       expect(config.content.hooks.Notification).toBeDefined();
     });
 
-    it("uses explicit platform argument and timeout 5000", () => {
+    it("limits AfterTool to shell commands via matcher", () => {
+      const config = geminiAdapter.generateHookConfig("npx adit-hook");
+      const entry = config.content.hooks.AfterTool[0] as { matcher?: string };
+      expect(entry.matcher).toBe("run_shell_command");
+      // Other events carry no matcher
+      const sessionEntry = config.content.hooks.SessionStart[0] as { matcher?: string };
+      expect(sessionEntry.matcher).toBeUndefined();
+    });
+
+    it("uses explicit platform argument and a 10s millisecond timeout", () => {
       const config = geminiAdapter.generateHookConfig("npx adit-hook", "/project");
 
       const entry = config.content.hooks.SessionStart[0];
@@ -197,7 +206,9 @@ describe("Gemini CLI Hook Chaining", () => {
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).not.toContain("GEMINI=1");
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("npx adit-hook");
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("session-start");
-      expect((entry as { hooks: Array<{ command: string }> }).hooks[0].timeout).toBe(5000);
+      // Gemini timeouts are milliseconds — 10000 = 10s, matching the
+      // adit-hook self-kill guard (NOT seconds like other platforms).
+      expect((entry as { hooks: Array<{ command: string }> }).hooks[0].timeout).toBe(10000);
     });
   });
 

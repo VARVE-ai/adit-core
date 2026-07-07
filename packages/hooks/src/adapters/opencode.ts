@@ -266,9 +266,6 @@ const ADIT_TOOLS = {
   filename: "adit.ts",
 };
 
-/** Filenames of old command files to clean up during install */
-const LEGACY_COMMAND_FILES = ["adit-link.md", "adit-intent.md"];
-
 const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "chat.message", aditHandler: "prompt-submit" },
   // OpenCode has no "stop" hook key; session.idle fires when the assistant
@@ -955,15 +952,6 @@ export const opencodeAdapter: PlatformAdapter = {
     const toolsDir = join(projectRoot, ".opencode", "tools");
     mkdirSync(toolsDir, { recursive: true });
     writeFileSync(join(toolsDir, ADIT_TOOLS.filename), generateToolsContent());
-
-    // Clean up legacy command files from previous versions
-    for (const legacy of LEGACY_COMMAND_FILES) {
-      try { unlinkSync(join(commandsDir, legacy)); } catch { /* best-effort */ }
-    }
-  },
-
-  getResumeCommand(_projectRoot: string): string | null {
-    return "opencode";
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {
@@ -972,10 +960,7 @@ export const opencodeAdapter: PlatformAdapter = {
       return true;
     }
     if (existsSync(join(projectRoot, ".opencode", "commands", ADIT_COMMAND.filename))) return true;
-    if (existsSync(join(projectRoot, ".opencode", "tools", ADIT_TOOLS.filename))) return true;
-    return LEGACY_COMMAND_FILES.some((legacy) =>
-      existsSync(join(projectRoot, ".opencode", "commands", legacy)),
-    );
+    return existsSync(join(projectRoot, ".opencode", "tools", ADIT_TOOLS.filename));
   },
 
   async uninstallHooks(projectRoot: string): Promise<void> {
@@ -989,11 +974,6 @@ export const opencodeAdapter: PlatformAdapter = {
 
     // Remove custom tools
     try { unlinkSync(join(projectRoot, ".opencode", "tools", ADIT_TOOLS.filename)); } catch { /* best-effort */ }
-
-    // Clean up legacy command files
-    for (const legacy of LEGACY_COMMAND_FILES) {
-      try { unlinkSync(join(commandsDir, legacy)); } catch { /* best-effort */ }
-    }
   },
 };
 

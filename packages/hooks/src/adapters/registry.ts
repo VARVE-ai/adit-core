@@ -66,39 +66,34 @@ export function registerAdapter(adapter: PlatformAdapter): void {
  * Falls back to "other" when no platform is detected.
  */
 export function detectPlatform(): Platform {
-  // Explicit platform args are handled by the hook dispatcher before this env
-  // fallback. Env vars stay here for compatibility with previously installed
-  // hooks and platforms that inject their own environment clues.
+  // Hook dispatching always uses the explicit --platform argument; this env
+  // detection only backs detectPlatforms() for CLI commands run from inside
+  // an AI tool session (e.g. the agent itself running `adit plugin install`).
   //
-  // Hook-explicit platform env vars are checked BEFORE inherited ones.
-  // When running Gemini/Codex/Cursor inside another tool's terminal
-  // (e.g., Gemini inside Claude Code), the parent's env vars (CLAUDE_CODE)
-  // are inherited by the child. Old ADIT hook command prefixes explicitly set
-  // the correct platform var, so those must win.
+  // Platform-specific vars are checked BEFORE inherited ones: when running
+  // Gemini/Cursor inside another tool's terminal, the parent's env vars
+  // (e.g. CLAUDECODE) are inherited by the child, so the child tool's own
+  // markers must win.
 
-  // Cursor detection
-  if (process.env.CURSOR_SESSION_ID || process.env.CURSOR || process.env.CURSOR_PROJECT_DIR) {
+  // Cursor detection (Cursor sets CURSOR_PROJECT_DIR for hook processes)
+  if (process.env.CURSOR_PROJECT_DIR) {
     return "cursor";
   }
 
-  // Codex detection (OpenAI's AI coding agent)
-  if (process.env.CODEX || process.env.CODEX_SESSION) {
-    return "codex";
-  }
-
-  // Gemini CLI detection (Google's AI coding agent)
-  if (process.env.GEMINI || process.env.GEMINI_SESSION_ID || process.env.GEMINI_PROJECT_DIR) {
+  // Gemini CLI detection (Gemini sets these for hook processes)
+  if (process.env.GEMINI_SESSION_ID || process.env.GEMINI_PROJECT_DIR) {
     return "gemini";
   }
 
-  // Claude Code (CLI or VS Code extension).
-  // Old ADIT hook command prefixes set CLAUDE_CODE=1 for both platforms.
+  // Codex sets no environment markers at all — codex is only detectable via
+  // the explicit --platform argument or the .codex directory on disk.
+
+  // Claude Code (CLI or VS Code extension) sets CLAUDECODE=1 in child
+  // processes; plugins additionally see CLAUDE_PLUGIN_ROOT.
   // The VS Code extension host additionally sets ELECTRON_RUN_AS_NODE and
   // VSCODE_IPC_HOOK — these are NOT inherited by terminal child processes,
   // so running CLI from VS Code's terminal won't trigger false detection.
-  // Checked AFTER other platforms because CLAUDE_CODE is often inherited
-  // from the parent shell when running other tools inside Claude Code.
-  if (process.env.CLAUDE_CODE || process.env.CLAUDE_PLUGIN_ROOT) {
+  if (process.env.CLAUDECODE || process.env.CLAUDE_PLUGIN_ROOT) {
     if (process.env.ELECTRON_RUN_AS_NODE && process.env.VSCODE_IPC_HOOK) {
       return "claude-vscode";
     }
@@ -119,65 +114,6 @@ export function detectPlatform(): Platform {
   // Callers that need a concrete adapter should check for "other" and handle
   // it explicitly rather than silently assuming a specific platform.
   return "other";
-}
-
-/**
- * Cursor-native hook event names (lowercase).
- * Used by payload-based detection to distinguish Cursor from other platforms.
- */
-const CURSOR_HOOK_EVENTS = new Set([
-  "beforeSubmitPrompt",
-  "stop",
-  "sessionStart",
-  "sessionEnd",
-  "afterAgentResponse",
-  "beforeShellExecution",
-  "afterShellExecution",
-  "afterFileEdit",
-]);
-
-/**
- * Gemini CLI hook event names (PascalCase).
- * Used by payload-based detection to distinguish Gemini from other platforms.
- * Excludes names that overlap with Codex ("SessionStart") or other tools.
- */
-const GEMINI_HOOK_EVENTS = new Set([
-  "BeforeAgent",
-  "AfterAgent",
-  "BeforeModel",
-  "AfterModel",
-  "BeforeToolSelection",
-  "PreCompress",
-]);
-
-/**
- * Detect platform from the raw stdin JSON payload.
- *
- * Used as a fallback when env-var detection returns "other".
- * Some platforms (notably Cursor) may not set the expected env vars
- * when spawning hook child processes, but the payload always carries
- * identifying fields like `cursor_version`.
- *
- * Returns `null` if the payload doesn't match any known platform.
- */
-export function detectPlatformFromPayload(raw: Record<string, unknown>): Platform | null {
-  // Cursor: always includes cursor_version in every hook event payload
-  if (typeof raw.cursor_version === "string") {
-    return "cursor";
-  }
-
-  // Cursor (fallback): Cursor-native hook_event_name values that differ from
-  // Claude Code's CamelCase names (e.g. "beforeSubmitPrompt" vs "UserPromptSubmit")
-  if (typeof raw.hook_event_name === "string" && CURSOR_HOOK_EVENTS.has(raw.hook_event_name)) {
-    return "cursor";
-  }
-
-  // Gemini: unique PascalCase event names not used by other platforms
-  if (typeof raw.hook_event_name === "string" && GEMINI_HOOK_EVENTS.has(raw.hook_event_name)) {
-    return "gemini";
-  }
-
-  return null;
 }
 
 /**

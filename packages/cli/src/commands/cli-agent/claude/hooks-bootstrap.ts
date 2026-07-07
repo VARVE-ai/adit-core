@@ -6,6 +6,7 @@ import {
   claudeCodeAdapter,
   resolveAditHookBinary,
 } from "@varveai/adit-hooks/adapters";
+import { buildCloudHookCommand, quoteHookCommandArg } from "../hook-post-script.js";
 
 const EVENTS = [
   "SessionStart",
@@ -16,33 +17,6 @@ const EVENTS = [
   "SubagentStop",
   "SessionEnd",
 ] as const;
-
-const HOOK_POST_SCRIPT = [
-  "try{",
-  "const a=process.argv[1]===undefined?'':process.argv[1];",
-  "const envE=process.env.ADIT_CLOUD_CODEX_HOOK_ENDPOINT===undefined?'':process.env.ADIT_CLOUD_CODEX_HOOK_ENDPOINT;",
-  "const e=a!==''?a:envE;",
-  "if(!e)process.exit(0);",
-  "const argQ=process.argv[2]===undefined?'':process.argv[2];",
-  "const envQ=process.env.ADIT_CLOUD_CODEX_HOOK_MARKER===undefined?argQ:process.env.ADIT_CLOUD_CODEX_HOOK_MARKER;",
-  "const q=a!==''?argQ:envQ;",
-  "let u=new URL(e);",
-  "if(q&&!u.search.includes(q)){const s=u.search?'&':'?';u=new URL(u.toString()+s+q)}",
-  "const m=u.protocol==='https:'?require('https'):require('http');",
-  "let d='';",
-  "let done=false;",
-  "const finish=()=>{if(done)return;done=true;process.exit(0)};",
-  "process.stdin.setEncoding('utf8');",
-  "process.stdin.on('data',c=>{d+=c});",
-  "process.stdin.on('end',()=>{try{",
-  "const r=m.request(u,{method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(d)},timeout:3000},res=>{res.resume();res.on('end',finish)});",
-  "r.on('timeout',()=>{r.destroy();finish()});",
-  "r.on('error',finish);",
-  "r.end(d)",
-  "}catch{finish()}});",
-  "setTimeout(finish,3500).unref();",
-  "}catch{process.exit(0)}",
-].join("");
 
 const STATUSLINE_POST_SCRIPT = [
   "try{",
@@ -366,16 +340,6 @@ function isLocalPortListening(port: number, timeoutMs: number): Promise<boolean>
   });
 }
 
-function buildCloudHookCommand(endpoint: string, marker: string): string {
-  return [
-    "node",
-    "-e",
-    quoteHookCommandArg(HOOK_POST_SCRIPT),
-    quoteHookCommandArg(endpoint),
-    quoteHookCommandArg(marker),
-  ].join(" ");
-}
-
 function buildCloudStatusLineCommand(opts: {
   endpoint: string;
   marker: string;
@@ -389,13 +353,6 @@ function buildCloudStatusLineCommand(opts: {
     quoteHookCommandArg(opts.marker),
     quoteHookCommandArg(Buffer.from(opts.originalCommand ?? "", "utf8").toString("base64")),
   ].join(" ");
-}
-
-function quoteHookCommandArg(value: string): string {
-  if (value.includes("\"")) {
-    throw new Error("Hook command arguments cannot contain double quotes");
-  }
-  return `"${value}"`;
 }
 
 function findOriginalStatusLineCommand(opts: {

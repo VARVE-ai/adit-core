@@ -51,13 +51,56 @@ export function getActiveSession(
   db: Database.Database,
   projectId: string,
   clientId: string,
+  platform?: Platform,
 ): AditSession | null {
+  // Optional platform filter keeps sessionless hook events (no platform
+  // session id in the payload) from attaching to another CLI's session.
   const row = db
     .prepare(
-      "SELECT * FROM sessions WHERE project_id = ? AND client_id = ? AND status = 'active' AND deleted_at IS NULL ORDER BY started_at DESC LIMIT 1",
+      `SELECT * FROM sessions WHERE project_id = ? AND client_id = ? AND status = 'active' AND deleted_at IS NULL${platform ? " AND platform = ?" : ""} ORDER BY started_at DESC LIMIT 1`,
     )
-    .get(projectId, clientId) as Record<string, unknown> | undefined;
+    .get(...(platform ? [projectId, clientId, platform] : [projectId, clientId])) as
+    | Record<string, unknown>
+    | undefined;
   return row ? rowToSession(row) : null;
+}
+
+/**
+ * Close active sessions whose last activity is older than the cutoff.
+ *
+ * "Last activity" is the newest event's started_at, falling back to the
+ * session's own started_at for sessions with no events. Scoped to one
+ * project+platform because this backstops platforms without a SessionEnd
+ * hook event (Codex has none), where sessions would otherwise stay active
+ * forever. Returns the number of sessions closed.
+ */
+export function endStaleSessions(
+  db: Database.Database,
+  input: {
+    projectId: string;
+    platform: Platform;
+    cutoffIso: string;
+    excludeSessionId?: string;
+  },
+): number {
+  const result = db
+    .prepare(
+      `UPDATE sessions SET ended_at = ?, status = 'completed'
+       WHERE project_id = ? AND platform = ? AND status = 'active' AND deleted_at IS NULL
+         AND id != ?
+         AND COALESCE(
+           (SELECT MAX(e.started_at) FROM events e WHERE e.session_id = sessions.id AND e.deleted_at IS NULL),
+           sessions.started_at
+         ) < ?`,
+    )
+    .run(
+      new Date().toISOString(),
+      input.projectId,
+      input.platform,
+      input.excludeSessionId ?? "",
+      input.cutoffIso,
+    );
+  return result.changes;
 }
 
 export function getSessionByPlatformSessionId(

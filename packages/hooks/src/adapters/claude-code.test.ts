@@ -55,6 +55,8 @@ describe("Claude Code Hook Chaining", () => {
 
     expect(hooks.UserPromptSubmit).toBeDefined();
     expect(hooks.Stop).toBeDefined();
+    // StopFailure routes API-error turn ends through the stop handler
+    expect(hooks.StopFailure).toBeDefined();
     expect(hooks.SessionStart).toBeDefined();
     expect(hooks.SessionEnd).toBeDefined();
     expect(hooks.TaskCompleted).toBeDefined();
@@ -356,6 +358,9 @@ describe("Claude Code Hook Chaining", () => {
           { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook prompt-submit" }] },
         ],
         Stop: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook stop" }] },
+        ],
+        StopFailure: [
           { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook stop" }] },
         ],
         SessionStart: [

@@ -8,6 +8,7 @@
 import {
   getLatestEnvSnapshot,
   endSession,
+  endStaleSessions,
   withPerf,
   insertDiff,
   generateId,
@@ -22,6 +23,10 @@ import {
   type FileChange,
 } from "@varveai/adit-engine";
 import { initHookContext, type HookContext } from "../common/context.js";
+import {
+  assistantTextFromTranscriptEntry,
+  type TranscriptEntryLike,
+} from "../common/transcript-entry.js";
 import {
   detectAndRecordCommits,
   initializeSessionRepoBaselines,
@@ -422,18 +427,8 @@ function extractLastAssistantTextFromTranscript(transcriptPath: string): string 
       .filter((l) => l.trim().length > 0);
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
-        const entry = JSON.parse(lines[i]) as {
-          role?: string;
-          message?: { content?: Array<{ type?: string; text?: string }> };
-        };
-        if (entry.role !== "assistant") continue;
-        const content = entry.message?.content;
-        if (!Array.isArray(content)) continue;
-        const text = content
-          .filter((c): c is { type: string; text: string } => c?.type === "text" && typeof c.text === "string")
-          .map((c) => c.text.trim())
-          .filter((t) => t.length > 0)
-          .join("\n");
+        const entry = JSON.parse(lines[i]) as TranscriptEntryLike;
+        const text = assistantTextFromTranscriptEntry(entry);
         if (text) return text;
       } catch {
         // ignore malformed lines
@@ -458,9 +453,28 @@ async function recoverAssistantMessageFromTranscript(transcriptPath?: string): P
   return undefined;
 }
 
+/** How long a session may sit with no events before the lazy sweep closes it */
+const STALE_SESSION_MAX_IDLE_MS = 24 * 60 * 60 * 1000;
+
 /** Handle session start — capture initial env snapshot and record metadata */
 async function handleSessionStart(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
   const timeline = createTimelineManager(ctx.db, ctx.config);
+
+  // Lazily close zombie sessions for this platform. Codex has no SessionEnd
+  // hook event, so its sessions would otherwise stay active forever and
+  // become targets for the sessionless getActiveSession fallback.
+  if (input.platformCli) {
+    try {
+      endStaleSessions(ctx.db, {
+        projectId: ctx.config.projectId,
+        platform: input.platformCli,
+        cutoffIso: new Date(Date.now() - STALE_SESSION_MAX_IDLE_MS).toISOString(),
+        excludeSessionId: ctx.session.id,
+      });
+    } catch {
+      // Fail-open
+    }
+  }
 
   // Seed per-repo HEAD baselines so first-turn commits are attributable.
   await initializeSessionRepoBaselines(ctx);

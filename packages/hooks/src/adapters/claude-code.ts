@@ -26,6 +26,10 @@ import {
 const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "UserPromptSubmit", aditHandler: "prompt-submit" },
   { platformEvent: "Stop", aditHandler: "stop" },
+  // StopFailure fires when a turn ends with an API error (Stop does not).
+  // Route it through the stop handler so edits made before the failure are
+  // still extracted from the transcript.
+  { platformEvent: "StopFailure", aditHandler: "stop" },
   { platformEvent: "SessionStart", aditHandler: "session-start" },
   { platformEvent: "SessionEnd", aditHandler: "session-end" },
   { platformEvent: "TaskCompleted", aditHandler: "task-completed" },
@@ -33,11 +37,6 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "SubagentStart", aditHandler: "subagent-start" },
   { platformEvent: "SubagentStop", aditHandler: "subagent-stop" },
 ];
-
-/** Map Claude Code platform events to ADIT hook types (derived from HOOK_MAPPINGS) */
-const PLATFORM_TO_ADIT: Record<string, AditHookType> = Object.fromEntries(
-  HOOK_MAPPINGS.map((m) => [m.platformEvent, m.aditHandler]),
-) as Record<string, AditHookType>;
 
 /** Slash command installed into .claude/commands/ */
 const ADIT_COMMAND = {
@@ -100,9 +99,6 @@ Shows intents (development plans) and tasks from the connected adit-cloud projec
 `,
 };
 
-/** Filenames of old command files to clean up during install */
-const LEGACY_COMMAND_FILES = ["adit-link.md", "adit-intent.md"];
-
 /**
  * Detect system-injected prompts that Claude Code sends through UserPromptSubmit
  * (e.g. background task completion callbacks wrapped in <task-notification> XML).
@@ -118,7 +114,9 @@ export const claudeCodeAdapter: PlatformAdapter = {
   hookMappings: HOOK_MAPPINGS,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {
-    let aditHookType = PLATFORM_TO_ADIT[hookType] ?? (hookType as AditHookType);
+    // Hook commands always pass the ADIT hook type directly (baked into the
+    // installed command string by buildAditHookCommand).
+    let aditHookType = hookType as AditHookType;
     const cwd = (raw.cwd as string) ?? process.cwd();
 
     // Claude Code sends <task-notification> XML blocks through UserPromptSubmit
@@ -138,12 +136,12 @@ export const claudeCodeAdapter: PlatformAdapter = {
       transcriptPath: raw.transcript_path as string | undefined,
       // Prompt
       prompt: isReclassifiedNotification ? undefined : (raw.prompt as string | undefined),
-      // Tool use fields (available from SubagentStop, etc.)
+      // Tool use fields (Claude Code sends tool_response for tool results)
       toolName: raw.tool_name as string | undefined,
       toolInput: raw.tool_input as Record<string, unknown> | undefined,
-      toolOutput: raw.tool_output as Record<string, unknown> | undefined,
-      // Stop
-      stopReason: raw.stop_reason as string | undefined,
+      toolOutput: (raw.tool_response ?? raw.tool_output) as Record<string, unknown> | undefined,
+      // Stop / StopFailure (StopFailure carries `error` instead of stop_reason)
+      stopReason: (raw.stop_reason ?? raw.error) as string | undefined,
       lastAssistantMessage: raw.last_assistant_message as string | undefined,
       stopHookActive: raw.stop_hook_active as boolean | undefined,
       // Task completed
@@ -195,6 +193,7 @@ export const claudeCodeAdapter: PlatformAdapter = {
         hooks: {
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
+          StopFailure: makeHookEntry("stop"),
           SessionStart: makeHookEntry("session-start"),
           SessionEnd: makeHookEntry("session-end"),
           TaskCompleted: makeHookEntry("task-completed"),
@@ -347,24 +346,12 @@ export const claudeCodeAdapter: PlatformAdapter = {
     const commandsDir = join(claudeDir, "commands");
     mkdirSync(commandsDir, { recursive: true });
     writeFileSync(join(commandsDir, ADIT_COMMAND.filename), ADIT_COMMAND.content);
-
-    // Clean up legacy command files from previous versions
-    for (const legacy of LEGACY_COMMAND_FILES) {
-      try { unlinkSync(join(commandsDir, legacy)); } catch { /* best-effort */ }
-    }
-  },
-
-  getResumeCommand(_projectRoot: string): string | null {
-    return "claude --continue";
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {
     if (configHasAditHooks(join(projectRoot, ".claude", "settings.local.json"))) return true;
     if (configHasAditHooks(join(projectRoot, ".claude", "settings.json"))) return true;
-    if (existsSync(join(projectRoot, ".claude", "commands", ADIT_COMMAND.filename))) return true;
-    return LEGACY_COMMAND_FILES.some((legacy) =>
-      existsSync(join(projectRoot, ".claude", "commands", legacy)),
-    );
+    return existsSync(join(projectRoot, ".claude", "commands", ADIT_COMMAND.filename));
   },
 
   async uninstallHooks(projectRoot: string): Promise<void> {
@@ -374,11 +361,6 @@ export const claudeCodeAdapter: PlatformAdapter = {
     // Remove slash command
     const commandsDir = join(projectRoot, ".claude", "commands");
     try { unlinkSync(join(commandsDir, ADIT_COMMAND.filename)); } catch { /* best-effort */ }
-
-    // Clean up legacy command files
-    for (const legacy of LEGACY_COMMAND_FILES) {
-      try { unlinkSync(join(commandsDir, legacy)); } catch { /* best-effort */ }
-    }
   },
 };
 

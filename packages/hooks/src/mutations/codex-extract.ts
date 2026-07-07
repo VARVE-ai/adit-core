@@ -9,7 +9,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { AgentFileMutation, MutationKind } from "./types.js";
-import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES, MAX_EVENT_DIFF_BYTES } from "./constants.js";
+import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES } from "./constants.js";
 
 interface CodexRawEntry {
   type?: string;
@@ -266,17 +266,22 @@ function isExecCommandEndPayload(
   return value?.type === "exec_command_end";
 }
 
+interface ShellWriteTarget {
+  path: string;
+  kind: MutationKind;
+}
+
 function mutationsFromExecCommandEnd(payload: ExecCommandEndPayload): AgentFileMutation[] {
   if (!isSuccessfulExecCommand(payload)) return [];
 
   const toolUseId = readString(payload.call_id) ?? "codex-bash";
-  const paths = extractWrittenPathsFromExecCommand(payload);
-  return paths.map((path) => ({
+  const targets = extractWrittenPathsFromExecCommand(payload);
+  return targets.map(({ path, kind }) => ({
     provider: "codex",
     toolUseId,
     toolName: "Bash",
     path,
-    kind: "update",
+    kind,
     status: "completed",
     source: "codex-bash-output",
     omitted: { reason: "unavailable" },
@@ -288,21 +293,23 @@ function isSuccessfulExecCommand(payload: ExecCommandEndPayload): boolean {
   return typeof payload.exit_code === "number" && payload.exit_code === 0;
 }
 
-function extractWrittenPathsFromExecCommand(payload: ExecCommandEndPayload): string[] {
-  const paths = new Set<string>();
+function extractWrittenPathsFromExecCommand(payload: ExecCommandEndPayload): ShellWriteTarget[] {
+  const targets = new Map<string, MutationKind>();
   const cwd = readString(payload.cwd);
 
   for (const command of readParsedCommands(payload.parsed_cmd)) {
     if (isReadOnlyParsedCommand(command)) continue;
-    addPath(paths, readString(command.path), cwd);
+    addTarget(targets, readString(command.path), cwd, "update");
   }
 
   const commandText = execCommandText(payload.command);
   if (commandText) {
-    extractShellWriteTargets(commandText).forEach((path) => addPath(paths, path, cwd));
+    for (const target of extractShellWriteTargets(commandText)) {
+      addTarget(targets, target.path, cwd, target.kind);
+    }
   }
 
-  return Array.from(paths);
+  return Array.from(targets, ([path, kind]) => ({ path, kind }));
 }
 
 function readParsedCommands(value: unknown): ParsedCommand[] {
@@ -326,16 +333,18 @@ function execCommandText(command: unknown): string | null {
   return parts.at(-1) ?? null;
 }
 
-function extractShellWriteTargets(command: string): string[] {
-  const targets = new Set<string>();
+function extractShellWriteTargets(command: string): ShellWriteTarget[] {
+  const targets = new Map<string, MutationKind>();
   for (const line of command.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
-    extractRedirectionTargets(trimmed).forEach((path) => addPath(targets, path, null));
-    extractOptionTargets(trimmed).forEach((path) => addPath(targets, path, null));
-    extractKnownWriteCallTargets(trimmed).forEach((path) => addPath(targets, path, null));
+    extractRedirectionTargets(trimmed).forEach((path) => addTarget(targets, path, null, "update"));
+    extractOptionTargets(trimmed).forEach((path) => addTarget(targets, path, null, "update"));
+    extractKnownWriteCallTargets(trimmed).forEach((target) =>
+      addTarget(targets, target.path, null, target.kind),
+    );
   }
-  return Array.from(targets);
+  return Array.from(targets, ([path, kind]) => ({ path, kind }));
 }
 
 function extractRedirectionTargets(command: string): string[] {
@@ -365,32 +374,50 @@ function extractOptionTargets(command: string): string[] {
   return paths;
 }
 
-function extractKnownWriteCallTargets(command: string): string[] {
-  const paths: string[] = [];
-  const patterns = [
+function extractKnownWriteCallTargets(command: string): ShellWriteTarget[] {
+  const targets: ShellWriteTarget[] = [];
+  const updatePatterns = [
     /\bwriteFile(?:Sync)?\(\s*["']([^"']+)["']/gu,
     /\bPath\(\s*["']([^"']+)["']\s*\)\.write_(?:text|bytes)\(/gu,
     /\bopen\(\s*["']([^"']+)["']\s*,\s*["'][^"']*[wa][^"']*["']/gu,
-    /\b(?:touch|rm|unlink)\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu,
+    /\btouch\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu,
+    // cp/mv record the written destination; mv's removed source is not
+    // tracked by this heuristic.
     /\b(?:cp|mv)\s+(?:"[^"]+"|'[^']+'|[^\s;&|]+)\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu,
   ];
+  const deletePatterns = [
+    /\b(?:rm|unlink)\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu,
+  ];
 
-  for (const pattern of patterns) {
-    for (const match of command.matchAll(pattern)) {
-      const path = match.slice(1).find((value) => value);
-      if (path && isLikelyFilePath(path)) paths.push(path);
+  const collect = (patterns: RegExp[], kind: MutationKind) => {
+    for (const pattern of patterns) {
+      for (const match of command.matchAll(pattern)) {
+        const path = match.slice(1).find((value) => value);
+        if (path && isLikelyFilePath(path)) targets.push({ path, kind });
+      }
     }
-  }
+  };
+  collect(updatePatterns, "update");
+  collect(deletePatterns, "delete");
 
-  return paths;
+  return targets;
 }
 
-function addPath(paths: Set<string>, path: string | null, cwd: string | null): void {
+function addTarget(
+  targets: Map<string, MutationKind>,
+  path: string | null,
+  cwd: string | null,
+  kind: MutationKind,
+): void {
   if (!path || !isLikelyFilePath(path)) return;
   const absolutePath = cwd && !isAbsolute(path)
     ? resolve(join(cwd, path))
     : path;
-  paths.add(normalizePath(absolutePath));
+  const normalized = normalizePath(absolutePath);
+  // "delete" wins when one command both writes and removes a path — the
+  // removal is the terminal state this heuristic can see.
+  if (targets.get(normalized) === "delete") return;
+  targets.set(normalized, kind);
 }
 
 function isLikelyFilePath(path: string): boolean {
@@ -423,5 +450,3 @@ function normalizePath(path: string): string {
 function sessionIdFromPath(transcriptPath: string): string | undefined {
   return transcriptPath.match(/([0-9a-f-]{36})\.jsonl$/i)?.[1];
 }
-
-export const CODEX_EVENT_DIFF_LIMIT = MAX_EVENT_DIFF_BYTES;

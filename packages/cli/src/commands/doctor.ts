@@ -109,7 +109,14 @@ export async function doctorCommand(
     const result = await adapter.validateInstallation(config.projectRoot);
     if (result.valid) {
       hooksOk = true;
-      hooksDetails.push(`${adapter.displayName}: OK`);
+      // Advisory checks don't fail validation (reinstall can't fix them),
+      // but the user still needs to see them.
+      const warnings = result.checks
+        .filter((c) => c.advisory && !c.ok)
+        .map((c) => c.detail);
+      hooksDetails.push(
+        `${adapter.displayName}: OK${warnings.length > 0 ? ` — warning: ${warnings.join("; ")}` : ""}`,
+      );
     } else if (result.checks.some((c) => c.ok)) {
       // Platform directory exists but hooks incomplete
       hooksDetails.push(`${adapter.displayName}: ${result.checks.filter((c) => !c.ok).map((c) => c.detail).join("; ")}`);

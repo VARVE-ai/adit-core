@@ -28,14 +28,14 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "BeforeAgent", aditHandler: "prompt-submit" },
   { platformEvent: "AfterAgent", aditHandler: "stop" },
   { platformEvent: "SessionEnd", aditHandler: "session-end" },
-  { platformEvent: "AfterTool", aditHandler: "notification" },
+  // Shell commands only (matcher is regex-tested against the tool name).
+  // File edits are extracted from the transcript at stop; matching all
+  // tools would record a notification event for every read-only call.
+  // Gemini's shell tool is named run_shell_command (verified against the
+  // installed gemini-cli 0.41.2 bundle: TOOL_NAME_MAPPING maps Bash to it).
+  { platformEvent: "AfterTool", aditHandler: "notification", matcher: "run_shell_command" },
   { platformEvent: "Notification", aditHandler: "notification" },
 ];
-
-/** Map Gemini CLI platform events to ADIT hook types (derived from HOOK_MAPPINGS) */
-const PLATFORM_TO_ADIT: Record<string, AditHookType> = Object.fromEntries(
-  HOOK_MAPPINGS.map((m) => [m.platformEvent, m.aditHandler]),
-) as Record<string, AditHookType>;
 
 export const geminiAdapter: PlatformAdapter = {
   platform: "gemini" as Platform,
@@ -43,7 +43,7 @@ export const geminiAdapter: PlatformAdapter = {
   hookMappings: HOOK_MAPPINGS,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {
-    const aditHookType = PLATFORM_TO_ADIT[hookType] ?? (hookType as AditHookType);
+    const aditHookType = hookType as AditHookType;
     const cwd = (raw.cwd as string) ?? process.cwd();
 
     return {
@@ -77,14 +77,17 @@ export const geminiAdapter: PlatformAdapter = {
   },
 
   generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
-    const makeHookEntry = (hookType: AditHookType) => [
-      {
-        hooks: [{
-          type: "command",
-          command: buildAditHookCommand(aditBinaryPath, "gemini", hookType, projectRoot),
-          timeout: 5000,
-        }],
-      },
+    const makeHook = (hookType: AditHookType) => ({
+      type: "command",
+      command: buildAditHookCommand(aditBinaryPath, "gemini", hookType, projectRoot),
+      // Gemini CLI hook timeouts are in MILLISECONDS (default 60000),
+      // unlike Claude Code/Codex/Cursor which use seconds. 10s matches
+      // the adit-hook self-kill guard.
+      timeout: 10000,
+    });
+    const makeHookEntry = (hookType: AditHookType) => [{ hooks: [makeHook(hookType)] }];
+    const makeMatcherEntry = (matcher: string, hookType: AditHookType) => [
+      { matcher, hooks: [makeHook(hookType)] },
     ];
 
     return {
@@ -95,7 +98,7 @@ export const geminiAdapter: PlatformAdapter = {
           BeforeAgent: makeHookEntry("prompt-submit"),
           AfterAgent: makeHookEntry("stop"),
           SessionEnd: makeHookEntry("session-end"),
-          AfterTool: makeHookEntry("notification"),
+          AfterTool: makeMatcherEntry("run_shell_command", "notification"),
           Notification: makeHookEntry("notification"),
         },
       },
@@ -225,10 +228,6 @@ export const geminiAdapter: PlatformAdapter = {
 
     settings.hooks = mergedHooks;
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-  },
-
-  getResumeCommand(_projectRoot: string): string | null {
-    return "gemini";
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {
