@@ -18,6 +18,7 @@ import {
   type InstalledHooks,
 } from "./cli-agent/codex/hooks-bootstrap.js";
 import { startCliAgentHookServer, type HookServer } from "./cli-agent/hook-server.js";
+import { CodexLocalSessionLister, LocalSessionsReporter } from "./cli-agent/local-sessions.js";
 import { CliAgentRelayWebSocket } from "./cli-agent/relay-client.js";
 import {
   createRelayNotices,
@@ -482,6 +483,11 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
         relayStatus.retryScheduled(attempt, delayMs);
       },
     });
+    const localSessionLister = new CodexLocalSessionLister(config.projectRoot);
+    const localSessionsReporter = new LocalSessionsReporter(
+      ws,
+      () => localSessionLister.list(),
+    );
 
     hookServer.events.on("hook", (event) => {
       const body = event.body as Record<string, unknown>;
@@ -566,13 +572,14 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
             const sent = ws.sendEvents(batch);
             if (!sent) eventQueue.unshift(...batch);
           };
-          await drainCommandQueue({
+          const processedCommands = await drainCommandQueue({
             provider,
             commands: commandQueue,
             enqueueEvent,
             ws,
           });
           ws.sendHeartbeat(provider.state);
+          localSessionsReporter.maybeReport(processedCommands);
           const state = provider.state;
           const now = Date.now();
           if (state.activeSessionId && now - lastTranscriptDrainAt > 1000) {

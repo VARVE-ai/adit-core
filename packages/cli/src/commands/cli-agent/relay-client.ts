@@ -229,6 +229,13 @@ export class CliAgentRelayWebSocket {
     });
   }
 
+  sendLocalSessions(sessionIds: string[]): boolean {
+    return this.send({
+      type: "local-sessions",
+      sessionIds,
+    });
+  }
+
   ack(commandId: string): boolean {
     return this.send({ type: "command.ack", commandId });
   }

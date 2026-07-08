@@ -1470,6 +1470,92 @@ describe("CodexCliProvider takeover", () => {
     provider.stop();
   });
 
+  it("unarchives an archived thread and retries the resume when switching sessions", async () => {
+    const archivedThreadId = "019e0000-0000-7000-8000-00000000000a";
+    let resumeAttempts = 0;
+    let unarchived = false;
+    mocks.appRequest.mockImplementation(async (method: string, params: unknown) => {
+      if (method === "adit/capabilities/discover") throw appServerMethodsError();
+      if (method === "thread/resume") {
+        const threadId = (params as { threadId?: string }).threadId;
+        if (threadId === archivedThreadId) {
+          resumeAttempts += 1;
+          if (!unarchived) {
+            throw new Error(
+              `session ${archivedThreadId} is archived. Run \`codex unarchive ${archivedThreadId}\` to restore it`,
+            );
+          }
+        }
+        return { model: "gpt-test", thread: { id: threadId } };
+      }
+      if (method === "thread/unarchive") {
+        unarchived = true;
+        return {};
+      }
+      if (method === "thread/start") {
+        return { model: "gpt-test", thread: { id: "019e2110-d96f-7e40-882e-b524fa9148e4" } };
+      }
+      if (method === "turn/start") return { turn: { id: "turn-1" } };
+      return {};
+    });
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+    });
+
+    try {
+      await provider.takeover();
+      await provider.switchSession(archivedThreadId);
+
+      expect(mocks.appRequest).toHaveBeenCalledWith(
+        "thread/unarchive",
+        { threadId: archivedThreadId },
+      );
+      expect(resumeAttempts).toBe(2);
+      expect(provider.state.activeSessionId).toBe(archivedThreadId);
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("does not attempt unarchive when the rollout is missing", async () => {
+    const missingThreadId = "019e0000-0000-7000-8000-00000000000b";
+    mocks.appRequest.mockImplementation(async (method: string, params: unknown) => {
+      if (method === "adit/capabilities/discover") throw appServerMethodsError();
+      if (method === "thread/resume") {
+        const threadId = (params as { threadId?: string }).threadId;
+        if (threadId === missingThreadId) {
+          throw new Error(`no rollout found for thread id ${missingThreadId}`);
+        }
+        return { model: "gpt-test", thread: { id: threadId } };
+      }
+      if (method === "thread/start") {
+        return { model: "gpt-test", thread: { id: "019e2110-d96f-7e40-882e-b524fa9148e4" } };
+      }
+      if (method === "turn/start") return { turn: { id: "turn-1" } };
+      return {};
+    });
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+    });
+
+    try {
+      await provider.takeover();
+      await expect(provider.switchSession(missingThreadId)).rejects.toThrow(
+        `no rollout found for thread id ${missingThreadId}`,
+      );
+      expect(mocks.appRequest).not.toHaveBeenCalledWith(
+        "thread/unarchive",
+        expect.anything(),
+      );
+    } finally {
+      provider.stop();
+    }
+  });
+
   it("does not resume a loaded empty thread when switching back to it", async () => {
     const provider = new CodexCliProvider({
       bin: "codex",

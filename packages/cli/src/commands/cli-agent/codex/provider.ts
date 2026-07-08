@@ -934,12 +934,24 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   ): Promise<void> {
     await this.ensureAppServer();
     const preferredModelId = this.activeModelId;
-    const result = asRecord(await this.appServer?.request("thread/resume", {
+    const resumeParams = {
       threadId,
       cwd: this.opts.cwd,
       ...codexThreadModeOverrides(mode),
       persistExtendedHistory: true,
-    }));
+    };
+    let rawResult: unknown;
+    try {
+      rawResult = await this.appServer?.request("thread/resume", resumeParams);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/is archived/i.test(message)) throw error;
+      // The rollout still exists but was archived outside adit (e.g. by the
+      // Codex desktop app); unarchive and retry instead of failing the switch.
+      await this.appServer?.request("thread/unarchive", { threadId });
+      rawResult = await this.appServer?.request("thread/resume", resumeParams);
+    }
+    const result = asRecord(rawResult);
     const thread = asRecord(result?.thread);
     const resumedId = readString(thread?.id) ?? threadId;
     this.noteThread({ ...(thread ?? {}), id: resumedId }, result, {

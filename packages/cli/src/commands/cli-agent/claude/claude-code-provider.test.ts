@@ -331,13 +331,18 @@ describe("ClaudeCodeProvider abort", () => {
   });
 
   it("interrupts the active run and emits run.aborted before switching sessions", async () => {
+    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const configDir = fs.mkdtempSync(path.join(tmpdir(), "adit-claude-config-"));
+    const cwd = "/tmp/project";
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
     const oldSessionId = "11111111-1111-1111-1111-111111111111";
     const newSessionId = "22222222-2222-2222-2222-222222222222";
+    writeClaudeTranscript({ configDir, cwd, sessionId: newSessionId });
+    process.env.CLAUDE_CONFIG_DIR = configDir;
     const provider = new ClaudeCodeProvider({
       bin: "claude",
       args: [],
-      cwd: "/tmp/project",
+      cwd,
       onEvent: (event) => events.push(event),
     });
 
@@ -360,6 +365,109 @@ describe("ClaudeCodeProvider abort", () => {
       expect(provider.state.activeSessionId).toBe(newSessionId);
     } finally {
       provider.stop();
+      if (originalConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir;
+      }
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a Web switch to a session with no local transcript and keeps the current run", async () => {
+    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const configDir = fs.mkdtempSync(path.join(tmpdir(), "adit-claude-config-"));
+    const cwd = "/tmp/project";
+    const oldSessionId = "11111111-1111-1111-1111-111111111111";
+    const missingSessionId = "99999999-9999-9999-9999-999999999999";
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd,
+    });
+
+    try {
+      provider.noteLocalSession(oldSessionId);
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      mocks.remoteInterrupt.mockClear();
+
+      await expect(provider.switchSession(missingSessionId)).rejects.toThrow(
+        "Claude session not found for this project",
+      );
+      expect(mocks.remoteInterrupt).not.toHaveBeenCalled();
+      expect(provider.state.activeSessionId).toBe(oldSessionId);
+    } finally {
+      provider.stop();
+      if (originalConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir;
+      }
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a Web switch back to the SDK session the current run still holds", async () => {
+    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const configDir = fs.mkdtempSync(path.join(tmpdir(), "adit-claude-config-"));
+    const cwd = "/tmp/project";
+    const canonicalSessionId = "11111111-1111-1111-1111-111111111111";
+    const sdkSessionId = "55555555-5555-5555-5555-555555555555";
+    writeClaudeTranscript({ configDir, cwd, sessionId: canonicalSessionId });
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    mocks.query.mockImplementation((
+      input: {
+        prompt?: AsyncIterable<Record<string, unknown>>;
+        options?: { includePartialMessages?: boolean };
+      },
+    ) => {
+      if (!input.options?.includePartialMessages || !input.prompt) {
+        return createCapabilityQuery();
+      }
+      return {
+        supportedCommands: vi.fn(async () => []),
+        mcpServerStatus: vi.fn(async () => []),
+        getContextUsage: vi.fn(async () => null),
+        close: mocks.remoteClose,
+        interrupt: mocks.remoteInterrupt,
+        async *[Symbol.asyncIterator]() {
+          const iterator = input.prompt![Symbol.asyncIterator]();
+          await iterator.next();
+          yield {
+            type: "result",
+            session_id: sdkSessionId,
+            usage: { input_tokens: 1, output_tokens: 1 },
+          };
+          await iterator.next();
+        },
+      };
+    });
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd,
+    });
+
+    try {
+      provider.noteLocalSession(canonicalSessionId);
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      await tick();
+
+      // The SDK session id has no transcript on disk yet, but the running
+      // process still holds it — switching back must not 404.
+      await expect(provider.switchSession(sdkSessionId)).resolves.toBeUndefined();
+      expect(provider.state.activeSessionId).toBe(sdkSessionId);
+    } finally {
+      provider.stop();
+      if (originalConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = originalConfigDir;
+      }
+      fs.rmSync(configDir, { recursive: true, force: true });
     }
   });
 

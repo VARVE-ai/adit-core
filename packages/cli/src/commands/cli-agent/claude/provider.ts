@@ -422,10 +422,17 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
     const hasLocalTranscript = isValidClaudeSession(sessionId, this.opts.cwd);
     if (hasLocalTranscript) this.localResumeSessionId = sessionId;
-    if (!hasLocalTranscript && this.ownerValue !== "web") {
-      throw Object.assign(new Error("Claude session not found for this project"), {
-        statusCode: 404,
-      });
+    if (!hasLocalTranscript) {
+      // In web mode a session the running SDK still holds can be resumed even
+      // before its transcript is flushed/merged to disk; anything else would
+      // silently restart as an empty session under the same id.
+      const resumableInProcess =
+        this.ownerValue === "web" && this.isSessionAliveInProcess(sessionId);
+      if (!resumableInProcess) {
+        throw Object.assign(new Error("Claude session not found for this project"), {
+          statusCode: 404,
+        });
+      }
     }
 
     if (this.ownerValue === "web") {
@@ -2139,6 +2146,15 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
   private currentContextUsageSessionId(): string | null {
     return this.activeSessionId ?? this.resumeSessionId ?? this.sdkSessionId ?? this.remoteSdkSessionId;
+  }
+
+  private isSessionAliveInProcess(sessionId: string): boolean {
+    return (
+      sessionId === this.activeSessionId ||
+      sessionId === this.sdkSessionId ||
+      sessionId === this.remoteSdkSessionId ||
+      this.remoteSdkSessionIdsByActiveSession.has(sessionId)
+    );
   }
 
   private applyStoredContextUsageForSession(sessionId: string | null): void {

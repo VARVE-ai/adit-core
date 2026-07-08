@@ -17,6 +17,7 @@ import {
   type InstalledHooks,
 } from "./cli-agent/claude/hooks-bootstrap.js";
 import { startCliAgentHookServer, type HookServer } from "./cli-agent/hook-server.js";
+import { ClaudeLocalSessionLister, LocalSessionsReporter } from "./cli-agent/local-sessions.js";
 import { CliAgentRelayWebSocket } from "./cli-agent/relay-client.js";
 import { createRelayNotices, createRelayStatusReporter } from "./cli-agent/relay-console.js";
 import { loadInitializedGitOrWorkspaceProjectConfig } from "./project-initialization.js";
@@ -345,10 +346,12 @@ async function drainCommandQueue(input: {
   commands: RelayCommand[];
   enqueueEvent: (event: CliAgentRelayEvent) => void;
   ws: CliAgentRelayWebSocket | null;
-}): Promise<void> {
+}): Promise<boolean> {
+  let processed = false;
   while (input.commands.length > 0) {
     const command = input.commands.shift();
-    if (!command) return;
+    if (!command) return processed;
+    processed = true;
     try {
       await processCommand(input.provider, command);
       input.ws?.ack(command.id);
@@ -365,6 +368,7 @@ async function drainCommandQueue(input: {
       });
     }
   }
+  return processed;
 }
 
 export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<void> {
@@ -502,6 +506,11 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
         relayStatus.retryScheduled(attempt, delayMs);
       },
     });
+    const localSessionLister = new ClaudeLocalSessionLister(config.projectRoot);
+    const localSessionsReporter = new LocalSessionsReporter(
+      ws,
+      () => localSessionLister.list(),
+    );
 
     hookServer.events.on("hook", (event) => {
       const body = event.body as Record<string, unknown>;
@@ -601,7 +610,7 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
     while (!stopping) {
       try {
         if (ws.isOpen && ws.currentConnectionId) {
-          await drainCommandQueue({
+          const processedCommands = await drainCommandQueue({
             provider,
             commands: commandQueue,
             enqueueEvent,
@@ -621,6 +630,7 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
             provider.markLocalIdle();
           }
           ws.sendHeartbeat(provider.state);
+          localSessionsReporter.maybeReport(processedCommands);
           if (eventQueue.length > 0) {
             const batch = eventQueue.splice(0, 50);
             const sent = ws.sendEvents(batch);
