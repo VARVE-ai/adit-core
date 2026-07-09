@@ -9,8 +9,8 @@ const mocks = vi.hoisted(() => ({
   endSession: vi.fn(),
   isGitRepo: vi.fn(),
   detectPlatform: vi.fn(),
+  detectPlatforms: vi.fn(),
   getAdapter: vi.fn(),
-  listAdapters: vi.fn(),
   resolveAditHookBinary: vi.fn(),
 }));
 
@@ -33,8 +33,8 @@ vi.mock("@varveai/adit-engine", () => ({
 
 vi.mock("@varveai/adit-hooks/adapters", () => ({
   detectPlatform: mocks.detectPlatform,
+  detectPlatforms: mocks.detectPlatforms,
   getAdapter: mocks.getAdapter,
-  listAdapters: mocks.listAdapters,
   resolveAditHookBinary: mocks.resolveAditHookBinary,
 }));
 
@@ -58,6 +58,7 @@ describe("doctorCommand", () => {
       dataDir: "/repo/.adit",
       dbPath: "/repo/.adit/adit.sqlite",
       projectId: "project-1",
+      projectType: "repo",
       clientId: "client-1",
     });
     mocks.openDatabase.mockReturnValue({
@@ -66,7 +67,7 @@ describe("doctorCommand", () => {
     mocks.queryEvents.mockReturnValue([]);
     mocks.listSessions.mockReturnValue([]);
     mocks.isGitRepo.mockResolvedValue(true);
-    mocks.listAdapters.mockReturnValue([]);
+    mocks.detectPlatforms.mockReturnValue([]);
     mocks.resolveAditHookBinary.mockReturnValue("adit-hook");
     mocks.detectPlatform.mockReturnValue("other");
     mocks.getAdapter.mockReturnValue({
@@ -99,6 +100,63 @@ describe("doctorCommand", () => {
     expect(output).toContain("Hooks config: No platform hooks found");
     expect(output).not.toContain("Unknown Platform settings");
     expect(output).not.toContain("Unknown Platform support");
+  });
+
+  it("skips the git repository check for workspace projects", async () => {
+    mocks.loadInitializedProjectConfig.mockReturnValue({
+      projectRoot: "/workspace",
+      dataDir: "/workspace/.adit",
+      dbPath: "/workspace/.adit/adit.sqlite",
+      projectId: "workspace-1",
+      projectType: "workspace",
+      clientId: "client-1",
+    });
+    mocks.isGitRepo.mockResolvedValue(false);
+
+    await doctorCommand();
+
+    const output = (console.log as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .map((args) => args.join(" "))
+      .join("\n");
+
+    expect(output).toContain("Git repository: Workspace project: /workspace (git check skipped)");
+    expect(mocks.isGitRepo).not.toHaveBeenCalled();
+  });
+
+  it("only reports hook adapters detected in the current project root", async () => {
+    const claudeAdapter = {
+      platform: "claude-code",
+      displayName: "Claude Code",
+      hookMappings: [{ platformEvent: "Stop", aditHandler: "stop" }],
+      validateInstallation: vi.fn(async () => ({
+        valid: true,
+        checks: [{ name: "Hook configuration", ok: true, detail: "All hooks registered" }],
+      })),
+      installHooks: vi.fn(),
+    };
+    mocks.detectPlatforms.mockReturnValue(["claude-code"]);
+    mocks.getAdapter.mockImplementation((platform: string) => {
+      if (platform === "claude-code") return claudeAdapter;
+      return {
+        platform,
+        displayName: "Codex",
+        hookMappings: [{ platformEvent: "Stop", aditHandler: "stop" }],
+        validateInstallation: vi.fn(async () => ({
+          valid: false,
+          checks: [{ name: "Hook configuration", ok: false, detail: "No hook configuration found" }],
+        })),
+        installHooks: vi.fn(),
+      };
+    });
+
+    await doctorCommand();
+
+    const output = (console.log as unknown as ReturnType<typeof vi.fn>).mock.calls
+      .map((args) => args.join(" "))
+      .join("\n");
+
+    expect(output).toContain("Hooks config: Claude Code: OK");
+    expect(output).not.toContain("Codex:");
   });
 });
 

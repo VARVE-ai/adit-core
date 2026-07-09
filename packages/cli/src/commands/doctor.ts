@@ -19,8 +19,8 @@ import {
 import { isGitRepo } from "@varveai/adit-engine";
 import {
   detectPlatform,
+  detectPlatforms,
   getAdapter,
-  listAdapters,
   resolveAditHookBinary,
   type PlatformAdapter,
 } from "@varveai/adit-hooks/adapters";
@@ -42,11 +42,15 @@ export async function doctorCommand(
   if (!config) return;
 
   // 1. Git repo
-  const gitOk = await isGitRepo(config.projectRoot);
+  const gitOk = config.projectType === "workspace"
+    ? true
+    : await isGitRepo(config.projectRoot);
   checks.push({
     name: "Git repository",
     ok: gitOk,
-    detail: gitOk ? config.projectRoot : "Not a git repository",
+    detail: config.projectType === "workspace"
+      ? `Workspace project: ${config.projectRoot} (git check skipped)`
+      : gitOk ? config.projectRoot : "Not a git repository",
   });
 
   // 2. Data directory
@@ -98,9 +102,11 @@ export async function doctorCommand(
     detail: binaryCheck.detail,
   });
 
-  // 6. Hooks — validate via platform adapters
-  //    Check all implemented adapters; report per-platform status.
-  const implementedAdapters = listAdapters().filter((a) => a.hookMappings.length > 0);
+  // 6. Hooks — validate adapters detected in the current project root.
+  const detectedPlatforms = detectPlatforms(config.projectRoot);
+  const implementedAdapters = detectedPlatforms
+    .map((platform) => getAdapter(platform))
+    .filter((a) => a.hookMappings.length > 0);
   let hooksOk = false;
   const hooksDetails: string[] = [];
   const adaptersNeedingFix: typeof implementedAdapters = [];
@@ -117,7 +123,7 @@ export async function doctorCommand(
       hooksDetails.push(
         `${adapter.displayName}: OK${warnings.length > 0 ? ` — warning: ${warnings.join("; ")}` : ""}`,
       );
-    } else if (result.checks.some((c) => c.ok)) {
+    } else if (result.checks.some((c) => !c.advisory && c.ok)) {
       // Platform directory exists but hooks incomplete
       hooksDetails.push(`${adapter.displayName}: ${result.checks.filter((c) => !c.ok).map((c) => c.detail).join("; ")}`);
       adaptersNeedingFix.push(adapter);
@@ -141,7 +147,7 @@ export async function doctorCommand(
     name: "Hooks config",
     ok: hooksOk,
     detail: hooksDetails.join("; "),
-    fixable: !hooksOk,
+    fixable: !hooksOk && adaptersNeedingFix.length > 0,
   });
 
   // 7. Platform hook completeness — detailed per-adapter validation
