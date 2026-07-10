@@ -11,7 +11,6 @@ import { createGzip } from "node:zlib";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import {
-  loadConfig,
   openDatabase,
   closeDatabase,
   getEnvSnapshotById,
@@ -22,6 +21,7 @@ import {
   parseDiffStats,
   type AditEvent,
 } from "@varveai/adit-core";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 import { createTimelineManager } from "@varveai/adit-engine";
 
 /** `adit export <id>` — export a single event bundle */
@@ -34,7 +34,8 @@ export async function exportCommand(
     includeEnv?: boolean;
   },
 ): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit export");
+  if (!config) return;
   const db = openDatabase(config.dbPath);
   const timeline = createTimelineManager(db, config);
 
@@ -77,7 +78,8 @@ export async function exportSessionCommand(
     gzip?: boolean;
   },
 ): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit export");
+  if (!config) return;
   const db = openDatabase(config.dbPath);
   const timeline = createTimelineManager(db, config);
 

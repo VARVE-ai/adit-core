@@ -93,7 +93,7 @@ export function EventList({
   return (
     <Box flexDirection="column" width="100%">
       <Box flexDirection="row" paddingX={1}>
-        <Text bold dimColor>
+        <Text bold dimColor wrap="truncate">
           {"  "}TIME{sortIndicator("TIME", sortField)}{"           "}ACTOR{sortIndicator("ACTOR", sortField)}{"  "}SUMMARY
         </Text>
       </Box>
@@ -106,25 +106,29 @@ export function EventList({
         const summary = getSummary(event);
         const hasCheckpoint = !!event.checkpointSha;
 
+        // Single truncated Text per row: a wrapped row breaks ink's
+        // frame-height math and leaves stale frames stacked on screen.
         return (
-          <Box key={event.id} flexDirection="row" paddingX={1}>
-            <Text inverse={isSelected}>
-              {isSelected ? ">" : " "}{" "}
+          <Box key={event.id} paddingX={1}>
+            <Text wrap="truncate-end">
+              <Text inverse={isSelected}>
+                {isSelected ? ">" : " "}{" "}
+              </Text>
+              <Text inverse={isSelected} dimColor={!isSelected}>
+                {time}
+              </Text>
+              <Text inverse={isSelected}>{" "}</Text>
+              <Text inverse={isSelected} color={color}>
+                {actor}
+              </Text>
+              <Text inverse={isSelected}>{" "}</Text>
+              <Text inverse={isSelected} bold={hasCheckpoint}>
+                {summary}
+              </Text>
+              {hasCheckpoint && !isSelected && (
+                <Text color="green">{" "}*</Text>
+              )}
             </Text>
-            <Text inverse={isSelected} dimColor={!isSelected}>
-              {time}
-            </Text>
-            <Text inverse={isSelected}>{" "}</Text>
-            <Text inverse={isSelected} color={color}>
-              {actor}
-            </Text>
-            <Text inverse={isSelected}>{" "}</Text>
-            <Text inverse={isSelected} bold={hasCheckpoint}>
-              {summary}
-            </Text>
-            {hasCheckpoint && !isSelected && (
-              <Text color="green">{" "}*</Text>
-            )}
           </Box>
         );
       })}

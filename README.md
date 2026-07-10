@@ -1,38 +1,30 @@
 # ADIT Core
 
-**AI Development Intent Tracker — The Transparent Time Machine**
+**AI Development Intent Tracker — a flight recorder for AI-assisted development**
 
-ADIT is a local-first flight recorder for AI-assisted development. It records
-prompts, assistant responses, tool activity, Git checkpoints, environment
-snapshots, and cloud sync state so a project can be inspected, resumed, or
-reverted with context instead of guesswork.
+ADIT is a local-first recorder for AI-assisted development. It records
+prompts, assistant responses, tool activity, per-turn file diffs, environment
+snapshots, and cloud sync state so a project can be inspected and understood
+with context instead of guesswork — locally via CLI/TUI, and optionally in
+the adit-cloud Coding panel.
 
 ## What ADIT Does
 
 1. **Trace every AI-assisted change** — ADIT stores normalized timeline events
    for user prompts, assistant turns, tools, subagents, notifications, session
    lifecycle events, diffs, and related metadata.
-2. **Create Git-native checkpoints** — ADIT snapshots working tree state into
-   `refs/adit/checkpoints/<id>` without adding commits to normal branch history
-   or touching the user's staged changes.
-3. **Make sessions recoverable** — ADIT can inspect timelines, search recorded
-   context, export sessions, compare environment drift, revert checkpoints, and
-   resume work from the latest checkpoint on a branch.
+2. **Capture per-turn file diffs** — ADIT extracts file mutations from platform
+   transcripts on each turn and stores bounded diff text for inspection.
+3. **Bridge local CLIs to adit-cloud** — `adit cloud claude|codex` connects a
+   local Claude Code or Codex session to the adit-cloud Coding panel, and
+   hook-driven auto-sync pushes timeline data incrementally.
 
 ## Features
 
 - **Prompt and response capture** — Records AI coding interactions as local
   timeline events.
-- **Shadow Git checkpoints** — Creates checkpoint refs for revert, undo, diff,
-  and branch resume flows.
-- **Interactive revert picker** — `adit snapshot revert` shows recent
-  checkpoints when no ID is provided.
-- **Session resume** — `adit snapshot resume [branch]` restores from the latest
-  checkpoint and prints platform-specific continuation guidance.
-- **Squash-merge recovery** — Looks up checkpoint refs from deleted or merged
-  branches with SHA reachability checks and fallbacks.
-- **Content-aware secret redaction** — Uses entropy scoring, built-in secret
-  patterns, configurable thresholds, skip rules, and custom patterns.
+- **Per-turn diff capture** — Extracts file mutations from platform transcripts
+  and stores diff stats plus bounded diff text per assistant turn.
 - **Hook chaining** — Adds ADIT hooks while preserving existing tool hooks, and
   removes only ADIT-managed entries on reinstall or uninstall.
 - **Multi-actor timeline** — Distinguishes user, assistant, tool, and system
@@ -47,8 +39,6 @@ reverted with context instead of guesswork.
   adit-cloud on session start with staleness-based caching.
 - **Platform session tracking** — Correlates ADIT records with platform-native
   session IDs.
-- **SpecFlow-style planning** — Generates Intent, Roadmap, Task, and project
-  document artifacts.
 - **Interactive TUI** — React/Ink terminal UI with timeline, detail, search,
   diff, and environment screens.
 - **Fail-open hooks** — Hook errors are swallowed so ADIT never blocks the AI
@@ -60,8 +50,8 @@ ADIT is a TypeScript pnpm monorepo with six packages:
 
 | Package | Description |
 | --- | --- |
-| `@varveai/adit-core` | Core types, SQLite database access, config, sync primitives, performance logs, content redaction, and native install checks |
-| `@varveai/adit-engine` | Git runner, checkpoint refs, temp-index snapshots, working tree detection, timeline management, and environment capture/diff |
+| `@varveai/adit-core` | Core types, SQLite database access, config, sync primitives, performance logs, and native install checks |
+| `@varveai/adit-engine` | Git runner, working tree detection, timeline management, and environment capture/diff |
 | `@varveai/adit-hooks` | Hook dispatcher, fail-open handlers, platform adapter registry, and hook install/validate/uninstall logic |
 | `@varveai/adit-cli` | Commander.js CLI, cloud coding entry points, debug commands, docs commands, and React/Ink TUI |
 | `@varveai/adit-cloud` | Cloud config, device/token auth, HTTP client, incremental sync, transcript upload, project-link sync, and intent commands |
@@ -167,16 +157,13 @@ adit cloud login --server <url>
 | `adit prompt <id>` | Show prompt text with `--max-chars` and `--offset` |
 
 Common timeline options include `--limit`, `--actor`, `--type`,
-`--checkpoints`, `--query`, `--expand`, `--sort`, and `--json`.
+`--query`, `--expand`, `--sort`, and `--json`.
 
 ### Snapshot
 
 | Command | Description |
 | --- | --- |
-| `adit snapshot revert [id]` | Restore working tree to a checkpoint; interactive picker when no ID is given |
-| `adit snapshot undo` | Revert to the parent of the latest checkpoint |
-| `adit snapshot resume [branch]` | Resume from the latest checkpoint on a branch |
-| `adit snapshot diff <id>` | Show checkpoint diff with line and file filters |
+| `adit snapshot diff <id>` | Show the recorded diff for an event with line and file filters |
 | `adit snapshot env show <id>` | Show the environment snapshot for an event |
 | `adit snapshot env latest` | Show the most recent environment snapshot |
 | `adit snapshot env diff <id1> <id2>` | Compare two environment snapshots |
@@ -255,9 +242,11 @@ search, `f` filter, `s` cycle sort, `Esc`/`b` back, and `q` quit.
 
 ## Cloud Sync
 
-Cloud sync is optional. After `adit cloud login`, ADIT can push local events,
-sessions, diffs, environment snapshots, sync cursors, transcripts, Git metadata,
-and project documents to adit-cloud.
+Cloud sync is optional. After `adit cloud login`, ADIT automatically pushes
+local events, sessions, diffs, environment snapshots, sync cursors,
+transcripts, Git metadata, and project documents to adit-cloud — being logged
+in is the opt-in. The login command prints exactly what is uploaded and how to
+disable each channel; `adit status` surfaces sync health warnings.
 
 - Auto-sync runs after stable hook events when credentials are available.
 - `prompt-submit` is skipped so cloud does not receive a half-finished turn.
@@ -340,7 +329,7 @@ Files larger than 500 KB are skipped with a warning.
 | `ADIT_TRANSCRIPT_MIN_INCREMENT` | Minimum new transcript bytes before incremental upload | `1024` |
 | `ADIT_PROJECT_LINK_AUTO_SYNC` | Set to `false` to disable project-link auto-sync | `true` |
 | `ADIT_PROJECT_LINK_STALE_HOURS` | Project-link cache staleness threshold | `2` |
-| `ADIT_DEBUG` | Enable debug output for selected cloud/agent paths | unset |
+| `ADIT_DEBUG` | Enable debug output and the hook debug log (`$TMPDIR/adit-hook-debug.jsonl`, size-capped) | unset |
 | `ADIT_CODEX_BIN` | Override Codex binary used by cloud coding commands | unset |
 | `ADIT_INSTALL_DIR` | Override the upgrade install directory | unset |
 | `ADIT_ALLOW_NATIVE_BUILD` | Allow native better-sqlite3 build when no prebuild is confirmed | unset |

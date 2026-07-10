@@ -8,11 +8,13 @@ import { Box, Text } from "ink";
 interface DiffViewProps {
   diffText: string | null;
   title?: string;
+  maxLines?: number;
 }
 
 export function DiffView({
   diffText,
   title,
+  maxLines,
 }: DiffViewProps): React.ReactElement {
   if (!diffText) {
     return (
@@ -22,7 +24,11 @@ export function DiffView({
     );
   }
 
-  const lines = diffText.split("\n");
+  const allLines = diffText.split("\n");
+  // Cap to the viewport: overflowing frames break ink's in-place redraw.
+  const cap = maxLines ? Math.max(maxLines - (title ? 2 : 1), 1) : allLines.length;
+  const lines = allLines.slice(0, cap);
+  const hidden = allLines.length - lines.length;
 
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -51,6 +57,9 @@ export function DiffView({
           </Text>
         );
       })}
+      {hidden > 0 && (
+        <Text dimColor>... {hidden} more line{hidden !== 1 ? "s" : ""}</Text>
+      )}
     </Box>
   );
 }

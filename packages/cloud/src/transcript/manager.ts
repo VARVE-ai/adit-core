@@ -137,6 +137,19 @@ export async function processTranscriptUploads(
       continue;
     }
 
+    // File shrank below the confirmed offset — it was rewritten or
+    // rotated (e.g. transcript compaction). The server copy no longer
+    // matches the file, and resuming from the old offset would splice
+    // unrelated bytes. Reset and re-upload from offset 0 instead of
+    // skipping forever.
+    if (upload.uploadedBytes > 0 && currentSize < upload.uploadedBytes) {
+      resetTranscriptUpload(db, upload.id);
+      upload.uploadedBytes = 0;
+      upload.serverVersion = null;
+      upload.status = "pending";
+      result.resynced++;
+    }
+
     // Skip if no new data and already up to date
     const newDataBytes = currentSize - upload.uploadedBytes;
     if (newDataBytes < config.minIncrementBytes && upload.status === "up_to_date") {

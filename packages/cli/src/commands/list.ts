@@ -4,7 +4,8 @@
  * Displays a compact, token-efficient table of recent events.
  */
 
-import { loadConfig, openDatabase, closeDatabase, type AditEvent, type Actor, type EventType } from "@varveai/adit-core";
+import { openDatabase, closeDatabase, type AditEvent, type Actor, type EventType } from "@varveai/adit-core";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 import { getEventSummary } from "../utils/summary.js";
 import { padRight, formatDateTime } from "../utils/format.js";
 import { createTimelineManager } from "@varveai/adit-engine";
@@ -16,7 +17,6 @@ export interface ListCommandOptions {
   limit?: number;
   actor?: string;
   type?: string;
-  checkpoints?: boolean;
   query?: string;
   expand?: boolean;
   sort?: SortField;
@@ -24,7 +24,8 @@ export interface ListCommandOptions {
 }
 
 export async function listCommand(opts: ListCommandOptions): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit timeline");
+  if (!config) return;
   const db = openDatabase(config.dbPath);
   const timeline = createTimelineManager(db, config);
 
@@ -37,7 +38,6 @@ export async function listCommand(opts: ListCommandOptions): Promise<void> {
       events = await timeline.list({
         actor: opts.actor as Actor | undefined,
         eventType: opts.type as EventType | undefined,
-        hasCheckpoint: opts.checkpoints,
         limit: opts.limit ?? 50,
       });
     }

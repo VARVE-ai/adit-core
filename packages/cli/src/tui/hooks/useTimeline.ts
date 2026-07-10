@@ -5,6 +5,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { existsSync } from "node:fs";
 import {
   loadConfig,
   openDatabase,
@@ -21,6 +22,7 @@ import {
   type EventType,
   type EnvSnapshot,
 } from "@varveai/adit-core";
+import { formatAditProjectNotInitializedMessage } from "../../commands/project-initialization.js";
 
 export interface TimelineState {
   events: AditEvent[];
@@ -34,7 +36,6 @@ export interface TimelineState {
 export interface TimelineFilters {
   actor?: Actor;
   eventType?: EventType;
-  hasCheckpoint?: boolean;
   searchQuery?: string;
 }
 
@@ -68,6 +69,9 @@ export function useTimeline(): UseTimelineResult {
   const getDb = useCallback(() => {
     if (!dbRef.current) {
       const config = loadConfig();
+      if (!existsSync(config.dbPath)) {
+        throw new Error(formatAditProjectNotInitializedMessage("adit"));
+      }
       configRef.current = config;
       dbRef.current = openDatabase(config.dbPath);
     }
@@ -88,7 +92,6 @@ export function useTimeline(): UseTimelineResult {
         events = queryEvents(db, {
           eventType: filters.eventType,
           actor: filters.actor,
-          hasCheckpoint: filters.hasCheckpoint,
           limit: DEFAULT_LIMIT,
         });
       }

@@ -2,8 +2,7 @@
  * Tests for Cursor adapter.
  *
  * Validates hook generation in Cursor's native flat format,
- * install/uninstall chaining, stdin field mapping, and
- * legacy Claude Code format migration.
+ * install/uninstall chaining, and stdin field mapping.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -49,7 +48,8 @@ describe("Cursor Adapter - Hook Generation", () => {
     expect(hooks.stop).toBeDefined();
     expect(hooks.sessionStart).toBeDefined();
     expect(hooks.sessionEnd).toBeDefined();
-    expect(hooks.afterAgentResponse).toBeDefined();
+    // afterAgentResponse duplicates stop-side transcript extraction
+    expect(hooks.afterAgentResponse).toBeUndefined();
 
     // Verify flat format (no nested "hooks" array)
     const stopEntry = hooks.stop[0] as { command: string; type: string; timeout: number };
@@ -61,12 +61,13 @@ describe("Cursor Adapter - Hook Generation", () => {
   });
 
   it("includes explicit platform argument in commands", () => {
-    const config = cursorAdapter.generateHookConfig("npx adit-hook");
+    const config = cursorAdapter.generateHookConfig("npx adit-hook", "/project");
     const hooks = config.content.hooks as Record<string, unknown[]>;
 
     for (const [, entries] of Object.entries(hooks)) {
       const entry = (entries as Array<{ command: string }>)[0];
       expect(entry.command).toContain("--platform cursor");
+      expect(entry.command).toContain("--project-root-b64");
       expect(entry.command).not.toMatch(/^CURSOR=1 /);
     }
   });
@@ -183,7 +184,7 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
     expect(hooks.stop).toBeDefined();
     expect(hooks.sessionStart).toBeDefined();
     expect(hooks.sessionEnd).toBeDefined();
-    expect(hooks.afterAgentResponse).toBeDefined();
+    expect(hooks.afterAgentResponse).toBeUndefined();
 
     // Each event should have exactly one flat entry
     const stopEntries = hooks.stop as Array<{ command: string; type: string; timeout: number }>;
@@ -312,16 +313,20 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
     expect(fullConfig.settings).toEqual({ theme: "dark" });
   });
 
-  it("handles corrupted hooks file gracefully", async () => {
+  it("refuses to overwrite a corrupted hooks file", async () => {
     const cursorDir = join(projectRoot, ".cursor");
     mkdirSync(cursorDir, { recursive: true });
-    writeFileSync(join(cursorDir, "hooks.json"), "{ invalid json }}}");
+    const hooksPath = join(cursorDir, "hooks.json");
+    writeFileSync(hooksPath, "{ invalid json }}}");
 
-    // Should not throw — starts fresh
-    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
+    // Must throw instead of silently rebuilding the file — the corrupt
+    // file may hold other tools' hook config.
+    await expect(
+      cursorAdapter.installHooks(projectRoot, "npx adit-hook"),
+    ).rejects.toThrow("invalid JSON");
 
-    const hooks = readHooks(projectRoot);
-    expect(hooks.stop).toBeDefined();
+    // The corrupted file is left untouched for the user to fix.
+    expect(readFileSync(hooksPath, "utf-8")).toBe("{ invalid json }}}");
   });
 
   it("uninstallHooks removes only ADIT entries, preserves others", async () => {
@@ -402,50 +407,31 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
     expect(result.checks.every((c) => c.ok)).toBe(true);
   });
 
-  it("migrates legacy Claude Code format entries during install", async () => {
-    // Simulate old ADIT install with Claude Code format event names + nested structure
+  it("validateInstallation marks old ADIT hook commands as needing upgrade", async () => {
     writeHooks(projectRoot, {
       hooks: {
-        UserPromptSubmit: [
-          { hooks: [{ type: "command", command: "CURSOR=1 npx adit-hook prompt-submit", timeout: 10000 }] },
+        beforeSubmitPrompt: [
+          { command: "CURSOR=1 npx adit-hook prompt-submit", type: "command" },
         ],
-        Stop: [
-          { hooks: [{ type: "command", command: "CURSOR=1 npx adit-hook stop", timeout: 10000 }] },
+        stop: [
+          { command: "CURSOR=1 npx adit-hook stop", type: "command" },
         ],
-        SessionStart: [
-          { hooks: [{ type: "command", command: "CURSOR=1 npx adit-hook session-start", timeout: 10000 }] },
+        sessionStart: [
+          { command: "CURSOR=1 npx adit-hook session-start", type: "command" },
         ],
-        SessionEnd: [
-          { hooks: [{ type: "command", command: "CURSOR=1 npx adit-hook session-end", timeout: 10000 }] },
-        ],
-        Notification: [
-          { hooks: [{ type: "command", command: "CURSOR=1 npx adit-hook notification", timeout: 10000 }] },
+        sessionEnd: [
+          { command: "CURSOR=1 npx adit-hook session-end", type: "command" },
         ],
       },
     });
 
-    // Reinstall with new format
-    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
+    const result = await cursorAdapter.validateInstallation(projectRoot);
 
-    const hooks = readHooks(projectRoot);
-
-    // Legacy keys should be gone
-    expect(hooks.UserPromptSubmit).toBeUndefined();
-    expect(hooks.Stop).toBeUndefined();
-    expect(hooks.SessionStart).toBeUndefined();
-    expect(hooks.SessionEnd).toBeUndefined();
-    expect(hooks.Notification).toBeUndefined();
-
-    // New Cursor-native keys should be present with flat format
-    expect(hooks.beforeSubmitPrompt).toBeDefined();
-    expect(hooks.stop).toBeDefined();
-    expect(hooks.sessionStart).toBeDefined();
-    expect(hooks.sessionEnd).toBeDefined();
-    expect(hooks.afterAgentResponse).toBeDefined();
+    expect(result.valid).toBe(false);
+    expect(result.checks.find((c) => c.name === "Hook configuration")?.ok).toBe(false);
   });
 
-  it("uninstallHooks also cleans up legacy Claude Code format entries", async () => {
-    // Simulate old ADIT install
+  it("uninstallHooks removes ADIT entries under any event key, including nested format", async () => {
     writeHooks(projectRoot, {
       hooks: {
         UserPromptSubmit: [
@@ -503,6 +489,17 @@ describe("Cursor Adapter - extractLastAssistantMessage", () => {
 
     const result = extractLastAssistantMessage(transcriptPath);
     expect(result).toBe("Hi there!");
+  });
+
+  it("extracts assistant text from the type-shaped format (Cursor CLI stream-json)", () => {
+    const transcriptPath = join(tempDir, "transcript.jsonl");
+    writeFileSync(transcriptPath, [
+      JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "hello" }] } }),
+      JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Typed shape reply" }] } }),
+    ].join("\n") + "\n");
+
+    const result = extractLastAssistantMessage(transcriptPath);
+    expect(result).toBe("Typed shape reply");
   });
 
   it("extracts multi-block assistant message", () => {
@@ -623,17 +620,4 @@ describe("Cursor Adapter - parseInput stop fields", () => {
     }
   });
 
-  it("maps notification fields from afterAgentResponse", () => {
-    const raw = {
-      conversation_id: "conv-123",
-      workspace_roots: ["/path/to/project"],
-      message: "Agent completed the task",
-      notification_type: "agent_response",
-    };
-
-    const input = cursorAdapter.parseInput(raw, "notification");
-
-    expect(input.notificationMessage).toBe("Agent completed the task");
-    expect(input.notificationType).toBe("agent_response");
-  });
 });

@@ -7,6 +7,7 @@ export {
   getActiveSession,
   getSessionByPlatformSessionId,
   endSession,
+  endStaleSessions,
   listSessions,
   type CreateSessionInput,
 } from "./sessions.js";
@@ -18,15 +19,11 @@ export {
   queryEvents,
   getEventsBySession,
   updateEventStatus,
-  updateEventCheckpoint,
   updateEventLabels,
-  allocateSequence,
   searchEvents,
-  getLatestCheckpointEvent,
-  getLatestCheckpointByBranch,
-  getRecentCheckpointsExcludingBranch,
   clearEvents,
   countEvents,
+  hasGitCommitEvent,
   type InsertEventInput,
   type EventQueryOptions,
 } from "./events.js";
@@ -62,6 +59,12 @@ export {
   clearSyncState,
   type SyncState,
 } from "./sync-state.js";
+
+export {
+  getSessionRepoHeads,
+  upsertSessionRepoHead,
+  type SessionRepoHead,
+} from "./session-repo-heads.js";
 
 export {
   upsertTranscriptUpload,

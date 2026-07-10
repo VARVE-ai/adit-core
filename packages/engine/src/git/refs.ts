@@ -3,23 +3,14 @@
  *
  * Checkpoints are stored under refs/adit/checkpoints/<id>
  * This keeps them entirely out of the branch history.
+ *
+ * Note: checkpoint creation has been removed; the functions here are
+ * read-only or for cleaning up legacy refs left in user repos.
  */
 
-import { runGit, runGitOrThrow } from "./runner.js";
+import { runGit } from "./runner.js";
 
 const REF_PREFIX = "refs/adit/checkpoints";
-
-/** Create or update a checkpoint ref */
-export async function storeCheckpointRef(
-  cwd: string,
-  stepId: string,
-  sha: string,
-): Promise<void> {
-  await runGitOrThrow(
-    ["update-ref", `${REF_PREFIX}/${stepId}`, sha],
-    { cwd },
-  );
-}
 
 /** Resolve a checkpoint ref to its SHA */
 export async function resolveCheckpointRef(
@@ -78,9 +69,4 @@ export async function getParentSha(
 ): Promise<string | null> {
   const result = await runGit(["rev-parse", `${sha}^1`], { cwd });
   return result.exitCode === 0 ? result.stdout.trim() : null;
-}
-
-/** Get the ref prefix constant */
-export function getRefPrefix(): string {
-  return REF_PREFIX;
 }

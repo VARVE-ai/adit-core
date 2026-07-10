@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { codexAdapter } from "./codex.js";
+import { encodeProjectRoot } from "./command.js";
 import { codexHookTrustMarkerForPath } from "./codex-trust.js";
 
 /** Create a unique temp directory for each test */
@@ -74,10 +75,10 @@ describe("Codex CLI Hook Chaining", () => {
     expect(stopEntries).toHaveLength(1);
     expect(stopEntries[0].hooks[0].command).toContain("adit-hook");
 
-    const projectConfig = readFileSync(join(projectRoot, ".codex", "config.toml"), "utf-8");
+    // No project config.toml is written — the hooks feature is enabled by
+    // default on Codex >= 0.124 (ADIT's baseline).
+    expect(existsSync(join(projectRoot, ".codex", "config.toml"))).toBe(false);
     const userConfig = readFileSync(join(codexHome, "config.toml"), "utf-8");
-    expect(projectConfig).toContain("[features]");
-    expect(projectConfig).toContain("hooks = true");
     expect(userConfig).toContain("# >>> adit-codex-hooks project=");
     expect(userConfig).toContain(".codex/hooks.json:session_start:0:0");
     expect(userConfig).toContain(".codex/hooks.json:user_prompt_submit:0:0");
@@ -221,17 +222,20 @@ describe("Codex CLI Hook Chaining", () => {
     expect(hooksConfig.model).toBe("gpt-4");
   });
 
-  it("handles corrupted hooks file gracefully", async () => {
+  it("refuses to overwrite a corrupted hooks file", async () => {
     const codexDir = join(projectRoot, ".codex");
     mkdirSync(codexDir, { recursive: true });
-    writeFileSync(join(codexDir, "hooks.json"), "{ invalid json }}}");
+    const hooksPath = join(codexDir, "hooks.json");
+    writeFileSync(hooksPath, "{ invalid json }}}");
 
-    // Should not throw — starts fresh
-    await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+    // Must throw instead of silently rebuilding the file — the corrupt
+    // file may hold other tools' hook config.
+    await expect(
+      codexAdapter.installHooks(projectRoot, "npx adit-hook"),
+    ).rejects.toThrow("invalid JSON");
 
-    const hooksConfig = readHooks(projectRoot);
-    const hooks = hooksConfig.hooks as Record<string, unknown[]>;
-    expect(hooks.Stop).toBeDefined();
+    // The corrupted file is left untouched for the user to fix.
+    expect(readFileSync(hooksPath, "utf-8")).toBe("{ invalid json }}}");
   });
 
   it("uninstallHooks removes only ADIT entries, preserves others", async () => {
@@ -377,7 +381,7 @@ describe("Codex CLI Hook Chaining", () => {
 
     const result = await codexAdapter.validateInstallation(projectRoot);
     expect(result.valid).toBe(true);
-    expect(result.checks.every((c) => c.ok)).toBe(true);
+    expect(result.checks.filter((c) => !c.advisory).every((c) => c.ok)).toBe(true);
   });
 
   describe("Hook mappings", () => {
@@ -431,7 +435,7 @@ describe("Codex CLI Hook Chaining", () => {
         turn_id: "turn456"
       };
 
-      const result = codexAdapter.parseInput(raw, "SessionStart");
+      const result = codexAdapter.parseInput(raw, "session-start");
 
       expect(result).toEqual({
         cwd: "/project",
@@ -447,7 +451,7 @@ describe("Codex CLI Hook Chaining", () => {
       });
     });
 
-    it("parses Codex thread_id aliases as platform session IDs", () => {
+    it("only reads schema fields — no thread_id/camelCase aliases", () => {
       const raw = {
         thread_id: "thread123",
         transcriptPath: "/path/to/transcript",
@@ -456,10 +460,12 @@ describe("Codex CLI Hook Chaining", () => {
         model: "gpt-4"
       };
 
-      const result = codexAdapter.parseInput(raw, "SessionStart");
+      const result = codexAdapter.parseInput(raw, "session-start");
 
-      expect(result.platformSessionId).toBe("thread123");
-      expect(result.transcriptPath).toBe("/path/to/transcript");
+      // Codex's hook schema sends session_id/transcript_path; aliases are
+      // deliberately not honored.
+      expect(result.platformSessionId).toBeUndefined();
+      expect(result.transcriptPath).toBeUndefined();
     });
 
     it("parses UserPromptSubmit input correctly", () => {
@@ -470,7 +476,7 @@ describe("Codex CLI Hook Chaining", () => {
         cwd: "/project"
       };
 
-      const result = codexAdapter.parseInput(raw, "UserPromptSubmit");
+      const result = codexAdapter.parseInput(raw, "prompt-submit");
 
       expect(result).toEqual({
         cwd: "/project",
@@ -495,7 +501,7 @@ describe("Codex CLI Hook Chaining", () => {
         cwd: "/project"
       };
 
-      const result = codexAdapter.parseInput(raw, "Stop");
+      const result = codexAdapter.parseInput(raw, "stop");
 
       expect(result).toEqual({
         cwd: "/project",
@@ -522,7 +528,7 @@ describe("Codex CLI Hook Chaining", () => {
         cwd: "/project"
       };
 
-      const result = codexAdapter.parseInput(raw, "PostToolUse");
+      const result = codexAdapter.parseInput(raw, "notification");
 
       expect(result).toEqual({
         cwd: "/project",
@@ -539,54 +545,29 @@ describe("Codex CLI Hook Chaining", () => {
         rawPlatformData: raw
       });
     });
-
-    it("parses PostToolUse camelCase tool aliases", () => {
-      const raw = {
-        session_id: "session123",
-        toolName: "Bash",
-        toolInput: { command: "git status" },
-        toolResponse: { output: "clean" },
-        cwd: "/project"
-      };
-
-      const result = codexAdapter.parseInput(raw, "PostToolUse");
-
-      expect(result).toEqual({
-        cwd: "/project",
-        hookType: "notification",
-        platformCli: "codex",
-        platformSessionId: "session123",
-        toolName: "Bash",
-        toolInput: { command: "git status" },
-        toolOutput: { output: "clean" },
-        permissionMode: undefined,
-        model: undefined,
-        sessionSource: undefined,
-        sessionEndReason: undefined,
-        rawPlatformData: raw
-      });
-    });
   });
 
   describe("generateHookConfig", () => {
     it("generates correct hook configuration", () => {
-      const config = codexAdapter.generateHookConfig("npx adit-hook");
+      const projectRoot = "/project with spaces";
+      const fixedRootArg = `--project-root-b64 ${encodeProjectRoot(projectRoot)}`;
+      const config = codexAdapter.generateHookConfig("npx adit-hook", projectRoot);
 
       expect(config).toEqual({
         configPath: ".codex/hooks.json",
         content: {
           hooks: {
             SessionStart: [
-              { matcher: "startup|resume", hooks: [{ type: "command", command: "npx adit-hook --platform codex session-start", timeout: 30 }] }
+              { matcher: "startup|resume", hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} session-start`, timeout: 30 }] }
             ],
             UserPromptSubmit: [
-              { hooks: [{ type: "command", command: "npx adit-hook --platform codex prompt-submit", timeout: 30 }] }
+              { hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} prompt-submit`, timeout: 30 }] }
             ],
             Stop: [
-              { hooks: [{ type: "command", command: "npx adit-hook --platform codex stop", timeout: 30 }] }
+              { hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} stop`, timeout: 30 }] }
             ],
             PostToolUse: [
-              { matcher: "Bash", hooks: [{ type: "command", command: "npx adit-hook --platform codex notification", timeout: 30 }] }
+              { matcher: "Bash", hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} notification`, timeout: 30 }] }
             ]
           }
         }
@@ -607,10 +588,29 @@ describe("Codex CLI Hook Chaining", () => {
       expect(result.checks[0].ok).toBe(true);
       expect(result.checks[1].name).toBe("Hook configuration");
       expect(result.checks[1].ok).toBe(true);
-      expect(result.checks[2].name).toBe("Codex hooks feature");
+      expect(result.checks[2].name).toBe("Codex hook trust");
       expect(result.checks[2].ok).toBe(true);
-      expect(result.checks[3].name).toBe("Codex hook trust");
-      expect(result.checks[3].ok).toBe(true);
+      // Advisory: the workspace is not trusted in this fresh CODEX_HOME,
+      // but that must NOT fail validation (reinstall cannot fix it and
+      // ensurePersistentCodexHooksInstalled would loop).
+      expect(result.checks[3].name).toBe("Codex workspace trust");
+      expect(result.checks[3].ok).toBe(false);
+      expect(result.checks[3].advisory).toBe(true);
+    });
+
+    it("reports workspace trust when the project is trusted in Codex", async () => {
+      await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+      const userConfigPath = join(codexHome, "config.toml");
+      writeFileSync(
+        userConfigPath,
+        `${readFileSync(userConfigPath, "utf-8")}\n[projects.${JSON.stringify(projectRoot)}]\ntrust_level = "trusted"\n`,
+      );
+
+      const result = await codexAdapter.validateInstallation(projectRoot);
+
+      expect(result.valid).toBe(true);
+      const trustCheck = result.checks.find((c) => c.name === "Codex workspace trust");
+      expect(trustCheck?.ok).toBe(true);
     });
 
     it("detects ADIT hooks that still need Codex review", async () => {
@@ -621,13 +621,12 @@ describe("Codex CLI Hook Chaining", () => {
 
       expect(result.valid).toBe(false);
       expect(result.checks[1].ok).toBe(true);
-      expect(result.checks[2].ok).toBe(true);
-      expect(result.checks[3].name).toBe("Codex hook trust");
-      expect(result.checks[3].ok).toBe(false);
-      expect(result.checks[3].detail).toContain("4 hook(s) need review");
+      expect(result.checks[2].name).toBe("Codex hook trust");
+      expect(result.checks[2].ok).toBe(false);
+      expect(result.checks[2].detail).toContain("4 hook(s) need review");
     });
 
-    it("detects hooks that are configured but not enabled for Codex", async () => {
+    it("detects old ADIT hook commands as needing upgrade", async () => {
       writeHooks(projectRoot, {
         hooks: {
           SessionStart: [
@@ -648,9 +647,8 @@ describe("Codex CLI Hook Chaining", () => {
       const result = await codexAdapter.validateInstallation(projectRoot);
 
       expect(result.valid).toBe(false);
-      expect(result.checks[1].ok).toBe(true);
-      expect(result.checks[2].name).toBe("Codex hooks feature");
-      expect(result.checks[2].ok).toBe(false);
+      expect(result.checks[1].name).toBe("Hook configuration");
+      expect(result.checks[1].ok).toBe(false);
     });
 
     it("detects missing .codex directory", async () => {
@@ -694,10 +692,4 @@ describe("Codex CLI Hook Chaining", () => {
     });
   });
 
-  describe("getResumeCommand", () => {
-    it("returns codex --continue for Codex", () => {
-      const command = codexAdapter.getResumeCommand("/project");
-      expect(command).toBe("codex --continue");
-    });
-  });
 });

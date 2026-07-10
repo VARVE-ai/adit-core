@@ -16,21 +16,26 @@ import type {
   ValidationResult,
   AditHookType,
 } from "./types.js";
-import { buildAditHookCommand, isAditHookCommand } from "./command.js";
+import {
+  buildAditHookCommand,
+  classifyAditHookEntries,
+  describeHookValidation,
+  isAditHookCommand,
+} from "./command.js";
 
 const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "SessionStart", aditHandler: "session-start" },
   { platformEvent: "BeforeAgent", aditHandler: "prompt-submit" },
   { platformEvent: "AfterAgent", aditHandler: "stop" },
   { platformEvent: "SessionEnd", aditHandler: "session-end" },
-  { platformEvent: "AfterTool", aditHandler: "notification" },
+  // Shell commands only (matcher is regex-tested against the tool name).
+  // File edits are extracted from the transcript at stop; matching all
+  // tools would record a notification event for every read-only call.
+  // Gemini's shell tool is named run_shell_command (verified against the
+  // installed gemini-cli 0.41.2 bundle: TOOL_NAME_MAPPING maps Bash to it).
+  { platformEvent: "AfterTool", aditHandler: "notification", matcher: "run_shell_command" },
   { platformEvent: "Notification", aditHandler: "notification" },
 ];
-
-/** Map Gemini CLI platform events to ADIT hook types (derived from HOOK_MAPPINGS) */
-const PLATFORM_TO_ADIT: Record<string, AditHookType> = Object.fromEntries(
-  HOOK_MAPPINGS.map((m) => [m.platformEvent, m.aditHandler]),
-) as Record<string, AditHookType>;
 
 export const geminiAdapter: PlatformAdapter = {
   platform: "gemini" as Platform,
@@ -38,7 +43,7 @@ export const geminiAdapter: PlatformAdapter = {
   hookMappings: HOOK_MAPPINGS,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {
-    const aditHookType = PLATFORM_TO_ADIT[hookType] ?? (hookType as AditHookType);
+    const aditHookType = hookType as AditHookType;
     const cwd = (raw.cwd as string) ?? process.cwd();
 
     return {
@@ -71,15 +76,18 @@ export const geminiAdapter: PlatformAdapter = {
     };
   },
 
-  generateHookConfig(aditBinaryPath: string): PlatformHookConfig {
-    const makeHookEntry = (hookType: AditHookType) => [
-      {
-        hooks: [{
-          type: "command",
-          command: buildAditHookCommand(aditBinaryPath, "gemini", hookType),
-          timeout: 5000,
-        }],
-      },
+  generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
+    const makeHook = (hookType: AditHookType) => ({
+      type: "command",
+      command: buildAditHookCommand(aditBinaryPath, "gemini", hookType, projectRoot),
+      // Gemini CLI hook timeouts are in MILLISECONDS (default 60000),
+      // unlike Claude Code/Codex/Cursor which use seconds. 10s matches
+      // the adit-hook self-kill guard.
+      timeout: 10000,
+    });
+    const makeHookEntry = (hookType: AditHookType) => [{ hooks: [makeHook(hookType)] }];
+    const makeMatcherEntry = (matcher: string, hookType: AditHookType) => [
+      { matcher, hooks: [makeHook(hookType)] },
     ];
 
     return {
@@ -90,7 +98,7 @@ export const geminiAdapter: PlatformAdapter = {
           BeforeAgent: makeHookEntry("prompt-submit"),
           AfterAgent: makeHookEntry("stop"),
           SessionEnd: makeHookEntry("session-end"),
-          AfterTool: makeHookEntry("notification"),
+          AfterTool: makeMatcherEntry("run_shell_command", "notification"),
           Notification: makeHookEntry("notification"),
         },
       },
@@ -116,6 +124,8 @@ export const geminiAdapter: PlatformAdapter = {
     let hooksDetail = "No hook configuration found";
     const requiredHooks = HOOK_MAPPINGS.map((m) => m.platformEvent);
     const missingHooks: string[] = [];
+    const staleHooks: string[] = [];
+    const stalePinnedRoots = new Set<string>();
 
     if (existsSync(settingsPath)) {
       try {
@@ -129,22 +139,22 @@ export const geminiAdapter: PlatformAdapter = {
               missingHooks.push(hookName);
               continue;
             }
-            const hasAdit = entries.some(
-              (entry: { command?: string; hooks?: Array<{ command?: string }> }) => {
-                if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return true;
-                if (Array.isArray(entry.hooks)) {
-                  return entry.hooks.some((h) => typeof h.command === "string" && isAditHookCommand(h.command));
-                }
-                return false;
-              },
-            );
-            if (!hasAdit) missingHooks.push(hookName);
+            const { status, stalePinnedRoots: roots } = classifyAditHookEntries(entries, projectRoot);
+            if (status === "absent") missingHooks.push(hookName);
+            if (status === "stale") {
+              staleHooks.push(hookName);
+              roots.forEach((root) => stalePinnedRoots.add(root));
+            }
           }
 
-          hooksFound = missingHooks.length === 0;
-          hooksDetail = hooksFound
-            ? `All hooks registered in ${settingsPath}`
-            : `Missing hooks: ${missingHooks.join(", ")}`;
+          hooksFound = missingHooks.length === 0 && staleHooks.length === 0;
+          hooksDetail = describeHookValidation({
+            configPath: settingsPath,
+            projectRoot,
+            missingHooks,
+            staleHooks,
+            stalePinnedRoots: Array.from(stalePinnedRoots),
+          }).detail;
         }
       } catch {
         hooksDetail = `Failed to parse ${settingsPath}`;
@@ -173,14 +183,22 @@ export const geminiAdapter: PlatformAdapter = {
     let settings: Record<string, unknown> = {};
 
     if (existsSync(settingsPath)) {
-      try {
-        settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-      } catch {
-        // Start fresh if settings are invalid
+      const raw = readFileSync(settingsPath, "utf-8");
+      // An empty file has no user data to protect — treat it as a fresh
+      // install. Anything else must parse; refuse to overwrite a file we
+      // cannot parse, as it may hold the user's own settings.
+      if (raw.trim().length > 0) {
+        try {
+          settings = JSON.parse(raw);
+        } catch {
+          throw new Error(
+            `${settingsPath} contains invalid JSON. Fix or remove it, then re-run the install.`,
+          );
+        }
       }
     }
 
-    const hookConfig = this.generateHookConfig(aditBinaryPath);
+    const hookConfig = this.generateHookConfig(aditBinaryPath, projectRoot);
     const existingHooks = (settings.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 
@@ -210,10 +228,6 @@ export const geminiAdapter: PlatformAdapter = {
 
     settings.hooks = mergedHooks;
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-  },
-
-  getResumeCommand(_projectRoot: string): string | null {
-    return "gemini";
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {

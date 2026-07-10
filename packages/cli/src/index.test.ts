@@ -61,6 +61,14 @@ describe("CLI help", () => {
     expect(uninstallHelp).toContain("Usage: adit uninstall [options]");
   });
 
+  it("shows event detail usage without placeholder options", () => {
+    const showHelp = findCommand(createProgram(), "show").helpInformation();
+
+    expect(showHelp).toContain("Usage: adit show <id>");
+    expect(showHelp).not.toContain("Usage: adit show [options] <id>");
+    expect(showHelp).toContain("-h, --help");
+  });
+
   it("lists hook integration commands", () => {
     const hookHelp = findCommand(createProgram(), "hook").helpInformation();
 

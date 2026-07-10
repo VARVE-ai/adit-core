@@ -10,6 +10,11 @@
 import type { CloudClient } from "../http/client.js";
 import type { QualifyResponse } from "./types.js";
 
+export interface QualityRepositoryIdentity {
+  localRepositoryId?: string | null;
+  relativePath?: string | null;
+}
+
 /**
  * Check document quality with the server.
  *
@@ -19,10 +24,16 @@ import type { QualifyResponse } from "./types.js";
 export async function checkQuality(
   client: CloudClient,
   localProjectId: string,
+  repository?: QualityRepositoryIdentity,
 ): Promise<QualifyResponse> {
-  return client.get<QualifyResponse>(
-    `/api/project-link/qualify?localProjectId=${encodeURIComponent(localProjectId)}`,
-  );
+  const params = new URLSearchParams({ localProjectId });
+  if (repository?.localRepositoryId) {
+    params.set("localRepositoryId", repository.localRepositoryId);
+  }
+  if (repository?.relativePath) {
+    params.set("relativePath", repository.relativePath);
+  }
+  return client.get<QualifyResponse>(`/api/project-link/qualify?${params.toString()}`);
 }
 
 /**
@@ -70,8 +81,8 @@ export function formatQualityFeedback(response: QualifyResponse): string | null 
       }
     }
   } else if (hasLowScoreDocs) {
-    lines.push("  Tip: Use /generate-docs in your AI coding tool to auto-fill");
-    lines.push("       document content from your codebase. Then re-run link.");
+    lines.push("  Tip: Ask your AI agent to read .adit/prompts/generate-docs.md and");
+    lines.push("       follow it to fill document content. Then re-run link.");
   }
 
   return lines.length > 0 ? lines.join("\n") : null;

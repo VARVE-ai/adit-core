@@ -16,7 +16,16 @@ import type {
   ValidationResult,
   AditHookType,
 } from "./types.js";
-import { buildAditHookCommand, isAditHookCommand } from "./command.js";
+import {
+  buildAditHookCommand,
+  classifyAditHookEntries,
+  describeHookValidation,
+  isAditHookCommand,
+} from "./command.js";
+import {
+  assistantTextFromTranscriptEntry,
+  type TranscriptEntryLike,
+} from "../common/transcript-entry.js";
 
 /**
  * Read the tail of a file (last N bytes) and split into lines.
@@ -71,21 +80,9 @@ export function extractLastAssistantMessage(transcriptPath: string): string | un
     const findAssistantText = (lines: string[]): string | undefined => {
       for (let i = lines.length - 1; i >= 0; i--) {
         try {
-          const entry = JSON.parse(lines[i]) as {
-            role?: string;
-            message?: { content?: Array<{ type?: string; text?: string }> };
-          };
-          if (entry.role !== "assistant") continue;
-
-          const content = entry.message?.content;
-          if (!Array.isArray(content)) continue;
-
-          const texts = content
-            .filter((c): c is { type: string; text: string } => c.type === "text" && typeof c.text === "string")
-            .map((c) => c.text)
-            .filter((t) => t.trim().length > 0);
-
-          if (texts.length > 0) return texts.join("\n");
+          const entry = JSON.parse(lines[i]) as TranscriptEntryLike;
+          const text = assistantTextFromTranscriptEntry(entry);
+          if (text) return text;
         } catch {
           // Skip malformed lines
         }
@@ -113,13 +110,10 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "stop", aditHandler: "stop" },
   { platformEvent: "sessionStart", aditHandler: "session-start" },
   { platformEvent: "sessionEnd", aditHandler: "session-end" },
-  { platformEvent: "afterAgentResponse", aditHandler: "notification" },
+  // afterAgentResponse is deliberately NOT registered: it fires once per
+  // assistant message segment and its text duplicates what the stop handler
+  // already extracts from the transcript.
 ];
-
-/** Map Cursor platform events to ADIT hook types (derived from HOOK_MAPPINGS) */
-const PLATFORM_TO_ADIT: Record<string, AditHookType> = Object.fromEntries(
-  HOOK_MAPPINGS.map((m) => [m.platformEvent, m.aditHandler]),
-) as Record<string, AditHookType>;
 
 export const cursorAdapter: PlatformAdapter = {
   platform: "cursor" as Platform,
@@ -127,7 +121,7 @@ export const cursorAdapter: PlatformAdapter = {
   hookMappings: HOOK_MAPPINGS,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {
-    const aditHookType = PLATFORM_TO_ADIT[hookType] ?? (hookType as AditHookType);
+    const aditHookType = hookType as AditHookType;
 
     // Cursor sends workspace_roots as array; fall back to CURSOR_PROJECT_DIR env
     const workspaceRoots = raw.workspace_roots as string[] | undefined;
@@ -161,9 +155,6 @@ export const cursorAdapter: PlatformAdapter = {
       lastAssistantMessage: aditHookType === "stop" && transcriptPath
         ? extractLastAssistantMessage(transcriptPath)
         : undefined,
-      // Notification (from afterAgentResponse)
-      notificationMessage: raw.message as string | undefined,
-      notificationType: raw.notification_type as string | undefined,
       // Session lifecycle
       sessionSource: raw.composer_mode as string | undefined,
       sessionEndReason: raw.reason as string | undefined,
@@ -171,12 +162,12 @@ export const cursorAdapter: PlatformAdapter = {
     };
   },
 
-  generateHookConfig(aditBinaryPath: string): PlatformHookConfig {
+  generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
     // Cursor uses flat format: { command, type, timeout }
     // Timeout is in SECONDS (not milliseconds like Claude Code)
     const makeHookEntry = (hookType: AditHookType) => [
       {
-        command: buildAditHookCommand(aditBinaryPath, "cursor", hookType),
+        command: buildAditHookCommand(aditBinaryPath, "cursor", hookType, projectRoot),
         type: "command",
         timeout: 10,
       },
@@ -185,12 +176,14 @@ export const cursorAdapter: PlatformAdapter = {
     return {
       configPath: ".cursor/hooks.json",
       content: {
+        // Cursor requires a top-level numeric `version` field. Without it,
+        // Cursor rejects the config with "Config version must be a number".
+        version: 1,
         hooks: {
           beforeSubmitPrompt: makeHookEntry("prompt-submit"),
           stop: makeHookEntry("stop"),
           sessionStart: makeHookEntry("session-start"),
           sessionEnd: makeHookEntry("session-end"),
-          afterAgentResponse: makeHookEntry("notification"),
         },
       },
     };
@@ -214,6 +207,8 @@ export const cursorAdapter: PlatformAdapter = {
     let hooksDetail = "No hook configuration found";
     const requiredHooks = HOOK_MAPPINGS.map((m) => m.platformEvent);
     const missingHooks: string[] = [];
+    const staleHooks: string[] = [];
+    const stalePinnedRoots = new Set<string>();
 
     if (existsSync(hooksPath)) {
       try {
@@ -227,22 +222,22 @@ export const cursorAdapter: PlatformAdapter = {
               missingHooks.push(hookName);
               continue;
             }
-            const hasAdit = entries.some(
-              (entry: { command?: string; hooks?: Array<{ command?: string }> }) => {
-                if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return true;
-                if (Array.isArray(entry.hooks)) {
-                  return entry.hooks.some((h) => typeof h.command === "string" && isAditHookCommand(h.command));
-                }
-                return false;
-              },
-            );
-            if (!hasAdit) missingHooks.push(hookName);
+            const { status, stalePinnedRoots: roots } = classifyAditHookEntries(entries, projectRoot);
+            if (status === "absent") missingHooks.push(hookName);
+            if (status === "stale") {
+              staleHooks.push(hookName);
+              roots.forEach((root) => stalePinnedRoots.add(root));
+            }
           }
 
-          hooksFound = missingHooks.length === 0;
-          hooksDetail = hooksFound
-            ? `All hooks registered in ${hooksPath}`
-            : `Missing hooks: ${missingHooks.join(", ")}`;
+          hooksFound = missingHooks.length === 0 && staleHooks.length === 0;
+          hooksDetail = describeHookValidation({
+            configPath: hooksPath,
+            projectRoot,
+            missingHooks,
+            staleHooks,
+            stalePinnedRoots: Array.from(stalePinnedRoots),
+          }).detail;
         }
       } catch {
         hooksDetail = `Failed to parse ${hooksPath}`;
@@ -271,39 +266,23 @@ export const cursorAdapter: PlatformAdapter = {
     let hooksConfig: Record<string, unknown> = {};
 
     if (existsSync(hooksPath)) {
-      try {
-        hooksConfig = JSON.parse(readFileSync(hooksPath, "utf-8"));
-      } catch {
-        // Start fresh if hooks are invalid
-      }
-    }
-
-    const hookConfig = this.generateHookConfig(aditBinaryPath);
-    const existingHooks = (hooksConfig.hooks as Record<string, unknown[]>) ?? {};
-
-    // Clean up legacy Claude Code format entries (from previous ADIT versions
-    // that used Claude Code event names: UserPromptSubmit, Stop, etc.)
-    const legacyEventKeys = ["UserPromptSubmit", "Stop", "SessionStart", "SessionEnd", "Notification"];
-    for (const legacyKey of legacyEventKeys) {
-      if (Array.isArray(existingHooks[legacyKey])) {
-        existingHooks[legacyKey] = existingHooks[legacyKey].filter(
-          (raw) => {
-            const entry = raw as { command?: string; hooks?: Array<{ command?: string }> };
-            if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return false;
-            if (Array.isArray(entry.hooks)) {
-              return !entry.hooks.some(
-                (h) => typeof h.command === "string" && isAditHookCommand(h.command),
-              );
-            }
-            return true;
-          },
-        );
-        if (existingHooks[legacyKey].length === 0) {
-          delete existingHooks[legacyKey];
+      const raw = readFileSync(hooksPath, "utf-8");
+      // An empty file has no user data to protect — treat it as a fresh
+      // install. Anything else must parse; refuse to overwrite a file we
+      // cannot parse, as it may hold other tools' hook config.
+      if (raw.trim().length > 0) {
+        try {
+          hooksConfig = JSON.parse(raw);
+        } catch {
+          throw new Error(
+            `${hooksPath} contains invalid JSON. Fix or remove it, then re-run the install.`,
+          );
         }
       }
     }
 
+    const hookConfig = this.generateHookConfig(aditBinaryPath, projectRoot);
+    const existingHooks = (hooksConfig.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 
     // Merge hook entries per event key: preserve other tools' hooks,
@@ -334,10 +313,6 @@ export const cursorAdapter: PlatformAdapter = {
     writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2) + "\n");
   },
 
-  getResumeCommand(_projectRoot: string): string | null {
-    return null;
-  },
-
   async hasHooks(projectRoot: string): Promise<boolean> {
     const hooksPath = join(projectRoot, ".cursor", "hooks.json");
     if (!existsSync(hooksPath)) return false;
@@ -363,11 +338,8 @@ export const cursorAdapter: PlatformAdapter = {
       const hooksConfig = JSON.parse(readFileSync(hooksPath, "utf-8"));
       if (!hooksConfig.hooks) return;
 
-      // Also clean up legacy Claude Code format event keys
-      const allEventKeys = [...Object.keys(hooksConfig.hooks), "UserPromptSubmit", "Stop", "SessionStart", "SessionEnd", "Notification"];
-
       // Remove ADIT hook entries
-      for (const hookName of allEventKeys) {
+      for (const hookName of Object.keys(hooksConfig.hooks)) {
         const entries = hooksConfig.hooks[hookName];
         if (!Array.isArray(entries)) continue;
 

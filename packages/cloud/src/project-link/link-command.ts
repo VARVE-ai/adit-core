@@ -11,8 +11,14 @@
  */
 
 import type Database from "better-sqlite3";
+import { loadConfig } from "@varveai/adit-core";
+import type { ProjectType } from "@varveai/adit-core";
 import type { CloudClient } from "../http/client.js";
+import { CloudApiError } from "../http/errors.js";
+import type { CloudRepository } from "../project-context.js";
+import { repositoryPayloads, resolveCloudProjectContext } from "../project-context.js";
 import type {
+  GitCommit,
   LinkOptions,
   LinkResult,
   StepTiming,
@@ -21,9 +27,11 @@ import type {
   CommitUploadResponse,
   DocumentUploadResponse,
   DiscoveredDocument,
+  QualifyResponse,
+  WorkspaceRepositoryFailure,
+  WorkspaceRepositoryResult,
 } from "./types.js";
 import {
-  collectRemoteUrl,
   collectDefaultBranch,
   collectGitIdentity,
   collectBranches,
@@ -53,6 +61,167 @@ const COMMIT_BATCH_SIZE = 1000;
 /** Minimum staleness before re-uploading branches (1 hour) */
 const BRANCH_STALE_MS = 60 * 60 * 1000;
 
+type WorkspaceCommitDedupeState = Set<string>;
+
+interface LinkRepositoryInternalOptions {
+  silent?: boolean;
+}
+
+interface WorkspaceLinkFailure extends WorkspaceRepositoryFailure {
+  error: unknown;
+}
+
+interface WorkspaceQualitySummary {
+  lowScoreDocumentCount: number;
+  stubDocumentCount: number;
+  lowestScoringDocuments: Array<{
+    fileName: string;
+    score: number;
+    detectedType: string;
+  }>;
+  missingItems: string[];
+  suggestions: string[];
+}
+
+class LinkStepError extends Error {
+  readonly step: string;
+  readonly cause: unknown;
+
+  constructor(step: string, cause: unknown) {
+    super(errorMessage(cause));
+    this.name = "LinkStepError";
+    this.step = step;
+    this.cause = cause;
+  }
+}
+
+export class WorkspaceLinkPartialFailureError extends Error {
+  readonly result: LinkResult;
+  readonly repositoryResults: WorkspaceRepositoryResult[];
+  readonly repositoryFailures: WorkspaceRepositoryFailure[];
+
+  constructor(
+    result: LinkResult,
+    repositoryResults: WorkspaceRepositoryResult[],
+    repositoryFailures: WorkspaceRepositoryFailure[],
+  ) {
+    super("Workspace link completed with repository failures.");
+    this.name = "WorkspaceLinkPartialFailureError";
+    this.result = result;
+    this.repositoryResults = repositoryResults;
+    this.repositoryFailures = repositoryFailures;
+  }
+}
+
+function cloudDocumentSourcePath(repository: CloudRepository, sourcePath: string): string {
+  return repository.relativePath === "." ? sourcePath : `${repository.relativePath}/${sourcePath}`;
+}
+
+function filterWorkspaceDuplicateCommits(
+  commits: GitCommit[],
+  workspaceCommitDedupeState?: WorkspaceCommitDedupeState,
+): GitCommit[] {
+  if (!workspaceCommitDedupeState) return commits;
+  return commits.filter((commit) => !workspaceCommitDedupeState.has(commit.sha));
+}
+
+function rememberWorkspaceCommits(
+  commits: GitCommit[],
+  workspaceCommitDedupeState?: WorkspaceCommitDedupeState,
+): void {
+  if (!workspaceCommitDedupeState) return;
+  for (const commit of commits) {
+    workspaceCommitDedupeState.add(commit.sha);
+  }
+}
+
+async function linkWorkspaceProject(
+  db: Database.Database,
+  client: CloudClient,
+  repositories: CloudRepository[],
+  projectId: string,
+  projectType: ProjectType,
+  projectName: string,
+  serverUrl: string,
+  options: LinkOptions,
+): Promise<LinkResult> {
+  if (repositories.length === 0) {
+    throw new Error("No Git repositories found in this workspace.");
+  }
+
+  const results: LinkResult[] = [];
+  const failures: WorkspaceLinkFailure[] = [];
+  const repositorySet = repositoryPayloads(repositories);
+  const commitDedupeState: WorkspaceCommitDedupeState = new Set();
+  const totalStart = performance.now();
+  const log = options.json ? (() => {}) : console.log.bind(console);
+
+  log("");
+  log("Workspace project link");
+  log(`Project:      ${projectName}`);
+  log(`Server:       ${serverUrl}`);
+  log(`Repositories: ${repositories.length}`);
+
+  for (let index = 0; index < repositories.length; index++) {
+    const repository = repositories[index];
+    if (!repository) continue;
+
+    logWorkspaceRepositoryStart(index + 1, repositories.length, repository, log);
+
+    try {
+      const result = await linkRepositoryCommand(
+        db,
+        client,
+        repository,
+        projectId,
+        projectType,
+        projectName,
+        repositorySet,
+        serverUrl,
+        options,
+        commitDedupeState,
+        { silent: true },
+      );
+      results.push(result);
+      logWorkspaceRepositoryResult(index + 1, repositories.length, result, log);
+    } catch (error) {
+      const failure: WorkspaceLinkFailure = {
+        localRepositoryId: repository.localRepositoryId,
+        relativePath: repository.relativePath,
+        step: errorStep(error),
+        message: formatFailureMessage(error),
+        status: errorStatus(error),
+        response: errorResponse(error),
+        error,
+      };
+      failures.push(failure);
+      logWorkspaceRepositoryFailure(index + 1, repositories.length, failure, log);
+    }
+  }
+
+  const totalDurationMs = Math.round(performance.now() - totalStart);
+  const result = createWorkspaceLinkResult(
+    results,
+    failures,
+    projectId,
+    projectName,
+    serverUrl,
+    totalDurationMs,
+  );
+
+  logWorkspaceSummary(result, failures, log);
+
+  if (failures.length > 0) {
+    throw new WorkspaceLinkPartialFailureError(
+      result,
+      result.repositoryResults ?? [],
+      result.repositoryFailures ?? [],
+    );
+  }
+
+  return result;
+}
+
 /**
  * Execute the project link flow.
  *
@@ -71,8 +240,66 @@ export async function linkCommand(
   serverUrl: string,
   options: LinkOptions = {},
 ): Promise<LinkResult> {
+  const projectConfig = loadConfig(projectRoot);
+  const projectContext = await resolveCloudProjectContext(projectConfig);
+
+  if (projectContext.projectType === "workspace") {
+    return linkWorkspaceProject(
+      db,
+      client,
+      projectContext.repositories,
+      projectId,
+      projectContext.projectType,
+      projectContext.projectName,
+      serverUrl,
+      options,
+    );
+  }
+
+  const repository = projectContext.repositories[0];
+  if (!repository) {
+    throw new Error("No Git repositories found for project link.");
+  }
+  return linkRepositoryCommand(
+    db,
+    client,
+    repository,
+    projectId,
+    projectContext.projectType,
+    projectContext.projectName,
+    repositoryPayloads(projectContext.repositories),
+    serverUrl,
+    options,
+  );
+}
+
+async function linkRepositoryCommand(
+  db: Database.Database,
+  client: CloudClient,
+  repository: CloudRepository,
+  projectId: string,
+  projectType: ProjectType,
+  projectName: string,
+  repositories: ReturnType<typeof repositoryPayloads>,
+  serverUrl: string,
+  options: LinkOptions,
+  workspaceCommitDedupeState?: WorkspaceCommitDedupeState,
+  internalOptions: LinkRepositoryInternalOptions = {},
+): Promise<LinkResult> {
   // In JSON mode, suppress progress output
-  const log = options.json ? (() => {}) : console.log.bind(console);
+  const log = options.json || internalOptions.silent ? (() => {}) : console.log.bind(console);
+  const shouldWrapStepErrors = internalOptions.silent === true;
+  const runStep = <T>(step: string, operation: () => Promise<T>): Promise<T> =>
+    runLinkStep(step, operation, shouldWrapStepErrors);
+  const runStepSync = <T>(step: string, operation: () => T): T =>
+    runLinkStepSync(step, operation, shouldWrapStepErrors);
+  const failStep = (step: string, cause: unknown): never => {
+    if (shouldWrapStepErrors) throw new LinkStepError(step, cause);
+    throw cause instanceof Error ? cause : new Error(String(cause));
+  };
+  const projectRoot = repository.path;
+  const repositoryId = repository.localRepositoryId;
+  let currentStep = "Prepare repository";
 
   // Step timing tracker
   const totalStart = performance.now();
@@ -89,11 +316,14 @@ export async function linkCommand(
   // Handle --force: clear local cache and server data
   if (options.force) {
     log("Clearing cached link data...");
-    clearProjectLinkCache(db, projectId, serverUrl);
+    clearProjectLinkCache(db, projectId, serverUrl, repositoryId);
     try {
-      await client.delete(
-        `/api/project-link/reset?localProjectId=${encodeURIComponent(projectId)}`,
-      );
+      const params = new URLSearchParams({
+        localProjectId: projectId,
+        localRepositoryId: repositoryId,
+        relativePath: repository.relativePath,
+      });
+      await client.delete(`/api/project-link/reset?${params.toString()}`);
       log("Server link data cleared.");
     } catch {
       // Server reset may fail if no link exists yet — that's fine
@@ -101,23 +331,42 @@ export async function linkCommand(
   }
 
   // Load or initialize cache
-  let cache = getProjectLinkCache(db, projectId, serverUrl);
+  let cache = getProjectLinkCache(db, projectId, serverUrl, repositoryId);
 
   // ──────────────────────────────────────────────────────────
   // Step 2: Negotiate project ID
   // ──────────────────────────────────────────────────────────
 
+  currentStep = "Negotiate project ID";
   log("\n[Step 1/6] Negotiating project ID with server...");
   const step1Start = startStep();
 
-  const remoteUrl = await collectRemoteUrl(projectRoot);
-  const canonicalRepoKey = normalizeGitHubRepoKey(remoteUrl);
-  const projectName = projectNameFromRemoteUrl(remoteUrl);
+  const remoteUrl = repository.repositoryUrl?.trim() ?? "";
+  if (!remoteUrl) {
+    failStep(currentStep, new Error(`No git remote 'origin' configured for ${repository.relativePath}.`));
+  }
+  const canonicalRepoKey = repository.canonicalRepoKey ?? normalizeGitHubRepoKey(remoteUrl);
+  const remoteProjectName = projectNameFromRemoteUrl(remoteUrl);
+  const cloudProjectName = projectType === "workspace" ? projectName : remoteProjectName;
+  const repositoryDisplayName = repository.displayName || remoteProjectName;
   const cachedServerProjectId = cache?.confirmedProjectId ?? null;
 
-  const negotiate = await client.post<NegotiateResponse>(
-    "/api/project-link/negotiate",
-    { localProjectId: projectId, remoteUrl, canonicalRepoKey, projectName },
+  const negotiate = await runStep(currentStep, () =>
+    client.post<NegotiateResponse>(
+      "/api/project-link/negotiate",
+      {
+        localProjectId: projectId,
+        projectType,
+        localRepositoryId: repositoryId,
+        relativePath: repository.relativePath,
+        displayName: repositoryDisplayName,
+        remoteUrl,
+        repositoryUrl: remoteUrl,
+        canonicalRepoKey,
+        repositories,
+        projectName: cloudProjectName,
+      },
+    )
   );
   const confirmedProjectId = negotiate.confirmedProjectId;
   const serverProjectChanged =
@@ -135,6 +384,7 @@ export async function linkCommand(
   if (!cache) {
     cache = {
       projectId,
+      repositoryId,
       serverUrl,
       confirmedProjectId,
       lastCommitSha: null,
@@ -175,6 +425,7 @@ export async function linkCommand(
   // Step 3: Upload git metadata (branches + commits)
   // ──────────────────────────────────────────────────────────
 
+  currentStep = "Collect git metadata";
   log("\n[Step 2/6] Uploading git metadata...");
   const step2Start = startStep();
 
@@ -183,9 +434,9 @@ export async function linkCommand(
     (Date.now() - new Date(cache.lastBranchSyncAt).getTime() > BRANCH_STALE_MS) ||
     options.force;
 
-  const allBranches = await collectBranches(projectRoot);
-  const defaultBranch = await collectDefaultBranch(projectRoot);
-  const gitIdentity = await collectGitIdentity(projectRoot);
+  const allBranches = await runStep(currentStep, () => collectBranches(projectRoot));
+  const defaultBranch = await runStep(currentStep, () => collectDefaultBranch(projectRoot));
+  const gitIdentity = await runStep(currentStep, () => collectGitIdentity(projectRoot));
   let branchCount = 0;
 
   if (branchesStale) {
@@ -193,20 +444,29 @@ export async function linkCommand(
       log(`  [dry-run] Would upload ${allBranches.length} branches, default: ${defaultBranch ?? "unknown"}`);
       branchCount = allBranches.length;
     } else {
-      const initResponse = await client.post<LinkInitResponse>(
-        "/api/project-link/init",
-        {
-          localProjectId,
-          remoteUrl,
-          canonicalRepoKey,
-          defaultBranch,
-          gitAuthorName: gitIdentity.authorName,
-          gitAuthorEmail: gitIdentity.authorEmail,
-          branches: allBranches.map((b) => ({
-            name: b.name,
-            headSha: b.headSha,
-          })),
-        },
+      currentStep = "Upload branches";
+      const initResponse = await runStep(currentStep, () =>
+        client.post<LinkInitResponse>(
+          "/api/project-link/init",
+          {
+            localProjectId,
+            projectType,
+            localRepositoryId: repositoryId,
+            relativePath: repository.relativePath,
+            displayName: repositoryDisplayName,
+            remoteUrl,
+            repositoryUrl: remoteUrl,
+            canonicalRepoKey,
+            repositories,
+            defaultBranch,
+            gitAuthorName: gitIdentity.authorName,
+            gitAuthorEmail: gitIdentity.authorEmail,
+            branches: allBranches.map((b) => ({
+              name: b.name,
+              headSha: b.headSha,
+            })),
+          },
+        )
       );
       branchCount = initResponse.projectLink.branchCount;
       cache.lastBranchSyncAt = new Date().toISOString();
@@ -221,70 +481,94 @@ export async function linkCommand(
   let commitCount = 0;
 
   if (!options.skipCommits) {
+    currentStep = "Collect commits";
     // Collect commits and resolve per-commit branch assignment by checking
     // all refs, including local-only branches that are not checked out.
-    const commits = await collectCommitLogs(projectRoot, {
+    const commits = await runStep(currentStep, () => collectCommitLogs(projectRoot, {
       allRefs: true,
-    });
-    const totalCommits = await collectCommitCount(projectRoot);
+    }));
+    const totalCommits = await runStep(currentStep, () => collectCommitCount(projectRoot));
 
     // Resolve branch for each commit using collected branch data
     if (commits.length > 0) {
-      await resolveCommitBranches(projectRoot, commits, allBranches, defaultBranch);
+      await runStep(currentStep, () => resolveCommitBranches(projectRoot, commits, allBranches, defaultBranch));
     }
 
     if (commits.length === 0) {
       log("  No new commits to upload.");
       commitCount = totalCommits;
     } else if (options.dryRun) {
-      log(`  [dry-run] Would upload ${commits.length} commits (${totalCommits} total)`);
+      const commitsToUpload = filterWorkspaceDuplicateCommits(
+        commits,
+        workspaceCommitDedupeState,
+      );
+      const skipped = commits.length - commitsToUpload.length;
+      const skippedLabel = skipped > 0 ? `, ${skipped} duplicate in workspace` : "";
+      log(`  [dry-run] Would upload ${commitsToUpload.length} commits (${totalCommits} total${skippedLabel})`);
       commitCount = totalCommits;
+      rememberWorkspaceCommits(commits, workspaceCommitDedupeState);
     } else {
+      const commitsToUpload = filterWorkspaceDuplicateCommits(
+        commits,
+        workspaceCommitDedupeState,
+      );
       // Upload in batches
       let uploaded = 0;
-      for (let i = 0; i < commits.length; i += COMMIT_BATCH_SIZE) {
-        const batch = commits.slice(i, i + COMMIT_BATCH_SIZE);
-        const response = await client.post<CommitUploadResponse>(
-          "/api/project-link/commits",
-          {
-            localProjectId,
-            sinceCommitSha: null,
-            commits: batch.map((c) => ({
-              sha: c.sha,
-              authorName: c.authorName,
-              authorEmail: c.authorEmail,
-              date: c.date,
-              message: c.message,
-              branch: c.branch,
-            })),
-          },
-        );
-        uploaded += response.accepted;
-        commitCount = response.totalCommits;
+      if (commitsToUpload.length === 0) {
+        log(`  ${commits.length} commits already uploaded by another workspace repository.`);
+      } else {
+        for (let i = 0; i < commitsToUpload.length; i += COMMIT_BATCH_SIZE) {
+          const batch = commitsToUpload.slice(i, i + COMMIT_BATCH_SIZE);
+          currentStep = "Upload commits";
+          const response = await runStep(currentStep, () =>
+            client.post<CommitUploadResponse>(
+              "/api/project-link/commits",
+              {
+                localProjectId,
+                localRepositoryId: repositoryId,
+                relativePath: repository.relativePath,
+                sinceCommitSha: null,
+                commits: batch.map((c) => ({
+                  sha: c.sha,
+                  parentSha: c.parentSha,
+                  authorName: c.authorName,
+                  authorEmail: c.authorEmail,
+                  date: c.date,
+                  message: c.message,
+                  branch: c.branch,
+                })),
+              },
+            )
+          );
+          uploaded += response.accepted;
+          commitCount = response.totalCommits;
 
-        // Show progress for large uploads
-        if (commits.length > COMMIT_BATCH_SIZE) {
-          const done = Math.min(i + COMMIT_BATCH_SIZE, commits.length);
-          log(`  Uploading commits... ${done}/${commits.length}`);
+          // Show progress for large uploads
+          if (commitsToUpload.length > COMMIT_BATCH_SIZE) {
+            const done = Math.min(i + COMMIT_BATCH_SIZE, commitsToUpload.length);
+            log(`  Uploading commits... ${done}/${commitsToUpload.length}`);
+          }
         }
       }
 
       // Update cache with latest commit SHA
       if (commits.length > 0) {
-        updateCachedCommitSha(db, localProjectId, serverUrl, commits[0].sha);
+        updateCachedCommitSha(db, localProjectId, serverUrl, commits[0].sha, repositoryId);
         cache.lastCommitSha = commits[0].sha;
       }
 
+      rememberWorkspaceCommits(commits, workspaceCommitDedupeState);
       log(`  ${uploaded} new commits uploaded (${commitCount} total)`);
     }
 
-    const refsFingerprint = await collectGitRefsFingerprint(projectRoot);
+    currentStep = "Collect git refs";
+    const refsFingerprint = await runStep(currentStep, () => collectGitRefsFingerprint(projectRoot));
     if (refsFingerprint) {
       const docHashes = {
         ...cache.docHashes,
         [REFS_FINGERPRINT_CACHE_KEY]: refsFingerprint,
       };
-      updateCachedMetadata(db, localProjectId, serverUrl, docHashes);
+      updateCachedMetadata(db, localProjectId, serverUrl, docHashes, repositoryId);
       cache.docHashes = docHashes;
     }
   } else {
@@ -301,10 +585,11 @@ export async function linkCommand(
   const step3Start = startStep();
 
   if (!options.skipDocs) {
+    currentStep = "Discover documents";
     log("\n[Step 3/6] Discovering project documents...");
 
-    const docSettings = loadDocSettings(projectRoot);
-    discoveredDocs = discoverDocuments(projectRoot, cache.docHashes, docSettings);
+    const docSettings = runStepSync(currentStep, () => loadDocSettings(projectRoot));
+    discoveredDocs = runStepSync(currentStep, () => discoverDocuments(projectRoot, cache.docHashes, docSettings));
 
     if (discoveredDocs.length === 0) {
       log("  No documents found matching patterns.");
@@ -343,8 +628,8 @@ export async function linkCommand(
             log(`    [OK]   ${doc.sourcePath} — score ${scorePct}% (type: ${result.detectedType})`);
           }
         }
-        log("  Tip: Use 'adit docs validate' for a detailed report, or run your");
-        log("       AI coding tool's generate-docs skill to fill in missing sections.");
+        log("  Tip: Use 'adit docs validate' for a detailed report, or ask your AI");
+        log("       agent to follow .adit/prompts/generate-docs.md to fill missing sections.");
       }
     }
 
@@ -363,17 +648,22 @@ export async function linkCommand(
     } else {
       log(`\n[Step 4/6] Uploading ${toUpload.length} document${toUpload.length !== 1 ? "s" : ""}...`);
 
-      const response = await client.post<DocumentUploadResponse>(
-        "/api/project-link/documents",
-        {
-          localProjectId,
-          documents: toUpload.map((d) => ({
-            fileName: d.fileName,
-            sourcePath: d.sourcePath,
-            content: d.content,
-            contentHash: d.contentHash,
-          })),
-        },
+      currentStep = "Upload documents";
+      const response = await runStep(currentStep, () =>
+        client.post<DocumentUploadResponse>(
+          "/api/project-link/documents",
+          {
+            localProjectId,
+            localRepositoryId: repositoryId,
+            relativePath: repository.relativePath,
+            documents: toUpload.map((d) => ({
+              fileName: d.fileName,
+              sourcePath: cloudDocumentSourcePath(repository, d.sourcePath),
+              content: d.content,
+              contentHash: d.contentHash,
+            })),
+          },
+        )
       );
 
       const s = response.summary;
@@ -385,7 +675,7 @@ export async function linkCommand(
       for (const doc of discoveredDocs) {
         newHashes[doc.sourcePath] = doc.contentHash;
       }
-      updateCachedDocHashes(db, localProjectId, serverUrl, newHashes);
+      updateCachedDocHashes(db, localProjectId, serverUrl, newHashes, repositoryId);
       cache.docHashes = newHashes;
     }
   } else {
@@ -400,14 +690,22 @@ export async function linkCommand(
 
   let qualified = cache.qualified;
   let score: number | null = null;
+  let qualityFeedback: string | null = null;
+  let summaryPrompt: string | null = null;
+  let qualitySummary: WorkspaceQualitySummary | null = null;
   const step5Start = startStep();
 
   if (!options.skipDocs && !options.dryRun && !options.skipQualify) {
+    currentStep = "Quality check";
     log("\n[Step 5/6] Checking document quality...");
 
-    const qualifyResult = await checkQuality(client, localProjectId);
+    const qualifyResult = await runStep(currentStep, () => checkQuality(client, localProjectId, {
+      localRepositoryId: repositoryId,
+      relativePath: repository.relativePath,
+    }));
     qualified = qualifyResult.qualified;
     score = qualifyResult.score;
+    qualitySummary = summarizeQuality(qualifyResult);
 
     if (qualified) {
       log(`  Documents qualified (score: ${score!.toFixed(2)})`);
@@ -416,18 +714,19 @@ export async function linkCommand(
     }
 
     // Always show document quality feedback (even when qualified)
-    const feedback = formatQualityFeedback(qualifyResult);
-    if (feedback) {
-      log(feedback);
+    qualityFeedback = formatQualityFeedback(qualifyResult);
+    if (qualityFeedback) {
+      log(qualityFeedback);
     }
 
     // Show summary prompt when not qualified
     if (!qualified && qualifyResult.feedback?.summaryPrompt) {
+      summaryPrompt = qualifyResult.feedback.summaryPrompt;
       log("");
-      log(`  ${qualifyResult.feedback.summaryPrompt}`);
+      log(`  ${summaryPrompt}`);
     }
 
-    updateCachedQualified(db, localProjectId, serverUrl, qualified);
+    updateCachedQualified(db, localProjectId, serverUrl, qualified, repositoryId);
     cache.qualified = qualified;
   } else {
     log("\n[Step 5/6] Skipping quality check");
@@ -445,7 +744,7 @@ export async function linkCommand(
   log("");
   log("══════════════════════════════════════════");
   log("Project link complete!");
-  log(`Project:    ${projectName}`);
+  log(`Project:    ${cloudProjectName}`);
   log(`Server:     ${serverUrl}`);
   log(`Branches:   ${branchCount}`);
   log(`Commits:    ${commitCount}`);
@@ -460,8 +759,10 @@ export async function linkCommand(
   return {
     projectId: serverProjectId,
     localProjectId,
+    localRepositoryId: repositoryId,
+    relativePath: repository.relativePath,
     serverProjectId,
-    projectName,
+    projectName: cloudProjectName,
     canonicalRepoKey,
     serverUrl,
     branchCount,
@@ -469,6 +770,15 @@ export async function linkCommand(
     documentCount,
     qualified,
     score,
+    ...(qualitySummary ? {
+      lowScoreDocumentCount: qualitySummary.lowScoreDocumentCount,
+      stubDocumentCount: qualitySummary.stubDocumentCount,
+      lowestScoringDocuments: qualitySummary.lowestScoringDocuments,
+      missingItems: qualitySummary.missingItems,
+      suggestions: qualitySummary.suggestions,
+    } : {}),
+    qualityFeedback,
+    summaryPrompt,
     stepTimings,
     totalDurationMs,
   };
@@ -486,4 +796,332 @@ function formatDuration(ms: number): string {
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = Math.round(seconds % 60);
   return `${minutes}m ${remainingSeconds}s`;
+}
+
+function createWorkspaceLinkResult(
+  results: LinkResult[],
+  failures: WorkspaceLinkFailure[],
+  projectId: string,
+  projectName: string,
+  serverUrl: string,
+  totalDurationMs: number,
+): LinkResult {
+  const repositoryResults = results.map(toWorkspaceRepositoryResult);
+  const repositoryFailures = failures.map(({ localRepositoryId, relativePath, step, message, status, response }) => ({
+    localRepositoryId,
+    relativePath,
+    ...(step ? { step } : {}),
+    message,
+    ...(status ? { status } : {}),
+    ...(response !== undefined ? { response } : {}),
+  }));
+
+  return {
+    projectId: results[0]?.projectId ?? projectId,
+    localProjectId: projectId,
+    localRepositoryId: "*",
+    relativePath: "*",
+    serverProjectId: results[0]?.serverProjectId ?? projectId,
+    projectName,
+    canonicalRepoKey: null,
+    serverUrl,
+    branchCount: results.reduce((sum, result) => sum + result.branchCount, 0),
+    commitCount: results.reduce((sum, result) => sum + result.commitCount, 0),
+    documentCount: results.reduce((sum, result) => sum + result.documentCount, 0),
+    qualified: results.length > 0 && failures.length === 0 && results.every((result) => result.qualified),
+    score: averageScore(results),
+    stepTimings: results.flatMap((result) => result.stepTimings),
+    totalDurationMs,
+    repositoryResults,
+    repositoryFailures,
+  };
+}
+
+function toWorkspaceRepositoryResult(result: LinkResult): WorkspaceRepositoryResult {
+  return {
+    localRepositoryId: result.localRepositoryId,
+    relativePath: result.relativePath,
+    branchCount: result.branchCount,
+    commitCount: result.commitCount,
+    documentCount: result.documentCount,
+    qualified: result.qualified,
+    score: result.score,
+    ...(result.lowScoreDocumentCount !== undefined ? { lowScoreDocumentCount: result.lowScoreDocumentCount } : {}),
+    ...(result.stubDocumentCount !== undefined ? { stubDocumentCount: result.stubDocumentCount } : {}),
+    ...(result.lowestScoringDocuments ? { lowestScoringDocuments: result.lowestScoringDocuments } : {}),
+    ...(result.missingItems ? { missingItems: result.missingItems } : {}),
+    ...(result.suggestions ? { suggestions: result.suggestions } : {}),
+    qualityFeedback: result.qualityFeedback ?? null,
+    summaryPrompt: result.summaryPrompt ?? null,
+    totalDurationMs: result.totalDurationMs,
+  };
+}
+
+function logWorkspaceRepositoryResult(
+  index: number,
+  total: number,
+  result: LinkResult,
+  log: (message?: unknown) => void,
+): void {
+  const qualifiedLabel = result.qualified ? "qualified" : "not qualified";
+  const scoreLabel = formatScore(result.score);
+  log(
+    `[${index}/${total}] ${result.relativePath} ok | branches ${result.branchCount} | ` +
+    `commits ${result.commitCount} | docs ${result.documentCount} | ${qualifiedLabel}${scoreLabel} | ` +
+    formatDuration(result.totalDurationMs),
+  );
+}
+
+function logWorkspaceRepositoryStart(
+  index: number,
+  total: number,
+  repository: CloudRepository,
+  log: (message?: unknown) => void,
+): void {
+  log(`[${index}/${total}] ${repository.relativePath} linking...`);
+}
+
+function logWorkspaceRepositoryFailure(
+  index: number,
+  total: number,
+  failure: WorkspaceRepositoryFailure,
+  log: (message?: unknown) => void,
+): void {
+  log(`[${index}/${total}] ${failure.relativePath} failed | ${formatFailureLine(failure)}`);
+}
+
+function logWorkspaceSummary(
+  result: LinkResult,
+  failures: WorkspaceRepositoryFailure[],
+  log: (message?: unknown) => void,
+): void {
+  const successful = result.repositoryResults?.length ?? 0;
+  const failed = failures.length;
+  const qualifiedLabel = result.qualified ? "qualified" : "not qualified";
+  const scoreLabel = formatScore(result.score);
+
+  log("");
+  log("══════════════════════════════════════════");
+  log("Workspace link complete!");
+  log(`Project:      ${result.projectName}`);
+  log(`Server:       ${result.serverUrl}`);
+  log(`Repositories: ${successful} succeeded, ${failed} failed`);
+  log(`Branches:     ${result.branchCount}`);
+  log(`Commits:      ${result.commitCount}`);
+  log(`Documents:    ${result.documentCount} (${qualifiedLabel}${scoreLabel})`);
+  log(`Total:        ${formatDuration(result.totalDurationMs)}`);
+
+  logWorkspaceQualityFeedback(result, log);
+
+  if (failures.length > 0) {
+    log("──────────────────────────────────────────");
+    log("Failures:");
+    for (const failure of failures) {
+      log(`  ${failure.relativePath}: ${formatFailureLine(failure)}`);
+    }
+  }
+
+  log("══════════════════════════════════════════");
+}
+
+function logWorkspaceQualityFeedback(result: LinkResult, log: (message?: unknown) => void): void {
+  const feedbackResults = (result.repositoryResults ?? []).filter(
+    (repository) => repository.qualityFeedback || repository.summaryPrompt,
+  );
+  if (feedbackResults.length === 0) return;
+
+  log("──────────────────────────────────────────");
+  log("Quality feedback:");
+  log(formatQualityTable(feedbackResults));
+  log("");
+  log("  Quality shows the cloud score and pass status for each repository.");
+  log("  Needs attention explains why docs still need work: low scores, placeholders, worst file, or missing content.");
+  log("  AI prompt is not a shell command. Enter it in the AI agent opened at the workspace root.");
+  log("  Each prompt asks the agent to fill that repository's documents following .adit/prompts/generate-docs.md;");
+  log("  generated docs stay in their existing locations.");
+  log("  After the docs are updated, re-run adit cloud link.");
+}
+
+function formatQualityTable(repositories: WorkspaceRepositoryResult[]): string {
+  const headers = ["Repository", "Quality", "Docs", "Needs attention", "AI prompt"];
+  const rows = repositories.map((repository) => [
+    truncateCell(repository.relativePath, 18),
+    formatScoreCell(repository),
+    String(repository.documentCount),
+    truncateCell(formatIssueCell(repository), 50),
+    truncateCell(`Fill docs for ${repository.relativePath}`, 36),
+  ]);
+  const widths = headers.map((header, index) =>
+    Math.max(header.length, ...rows.map((row) => row[index]?.length ?? 0)),
+  );
+  const formatRow = (row: string[]): string =>
+    row.map((cell, index) => cell.padEnd(widths[index] ?? cell.length)).join("  ");
+
+  return [
+    `  ${formatRow(headers)}`,
+    `  ${widths.map((width) => "-".repeat(width)).join("  ")}`,
+    ...rows.map((row) => `  ${formatRow(row)}`),
+  ].join("\n");
+}
+
+function formatScoreCell(repository: WorkspaceRepositoryResult): string {
+  const score = repository.score === null ? "--" : repository.score.toFixed(2);
+  return repository.qualified ? `${score} pass` : `${score} needs docs`;
+}
+
+function formatIssueCell(repository: WorkspaceRepositoryResult): string {
+  const parts: string[] = [];
+  const low = repository.lowScoreDocumentCount ?? 0;
+  const stub = repository.stubDocumentCount ?? 0;
+  if (low > 0) parts.push(`${low} docs below 60%`);
+  if (stub > 0) parts.push(`${stub} placeholders`);
+
+  const lowest = repository.lowestScoringDocuments?.[0];
+  if (lowest) {
+    parts.push(`worst ${lowest.fileName} ${Math.round(lowest.score * 100)}%`);
+  }
+
+  const missing = repository.missingItems?.[0];
+  if (missing) {
+    parts.push(`missing ${missing}`);
+  }
+
+  return parts.length > 0 ? parts.join("; ") : "review quality feedback";
+}
+
+function truncateCell(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  if (maxLength <= 1) return value.slice(0, maxLength);
+  return `${value.slice(0, maxLength - 1)}…`;
+}
+
+function summarizeQuality(response: QualifyResponse): WorkspaceQualitySummary {
+  const details = response.documentDetails ?? [];
+  const lowestScoringDocuments = details
+    .map((doc) => ({
+      fileName: doc.fileName,
+      score: doc.structuralScore,
+      detectedType: doc.detectedType,
+    }))
+    .sort((a, b) => a.score - b.score)
+    .slice(0, 3);
+
+  return {
+    lowScoreDocumentCount: details.filter((doc) => doc.structuralScore < 0.6).length,
+    stubDocumentCount: details.filter((doc) => doc.hasStubContent).length,
+    lowestScoringDocuments,
+    missingItems: response.feedback?.missing.slice(0, 3) ?? [],
+    suggestions: response.feedback?.suggestions.slice(0, 3) ?? [],
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function averageScore(results: LinkResult[]): number | null {
+  const scores = results
+    .map((result) => result.score)
+    .filter((score): score is number => typeof score === "number" && Number.isFinite(score));
+  if (scores.length === 0) return null;
+  return scores.reduce((sum, score) => sum + score, 0) / scores.length;
+}
+
+function formatScore(score: number | null): string {
+  return typeof score === "number" && Number.isFinite(score)
+    ? `, score ${score.toFixed(2)}`
+    : "";
+}
+
+async function runLinkStep<T>(
+  step: string,
+  operation: () => Promise<T>,
+  wrapErrors: boolean,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (wrapErrors && !(error instanceof LinkStepError)) {
+      throw new LinkStepError(step, error);
+    }
+    throw error;
+  }
+}
+
+function runLinkStepSync<T>(step: string, operation: () => T, wrapErrors: boolean): T {
+  try {
+    return operation();
+  } catch (error) {
+    if (wrapErrors && !(error instanceof LinkStepError)) {
+      throw new LinkStepError(step, error);
+    }
+    throw error;
+  }
+}
+
+function errorStep(error: unknown): string | undefined {
+  return error instanceof LinkStepError ? error.step : undefined;
+}
+
+function rootError(error: unknown): unknown {
+  return error instanceof LinkStepError ? error.cause : error;
+}
+
+function errorStatus(error: unknown): number | undefined {
+  const cause = rootError(error);
+  return cause instanceof CloudApiError ? cause.status : undefined;
+}
+
+function errorResponse(error: unknown): unknown {
+  const cause = rootError(error);
+  return cause instanceof CloudApiError ? cause.body : undefined;
+}
+
+function formatFailureMessage(error: unknown): string {
+  const cause = rootError(error);
+  return cause instanceof CloudApiError
+    ? `API error ${cause.status}: ${cause.message.replace(/^API error:\s*\d+\s*/u, "")}`
+    : errorMessage(cause);
+}
+
+function formatFailureLine(failure: WorkspaceRepositoryFailure): string {
+  const response = formatFailureResponse(failure.response);
+  const message = response ? `${failure.message} | ${response}` : failure.message;
+  return failure.step ? `${failure.step}: ${message}` : message;
+}
+
+function formatFailureResponse(response: unknown): string | null {
+  if (response === undefined || response === null) return null;
+  if (typeof response === "string") return truncate(response);
+  if (typeof response === "number" || typeof response === "boolean") return String(response);
+
+  const record = asRecord(response);
+  const directMessage =
+    readString(record.message) ??
+    readString(record.error) ??
+    readString(record.reason) ??
+    readString(record.code);
+
+  if (directMessage) return truncate(directMessage);
+
+  try {
+    return truncate(JSON.stringify(response));
+  } catch {
+    return String(response);
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function truncate(value: string): string {
+  const singleLine = value.replace(/\s+/gu, " ").trim();
+  return singleLine.length > 300 ? `${singleLine.slice(0, 297)}...` : singleLine;
 }

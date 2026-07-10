@@ -21,6 +21,7 @@ import {
 } from "@varveai/adit-core";
 import type Database from "better-sqlite3";
 import { getCurrentBranch, getRemoteUrl } from "@varveai/adit-engine";
+import { existsSync } from "node:fs";
 
 export interface HookContext {
   db: Database.Database;
@@ -28,27 +29,39 @@ export interface HookContext {
   session: AditSession;
 }
 
+export interface HookContextOptions {
+  projectRoot?: string | null;
+}
+
 /** Initialize the hook context (DB + session) */
 export async function initHookContext(
   cwd: string,
   platform: Platform,
   platformSessionId?: string,
-): Promise<HookContext> {
-  const config = loadConfig(cwd);
+  options: HookContextOptions = {},
+): Promise<HookContext | null> {
+  const projectRoot = options.projectRoot ?? null;
+  if (!projectRoot) return null;
+
+  const config = loadHookConfig(projectRoot);
+  if (!existsSync(config.dbPath)) return null;
+
   const db = openDatabase(config.dbPath);
 
-  // Get or create session — prefer platform session ID lookup
+  // Get or create session — prefer platform session ID lookup. The
+  // sessionless fallback is platform-scoped so events without a session id
+  // never attach to another CLI's active session.
   let session: AditSession | null = null;
   if (platformSessionId) {
     session = getSessionByPlatformSessionId(db, platformSessionId);
   } else {
-    session = getActiveSession(db, config.projectId, config.clientId);
+    session = getActiveSession(db, config.projectId, config.clientId, platform);
   }
   if (!session) {
     const id = generateId();
     const now = new Date().toISOString();
-    const branch = await getCurrentBranch(cwd);
-    const remoteUrl = await getRemoteUrl(cwd);
+    const branch = await safeGetCurrentBranch(cwd);
+    const remoteUrl = await safeGetRemoteUrl(cwd);
 
     insertSession(db, {
       id,
@@ -70,11 +83,52 @@ export async function initHookContext(
     if (platformSessionId) {
       session = getSessionByPlatformSessionId(db, platformSessionId)!;
     } else {
-      session = getActiveSession(db, config.projectId, config.clientId)!;
+      session = getActiveSession(db, config.projectId, config.clientId, platform)!;
     }
   }
 
   return { db, config, session };
+}
+
+function loadHookConfig(projectRoot: string): AditConfig {
+  const originalProjectRoot = process.env.ADIT_PROJECT_ROOT;
+  const originalDataDir = process.env.ADIT_DATA_DIR;
+  const originalDbPath = process.env.ADIT_DB_PATH;
+  process.env.ADIT_PROJECT_ROOT = projectRoot;
+  delete process.env.ADIT_DATA_DIR;
+  delete process.env.ADIT_DB_PATH;
+
+  try {
+    return loadConfig(projectRoot);
+  } finally {
+    restoreEnv("ADIT_PROJECT_ROOT", originalProjectRoot);
+    restoreEnv("ADIT_DATA_DIR", originalDataDir);
+    restoreEnv("ADIT_DB_PATH", originalDbPath);
+  }
+}
+
+function restoreEnv(key: "ADIT_PROJECT_ROOT" | "ADIT_DATA_DIR" | "ADIT_DB_PATH", value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+}
+
+async function safeGetCurrentBranch(cwd: string): Promise<string | null> {
+  try {
+    return await getCurrentBranch(cwd);
+  } catch {
+    return null;
+  }
+}
+
+async function safeGetRemoteUrl(cwd: string): Promise<string | null> {
+  try {
+    return await getRemoteUrl(cwd);
+  } catch {
+    return null;
+  }
 }
 
 /** Read hook input from stdin (Claude Code sends JSON) */
@@ -86,6 +140,10 @@ export async function readStdin(): Promise<Record<string, unknown>> {
     const finish = <T>(fn: (value: T) => void, value: T): void => {
       if (settled) return;
       settled = true;
+      // Release the stdin handle so the process can exit naturally instead
+      // of relying on process.exit() while libuv handles are still closing
+      // (which asserts on Windows).
+      process.stdin.pause();
       fn(value);
     };
 
@@ -105,6 +163,7 @@ export async function readStdin(): Promise<Record<string, unknown>> {
     // Hard timeout — always fires after 3 seconds regardless of data state.
     // If data was received but stdin never closed (e.g. parent process didn't
     // close the pipe), try to parse whatever we have instead of hanging forever.
+    // unref'd so a completed read doesn't keep the process alive for 3s.
     setTimeout(() => {
       if (data) {
         try {
@@ -115,6 +174,6 @@ export async function readStdin(): Promise<Record<string, unknown>> {
       } else {
         finish(reject, new Error("No stdin data received"));
       }
-    }, 3000);
+    }, 3000).unref();
   });
 }

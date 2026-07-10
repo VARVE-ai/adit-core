@@ -16,6 +16,7 @@ export type EventType =
   | "mcp_call" // MCP server tool call
   | "checkpoint" // Git checkpoint created
   | "revert" // User reverted to checkpoint
+  | "git_commit" // Commit attributed to this session (gitHeadSha holds the commit sha itself)
   | "env_snapshot" // Environment captured
   | "env_drift" // Environment changed between snapshots
   | "plan_update" // SpecFlow plan modified

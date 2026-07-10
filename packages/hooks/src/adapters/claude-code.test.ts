@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { claudeCodeAdapter } from "./claude-code.js";
+import { encodeProjectRoot } from "./command.js";
 
 /** Create a unique temp directory for each test */
 function tempProjectRoot(): string {
@@ -54,6 +55,8 @@ describe("Claude Code Hook Chaining", () => {
 
     expect(hooks.UserPromptSubmit).toBeDefined();
     expect(hooks.Stop).toBeDefined();
+    // StopFailure routes API-error turn ends through the stop handler
+    expect(hooks.StopFailure).toBeDefined();
     expect(hooks.SessionStart).toBeDefined();
     expect(hooks.SessionEnd).toBeDefined();
     expect(hooks.TaskCompleted).toBeDefined();
@@ -65,6 +68,7 @@ describe("Claude Code Hook Chaining", () => {
     const stopEntries = hooks.Stop as Array<{ hooks: Array<{ command: string }> }>;
     expect(stopEntries).toHaveLength(1);
     expect(stopEntries[0].hooks[0].command).toContain("adit-hook");
+    expect(stopEntries[0].hooks[0].command).toContain("--project-root-b64");
   });
 
   it("preserves other tools' hooks when installing ADIT hooks", async () => {
@@ -194,17 +198,20 @@ describe("Claude Code Hook Chaining", () => {
     expect(settings.model).toBe("claude-sonnet-4-20250514");
   });
 
-  it("handles corrupted settings file gracefully", async () => {
+  it("refuses to overwrite a corrupted settings file", async () => {
     const claudeDir = join(projectRoot, ".claude");
     mkdirSync(claudeDir, { recursive: true });
-    writeFileSync(join(claudeDir, "settings.local.json"), "{ invalid json }}}");
+    const settingsPath = join(claudeDir, "settings.local.json");
+    writeFileSync(settingsPath, "{ invalid json }}}");
 
-    // Should not throw — starts fresh
-    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+    // Must throw instead of silently rebuilding the file — the corrupt
+    // file may hold the user's own permissions/env config.
+    await expect(
+      claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook"),
+    ).rejects.toThrow("invalid JSON");
 
-    const settings = readSettings(projectRoot);
-    const hooks = settings.hooks as Record<string, unknown[]>;
-    expect(hooks.Stop).toBeDefined();
+    // The corrupted file is left untouched for the user to fix.
+    expect(readFileSync(settingsPath, "utf-8")).toBe("{ invalid json }}}");
   });
 
   it("uninstallHooks removes only ADIT entries, preserves others", async () => {
@@ -342,5 +349,68 @@ describe("Claude Code Hook Chaining", () => {
     const result = await claudeCodeAdapter.validateInstallation(projectRoot);
     expect(result.valid).toBe(true);
     expect(result.checks.every((c) => c.ok)).toBe(true);
+  });
+
+  it("validateInstallation marks old ADIT hook commands as needing upgrade", async () => {
+    writeSettings(projectRoot, {
+      hooks: {
+        UserPromptSubmit: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook prompt-submit" }] },
+        ],
+        Stop: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook stop" }] },
+        ],
+        StopFailure: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook stop" }] },
+        ],
+        SessionStart: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook session-start" }] },
+        ],
+        SessionEnd: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook session-end" }] },
+        ],
+        TaskCompleted: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook task-completed" }] },
+        ],
+        Notification: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook notification" }] },
+        ],
+        SubagentStart: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook subagent-start" }] },
+        ],
+        SubagentStop: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook subagent-stop" }] },
+        ],
+      },
+    });
+
+    const result = await claudeCodeAdapter.validateInstallation(projectRoot);
+
+    expect(result.valid).toBe(false);
+    const hookCheck = result.checks.find((c) => c.name === "Hook configuration");
+    expect(hookCheck?.ok).toBe(false);
+    // Stale commands silently no-op at runtime — doctor must say how to fix,
+    // not report them as missing.
+    expect(hookCheck?.detail).toContain("Stale ADIT hooks");
+    expect(hookCheck?.detail).toContain("re-run `adit init`");
+    expect(hookCheck?.detail).not.toContain("Missing hooks");
+  });
+
+  it("validateInstallation hints at a moved project when the pinned root differs", async () => {
+    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+    const settingsPath = join(projectRoot, ".claude", "settings.local.json");
+    const movedRoot = "/somewhere/else";
+    const rewritten = readFileSync(settingsPath, "utf-8").replaceAll(
+      encodeProjectRoot(projectRoot),
+      encodeProjectRoot(movedRoot),
+    );
+    writeFileSync(settingsPath, rewritten);
+
+    const result = await claudeCodeAdapter.validateInstallation(projectRoot);
+
+    expect(result.valid).toBe(false);
+    const hookCheck = result.checks.find((c) => c.name === "Hook configuration");
+    expect(hookCheck?.detail).toContain("project moved?");
+    expect(hookCheck?.detail).toContain(movedRoot);
   });
 });

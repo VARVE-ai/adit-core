@@ -7,9 +7,9 @@
 
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig } from "@varveai/adit-core";
 import { deleteCheckpointRef, listCheckpointRefs } from "@varveai/adit-engine";
 import { uninstallInstalledPlatformHooks } from "./plugin.js";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 export interface ProjectUninstallResult {
   ok: boolean;
@@ -33,7 +33,8 @@ export async function projectUninstallCommand(opts?: {
   yes?: boolean;
   json?: boolean;
 }): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit project uninstall");
+  if (!config) return;
 
   if (!opts?.yes) {
     if (opts?.json) {
@@ -51,8 +52,7 @@ export async function projectUninstallCommand(opts?: {
       console.log(`  Project:        ${config.projectRoot}`);
       console.log(`  Data directory: ${config.dataDir}`);
       console.log();
-      console.log("  It will remove installed ADIT hooks, delete the local .adit/ data directory,");
-      console.log("  and delete git checkpoint refs under refs/adit/checkpoints/.");
+      console.log("  It will remove installed ADIT hooks and delete the local .adit/ data directory.");
       console.log();
       console.log("  Run with --yes to confirm.");
       console.log();
@@ -83,9 +83,6 @@ export async function projectUninstallCommand(opts?: {
   }
   console.log(
     `  [~] Removed ${result.generatedFilesRemoved} init-generated file${result.generatedFilesRemoved === 1 ? "" : "s"}`,
-  );
-  console.log(
-    `  [~] Removed ${result.checkpointRefsRemoved} checkpoint ref${result.checkpointRefsRemoved === 1 ? "" : "s"}`,
   );
   for (const err of result.errors ?? []) {
     console.error(`  [x] ${err}`);

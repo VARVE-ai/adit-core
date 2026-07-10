@@ -11,7 +11,7 @@
 
 import type Database from "better-sqlite3";
 import { getSyncState, upsertSyncState, withPerf } from "@varveai/adit-core";
-import type { SyncState } from "@varveai/adit-core";
+import type { ProjectType, SyncState } from "@varveai/adit-core";
 import type { CloudClient } from "../http/client.js";
 import { buildSyncBatch, batchRecordCount, countUnsyncedRecords } from "./serializer.js";
 import { handleConflicts, type SyncConflict } from "./conflicts.js";
@@ -31,6 +31,14 @@ export interface SyncResult {
   batches: number;
   /** Total records sent across all batches */
   totalRecords: number;
+}
+
+export interface SyncRepositoryPayload {
+  localRepositoryId: string;
+  relativePath: string;
+  displayName?: string;
+  repositoryUrl?: string;
+  canonicalRepoKey?: string;
 }
 
 interface PushResponse {
@@ -72,6 +80,8 @@ export class SyncEngine {
   private readonly client: CloudClient;
   private readonly projectId: string;
   private readonly projectName: string;
+  private readonly projectType: ProjectType;
+  private readonly repositories: SyncRepositoryPayload[];
   private readonly remoteUrl: string | null;
   private readonly canonicalRepoKey: string | null;
   private readonly batchSize: number;
@@ -85,6 +95,8 @@ export class SyncEngine {
     config: {
       projectId: string;
       projectName?: string;
+      projectType?: ProjectType;
+      repositories?: SyncRepositoryPayload[];
       remoteUrl?: string | null;
       canonicalRepoKey?: string | null;
       batchSize: number;
@@ -97,6 +109,13 @@ export class SyncEngine {
     this.client = client;
     this.projectId = config.projectId;
     this.projectName = config.projectName ?? "";
+    this.projectType = config.projectType ?? "repo";
+    this.repositories = config.repositories ?? defaultRepositoryPayload(
+      config.projectId,
+      config.projectName,
+      config.remoteUrl,
+      config.canonicalRepoKey,
+    );
     this.remoteUrl = config.remoteUrl ?? null;
     this.canonicalRepoKey = config.canonicalRepoKey ?? null;
     this.batchSize = config.batchSize;
@@ -196,7 +215,7 @@ export class SyncEngine {
 
       // 3. Push batches until no more records
       while (true) {
-        const batch = buildSyncBatch(
+        const { batch, diffByteCapApplied } = buildSyncBatch(
           this.db,
           cursor,
           lastSyncedAt,
@@ -215,6 +234,8 @@ export class SyncEngine {
             localProjectId: this.projectId,
             syncVersion,
             batch,
+            projectType: this.projectType,
+            repositories: this.repositories,
             ...(isNewProject && this.projectName ? { projectName: this.projectName } : {}),
             ...(this.remoteUrl ? { remoteUrl: this.remoteUrl } : {}),
             ...(this.canonicalRepoKey ? { canonicalRepoKey: this.canonicalRepoKey } : {}),
@@ -259,8 +280,9 @@ export class SyncEngine {
           break;
         }
 
-        // If batch was smaller than limit, we're done
-        if (count < this.batchSize) break;
+        // If batch was smaller than limit, we're done — unless the diff
+        // byte cap trimmed trailing events, which are still unsynced.
+        if (count < this.batchSize && !diffByteCapApplied) break;
       }
 
 
@@ -283,4 +305,19 @@ export class SyncEngine {
   getLocalStatus(): SyncState | null {
     return getSyncState(this.db, this.serverUrl);
   }
+}
+
+function defaultRepositoryPayload(
+  projectId: string,
+  projectName?: string,
+  remoteUrl?: string | null,
+  canonicalRepoKey?: string | null,
+): SyncRepositoryPayload[] {
+  return [{
+    localRepositoryId: projectId,
+    relativePath: ".",
+    ...(projectName ? { displayName: projectName } : {}),
+    ...(remoteUrl ? { repositoryUrl: remoteUrl } : {}),
+    ...(canonicalRepoKey ? { canonicalRepoKey } : {}),
+  }];
 }

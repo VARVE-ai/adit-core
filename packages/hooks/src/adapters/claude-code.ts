@@ -16,11 +16,20 @@ import type {
   ValidationResult,
   AditHookType,
 } from "./types.js";
-import { buildAditHookCommand, isAditHookCommand } from "./command.js";
+import {
+  buildAditHookCommand,
+  classifyAditHookEntries,
+  describeHookValidation,
+  isAditHookCommand,
+} from "./command.js";
 
 const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "UserPromptSubmit", aditHandler: "prompt-submit" },
   { platformEvent: "Stop", aditHandler: "stop" },
+  // StopFailure fires when a turn ends with an API error (Stop does not).
+  // Route it through the stop handler so edits made before the failure are
+  // still extracted from the transcript.
+  { platformEvent: "StopFailure", aditHandler: "stop" },
   { platformEvent: "SessionStart", aditHandler: "session-start" },
   { platformEvent: "SessionEnd", aditHandler: "session-end" },
   { platformEvent: "TaskCompleted", aditHandler: "task-completed" },
@@ -28,11 +37,6 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "SubagentStart", aditHandler: "subagent-start" },
   { platformEvent: "SubagentStop", aditHandler: "subagent-stop" },
 ];
-
-/** Map Claude Code platform events to ADIT hook types (derived from HOOK_MAPPINGS) */
-const PLATFORM_TO_ADIT: Record<string, AditHookType> = Object.fromEntries(
-  HOOK_MAPPINGS.map((m) => [m.platformEvent, m.aditHandler]),
-) as Record<string, AditHookType>;
 
 /** Slash command installed into .claude/commands/ */
 const ADIT_COMMAND = {
@@ -48,8 +52,8 @@ description: ADIT — manage cloud project linking and development intents
 
 Parse the requested action above and follow the **first matching rule**:
 
-1. Action is \`link\` (with optional flags) → run \`npx adit cloud link\` with the appropriate flags mapped from the arguments: \`--force\`, \`--skip-docs\`, \`--skip-commits\`, \`--dry-run\`.
-2. Action is \`intent\` (with optional flags) → run \`npx adit cloud intent\` with the appropriate flags mapped from the arguments: \`--id <value>\`, \`--state <value>\`. Add \`--json\` for structured output.
+1. Action is \`link\` (with optional flags) → run \`adit cloud link\` with the appropriate flags mapped from the arguments: \`--force\`, \`--skip-docs\`, \`--skip-commits\`, \`--dry-run\`.
+2. Action is \`intent\` (with optional flags) → run \`adit cloud intent\` with the appropriate flags mapped from the arguments: \`--id <value>\`, \`--state <value>\`. Add \`--json\` for structured output.
 3. No action, empty arguments, or unrecognized action → display the **Help** section below as your response. Do not run any commands.
 
 ---
@@ -91,12 +95,9 @@ Shows intents (development plans) and tasks from the connected adit-cloud projec
 - \`/adit intent\` — list all intents
 - \`/adit intent --state execution\` — show active intents
 
-> **Tip:** Not logged in? Run \`npx adit cloud login\` in your terminal first.
+> **Tip:** Not logged in? Run \`adit cloud login\` in your terminal first.
 `,
 };
-
-/** Filenames of old command files to clean up during install */
-const LEGACY_COMMAND_FILES = ["adit-link.md", "adit-intent.md"];
 
 /**
  * Detect system-injected prompts that Claude Code sends through UserPromptSubmit
@@ -113,7 +114,9 @@ export const claudeCodeAdapter: PlatformAdapter = {
   hookMappings: HOOK_MAPPINGS,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {
-    let aditHookType = PLATFORM_TO_ADIT[hookType] ?? (hookType as AditHookType);
+    // Hook commands always pass the ADIT hook type directly (baked into the
+    // installed command string by buildAditHookCommand).
+    let aditHookType = hookType as AditHookType;
     const cwd = (raw.cwd as string) ?? process.cwd();
 
     // Claude Code sends <task-notification> XML blocks through UserPromptSubmit
@@ -133,12 +136,12 @@ export const claudeCodeAdapter: PlatformAdapter = {
       transcriptPath: raw.transcript_path as string | undefined,
       // Prompt
       prompt: isReclassifiedNotification ? undefined : (raw.prompt as string | undefined),
-      // Tool use fields (available from SubagentStop, etc.)
+      // Tool use fields (Claude Code sends tool_response for tool results)
       toolName: raw.tool_name as string | undefined,
       toolInput: raw.tool_input as Record<string, unknown> | undefined,
-      toolOutput: raw.tool_output as Record<string, unknown> | undefined,
-      // Stop
-      stopReason: raw.stop_reason as string | undefined,
+      toolOutput: (raw.tool_response ?? raw.tool_output) as Record<string, unknown> | undefined,
+      // Stop / StopFailure (StopFailure carries `error` instead of stop_reason)
+      stopReason: (raw.stop_reason ?? raw.error) as string | undefined,
       lastAssistantMessage: raw.last_assistant_message as string | undefined,
       stopHookActive: raw.stop_hook_active as boolean | undefined,
       // Task completed
@@ -171,13 +174,15 @@ export const claudeCodeAdapter: PlatformAdapter = {
     };
   },
 
-  generateHookConfig(aditBinaryPath: string): PlatformHookConfig {
+  generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
     const makeHookEntry = (hookType: AditHookType) => [
       {
         hooks: [{
           type: "command",
-          command: buildAditHookCommand(aditBinaryPath, "claude", hookType),
-          timeout: 10000,
+          command: buildAditHookCommand(aditBinaryPath, "claude", hookType, projectRoot),
+          // Claude Code hook timeouts are in seconds. adit-hook self-kills
+          // after 10s, so this is a matching outer guard — not 10000s.
+          timeout: 10,
         }],
       },
     ];
@@ -188,6 +193,7 @@ export const claudeCodeAdapter: PlatformAdapter = {
         hooks: {
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
+          StopFailure: makeHookEntry("stop"),
           SessionStart: makeHookEntry("session-start"),
           SessionEnd: makeHookEntry("session-end"),
           TaskCompleted: makeHookEntry("task-completed"),
@@ -221,6 +227,8 @@ export const claudeCodeAdapter: PlatformAdapter = {
     let hooksDetail = "No hook configuration found";
     const requiredHooks = HOOK_MAPPINGS.map((m) => m.platformEvent);
     const missingHooks: string[] = [];
+    const staleHooks: string[] = [];
+    const stalePinnedRoots = new Set<string>();
 
     for (const settingsPath of settingsFiles) {
       if (!existsSync(settingsPath)) continue;
@@ -234,22 +242,23 @@ export const claudeCodeAdapter: PlatformAdapter = {
             missingHooks.push(hookName);
             continue;
           }
-          const hasAdit = entries.some(
-            (entry: { command?: string; hooks?: Array<{ command?: string }> }) => {
-              if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return true;
-              if (Array.isArray(entry.hooks)) {
-                return entry.hooks.some((h) => typeof h.command === "string" && isAditHookCommand(h.command));
-              }
-              return false;
-            },
-          );
-          if (!hasAdit) missingHooks.push(hookName);
+          const { status, stalePinnedRoots: roots } = classifyAditHookEntries(entries, projectRoot);
+          if (status === "absent") missingHooks.push(hookName);
+          if (status === "stale") {
+            staleHooks.push(hookName);
+            roots.forEach((root) => stalePinnedRoots.add(root));
+          }
         }
 
-        hooksFound = missingHooks.length === 0;
-        hooksDetail = hooksFound
-          ? `All hooks registered in ${settingsPath}`
-          : `Missing hooks: ${missingHooks.join(", ")}`;
+        const summary = describeHookValidation({
+          configPath: settingsPath,
+          projectRoot,
+          missingHooks,
+          staleHooks,
+          stalePinnedRoots: Array.from(stalePinnedRoots),
+        });
+        hooksFound = summary.ok;
+        hooksDetail = summary.detail;
         break;
       } catch {
         hooksDetail = `Failed to parse ${settingsPath}`;
@@ -287,14 +296,22 @@ export const claudeCodeAdapter: PlatformAdapter = {
     let settings: Record<string, unknown> = {};
 
     if (existsSync(settingsPath)) {
-      try {
-        settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-      } catch {
-        // Start fresh if settings are invalid
+      const raw = readFileSync(settingsPath, "utf-8");
+      // An empty file has no user data to protect — treat it as a fresh
+      // install. Anything else must parse; refuse to overwrite a file we
+      // cannot parse, as it may hold the user's own permissions/env config.
+      if (raw.trim().length > 0) {
+        try {
+          settings = JSON.parse(raw);
+        } catch {
+          throw new Error(
+            `${settingsPath} contains invalid JSON. Fix or remove it, then re-run the install.`,
+          );
+        }
       }
     }
 
-    const hookConfig = this.generateHookConfig(aditBinaryPath);
+    const hookConfig = this.generateHookConfig(aditBinaryPath, projectRoot);
     const existingHooks = (settings.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 
@@ -329,24 +346,12 @@ export const claudeCodeAdapter: PlatformAdapter = {
     const commandsDir = join(claudeDir, "commands");
     mkdirSync(commandsDir, { recursive: true });
     writeFileSync(join(commandsDir, ADIT_COMMAND.filename), ADIT_COMMAND.content);
-
-    // Clean up legacy command files from previous versions
-    for (const legacy of LEGACY_COMMAND_FILES) {
-      try { unlinkSync(join(commandsDir, legacy)); } catch { /* best-effort */ }
-    }
-  },
-
-  getResumeCommand(_projectRoot: string): string | null {
-    return "claude --continue";
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {
     if (configHasAditHooks(join(projectRoot, ".claude", "settings.local.json"))) return true;
     if (configHasAditHooks(join(projectRoot, ".claude", "settings.json"))) return true;
-    if (existsSync(join(projectRoot, ".claude", "commands", ADIT_COMMAND.filename))) return true;
-    return LEGACY_COMMAND_FILES.some((legacy) =>
-      existsSync(join(projectRoot, ".claude", "commands", legacy)),
-    );
+    return existsSync(join(projectRoot, ".claude", "commands", ADIT_COMMAND.filename));
   },
 
   async uninstallHooks(projectRoot: string): Promise<void> {
@@ -356,11 +361,6 @@ export const claudeCodeAdapter: PlatformAdapter = {
     // Remove slash command
     const commandsDir = join(projectRoot, ".claude", "commands");
     try { unlinkSync(join(commandsDir, ADIT_COMMAND.filename)); } catch { /* best-effort */ }
-
-    // Clean up legacy command files
-    for (const legacy of LEGACY_COMMAND_FILES) {
-      try { unlinkSync(join(commandsDir, legacy)); } catch { /* best-effort */ }
-    }
   },
 };
 

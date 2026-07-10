@@ -11,12 +11,6 @@ import { Command } from "commander";
 import { initCommand } from "./commands/init.js";
 import { listCommand } from "./commands/list.js";
 import { showCommand } from "./commands/show.js";
-import {
-  revertCommand,
-  interactiveRevertCommand,
-  undoCommand,
-} from "./commands/revert.js";
-import { resumeCommand } from "./commands/resume.js";
 import { searchCommand } from "./commands/search.js";
 import {
   diffCommand,
@@ -74,7 +68,7 @@ export function createProgram(): Command {
 
   program
     .name("adit")
-    .description("AI Development Intent Tracker — The Transparent Time Machine")
+    .description("AI Development Intent Tracker — a flight recorder for AI-assisted development")
     .version(CLI_VERSION);
   configureTopLevelHelp(program);
 
@@ -83,17 +77,22 @@ export function createProgram(): Command {
     .description("Initialize ADIT in the current project")
     .option(
       "-p, --platform <platform>",
-      "Target platform (claude-code, opencode, cursor, copilot, codex)",
+      "Target platform (claude-code, opencode, cursor, codex, gemini)",
     )
     .option(
       "-f, --force",
       "Force reinstall hooks (removes existing ADIT hooks first)",
+    )
+    .option(
+      "--workspace",
+      "Initialize a workspace root that contains Git repositories in child directories",
     )
     .action(withUpdateWarning("init", (opts) =>
       initCommand({
         cwd: process.cwd(),
         platform: opts.platform,
         force: opts.force,
+        workspace: opts.workspace,
       }),
     ));
 
@@ -104,7 +103,6 @@ export function createProgram(): Command {
     .option("-l, --limit <n>", "Number of entries to show", "20")
     .option("-a, --actor <actor>", "Filter by actor (assistant|user|tool)")
     .option("-t, --type <type>", "Filter by event type")
-    .option("-c, --checkpoints", "Only show checkpoint events")
     .option("-q, --query <text>", "Search by text")
     .option("-e, --expand", "Show expanded summaries")
     .option(
@@ -117,7 +115,6 @@ export function createProgram(): Command {
         limit: parseInt(opts.limit, 10),
         actor: opts.actor,
         type: opts.type,
-        checkpoints: opts.checkpoints,
         query: opts.query,
         expand: opts.expand,
         sort: opts.sort ? opts.sort.toUpperCase() : undefined,
@@ -127,6 +124,7 @@ export function createProgram(): Command {
 
   program
     .command("show <id>")
+    .usage("<id>")
     .description("Show full event details")
     .action((id) => showCommand(id));
 
@@ -140,7 +138,6 @@ export function createProgram(): Command {
     .option("--from <date>", "Start date (ISO 8601)")
     .option("--to <date>", "End date (ISO 8601)")
     .option("--branch <branch>", "Filter by git branch")
-    .option("--has-checkpoint", "Only events with checkpoints")
     .option("--format <fmt>", "Output format (json)")
     .option("--json", "Output as JSON")
     .action((query, opts) =>
@@ -151,7 +148,6 @@ export function createProgram(): Command {
         from: opts.from,
         to: opts.to,
         branch: opts.branch,
-        hasCheckpoint: opts.hasCheckpoint,
         format: opts.format,
         json: opts.json,
       }),
@@ -424,40 +420,10 @@ export function createProgram(): Command {
     .option("--json", "Output as JSON")
     .action((opts) => perfClearCommand({ json: opts.json }));
 
-  // Snapshot — git checkpoint features (revert, undo, diff, env)
+  // Snapshot — diff display and environment snapshot features
   const snapshotCmd = program
     .command("snapshot")
-    .description("Git checkpoint snapshot commands (revert, undo, diff, env)");
-
-  snapshotCmd
-    .command("revert [id]")
-    .description(
-      "Revert working tree to a checkpoint (interactive picker if no ID given)",
-    )
-    .option("-y, --yes", "Skip confirmation")
-    .option("-l, --limit <n>", "Max checkpoints to show in picker", "20")
-    .action((id, opts) => {
-      if (id) {
-        revertCommand(id, { yes: opts.yes });
-      } else {
-        interactiveRevertCommand({
-          yes: opts.yes,
-          limit: parseInt(opts.limit, 10),
-        });
-      }
-    });
-
-  snapshotCmd
-    .command("undo")
-    .description("Revert to parent of last checkpoint")
-    .option("-y, --yes", "Skip confirmation")
-    .action((opts) => undoCommand({ yes: opts.yes }));
-
-  snapshotCmd
-    .command("resume [branch]")
-    .description("Resume a session from the latest checkpoint on a branch")
-    .option("-y, --yes", "Skip confirmation and force-switch branches")
-    .action((branch, opts) => resumeCommand(branch, { yes: opts.yes }));
+    .description("Diff and environment snapshot commands");
 
   snapshotCmd
     .command("diff <id>")
@@ -612,7 +578,7 @@ Commands:
   show <id>                  Show full event details
   search [options] <query>   Search timeline events
 
-  snapshot                   Manage checkpoints, diffs, and environment snapshots
+  snapshot                   Show event diffs and environment snapshots
   cloud                      Sync and connect with adit-cloud
   hook                       Manage AI platform hook integrations
   docs                       Scaffold and validate project documents

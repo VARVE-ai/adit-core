@@ -9,8 +9,11 @@ import { getEventSummary } from "../../utils/summary.js";
 
 interface SearchScreenProps {
   onSearch: (query: string) => void;
+  onCancel: () => void;
+  submitted: boolean;
   events: AditEvent[];
   selectedIndex: number;
+  height: number;
 }
 
 function formatTime(iso: string): string {
@@ -46,16 +49,34 @@ function getSummary(event: AditEvent): string {
 
 export function SearchScreen({
   onSearch,
+  onCancel,
+  submitted,
   events,
   selectedIndex,
+  height,
 }: SearchScreenProps): React.ReactElement {
   const [query, setQuery] = useState("");
-  const [submitted, setSubmitted] = useState(false);
+
+  // Window the result list to the available height (same scheme as
+  // EventList); rendering all results overflows the terminal and breaks
+  // ink's in-place redraw. Chrome: query line + margin, count line,
+  // range line, footer + margin.
+  const listHeight = Math.max(height - 6, 3);
+  const halfVisible = Math.floor(listHeight / 2);
+  let scrollStart = Math.max(0, selectedIndex - halfVisible);
+  const scrollEnd = Math.min(events.length, scrollStart + listHeight);
+  if (scrollEnd === events.length) {
+    scrollStart = Math.max(0, scrollEnd - listHeight);
+  }
+  const visible = events.slice(scrollStart, scrollEnd);
 
   useInput(
     (input, key) => {
-      if (key.return && !submitted) {
-        setSubmitted(true);
+      if (key.escape) {
+        onCancel();
+        return;
+      }
+      if (key.return) {
         onSearch(query);
         return;
       }
@@ -63,7 +84,7 @@ export function SearchScreen({
         setQuery((q) => q.slice(0, -1));
         return;
       }
-      if (!key.ctrl && !key.meta && input && !key.escape) {
+      if (!key.ctrl && !key.meta && input) {
         setQuery((q) => q + input);
       }
     },
@@ -87,22 +108,35 @@ export function SearchScreen({
           <Text dimColor>
             {events.length} result{events.length !== 1 ? "s" : ""}:
           </Text>
-          {events.map((event, idx) => (
-            <Box key={event.id} flexDirection="row">
-              <Text inverse={idx === selectedIndex}>
-                {idx === selectedIndex ? ">" : " "}{" "}
-              </Text>
-              <Text dimColor>{formatTime(event.startedAt)} </Text>
-              <Text color="cyan">{actorSymbol(event.actor)} </Text>
-              <Text>{getSummary(event)}</Text>
-            </Box>
-          ))}
+          {visible.map((event, idx) => {
+            const actualIndex = scrollStart + idx;
+            const isSelected = actualIndex === selectedIndex;
+            return (
+              <Box key={event.id}>
+                <Text wrap="truncate-end">
+                  <Text inverse={isSelected}>
+                    {isSelected ? ">" : " "}{" "}
+                  </Text>
+                  <Text dimColor>{formatTime(event.startedAt)} </Text>
+                  <Text color="cyan">{actorSymbol(event.actor)} </Text>
+                  <Text inverse={isSelected}>{getSummary(event)}</Text>
+                </Text>
+              </Box>
+            );
+          })}
+          {events.length > listHeight && (
+            <Text dimColor>
+              [{scrollStart + 1}-{scrollEnd} of {events.length}]
+            </Text>
+          )}
         </Box>
       )}
 
       <Box marginTop={1}>
         <Text dimColor>
-          {submitted ? "[Esc] back" : "Type query and press [Enter]"}
+          {submitted
+            ? "[Esc] back  [j/k] navigate  [/] edit query"
+            : "Type query, [Enter] search, [Esc] cancel"}
         </Text>
       </Box>
     </Box>

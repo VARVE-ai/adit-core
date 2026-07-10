@@ -13,39 +13,18 @@ import {
   insertEventAutoSeq,
   getEventById,
   queryEvents,
-  updateEventCheckpoint,
   searchEvents,
-  getLatestCheckpointEvent,
-  insertDiff,
   getDiffText,
   type AditEvent,
   type EventType,
   type Actor,
   type AditConfig,
-  withPerf,
 } from "@varveai/adit-core";
-import { createSnapshot, getCheckpointDiff } from "../snapshot/creator.js";
-import type { FileChange } from "../detector/working-tree.js";
-import { getHeadSha, getCurrentBranch, shaExists } from "../git/runner.js";
-import { getRefPrefix } from "../git/refs.js";
-import { runGitOrThrow } from "../git/runner.js";
+import { getHeadSha, getCurrentBranch } from "../git/runner.js";
 
 export interface TimelineManager {
   /** Record a new event in the timeline */
   recordEvent(params: RecordEventParams): Promise<AditEvent>;
-
-  /** Create a git checkpoint for an event */
-  createCheckpoint(
-    eventId: string,
-    message: string,
-    preComputedChanges?: FileChange[],
-  ): Promise<{ sha: string; ref: string } | null>;
-
-  /** Revert working tree to a checkpoint */
-  revertTo(eventId: string): Promise<void>;
-
-  /** Undo the last checkpoint */
-  undo(): Promise<void>;
 
   /** Search events by text */
   search(query: string, limit?: number): Promise<AditEvent[]>;
@@ -77,13 +56,15 @@ export interface RecordEventParams {
   toolOutputJson?: string | null;
   errorJson?: string | null;
   planTaskId?: string | null;
+  diffStatJson?: string | null;
+  gitBranch?: string | null;
+  gitHeadSha?: string | null;
 }
 
 export interface ListOptions {
   sessionId?: string;
   eventType?: EventType;
   actor?: Actor;
-  hasCheckpoint?: boolean;
   limit?: number;
 }
 
@@ -98,8 +79,10 @@ export function createTimelineManager(
     async recordEvent(params: RecordEventParams): Promise<AditEvent> {
       const id = generateId();
       const now = new Date().toISOString();
-      const branch = await getCurrentBranch(cwd);
-      const headSha = await getHeadSha(cwd);
+      const hasGitBranchOverride = Object.prototype.hasOwnProperty.call(params, "gitBranch");
+      const hasGitHeadShaOverride = Object.prototype.hasOwnProperty.call(params, "gitHeadSha");
+      const branch = hasGitBranchOverride ? params.gitBranch ?? null : await getCurrentBranch(cwd);
+      const headSha = hasGitHeadShaOverride ? params.gitHeadSha ?? null : await getHeadSha(cwd);
       const vclock = serialize(createClock(config.clientId));
 
       // Use insertEventAutoSeq to atomically allocate the sequence number
@@ -124,6 +107,7 @@ export function createTimelineManager(
         endedAt: now,
         errorJson: params.errorJson ?? null,
         planTaskId: params.planTaskId ?? null,
+        diffStatJson: params.diffStatJson ?? null,
         clientId: config.clientId,
         vclockJson: vclock,
       });
@@ -135,121 +119,6 @@ export function createTimelineManager(
       return event;
     },
 
-    async createCheckpoint(
-      eventId: string,
-      message: string,
-      preComputedChanges?: FileChange[],
-    ): Promise<{ sha: string; ref: string } | null> {
-      return withPerf(config.dataDir, "snapshot", "createCheckpoint", async () => {
-        const event = getEventById(db, eventId);
-        if (!event) throw new Error(`Event not found: ${eventId}`);
-
-        // Find the parent checkpoint SHA for proper chaining
-        const lastCheckpoint = getLatestCheckpointEvent(db, event.sessionId);
-        const parentSha = lastCheckpoint?.checkpointSha ?? (await getHeadSha(cwd));
-
-        const refPath = `${getRefPrefix()}/${eventId}`;
-        const result = await createSnapshot(cwd, parentSha, message, refPath, preComputedChanges);
-        if (!result) return null;
-
-        // Store the diff
-        const diffText = await getCheckpointDiff(
-          cwd,
-          result.sha,
-          parentSha ?? undefined,
-        );
-        if (diffText) {
-          insertDiff(db, {
-            id: generateId(),
-            eventId,
-            diffText,
-          });
-        }
-
-        // Update the event with checkpoint info
-        updateEventCheckpoint(
-          db,
-          eventId,
-          result.sha,
-          result.ref,
-          JSON.stringify(result.files),
-        );
-
-        return { sha: result.sha, ref: result.ref };
-      });
-    },
-
-    async revertTo(eventId: string): Promise<void> {
-      const event = getEventById(db, eventId);
-      if (!event) throw new Error(`Event not found: ${eventId}`);
-      if (!event.checkpointSha) {
-        throw new Error(`Event ${eventId} has no checkpoint`);
-      }
-
-      // Verify the checkpoint commit object is reachable (may have been
-      // garbage collected if the ref was deleted after a squash merge).
-      const reachable = await shaExists(cwd, event.checkpointSha);
-      if (!reachable) {
-        throw new Error(
-          `Checkpoint ${event.checkpointSha.substring(0, 8)} is no longer reachable in the git object store. ` +
-          `The checkpoint ref may have been deleted and the object garbage collected.`,
-        );
-      }
-
-      // Use checkout to restore working tree content from the checkpoint
-      // WITHOUT moving the branch pointer. git reset --hard would move HEAD
-      // to the ADIT-internal checkpoint commit, corrupting branch history.
-      await runGitOrThrow(
-        ["checkout", event.checkpointSha, "--", "."],
-        { cwd },
-      );
-    },
-
-    async undo(): Promise<void> {
-      const latest = getLatestCheckpointEvent(db);
-      if (!latest?.checkpointSha) {
-        throw new Error("No checkpoints to undo");
-      }
-
-      // Find the target SHA to restore to. Try the git parent first;
-      // if that fails (e.g., after a squash merge where the parent commit
-      // is unreachable), fall back to the previous checkpoint in the DB
-      // by sequence order, or HEAD as a last resort.
-      let targetSha: string | null = null;
-
-      // Attempt 1: git parent of latest checkpoint commit
-      const parentResult = await import("../git/refs.js").then((m) =>
-        m.getParentSha(cwd, latest.checkpointSha!),
-      );
-      if (parentResult && (await shaExists(cwd, parentResult))) {
-        targetSha = parentResult;
-      }
-
-      // Attempt 2: previous checkpoint in DB sequence
-      if (!targetSha) {
-        const allCheckpoints = queryEvents(db, { hasCheckpoint: true, limit: 2 });
-        // allCheckpoints is ordered by started_at DESC; [0] is latest, [1] is previous
-        const previous = allCheckpoints.find((e) => e.id !== latest.id);
-        if (previous?.checkpointSha && (await shaExists(cwd, previous.checkpointSha))) {
-          targetSha = previous.checkpointSha;
-        }
-      }
-
-      // Attempt 3: fall back to HEAD
-      if (!targetSha) {
-        targetSha = await getHeadSha(cwd);
-      }
-
-      if (!targetSha) {
-        throw new Error("Cannot find a valid target to undo to");
-      }
-
-      // Use checkout to restore working tree content from the target
-      // WITHOUT moving the branch pointer. git reset --hard would move HEAD
-      // to the ADIT-internal checkpoint commit, corrupting branch history.
-      await runGitOrThrow(["checkout", targetSha, "--", "."], { cwd });
-    },
-
     async search(query: string, limit = 20): Promise<AditEvent[]> {
       return searchEvents(db, query, limit);
     },
@@ -259,7 +128,6 @@ export function createTimelineManager(
         sessionId: opts?.sessionId,
         eventType: opts?.eventType,
         actor: opts?.actor,
-        hasCheckpoint: opts?.hasCheckpoint,
         limit: opts?.limit ?? 50,
       });
     },

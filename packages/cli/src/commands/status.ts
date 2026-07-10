@@ -15,7 +15,6 @@ import {
   getActiveSession,
   countEvents,
   queryEvents,
-  getLatestCheckpointEvent,
   getSyncState,
   findGitRoot,
 } from "@varveai/adit-core";
@@ -122,22 +121,29 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
 
     // Event counts — use countEvents() for accurate total
     const totalEvents = countEvents(db, config.projectId);
-    const checkpointEvents = queryEvents(db, { hasCheckpoint: true, limit: 10000 });
     status.events = {
       total: totalEvents,
-      checkpoints: checkpointEvents.length,
     };
 
     // Unsynced events — count events after the last sync cursor.
     // Resolve server URL the same way auto-sync does: env var → credentials.
     let syncServerUrl = process.env.ADIT_CLOUD_URL ?? null;
-    if (!syncServerUrl) {
-      try {
-        const { loadCredentials } = await import("@varveai/adit-cloud");
-        syncServerUrl = loadCredentials()?.serverUrl ?? null;
-      } catch {
-        // @varveai/adit-cloud not available
-      }
+    try {
+      const { loadCredentials } = await import("@varveai/adit-cloud");
+      const credentials = loadCredentials();
+      syncServerUrl ??= credentials?.serverUrl ?? null;
+      // Cloud sync health — surfaced in the Warnings section below so
+      // silent fail-open behavior is still visible to the user.
+      status.cloud = credentials
+        ? {
+            loggedIn: true,
+            syncDisabled: credentials.syncDisabled === true,
+            syncErrorCount: credentials.syncErrorCount ?? 0,
+            lastAuthFailure: credentials.lastAuthFailure ?? null,
+          }
+        : { loggedIn: false };
+    } catch {
+      // @varveai/adit-cloud not available
     }
     const syncState = getSyncState(db, syncServerUrl ?? "");
     if (syncState?.lastSyncedEventId) {
@@ -152,30 +158,39 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
       (status.events as Record<string, unknown>).unsynced = totalEvents;
     }
 
-    // Latest checkpoint
-    const latest = getLatestCheckpointEvent(db);
-    status.latestCheckpoint = latest
-      ? {
-          eventId: latest.id,
-          sha: latest.checkpointSha?.substring(0, 8),
-          at: latest.startedAt,
-        }
-      : null;
+    // Failed transcript uploads — permanently stalled until manually reset
+    try {
+      const failedRow = db
+        .prepare(
+          `SELECT COUNT(*) as cnt FROM transcript_uploads WHERE status = 'failed'`,
+        )
+        .get() as { cnt: number };
+      status.failedTranscripts = failedRow.cnt;
+    } catch {
+      status.failedTranscripts = 0;
+    }
   } finally {
     closeDatabase(db);
   }
 
   // 4. Git info
-  const [branch, headSha, dirty] = await Promise.all([
-    getCurrentBranch(config.projectRoot),
-    getHeadSha(config.projectRoot),
-    hasUncommittedChanges(config.projectRoot),
-  ]);
-  status.git = {
-    branch,
-    head: headSha?.substring(0, 8) ?? null,
-    dirty,
-  };
+  if (config.projectType === "workspace") {
+    status.git = {
+      workspace: true,
+      repositories: config.repositories.length,
+    };
+  } else {
+    const [branch, headSha, dirty] = await Promise.all([
+      getCurrentBranch(config.projectRoot),
+      getHeadSha(config.projectRoot),
+      hasUncommittedChanges(config.projectRoot),
+    ]);
+    status.git = {
+      branch,
+      head: headSha?.substring(0, 8) ?? null,
+      dirty,
+    };
+  }
 
   // ──────────────────────────────────────────────
   // Output
@@ -197,17 +212,27 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
     platform: string;
     startedAt: string;
   } | null;
-  const events = status.events as { total: number; checkpoints: number; unsynced: number };
-  const latestCp = status.latestCheckpoint as {
-    eventId: string;
-    sha: string;
-    at: string;
-  } | null;
-  const git = status.git as {
-    branch: string | null;
-    head: string | null;
-    dirty: boolean;
-  };
+  const events = status.events as { total: number; unsynced: number };
+  const cloud = status.cloud as
+    | {
+        loggedIn: boolean;
+        syncDisabled?: boolean;
+        syncErrorCount?: number;
+        lastAuthFailure?: { at: string; stage: string; message: string } | null;
+      }
+    | undefined;
+  const failedTranscripts = (status.failedTranscripts as number) ?? 0;
+  const git = status.git as
+    | {
+        workspace: true;
+        repositories: number;
+      }
+    | {
+        workspace?: false;
+        branch: string | null;
+        head: string | null;
+        dirty: boolean;
+      };
 
   // ── Status line ──────────────────────────────
   console.log();
@@ -215,13 +240,15 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
   const hooksList = hooksStatus.installed.length > 0
     ? hooksStatus.installed.join(", ")
     : null;
-  const branchLabel = git.branch ? pc.cyan(git.branch) : pc.yellow("detached");
+  const branchLabel = git.workspace
+    ? pc.cyan("workspace")
+    : git.branch ? pc.cyan(git.branch) : pc.yellow("detached");
 
   console.log(
     joinDim([
       `${statusDot(isActive)} ${pc.bold(isActive ? "Active" : "Idle")}`,
       hooksList,
-      `branch ${branchLabel}`,
+      git.workspace ? `${git.repositories} repos` : `branch ${branchLabel}`,
     ]),
   );
 
@@ -245,7 +272,6 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
     const statsLine = joinDim([
       `started ${timeAgo(session.startedAt)}`,
       `${events.total} events`,
-      `${events.checkpoints} checkpoints`,
     ]);
     console.log(pc.dim(statsLine));
   } else {
@@ -257,18 +283,21 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
   console.log(sectionHeader("Git", ruleWidth));
   console.log();
 
-  const headShort = git.head ?? "unknown";
-  const treeStatus = git.dirty
-    ? pc.yellow("dirty")
-    : pc.green("clean");
-  console.log(joinDim([
-    `branch ${branchLabel}`,
-    headShort,
-    treeStatus,
-  ]));
-
-  if (latestCp) {
-    console.log(pc.dim(`last checkpoint ${latestCp.sha} ${timeAgo(latestCp.at)}`));
+  if (git.workspace) {
+    console.log(joinDim([
+      "workspace",
+      `${git.repositories} repositories`,
+    ]));
+  } else {
+    const headShort = git.head ?? "unknown";
+    const treeStatus = git.dirty
+      ? pc.yellow("dirty")
+      : pc.green("clean");
+    console.log(joinDim([
+      `branch ${branchLabel}`,
+      headShort,
+      treeStatus,
+    ]));
   }
 
   // ── Sync ─────────────────────────────────────
@@ -282,12 +311,33 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
     console.log(pc.yellow(`${events.unsynced} events unsynced`));
   }
 
-  // ── Hooks warnings (only if issues) ──────────
+  // ── Warnings (only if issues) ────────────────
+  const warnings: string[] = [];
   if (missingPlatforms.length > 0) {
+    warnings.push(`hooks incomplete: ${missingPlatforms.join(", ")}`);
+  }
+  if (cloud?.syncDisabled) {
+    warnings.push(
+      "cloud auto-sync paused after repeated failures — run 'adit cloud sync' to retry now (auto-resumes within 1h)",
+    );
+  }
+  if (cloud?.lastAuthFailure) {
+    warnings.push(
+      `cloud auth failing (${cloud.lastAuthFailure.stage}, ${timeAgo(cloud.lastAuthFailure.at)}): re-run 'adit cloud login'`,
+    );
+  }
+  if (failedTranscripts > 0) {
+    warnings.push(
+      `${failedTranscripts} transcript upload(s) stopped after repeated failures — see 'adit cloud transcript status'`,
+    );
+  }
+  if (warnings.length > 0) {
     console.log();
     console.log(sectionHeader("Warnings", ruleWidth));
     console.log();
-    console.log(pc.yellow(`hooks incomplete: ${missingPlatforms.join(", ")}`));
+    for (const warning of warnings) {
+      console.log(pc.yellow(warning));
+    }
   }
 
   // ── Footer ───────────────────────────────────

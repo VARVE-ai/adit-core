@@ -12,6 +12,7 @@ export interface CliAgentContextUsage {
 }
 
 export interface CliAgentTokenUsage {
+  totalTokens?: number;
   inputTokens: number;
   outputTokens: number;
   reasoningTokens: number;
@@ -87,6 +88,7 @@ export interface CliAgentProvider {
   readonly permissions: CliPermissionRequest[];
   takeover(): Promise<void>;
   releaseToLocal(): Promise<void>;
+  startNewSession?(pendingSessionId?: string | null): Promise<void>;
   switchSession(sessionId: string): Promise<void>;
   sendPrompt(prompt: string, opts?: {
     mode?: "build" | "plan";
@@ -126,6 +128,7 @@ export interface RelayCommand {
     | "permission"
     | "question"
     | "takeover"
+    | "new-session"
     | "switch-session"
     | "slash-command"
     | "rewind";

@@ -9,7 +9,7 @@
  *   reset    — Reset a failed transcript for re-upload
  */
 
-import { loadConfig, openDatabase, closeDatabase } from "@varveai/adit-core";
+import { openDatabase, closeDatabase } from "@varveai/adit-core";
 import {
   loadCloudConfig,
   loadCredentials,
@@ -20,6 +20,7 @@ import {
   processTranscriptUploads,
 } from "@varveai/adit-cloud";
 import type { TranscriptUpload } from "@varveai/adit-core";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 /**
  * `adit transcript enable` — Enable transcript upload.
@@ -81,7 +82,8 @@ export async function transcriptStatusCommand(opts?: {
 }): Promise<void> {
   const cloudConfig = loadCloudConfig();
   const credentials = loadCredentials();
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit transcript status");
+  if (!config) return;
 
   const statusData: Record<string, unknown> = {
     uploadEnabled: cloudConfig.transcriptUpload.enabled,
@@ -238,7 +240,8 @@ export async function transcriptUploadCommand(opts?: {
   }
 
   const serverUrl = cloudConfig.serverUrl ?? credentials.serverUrl;
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit transcript upload");
+  if (!config) return;
 
   if (!opts?.json) {
     console.log(`Uploading transcripts to ${serverUrl}...`);
@@ -291,7 +294,8 @@ export async function transcriptResetCommand(
   id: string,
   opts?: { json?: boolean },
 ): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit transcript reset");
+  if (!config) return;
   const db = openDatabase(config.dbPath);
 
   try {

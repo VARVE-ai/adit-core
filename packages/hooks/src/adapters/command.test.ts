@@ -3,7 +3,16 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { buildAditHookCommand, isAditHookCommand, parseHookArgs } from "./command.js";
+import {
+  buildAditHookCommand,
+  classifyAditHookEntries,
+  describeHookValidation,
+  encodeProjectRoot,
+  extractPinnedProjectRoot,
+  isAditHookCommand,
+  isFixedProjectRootHookCommand,
+  parseHookArgs,
+} from "./command.js";
 
 describe("Hook Command Helpers", () => {
   it("builds commands with explicit platform arguments", () => {
@@ -12,10 +21,33 @@ describe("Hook Command Helpers", () => {
     expect(command).toBe("npx adit-hook --platform codex stop");
   });
 
+  it("builds commands with a fixed project root argument", () => {
+    const projectRoot = "/Users/me/Project With Spaces";
+    const command = buildAditHookCommand("npx adit-hook", "codex", "stop", projectRoot);
+
+    expect(command).toBe(
+      `npx adit-hook --platform codex --project-root-b64 ${encodeProjectRoot(projectRoot)} stop`,
+    );
+    expect(isFixedProjectRootHookCommand(command, projectRoot)).toBe(true);
+  });
+
+  it("round-trips Windows project roots without shell-sensitive quoting", () => {
+    const projectRoot = "C:\\Users\\Me\\Adit Projects\\workspace";
+    const command = buildAditHookCommand("adit-hook.cmd", "cursor", "session-start", projectRoot);
+    const args = command.split(" ").slice(1);
+
+    expect(parseHookArgs(args)).toEqual({
+      platform: "cursor",
+      hookType: "session-start",
+      projectRoot,
+    });
+  });
+
   it("parses platform flag before hook type", () => {
     expect(parseHookArgs(["--platform", "cursor", "prompt-submit"])).toEqual({
       platform: "cursor",
       hookType: "prompt-submit",
+      projectRoot: null,
     });
   });
 
@@ -23,6 +55,7 @@ describe("Hook Command Helpers", () => {
     expect(parseHookArgs(["stop", "--platform=gemini"])).toEqual({
       platform: "gemini",
       hookType: "stop",
+      projectRoot: null,
     });
   });
 
@@ -30,6 +63,17 @@ describe("Hook Command Helpers", () => {
     expect(parseHookArgs(["session-start"])).toEqual({
       platform: null,
       hookType: "session-start",
+      projectRoot: null,
+    });
+  });
+
+  it("parses project root in equals form", () => {
+    const projectRoot = "/repo";
+
+    expect(parseHookArgs(["stop", `--project-root-b64=${encodeProjectRoot(projectRoot)}`])).toEqual({
+      platform: null,
+      hookType: "stop",
+      projectRoot,
     });
   });
 
@@ -40,5 +84,89 @@ describe("Hook Command Helpers", () => {
   it("identifies ADIT hook commands with mixed-case Windows paths", () => {
     expect(isAditHookCommand('node "C:\\Users\\me\\AppData\\Roaming\\npm\\ADIT-HOOK.CMD" stop')).toBe(true);
     expect(isAditHookCommand('node "C:\\tools\\Hooks\\Dist\\Index.js" stop')).toBe(true);
+  });
+
+  it("extracts the pinned project root from a command", () => {
+    const command = buildAditHookCommand("/tmp/adit-hook", "claude", "stop", "/repo");
+    expect(extractPinnedProjectRoot(command)).toBe("/repo");
+    expect(extractPinnedProjectRoot("/tmp/adit-hook --platform claude stop")).toBeNull();
+  });
+});
+
+describe("classifyAditHookEntries", () => {
+  const root = "/repo";
+  const pinned = buildAditHookCommand("/tmp/adit-hook", "claude", "stop", root);
+  const unpinned = "/tmp/adit-hook --platform claude stop";
+  const otherRoot = buildAditHookCommand("/tmp/adit-hook", "claude", "stop", "/moved/repo");
+
+  it("returns ok when any entry is pinned to the expected root", () => {
+    const result = classifyAditHookEntries(
+      [{ command: unpinned }, { hooks: [{ command: pinned }] }],
+      root,
+    );
+    expect(result.status).toBe("ok");
+  });
+
+  it("returns stale for legacy commands without a pinned root", () => {
+    const result = classifyAditHookEntries([{ hooks: [{ command: unpinned }] }], root);
+    expect(result.status).toBe("stale");
+    expect(result.stalePinnedRoots).toEqual([""]);
+  });
+
+  it("returns stale with the foreign root when the project moved", () => {
+    const result = classifyAditHookEntries([{ command: otherRoot }], root);
+    expect(result.status).toBe("stale");
+    expect(result.stalePinnedRoots).toEqual(["/moved/repo"]);
+  });
+
+  it("returns absent when no ADIT commands exist", () => {
+    const result = classifyAditHookEntries(
+      [{ command: "eslint --fix" }, { hooks: [{ command: "prettier -w ." }] }],
+      root,
+    );
+    expect(result.status).toBe("absent");
+  });
+});
+
+describe("describeHookValidation", () => {
+  const base = {
+    configPath: "/repo/.claude/settings.local.json",
+    projectRoot: "/repo",
+  };
+
+  it("reports ok when nothing is missing or stale", () => {
+    const result = describeHookValidation({
+      ...base,
+      missingHooks: [],
+      staleHooks: [],
+      stalePinnedRoots: [],
+    });
+    expect(result.ok).toBe(true);
+    expect(result.detail).toContain("All hooks registered");
+  });
+
+  it("tells users to re-run init for legacy commands", () => {
+    const result = describeHookValidation({
+      ...base,
+      missingHooks: [],
+      staleHooks: ["Stop", "UserPromptSubmit"],
+      stalePinnedRoots: [""],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("re-run `adit init`");
+    expect(result.detail).toContain("no pinned project root");
+  });
+
+  it("hints at a moved project when pinned roots differ", () => {
+    const result = describeHookValidation({
+      ...base,
+      missingHooks: ["SessionEnd"],
+      staleHooks: ["Stop"],
+      stalePinnedRoots: ["/old/location"],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("project moved?");
+    expect(result.detail).toContain("/old/location");
+    expect(result.detail).toContain("Missing hooks: SessionEnd");
   });
 });

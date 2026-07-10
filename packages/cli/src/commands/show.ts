@@ -3,17 +3,18 @@
  */
 
 import {
-  loadConfig,
   openDatabase,
   closeDatabase,
   parseLabels,
   parseDiffStats,
   parseError,
 } from "@varveai/adit-core";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 import { createTimelineManager } from "@varveai/adit-engine";
 
 export async function showCommand(eventId: string): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit show");
+  if (!config) return;
   const db = openDatabase(config.dbPath);
   const timeline = createTimelineManager(db, config);
 

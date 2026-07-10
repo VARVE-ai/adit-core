@@ -20,6 +20,11 @@ vi.mock("@varveai/adit-engine", () => ({
   runGit: (...args: unknown[]) => mockRunGit(...args),
 }));
 
+const mockLoadConfig = vi.fn();
+vi.mock("@varveai/adit-core", () => ({
+  loadConfig: (...args: unknown[]) => mockLoadConfig(...args),
+}));
+
 // Mock credentials
 const mockLoadCredentials = vi.fn();
 const mockCredentialsFromEnvToken = vi.fn();
@@ -47,6 +52,7 @@ import { triggerProjectLinkSync } from "./auto-link.js";
 
 /** Fake database — triggerProjectLinkSync passes it through to getProjectLinkCache */
 const fakeDb = {} as never;
+const originalPlatform = process.platform;
 
 function defaultConfig() {
   return {
@@ -81,6 +87,17 @@ describe("triggerProjectLinkSync", () => {
     mockLoadCredentials.mockReturnValue(defaultCredentials());
     mockIsSyncDisabled.mockReturnValue(false);
     mockGetProjectLinkCache.mockReturnValue(null);
+    mockLoadConfig.mockReturnValue({
+      clientId: "local-client",
+      repositories: [{
+        localRepositoryId: "proj_123",
+        relativePath: ".",
+        displayName: "project",
+        repositoryUrl: null,
+        canonicalRepoKey: null,
+        path: "/tmp/project",
+      }],
+    });
     mockRunGit.mockResolvedValue({
       exitCode: 0,
       stdout: "refs/heads/main\u0000abc123\n",
@@ -95,6 +112,7 @@ describe("triggerProjectLinkSync", () => {
       if (key.startsWith("ADIT_")) delete process.env[key];
     }
     Object.assign(process.env, originalEnv);
+    setPlatform(originalPlatform);
   });
 
   it("spawns a detached child process when all preconditions pass", async () => {
@@ -102,15 +120,34 @@ describe("triggerProjectLinkSync", () => {
 
     expect(mockSpawn).toHaveBeenCalledOnce();
     const [cmd, args, opts] = mockSpawn.mock.calls[0];
-    expect(cmd).toBe("npx");
+    expect(cmd).toBe(expectedNpxCommand());
     expect(args).toEqual(["adit", "cloud", "link", "--json", "--skip-qualify"]);
     expect(opts.cwd).toBe("/tmp/project");
     expect(opts.detached).toBe(true);
     expect(opts.stdio).toEqual(["ignore", "ignore", "ignore"]);
+    expect(opts.windowsHide).toBe(true);
 
     // Should unref the child so it doesn't keep the parent alive
     const child = mockSpawn.mock.results[0].value;
     expect(child.unref).toHaveBeenCalledOnce();
+  });
+
+  it("spawns a single quoted command line on Windows (avoids DEP0190)", async () => {
+    setPlatform("win32");
+
+    await triggerProjectLinkSync(fakeDb, "proj_123", "C:\\workspace");
+
+    expect(mockSpawn).toHaveBeenCalledOnce();
+    // shell:true with an args array is deprecated (DEP0190) and its warning
+    // lands on the hook's stderr — Windows must get one composed string.
+    const [cmd, opts] = mockSpawn.mock.calls[0];
+    expect(cmd).toBe("npx.cmd adit cloud link --json --skip-qualify");
+    expect(opts).toEqual(expect.objectContaining({
+      cwd: "C:\\workspace",
+      shell: true,
+      windowsHide: true,
+      detached: true,
+    }));
   });
 
   it("skips when project-link auto-sync is disabled", async () => {
@@ -263,3 +300,14 @@ describe("triggerProjectLinkSync", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 });
+
+function setPlatform(value: NodeJS.Platform): void {
+  Object.defineProperty(process, "platform", {
+    value,
+    configurable: true,
+  });
+}
+
+function expectedNpxCommand(): string {
+  return process.platform === "win32" ? "npx.cmd" : "npx";
+}

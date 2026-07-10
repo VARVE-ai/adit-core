@@ -33,6 +33,7 @@ export interface RelayWsClientOptions {
   onConnectionClosed?: () => void;
   onStatus?: (status: RelayWsStatus) => void;
   onError?: (error: Error) => void;
+  onReconnectScheduled?: (attempt: number, delayMs: number) => void;
 }
 
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
@@ -54,6 +55,7 @@ function asCommand(value: unknown): RelayCommand | null {
     type !== "permission" &&
     type !== "question" &&
     type !== "takeover" &&
+    type !== "new-session" &&
     type !== "switch-session" &&
     type !== "slash-command" &&
     type !== "rewind"
@@ -183,8 +185,11 @@ export class CliAgentRelayWebSocket {
     });
 
     socket.on("close", () => {
+      // A socket that has already been replaced by a newer connection must not
+      // clobber that connection's state when its close event arrives late.
+      if (this.socket !== socket) return;
       this.clearConnectTimer();
-      if (this.socket === socket) this.socket = null;
+      this.socket = null;
       const hadConnection = this.connectionId !== null;
       this.connectionId = null;
       this.setStatus("closed");
@@ -221,6 +226,13 @@ export class CliAgentRelayWebSocket {
     return this.send({
       type: "events",
       events,
+    });
+  }
+
+  sendLocalSessions(sessionIds: string[]): boolean {
+    return this.send({
+      type: "local-sessions",
+      sessionIds,
     });
   }
 
@@ -265,6 +277,7 @@ export class CliAgentRelayWebSocket {
     if (this.intentionalClose) return;
     const delay = RECONNECT_DELAYS_MS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
     this.reconnectAttempt += 1;
+    this.opts.onReconnectScheduled?.(this.reconnectAttempt, delay);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();

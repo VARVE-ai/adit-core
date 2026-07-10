@@ -259,18 +259,6 @@ export function updateEventStatus(
   ).run(status, now, errorJson ?? null, id);
 }
 
-export function updateEventCheckpoint(
-  db: Database.Database,
-  id: string,
-  checkpointSha: string,
-  checkpointRef: string,
-  diffStatJson: string,
-): void {
-  db.prepare(
-    "UPDATE events SET checkpoint_sha = ?, checkpoint_ref = ?, diff_stat_json = ? WHERE id = ?",
-  ).run(checkpointSha, checkpointRef, diffStatJson, id);
-}
-
 export function updateEventLabels(
   db: Database.Database,
   id: string,
@@ -280,18 +268,6 @@ export function updateEventLabels(
   db.prepare(
     "UPDATE events SET labels_json = ?, vclock_json = ? WHERE id = ?",
   ).run(labelsJson, vclockJson, id);
-}
-
-export function allocateSequence(
-  db: Database.Database,
-  sessionId: string,
-): number {
-  const row = db
-    .prepare(
-      "SELECT COALESCE(MAX(sequence), 0) as max_seq FROM events WHERE session_id = ?",
-    )
-    .get(sessionId) as { max_seq: number };
-  return row.max_seq + 1;
 }
 
 export function searchEvents(
@@ -309,74 +285,6 @@ export function searchEvents(
        LIMIT ?`,
     )
     .all(pattern, pattern, pattern, pattern, limit) as Record<string, unknown>[];
-  return rows.map(rowToEvent);
-}
-
-export function getLatestCheckpointEvent(
-  db: Database.Database,
-  sessionId?: string,
-): AditEvent | null {
-  let sql =
-    "SELECT * FROM events WHERE checkpoint_sha IS NOT NULL AND deleted_at IS NULL";
-  const params: unknown[] = [];
-
-  if (sessionId) {
-    sql += " AND session_id = ?";
-    params.push(sessionId);
-  }
-  sql += " ORDER BY sequence DESC LIMIT 1";
-
-  const row = db.prepare(sql).get(...params) as
-    | Record<string, unknown>
-    | undefined;
-  return row ? rowToEvent(row) : null;
-}
-
-/**
- * Find the most recent checkpoint event on a given git branch.
- *
- * Orders by started_at DESC to get the latest checkpoint regardless
- * of session boundaries.
- */
-export function getLatestCheckpointByBranch(
-  db: Database.Database,
-  branch: string,
-): AditEvent | null {
-  const row = db
-    .prepare(
-      `SELECT * FROM events
-       WHERE checkpoint_sha IS NOT NULL
-         AND git_branch = ?
-         AND deleted_at IS NULL
-       ORDER BY started_at DESC LIMIT 1`,
-    )
-    .get(branch) as Record<string, unknown> | undefined;
-  return row ? rowToEvent(row) : null;
-}
-
-/**
- * Find recent checkpoint events across all branches, excluding a specific branch.
- *
- * Used as a fallback when the current branch has no checkpoints — typically
- * after a squash merge where the feature branch's checkpoints are recorded
- * under the old branch name that no longer exists.
- *
- * Returns checkpoints ordered by started_at DESC so the most recent comes first.
- */
-export function getRecentCheckpointsExcludingBranch(
-  db: Database.Database,
-  excludeBranch: string,
-  limit = 10,
-): AditEvent[] {
-  const rows = db
-    .prepare(
-      `SELECT * FROM events
-       WHERE checkpoint_sha IS NOT NULL
-         AND git_branch != ?
-         AND deleted_at IS NULL
-       ORDER BY started_at DESC LIMIT ?`,
-    )
-    .all(excludeBranch, limit) as Record<string, unknown>[];
   return rows.map(rowToEvent);
 }
 
@@ -442,6 +350,28 @@ export function countEvents(
     )
     .get(projectId) as { cnt: number };
   return row.cnt;
+}
+
+/**
+ * Whether this session already attributed the given commit.
+ * Guards against re-attribution when the per-repo baseline legally moves
+ * backward (e.g. a pure checkout to an ancestor) and a later turn's
+ * baseline..HEAD range contains commits from earlier turns again.
+ */
+export function hasGitCommitEvent(
+  db: Database.Database,
+  sessionId: string,
+  commitSha: string,
+): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 FROM events
+       WHERE session_id = ? AND event_type = 'git_commit'
+         AND git_head_sha = ? AND deleted_at IS NULL
+       LIMIT 1`,
+    )
+    .get(sessionId, commitSha);
+  return row !== undefined;
 }
 
 function rowToEvent(row: Record<string, unknown>): AditEvent {

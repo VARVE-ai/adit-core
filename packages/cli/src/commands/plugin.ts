@@ -9,7 +9,7 @@
  */
 
 import { existsSync, rmSync } from "node:fs";
-import { loadConfig, findGitRoot } from "@varveai/adit-core";
+import { findGitRoot, type AditConfig } from "@varveai/adit-core";
 import {
   getAdapter,
   listAdapters,
@@ -18,6 +18,7 @@ import {
   type PlatformAdapter,
 } from "@varveai/adit-hooks/adapters";
 import type { Platform } from "@varveai/adit-core";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 export interface UninstallHooksResult {
   uninstalled: string[];
@@ -28,8 +29,7 @@ export interface UninstallHooksResult {
  * Resolve the project root from config, preferring git root for
  * directory-based platform detection.
  */
-function resolveProjectRoot(): string {
-  const config = loadConfig();
+function resolveProjectRoot(config: AditConfig): string {
   return findGitRoot(config.projectRoot) ?? config.projectRoot;
 }
 
@@ -38,8 +38,9 @@ export async function pluginInstallCommand(
   platformArg?: string,
   opts?: { json?: boolean },
 ): Promise<void> {
-  const config = loadConfig();
-  const projectRoot = resolveProjectRoot();
+  const config = loadInitializedProjectConfig("adit hook install");
+  if (!config) return;
+  const projectRoot = resolveProjectRoot(config);
   const aditBinaryPath = resolveAditHookBinary();
 
   // If explicit platform, install just that one
@@ -198,7 +199,8 @@ export async function pluginUninstallCommand(
   platformArg?: string,
   opts?: { json?: boolean; all?: boolean; clean?: boolean },
 ): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit hook uninstall");
+  if (!config) return;
 
   // --all: uninstall every installed platform (legacy behavior preserved)
   if (opts?.all) {
@@ -425,8 +427,10 @@ async function uninstallSinglePlatform(
 export async function pluginListCommand(
   opts?: { json?: boolean },
 ): Promise<void> {
+  const config = loadInitializedProjectConfig("adit hook list");
+  if (!config) return;
   const adapters = listAdapters();
-  const projectRoot = resolveProjectRoot();
+  const projectRoot = resolveProjectRoot(config);
 
   if (opts?.json) {
     const results = [];
@@ -493,8 +497,9 @@ export async function pluginValidateCommand(
   platformArg?: string,
   opts?: { json?: boolean },
 ): Promise<void> {
-  const config = loadConfig();
-  const projectRoot = resolveProjectRoot();
+  const config = loadInitializedProjectConfig("adit hook validate");
+  if (!config) return;
+  const projectRoot = resolveProjectRoot(config);
 
   // If explicit platform, validate just that one
   if (platformArg) {

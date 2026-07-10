@@ -7,8 +7,16 @@
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, basename } from "node:path";
+import { createInterface } from "node:readline/promises";
 import pc from "picocolors";
-import { loadConfig, openDatabase, closeDatabase, findGitRoot } from "@varveai/adit-core";
+import {
+  loadConfig,
+  openDatabase,
+  closeDatabase,
+  findGitRoot,
+  discoverWorkspaceRepositories,
+  ensureWorkspaceManifest,
+} from "@varveai/adit-core";
 import type { Platform } from "@varveai/adit-core";
 import { isGitRepo } from "@varveai/adit-engine";
 import {
@@ -22,12 +30,15 @@ import {
   renderArchitectureTemplate,
   renderApiReferenceTemplate,
   renderDataModelTemplate,
+  renderGenerateDocsPrompt,
+  GENERATE_DOCS_PROMPT_PATH,
 } from "@varveai/adit-plans";
 
 export async function initCommand(opts: {
   cwd?: string;
   platform?: string;
   force?: boolean;
+  workspace?: boolean;
 }): Promise<void> {
   const cwd = opts.cwd ?? process.cwd();
 
@@ -36,14 +47,46 @@ export async function initCommand(opts: {
   console.log("  =====================================");
   console.log();
 
-  // Verify we're in a git repo
-  if (!(await isGitRepo(cwd))) {
-    console.error("  [x] Not a git repository. Run 'git init' first.");
-    process.exit(1);
+  const isRepo = await isGitRepo(cwd);
+  let projectRoot = findGitRoot(cwd) ?? cwd;
+  let discoveredWorkspaceRepoCount = 0;
+
+  if (!isRepo) {
+    const workspaceRepos = discoverWorkspaceRepositories(cwd);
+    if (workspaceRepos.length === 0) {
+      console.error("  [x] Not a git repository, and no Git repositories were found one level below.");
+      console.error("      Run 'git init' first, or run this from a workspace parent directory.");
+      process.exit(1);
+    }
+
+    console.log("  Workspace candidate detected.");
+    console.log("  This directory is not a Git repository, but it contains Git repositories:");
+    for (const repo of workspaceRepos) {
+      console.log(`    - ${repo.relativePath}`);
+    }
+    console.log();
+
+    if (!opts.workspace) {
+      if (!process.stdin.isTTY || !process.stdout.isTTY) {
+        console.error("  [x] Refusing to initialize a workspace without confirmation.");
+        console.error("      Re-run with --workspace to confirm this multi-project setup.");
+        process.exit(1);
+      }
+
+      const confirmed = await confirmWorkspaceInit();
+      if (!confirmed) {
+        console.log("  Workspace initialization cancelled.");
+        process.exit(1);
+      }
+    }
+
+    ensureWorkspaceManifest(cwd);
+    projectRoot = cwd;
+    discoveredWorkspaceRepoCount = workspaceRepos.length;
   }
 
-  const config = loadConfig(cwd);
-  const gitRoot = findGitRoot(cwd) ?? cwd;
+  const config = loadConfig(projectRoot);
+  const setupRoot = config.projectRoot;
 
   // --- Step 1: Clean up if --force ---
   if (opts.force) {
@@ -51,9 +94,9 @@ export async function initCommand(opts: {
     for (const adapter of listAdapters()) {
       if (adapter.hookMappings.length === 0) continue;
       try {
-        const result = await adapter.validateInstallation(gitRoot);
+        const result = await adapter.validateInstallation(setupRoot);
         if (result.valid) {
-          await adapter.uninstallHooks(gitRoot);
+          await adapter.uninstallHooks(setupRoot);
           console.log(`    [~] Removed ${adapter.displayName} hooks`);
         }
       } catch {
@@ -74,8 +117,14 @@ export async function initCommand(opts: {
   closeDatabase(db);
   console.log(`  [+] Database: ${config.dbPath}`);
 
+  if (config.projectType === "workspace") {
+    const repoCount = discoveredWorkspaceRepoCount || config.repositories.length;
+    console.log(`  [+] Workspace: ${config.projectId}`);
+    console.log(`  [+] Repositories: ${repoCount}`);
+  }
+
   // Add .adit/ to .gitignore if not already there
-  const gitignorePath = join(gitRoot, ".gitignore");
+  const gitignorePath = join(setupRoot, ".gitignore");
   if (existsSync(gitignorePath)) {
     const content = readFileSync(gitignorePath, "utf-8");
     if (!content.includes(".adit/")) {
@@ -103,7 +152,7 @@ export async function initCommand(opts: {
     const platform = opts.platform as Platform;
     try {
       const adapter = getAdapter(platform);
-      await adapter.installHooks(gitRoot, aditBinaryPath);
+      await adapter.installHooks(setupRoot, aditBinaryPath);
       installed.push(adapter.displayName);
       console.log(`  [+] ${adapter.displayName} — ${adapter.hookMappings.length} hook events installed`);
     } catch (err) {
@@ -112,7 +161,7 @@ export async function initCommand(opts: {
     }
   } else {
     // Auto-detect: install hooks for all detected platforms
-    const platforms = detectPlatforms(gitRoot);
+    const platforms = detectPlatforms(setupRoot);
     if (platforms.length === 0) {
       console.log("  [ ] No AI platforms detected in this project.");
       console.log("      Supported: Claude Code (.claude/), OpenCode (.opencode/)");
@@ -127,7 +176,7 @@ export async function initCommand(opts: {
             console.log(`  [-] ${adapter.displayName} — detected but not yet supported`);
             continue;
           }
-          await adapter.installHooks(gitRoot, aditBinaryPath);
+          await adapter.installHooks(setupRoot, aditBinaryPath);
           installed.push(adapter.displayName);
           console.log(`  [+] ${adapter.displayName} — ${adapter.hookMappings.length} hook events installed`);
         } catch (err) {
@@ -144,7 +193,7 @@ export async function initCommand(opts: {
   console.log("  -----------------");
 
   const docsDir = join(config.dataDir, "docs");
-  const projectName = basename(gitRoot);
+  const projectName = basename(setupRoot);
   const defaultDocTypes: Array<{ file: string; renderer: (title: string) => string }> = [
     { file: "project-overview.md", renderer: renderProjectOverviewTemplate },
     { file: "architecture.md", renderer: renderArchitectureTemplate },
@@ -168,45 +217,18 @@ export async function initCommand(opts: {
     }
   }
 
+  // Always (re)write the AI prompt file. adit owns this copy — it is
+  // refreshed on every init so upgrades propagate; users customize by
+  // copying it (e.g. into their AI tool's skills/commands).
+  const promptsDir = join(config.dataDir, "prompts");
+  mkdirSync(promptsDir, { recursive: true });
+  const promptPath = join(promptsDir, "generate-docs.md");
+  const promptExisted = existsSync(promptPath);
+  writeFileSync(promptPath, renderGenerateDocsPrompt(), "utf-8");
+  console.log(`  [${promptExisted ? "=" : "+"}] ${promptExisted ? "Refreshed" : "Created"} ${GENERATE_DOCS_PROMPT_PATH}`);
+
   if (docsCreated > 0 || docsExisting > 0) {
-    console.log(`\n  ${pc.cyan("Next step:")} Run ${pc.bold("/generate-docs")} in your AI coding tool to auto-fill documents.`);
-  }
-
-  // --- Step 5: Install doc generation skill for detected AI platforms ---
-  console.log();
-  console.log("  AI Skills");
-  console.log("  ---------");
-
-  const skillPlatforms = detectPlatforms(gitRoot);
-  if (skillPlatforms.length === 0 && !opts.platform) {
-    console.log("  [ ] No AI coding tool detected — skill not installed.");
-    console.log("      Skill will be installed when you run init inside an AI tool session.");
-  } else {
-    // Merge explicit platform if specified
-    const allPlatforms = new Set(skillPlatforms);
-    if (opts.platform) allPlatforms.add(opts.platform as Platform);
-
-    for (const platform of allPlatforms) {
-      const target = SKILL_TARGETS[platform as string];
-      if (!target) continue;
-
-      // Check that the platform's config directory exists (e.g. .claude/, .opencode/)
-      const platformDir = join(gitRoot, target.dir.split("/")[0]);
-      if (!existsSync(platformDir) && platform !== opts.platform) continue;
-
-      const targetDir = join(gitRoot, target.dir);
-      mkdirSync(targetDir, { recursive: true });
-      const skillPath = join(targetDir, target.filename);
-
-      if (existsSync(skillPath) && !opts.force) {
-        console.log(`  [=] ${target.label} — skill already installed`);
-        continue;
-      }
-
-      writeFileSync(skillPath, target.content, "utf-8");
-      console.log(`  [+] ${target.label} — installed ${target.filename}`);
-      console.log(`      ${target.usageHint}`);
-    }
+    console.log(`\n  ${pc.cyan("Next step:")} Ask your AI agent to read ${pc.bold(GENERATE_DOCS_PROMPT_PATH)} and follow it to fill the documents.`);
   }
 
   // --- Summary ---
@@ -228,84 +250,18 @@ export async function initCommand(opts: {
   console.log();
 }
 
-/**
- * Per-platform skill installation targets.
- *
- * Each platform has its own directory convention and file format for
- * AI-readable instructions. The core prompt body is shared; only the
- * frontmatter/wrapper differs.
- */
+async function confirmWorkspaceInit(): Promise<boolean> {
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
 
-const DOCS_SKILL_BODY = `
-Analyze the current codebase and generate project documentation following the adit document specification.
-
-## Context
-
-This project uses adit for AI-assisted planning. The planning pipeline needs structured project documents as context. Your job is to analyze the codebase and fill in document templates.
-
-## Steps
-
-1. Check what document templates exist in the \`.adit/docs/\` directory. If none exist, list what's missing and suggest the user run \`adit docs scaffold <type>\` first.
-2. For each template file in \`.adit/docs/\`:
-   a. Read the template to understand which sections need content.
-   b. Analyze the relevant parts of the codebase:
-      - \`package.json\` — dependencies, scripts, project metadata
-      - Directory structure (\`src/\`, \`app/\`, \`lib/\`, etc.) — modules and organization
-      - \`prisma/schema.prisma\` or ORM configs — data models
-      - API route files — endpoints
-      - Config files — tech stack, conventions
-      - Test files — testing patterns
-   c. Fill in each section with specific, accurate content derived from the codebase.
-   d. Remove the HTML comment placeholders (<!-- ... -->) and replace with real content.
-3. Run \`adit docs validate\` to check the quality scores.
-4. If any documents score below 60%, improve the content and re-validate.
-
-## Rules
-
-- Be specific: reference actual file paths, function names, dependencies, and patterns.
-- Do NOT invent content — only document what actually exists in the codebase.
-- Keep each section concise but informative (2-5 sentences minimum per section).
-- Preserve the H2 heading structure exactly — do not rename or remove required sections.
-- All analysis happens locally. No code leaves this machine.
-`;
-
-interface SkillTarget {
-  dir: string;
-  filename: string;
-  label: string;
-  usageHint: string;
-  content: string;
+  try {
+    const answer = await rl.question(
+      "  Initialize this parent directory as an ADIT workspace? Type 'yes' to continue: ",
+    );
+    return answer.trim().toLowerCase() === "yes";
+  } finally {
+    rl.close();
+  }
 }
-
-const SKILL_TARGETS: Record<string, SkillTarget> = {
-  "claude-code": {
-    dir: ".claude/skills",
-    filename: "generate-docs.md",
-    label: "Claude Code",
-    usageHint: "Mention generate-docs or ask to fill project documents",
-    content: `---
-name: generate-docs
-description: Analyze codebase and generate project documentation following adit spec
----${DOCS_SKILL_BODY}`,
-  },
-  opencode: {
-    dir: ".opencode/commands",
-    filename: "generate-docs.md",
-    label: "OpenCode",
-    usageHint: "Run /generate-docs to auto-fill project documents",
-    content: `---
-description: Analyze codebase and generate project documentation following adit spec
----${DOCS_SKILL_BODY}`,
-  },
-  cursor: {
-    dir: ".cursor/rules",
-    filename: "generate-docs.mdc",
-    label: "Cursor",
-    usageHint: "Ask Cursor to fill project documents or mention generate-docs",
-    content: `---
-description: Analyze codebase and generate project documentation following adit spec
-globs:
-alwaysApply: false
----${DOCS_SKILL_BODY}`,
-  },
-};

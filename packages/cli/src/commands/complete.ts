@@ -6,7 +6,6 @@
  * when all tasks are done.
  */
 
-import { loadConfig } from "@varveai/adit-core";
 import {
   loadCloudConfig,
   loadCredentials,
@@ -14,6 +13,7 @@ import {
   bulkTaskUpdateCommand,
   type BulkTaskUpdateOptions,
 } from "@varveai/adit-cloud";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 import {
   CloudAuthError,
   CloudNetworkError,
@@ -30,7 +30,8 @@ export async function completeCliHandler(
     json?: boolean;
   },
 ): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit cloud intent complete");
+  if (!config) return;
 
   // Prerequisite: credentials
   const credentials = loadCredentials();

@@ -25,6 +25,7 @@ import type {
   ValidationResult,
   AditHookType,
 } from "./types.js";
+import { encodeProjectRoot } from "./command.js";
 
 const PLUGIN_FILENAME = "adit.js";
 
@@ -84,7 +85,7 @@ Shows intents (development plans) and tasks from the connected adit-cloud projec
 - \`/adit intent\` — list all intents
 - \`/adit intent --state execution\` — show active intents
 
-> **Tip:** Not logged in? Run \`npx adit cloud login\` in your terminal first.
+> **Tip:** Not logged in? Run \`adit cloud login\` in your terminal first.
 `,
 };
 
@@ -120,7 +121,7 @@ function generateToolsContent(): string {
     '    if (args.skipCommits) flags.push("--skip-commits");',
     '    if (args.dryRun) flags.push("--dry-run");',
     "",
-    '    const cmd = ["npx", "adit", "cloud", "link", ...flags];',
+    '    const cmd = ["adit", "cloud", "link", ...flags];',
     "    const result = await Bun.$`${cmd}`.cwd(context.directory).nothrow().quiet();",
     "    const stdout = result.stdout.toString().trim();",
     "    const stderr = result.stderr.toString().trim();",
@@ -178,7 +179,7 @@ function generateToolsContent(): string {
     '    if (args.id) flags.push("--id", args.id);',
     '    if (args.state) flags.push("--state", args.state);',
     "",
-    '    const cmd = ["npx", "adit", "cloud", "intent", ...flags];',
+    '    const cmd = ["adit", "cloud", "intent", ...flags];',
     "    const result = await Bun.$`${cmd}`.cwd(context.directory).nothrow().quiet();",
     "    const stdout = result.stdout.toString().trim();",
     "    const stderr = result.stderr.toString().trim();",
@@ -265,9 +266,6 @@ const ADIT_TOOLS = {
   filename: "adit.ts",
 };
 
-/** Filenames of old command files to clean up during install */
-const LEGACY_COMMAND_FILES = ["adit-link.md", "adit-intent.md"];
-
 const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "chat.message", aditHandler: "prompt-submit" },
   // OpenCode has no "stop" hook key; session.idle fires when the assistant
@@ -336,12 +334,15 @@ function isAditPlugin(content: string): boolean {
  * The active session ID is tracked via session.created/deleted, and a
  * sessionEndFired flag prevents duplicate session-end calls.
  */
-function generatePluginContent(aditBinaryPath: string): string {
+function generatePluginContent(aditBinaryPath: string, projectRoot?: string): string {
   // Split the binary path into command + args for spawning.
   // e.g. 'node "/path/to/index.js"' → ["node", "/path/to/index.js"]
   const parts = aditBinaryPath.match(/"[^"]*"|\S+/g) ?? [aditBinaryPath];
   const cmd = parts[0];
   const baseArgs = parts.slice(1).map((p) => p.replace(/^"|"$/g, ""));
+  if (projectRoot) {
+    baseArgs.push("--platform", "opencode", "--project-root-b64", encodeProjectRoot(projectRoot));
+  }
 
   return `// @varveai/adit-auto-generated — ADIT plugin for OpenCode
 // Do not edit manually. Reinstall with: adit plugin install opencode
@@ -861,11 +862,11 @@ export const opencodeAdapter: PlatformAdapter = {
     };
   },
 
-  generateHookConfig(aditBinaryPath: string): PlatformHookConfig {
+  generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
     return {
       configPath: `.opencode/plugins/${PLUGIN_FILENAME}`,
       content: {
-        plugin: generatePluginContent(aditBinaryPath),
+        plugin: generatePluginContent(aditBinaryPath, projectRoot),
       },
     };
   },
@@ -890,9 +891,11 @@ export const opencodeAdapter: PlatformAdapter = {
     if (existsSync(pluginPath)) {
       try {
         const content = readFileSync(pluginPath, "utf-8");
-        if (isAditPlugin(content)) {
+        if (isAditPlugin(content) && isFixedRootAditPlugin(content, projectRoot)) {
           pluginOk = true;
           pluginDetail = `ADIT plugin installed at ${pluginPath}`;
+        } else if (isAditPlugin(content)) {
+          pluginDetail = `${pluginPath} is an old ADIT plugin and needs reinstall`;
         } else {
           pluginDetail = `${pluginPath} exists but is not an ADIT plugin`;
         }
@@ -937,7 +940,7 @@ export const opencodeAdapter: PlatformAdapter = {
     mkdirSync(pluginsDir, { recursive: true });
 
     const pluginPath = join(pluginsDir, PLUGIN_FILENAME);
-    const content = generatePluginContent(aditBinaryPath);
+    const content = generatePluginContent(aditBinaryPath, projectRoot);
     writeFileSync(pluginPath, content);
 
     // Install slash command
@@ -949,15 +952,6 @@ export const opencodeAdapter: PlatformAdapter = {
     const toolsDir = join(projectRoot, ".opencode", "tools");
     mkdirSync(toolsDir, { recursive: true });
     writeFileSync(join(toolsDir, ADIT_TOOLS.filename), generateToolsContent());
-
-    // Clean up legacy command files from previous versions
-    for (const legacy of LEGACY_COMMAND_FILES) {
-      try { unlinkSync(join(commandsDir, legacy)); } catch { /* best-effort */ }
-    }
-  },
-
-  getResumeCommand(_projectRoot: string): string | null {
-    return "opencode";
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {
@@ -966,10 +960,7 @@ export const opencodeAdapter: PlatformAdapter = {
       return true;
     }
     if (existsSync(join(projectRoot, ".opencode", "commands", ADIT_COMMAND.filename))) return true;
-    if (existsSync(join(projectRoot, ".opencode", "tools", ADIT_TOOLS.filename))) return true;
-    return LEGACY_COMMAND_FILES.some((legacy) =>
-      existsSync(join(projectRoot, ".opencode", "commands", legacy)),
-    );
+    return existsSync(join(projectRoot, ".opencode", "tools", ADIT_TOOLS.filename));
   },
 
   async uninstallHooks(projectRoot: string): Promise<void> {
@@ -983,10 +974,10 @@ export const opencodeAdapter: PlatformAdapter = {
 
     // Remove custom tools
     try { unlinkSync(join(projectRoot, ".opencode", "tools", ADIT_TOOLS.filename)); } catch { /* best-effort */ }
-
-    // Clean up legacy command files
-    for (const legacy of LEGACY_COMMAND_FILES) {
-      try { unlinkSync(join(commandsDir, legacy)); } catch { /* best-effort */ }
-    }
   },
 };
+
+function isFixedRootAditPlugin(content: string, projectRoot: string): boolean {
+  return content.includes("--project-root-b64") &&
+    content.includes(encodeProjectRoot(projectRoot));
+}

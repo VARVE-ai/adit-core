@@ -21,8 +21,13 @@ export function App(): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const termHeight = stdout?.rows ?? 24;
+  // Keep the frame strictly shorter than the terminal: once a frame fills
+  // every row, ink falls back to clear-screen redraws, which flicker and
+  // push stale frames into the scrollback.
+  const appHeight = Math.max(termHeight - 1, 8);
 
   const [screen, setScreen] = useState<Screen>("timeline");
+  const [searchSubmitted, setSearchSubmitted] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showFilters, setShowFilters] = useState(false);
   const [envSnapshot, setEnvSnapshot] = useState<EnvSnapshot | null>(null);
@@ -80,6 +85,7 @@ export function App(): React.ReactElement {
   }, [getEnvSnapshot]);
 
   const handleSearch = useCallback(() => {
+    setSearchSubmitted(false);
     setScreen("search");
   }, []);
 
@@ -114,6 +120,7 @@ export function App(): React.ReactElement {
 
   const handleSearchSubmit = useCallback(
     (query: string) => {
+      setSearchSubmitted(true);
       setFilters({ ...filters, searchQuery: query });
     },
     [filters, setFilters],
@@ -134,7 +141,9 @@ export function App(): React.ReactElement {
       onBack: handleBack,
       onQuit: handleQuit,
     },
-    screen === "timeline" || screen === "diff" || screen === "env" || screen === "help",
+    // Disabled only while the search input is capturing text; on the
+    // results view global keys (j/k, Esc, q, ...) must stay live.
+    screen !== "search" || searchSubmitted,
   );
 
   // Header
@@ -145,11 +154,11 @@ export function App(): React.ReactElement {
       width="100%"
       paddingX={1}
     >
-      <Text bold color="cyan">
+      <Text bold color="cyan" wrap="truncate">
         ADIT — AI Development Intent Tracker
       </Text>
       {state.session?.id && (
-        <Text dimColor>
+        <Text dimColor wrap="truncate">
           [{state.session.platform}]{" "}
           {state.session.id.substring(0, 10)}
         </Text>
@@ -187,8 +196,8 @@ export function App(): React.ReactElement {
     );
   }
 
-  // Content height = terminal - header (1) - status bar (1) - borders (1)
-  const contentHeight = termHeight - 3;
+  // Content height = frame - header (1) - status bar (1)
+  const contentHeight = appHeight - 2;
 
   let content: React.ReactElement;
 
@@ -198,6 +207,7 @@ export function App(): React.ReactElement {
         <DiffScreen
           event={selectedEvent}
           getDiff={getEventDiff}
+          height={contentHeight}
         />
       );
       break;
@@ -206,8 +216,11 @@ export function App(): React.ReactElement {
       content = (
         <SearchScreen
           onSearch={handleSearchSubmit}
+          onCancel={handleBack}
+          submitted={searchSubmitted}
           events={events}
           selectedIndex={safeIndex}
+          height={contentHeight}
         />
       );
       break;
@@ -255,9 +268,9 @@ export function App(): React.ReactElement {
   }
 
   return (
-    <Box flexDirection="column" width="100%" height={termHeight}>
+    <Box flexDirection="column" width="100%" height={appHeight}>
       {header}
-      <Box flexDirection="column" flexGrow={1}>
+      <Box flexDirection="column" flexGrow={1} overflow="hidden">
         {content}
       </Box>
       <StatusBar

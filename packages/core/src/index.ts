@@ -41,6 +41,7 @@ export {
   getActiveSession,
   getSessionByPlatformSessionId,
   endSession,
+  endStaleSessions,
   listSessions,
   insertEvent,
   insertEventAutoSeq,
@@ -48,15 +49,11 @@ export {
   queryEvents,
   getEventsBySession,
   updateEventStatus,
-  updateEventCheckpoint,
   updateEventLabels,
-  allocateSequence,
   searchEvents,
-  getLatestCheckpointEvent,
-  getLatestCheckpointByBranch,
-  getRecentCheckpointsExcludingBranch,
   clearEvents,
   countEvents,
+  hasGitCommitEvent,
   insertDiff,
   getDiffByEventId,
   getDiffText,
@@ -81,6 +78,8 @@ export {
   markTranscriptUploadFailed,
   resetTranscriptUpload,
   countActiveTranscriptUploads,
+  getSessionRepoHeads,
+  upsertSessionRepoHead,
 } from "./db/index.js";
 
 export type {
@@ -94,6 +93,7 @@ export type {
   TranscriptUpload,
   TranscriptUploadStatus,
   UpsertTranscriptUploadInput,
+  SessionRepoHead,
 } from "./db/index.js";
 
 // Config
@@ -105,19 +105,23 @@ export {
   type AditConfig,
 } from "./config/index.js";
 
-// Security — content-aware secret redaction
 export {
-  shannonEntropy,
-  redactContent,
-  redactObject,
-  shouldSkipField,
-  builtinPatterns,
-  defaultSkipFields,
-  type RedactionResult,
-  type SecretDetection,
-  type RedactionConfig,
-  type SecretPattern,
-} from "./security/content-redaction.js";
+  workspaceManifestRelativePath,
+  computeRepoProjectId,
+  computeLocalRepositoryId,
+  workspaceManifestPath,
+  hasWorkspaceManifest,
+  readWorkspaceManifest,
+  ensureWorkspaceManifest,
+  findWorkspaceRoot,
+  discoverWorkspaceRepositories,
+  createRepoRepository,
+  toRepositoryPayload,
+  type ProjectType,
+  type WorkspaceManifest,
+  type LocalRepository,
+  type LocalProjectDescriptor,
+} from "./config/project.js";
 
 // Performance logging
 export {

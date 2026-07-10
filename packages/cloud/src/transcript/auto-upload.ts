@@ -62,7 +62,15 @@ export async function triggerTranscriptUpload(
   }
 
   try {
-    const client = new CloudClient(serverUrl, credentials);
+    // Budget tuned to the 10s hook hard-kill: 8s leaves room for the
+    // initial full-file upload of a large transcript (an aggressive
+    // timeout here burns failure_count and can permanently fail the
+    // upload after 3 strikes), and retrying a large POST in-process
+    // is pointless — the next hook event retries anyway.
+    const client = new CloudClient(serverUrl, credentials, {
+      timeoutMs: 8_000,
+      maxRetries: 0,
+    });
     await processTranscriptUploads({
       db,
       client,

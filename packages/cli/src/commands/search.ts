@@ -3,12 +3,12 @@
  */
 
 import {
-  loadConfig,
   openDatabase,
   closeDatabase,
   type AditEvent,
   type EventType,
 } from "@varveai/adit-core";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 import { getEventSummary } from "../utils/summary.js";
 import { createTimelineManager } from "@varveai/adit-engine";
 
@@ -22,12 +22,12 @@ export async function searchCommand(
     from?: string;
     to?: string;
     branch?: string;
-    hasCheckpoint?: boolean;
     format?: string;
     json?: boolean;
   },
 ): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit search");
+  if (!config) return;
   const db = openDatabase(config.dbPath);
   const timeline = createTimelineManager(db, config);
 
@@ -50,9 +50,6 @@ export async function searchCommand(
     }
     if (opts.branch) {
       events = events.filter((e) => e.gitBranch === opts.branch);
-    }
-    if (opts.hasCheckpoint) {
-      events = events.filter((e) => e.checkpointSha != null);
     }
 
     events = events.slice(0, opts.limit ?? 20);

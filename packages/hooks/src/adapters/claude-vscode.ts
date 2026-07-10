@@ -31,8 +31,8 @@ export const claudeVscodeAdapter: PlatformAdapter = {
     return input;
   },
 
-  generateHookConfig(aditBinaryPath: string) {
-    return claudeCodeAdapter.generateHookConfig(aditBinaryPath);
+  generateHookConfig(aditBinaryPath: string, projectRoot?: string) {
+    return claudeCodeAdapter.generateHookConfig(aditBinaryPath, projectRoot);
   },
 
   async validateInstallation(projectRoot: string) {
@@ -49,10 +49,5 @@ export const claudeVscodeAdapter: PlatformAdapter = {
 
   async uninstallHooks(projectRoot: string): Promise<void> {
     return claudeCodeAdapter.uninstallHooks(projectRoot);
-  },
-
-  getResumeCommand(_projectRoot: string): string | null {
-    // VS Code extension does not have a command-line resume mechanism
-    return null;
   },
 };

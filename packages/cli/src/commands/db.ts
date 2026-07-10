@@ -5,7 +5,8 @@
  *   clear-events — Delete all events, sessions, diffs, and env snapshots
  */
 
-import { loadConfig, openDatabase, closeDatabase, clearEvents, countEvents } from "@varveai/adit-core";
+import { openDatabase, closeDatabase, clearEvents, countEvents } from "@varveai/adit-core";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 /**
  * `adit db clear-events` — Clear all local events and related data.
@@ -17,7 +18,8 @@ export async function dbClearEventsCommand(opts?: {
   yes?: boolean;
   json?: boolean;
 }): Promise<void> {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit db clear-events");
+  if (!config) return;
 
   const db = openDatabase(config.dbPath);
   try {

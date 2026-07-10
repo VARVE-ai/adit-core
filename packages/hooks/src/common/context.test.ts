@@ -3,7 +3,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -42,9 +42,10 @@ describe("initHookContext", () => {
 
   beforeEach(() => {
     dir = tempDir();
-    dbPath = join(dir, "adit.sqlite");
+    mkdirSync(join(dir, ".adit"), { recursive: true });
+    dbPath = join(dir, ".adit", "adit.sqlite");
     process.env.ADIT_PROJECT_ROOT = dir;
-    process.env.ADIT_DATA_DIR = dir;
+    process.env.ADIT_DATA_DIR = join(dir, ".adit");
     process.env.ADIT_DB_PATH = dbPath;
     process.env.ADIT_CLIENT_ID = clientId;
     db = openDatabase(dbPath);
@@ -52,7 +53,7 @@ describe("initHookContext", () => {
   });
 
   afterEach(() => {
-    closeDatabase(db);
+    if (db) closeDatabase(db);
     delete process.env.ADIT_PROJECT_ROOT;
     delete process.env.ADIT_DATA_DIR;
     delete process.env.ADIT_DB_PATH;
@@ -75,13 +76,18 @@ describe("initHookContext", () => {
     });
 
     const { initHookContext } = await loadContextModule();
-    const ctx = await initHookContext(dir, "codex", "codex-platform-session");
+    const ctx = await initHookContext(
+      dir,
+      "codex",
+      "codex-platform-session",
+      { projectRoot: dir },
+    );
 
-    expect(ctx.session.id).not.toBe("claude-session");
-    expect(ctx.session.platform).toBe("codex");
-    expect(ctx.session.platformSessionId).toBe("codex-platform-session");
+    expect(ctx?.session.id).not.toBe("claude-session");
+    expect(ctx?.session.platform).toBe("codex");
+    expect(ctx?.session.platformSessionId).toBe("codex-platform-session");
 
-    closeDatabase(ctx.db);
+    closeDatabase(ctx!.db);
   });
 
   it("reuses active session only when no platform session id is available", async () => {
@@ -96,10 +102,65 @@ describe("initHookContext", () => {
     });
 
     const { initHookContext } = await loadContextModule();
-    const ctx = await initHookContext(dir, "claude-code");
+    const ctx = await initHookContext(dir, "claude-code", undefined, { projectRoot: dir });
 
-    expect(ctx.session.id).toBe("legacy-session");
+    expect(ctx?.session.id).toBe("legacy-session");
 
-    closeDatabase(ctx.db);
+    closeDatabase(ctx!.db);
+  });
+
+  it("uses fixed project root for config and DB while preserving runtime cwd metadata", async () => {
+    delete process.env.ADIT_PROJECT_ROOT;
+    delete process.env.ADIT_DATA_DIR;
+    delete process.env.ADIT_DB_PATH;
+
+    const workspaceRoot = join(dir, "workspace");
+    const childRepo = join(workspaceRoot, "adit-core");
+    mkdirSync(join(childRepo, ".git"), { recursive: true });
+    mkdirSync(join(workspaceRoot, ".adit"), { recursive: true });
+    const workspaceDbPath = join(workspaceRoot, ".adit", "adit.sqlite");
+    closeDatabase(openDatabase(workspaceDbPath));
+
+    const { initHookContext } = await loadContextModule();
+    const ctx = await initHookContext(
+      childRepo,
+      "codex",
+      "codex-platform-session",
+      { projectRoot: workspaceRoot },
+    );
+
+    expect(ctx?.config.projectRoot).toBe(workspaceRoot);
+    expect(ctx?.config.dbPath).toBe(workspaceDbPath);
+    expect(ctx?.session.metadataJson).toContain(`"workingDirectory":"${childRepo}"`);
+
+    closeDatabase(ctx!.db);
+  });
+
+  it("does not create a database when fixed project root is not initialized", async () => {
+    delete process.env.ADIT_PROJECT_ROOT;
+    delete process.env.ADIT_DATA_DIR;
+    delete process.env.ADIT_DB_PATH;
+
+    const uninitializedRoot = join(dir, "uninitialized");
+    const driftedCwd = join(uninitializedRoot, "child");
+    mkdirSync(driftedCwd, { recursive: true });
+
+    const { initHookContext } = await loadContextModule();
+    const ctx = await initHookContext(
+      driftedCwd,
+      "codex",
+      "codex-platform-session",
+      { projectRoot: uninitializedRoot },
+    );
+
+    expect(ctx).toBeNull();
+    expect(existsSync(join(uninitializedRoot, ".adit"))).toBe(false);
+  });
+
+  it("skips old hook commands without fixed project root", async () => {
+    const { initHookContext } = await loadContextModule();
+    const ctx = await initHookContext(dir, "codex", "codex-platform-session");
+
+    expect(ctx).toBeNull();
   });
 });

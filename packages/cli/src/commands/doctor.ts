@@ -1,31 +1,31 @@
 /**
  * `adit doctor` — Validate ADIT installation health.
  *
- * Checks: git repo, data dir, database, hooks, checkpoint refs,
- * Claude settings, adit-hook binary, schema version, disk space,
- * SQLite integrity, stale sessions, orphaned diffs.
+ * Checks: git repo, data dir, database, hooks, adit-hook binary,
+ * SQLite integrity, stale sessions, and disk usage.
  *
  * `adit doctor --fix` attempts automatic fixes.
  * `adit doctor --json` outputs results as JSON.
  */
 
 import { existsSync, statSync } from "node:fs";
-import { execSync } from "node:child_process";
 import {
-  loadConfig,
   openDatabase,
   closeDatabase,
   queryEvents,
   listSessions,
   endSession,
 } from "@varveai/adit-core";
-import { isGitRepo, listCheckpointRefs, deleteCheckpointRef } from "@varveai/adit-engine";
+import { isGitRepo } from "@varveai/adit-engine";
 import {
   detectPlatform,
+  detectPlatforms,
   getAdapter,
-  listAdapters,
   resolveAditHookBinary,
+  type PlatformAdapter,
 } from "@varveai/adit-hooks/adapters";
+import { checkAditHookBinary } from "./doctor-hooks.js";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 interface Check {
   name: string;
@@ -38,14 +38,19 @@ export async function doctorCommand(
   opts?: { fix?: boolean; json?: boolean },
 ): Promise<void> {
   const checks: Check[] = [];
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit doctor");
+  if (!config) return;
 
   // 1. Git repo
-  const gitOk = await isGitRepo(config.projectRoot);
+  const gitOk = config.projectType === "workspace"
+    ? true
+    : await isGitRepo(config.projectRoot);
   checks.push({
     name: "Git repository",
     ok: gitOk,
-    detail: gitOk ? config.projectRoot : "Not a git repository",
+    detail: config.projectType === "workspace"
+      ? `Workspace project: ${config.projectRoot} (git check skipped)`
+      : gitOk ? config.projectRoot : "Not a git repository",
   });
 
   // 2. Data directory
@@ -89,31 +94,19 @@ export async function doctorCommand(
   }
 
   // 5. adit-hook binary
-  let binaryOk = false;
   const aditHookBinary = resolveAditHookBinary();
-  try {
-    execSync(`${aditHookBinary} --help 2>/dev/null`, { timeout: 5000, stdio: "pipe" });
-    binaryOk = true;
-  } catch {
-    // Try direct binary
-    try {
-      execSync("which adit-hook 2>/dev/null", { timeout: 3000, stdio: "pipe" });
-      binaryOk = true;
-    } catch {
-      // not found
-    }
-  }
+  const binaryCheck = checkAditHookBinary(aditHookBinary);
   checks.push({
     name: "adit-hook binary",
-    ok: binaryOk,
-    detail: binaryOk
-      ? `Available via ${aditHookBinary}`
-      : "Not found. Ensure @varveai/adit-hooks is installed.",
+    ok: binaryCheck.ok,
+    detail: binaryCheck.detail,
   });
 
-  // 6. Hooks — validate via platform adapters
-  //    Check all implemented adapters; report per-platform status.
-  const implementedAdapters = listAdapters().filter((a) => a.hookMappings.length > 0);
+  // 6. Hooks — validate adapters detected in the current project root.
+  const detectedPlatforms = detectPlatforms(config.projectRoot);
+  const implementedAdapters = detectedPlatforms
+    .map((platform) => getAdapter(platform))
+    .filter((a) => a.hookMappings.length > 0);
   let hooksOk = false;
   const hooksDetails: string[] = [];
   const adaptersNeedingFix: typeof implementedAdapters = [];
@@ -122,8 +115,15 @@ export async function doctorCommand(
     const result = await adapter.validateInstallation(config.projectRoot);
     if (result.valid) {
       hooksOk = true;
-      hooksDetails.push(`${adapter.displayName}: OK`);
-    } else if (result.checks.some((c) => c.ok)) {
+      // Advisory checks don't fail validation (reinstall can't fix them),
+      // but the user still needs to see them.
+      const warnings = result.checks
+        .filter((c) => c.advisory && !c.ok)
+        .map((c) => c.detail);
+      hooksDetails.push(
+        `${adapter.displayName}: OK${warnings.length > 0 ? ` — warning: ${warnings.join("; ")}` : ""}`,
+      );
+    } else if (result.checks.some((c) => !c.advisory && c.ok)) {
       // Platform directory exists but hooks incomplete
       hooksDetails.push(`${adapter.displayName}: ${result.checks.filter((c) => !c.ok).map((c) => c.detail).join("; ")}`);
       adaptersNeedingFix.push(adapter);
@@ -133,61 +133,39 @@ export async function doctorCommand(
   if (hooksDetails.length === 0) {
     const detected = detectPlatform();
     const detectedAdapter = getAdapter(detected);
-    hooksDetails.push(`No platform hooks found (detected: ${detectedAdapter.displayName})`);
-    adaptersNeedingFix.push(detectedAdapter);
+    hooksDetails.push(
+      detected === "other"
+        ? "No platform hooks found"
+        : `No platform hooks found (detected: ${detectedAdapter.displayName})`,
+    );
+    if (isImplementedAdapter(detectedAdapter)) {
+      adaptersNeedingFix.push(detectedAdapter);
+    }
   }
 
   checks.push({
     name: "Hooks config",
     ok: hooksOk,
     detail: hooksDetails.join("; "),
-    fixable: !hooksOk,
+    fixable: !hooksOk && adaptersNeedingFix.length > 0,
   });
 
-  // 7. Checkpoint refs integrity
-  let refsOk = true;
-  let refCount = 0;
-  let orphanedRefs = 0;
-  const orphanedRefPaths: string[] = [];
-  try {
-    const refs = await listCheckpointRefs(config.projectRoot);
-    refCount = refs.length;
-
-    if (db && dbOk) {
-      const checkpointEvents = queryEvents(db, { hasCheckpoint: true, limit: 1000 });
-      const eventShas = new Set(checkpointEvents.map((e) => e.checkpointSha));
-
-      for (const ref of refs) {
-        if (!eventShas.has(ref.sha)) {
-          orphanedRefs++;
-          orphanedRefPaths.push(ref.stepId);
-        }
-      }
-    }
-  } catch {
-    refsOk = false;
-  }
-  checks.push({
-    name: "Checkpoint refs",
-    ok: refsOk && orphanedRefs === 0,
-    detail: `${refCount} refs${orphanedRefs > 0 ? `, ${orphanedRefs} orphaned` : ""}`,
-    fixable: orphanedRefs > 0,
-  });
-
-  // 8. Platform hook completeness — detailed per-adapter validation
+  // 7. Platform hook completeness — detailed per-adapter validation
   //    (check #6 above gives a summary; this gives per-check detail)
   const detectedPlatform = detectPlatform();
   const platformAdapter = getAdapter(detectedPlatform);
-  const platformResult = await platformAdapter.validateInstallation(config.projectRoot);
+  if (isImplementedAdapter(platformAdapter)) {
+    const platformResult = await platformAdapter.validateInstallation(config.projectRoot);
 
-  checks.push({
-    name: `${platformAdapter.displayName} settings`,
-    ok: platformResult.valid,
-    detail: platformResult.checks.map((c) => `${c.name}: ${c.detail}`).join("; "),
-    fixable: !platformResult.valid,
-  });
+    checks.push({
+      name: `${platformAdapter.displayName} settings`,
+      ok: platformResult.valid,
+      detail: platformResult.checks.map((c) => `${c.name}: ${c.detail}`).join("; "),
+      fixable: !platformResult.valid,
+    });
+  }
 
-  // 9. Stale sessions
+  // 8. Stale sessions
   let staleCount = 0;
   const staleSessions: string[] = [];
   if (db && dbOk) {
@@ -207,7 +185,7 @@ export async function doctorCommand(
     fixable: staleCount > 0,
   });
 
-  // 10. Disk space
+  // 9. Disk space
   let diskOk = true;
   let diskDetail = "OK";
   try {
@@ -231,18 +209,6 @@ export async function doctorCommand(
   // Attempt fixes if --fix
   if (opts?.fix) {
     const fixes: string[] = [];
-
-    // Fix orphaned refs
-    if (orphanedRefs > 0) {
-      for (const refPath of orphanedRefPaths) {
-        try {
-          await deleteCheckpointRef(config.projectRoot, refPath);
-          fixes.push(`Removed orphaned ref: ${refPath}`);
-        } catch {
-          // ignore
-        }
-      }
-    }
 
     // Fix stale sessions
     if (staleCount > 0 && db) {
@@ -301,4 +267,8 @@ export async function doctorCommand(
       ? "\nAll checks passed."
       : "\nSome checks failed. Run 'adit doctor --fix' to attempt repairs.",
   );
+}
+
+function isImplementedAdapter(adapter: PlatformAdapter): boolean {
+  return adapter.hookMappings.length > 0;
 }

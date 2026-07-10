@@ -8,10 +8,10 @@
  * All errors are caught and swallowed — hooks must never block the AI agent.
  */
 
-import { appendFileSync } from "node:fs";
 import type { Platform } from "@varveai/adit-core";
 import { readStdin } from "./common/context.js";
-import { detectPlatform, detectPlatformFromPayload, getAdapter } from "./adapters/index.js";
+import { debugLog } from "./common/debug-log.js";
+import { getAdapter } from "./adapters/index.js";
 import { parseHookArgs, type HookPlatformArg } from "./adapters/command.js";
 import { dispatchHook } from "./handlers/unified.js";
 
@@ -25,52 +25,36 @@ const hookArgs = parseHookArgs(process.argv.slice(2));
 async function main(): Promise<void> {
   if (!hookArgs.hookType) return;
 
-  const raw = await readStdin();
-  let platform = resolvePlatformArg(hookArgs.platform) ?? detectPlatform();
-  // Fallback: detect platform from the raw payload when env vars are absent.
-  // Cursor (and possibly other tools) may not set env vars in hook child processes.
-  if (platform === "other") {
-    platform = detectPlatformFromPayload(raw) ?? "other";
-  }
+  // Every installed hook command bakes in --platform; without it there is
+  // nothing to dispatch to (fail-open).
+  const platform = resolvePlatformArg(hookArgs.platform);
+  if (!platform) return;
 
-  // Debug: log raw hook data to /tmp/adit-hook-debug.jsonl
-  try {
-    const debugEntry = {
-      timestamp: new Date().toISOString(),
-      argv: process.argv,
-      env: {
-        CODEX: process.env.CODEX,
-        CLAUDE_CODE: process.env.CLAUDE_CODE,
-        CURSOR: process.env.CURSOR,
-        GEMINI: process.env.GEMINI,
-        GEMINI_SESSION_ID: process.env.GEMINI_SESSION_ID,
-        GEMINI_PROJECT_DIR: process.env.GEMINI_PROJECT_DIR,
-      },
-      detectedPlatform: platform,
-      command: hookArgs.hookType,
-      raw,
-    };
-    appendFileSync("/tmp/adit-hook-debug.jsonl", JSON.stringify(debugEntry) + "\n");
-  } catch { /* best-effort */ }
+  const raw = await readStdin();
+
+  // Debug: log raw hook data (only when ADIT_DEBUG is set)
+  debugLog({
+    argv: process.argv,
+    platform,
+    command: hookArgs.hookType,
+    raw,
+  });
 
   const adapter = getAdapter(platform);
   const input = adapter.parseInput(raw, hookArgs.hookType);
 
   // Debug: log parsed input to see what the adapter extracted
-  try {
-    appendFileSync("/tmp/adit-hook-debug.jsonl", JSON.stringify({
-      timestamp: new Date().toISOString(),
-      phase: "parsed",
-      platform,
-      hookType: input.hookType,
-      lastAssistantMessage: input.lastAssistantMessage,
-      stopReason: input.stopReason,
-      transcriptPath: input.transcriptPath,
-      rawKeys: Object.keys(raw),
-    }) + "\n");
-  } catch { /* best-effort */ }
+  debugLog({
+    phase: "parsed",
+    platform,
+    hookType: input.hookType,
+    lastAssistantMessage: input.lastAssistantMessage,
+    stopReason: input.stopReason,
+    transcriptPath: input.transcriptPath,
+    rawKeys: Object.keys(raw),
+  });
 
-  await dispatchHook(input);
+  await dispatchHook(input, { projectRoot: hookArgs.projectRoot });
 }
 
 function resolvePlatformArg(platform: HookPlatformArg | null): Platform | null {
@@ -84,9 +68,15 @@ function resolvePlatformArg(platform: HookPlatformArg | null): Platform | null {
   return platform;
 }
 
-// Fail-open: catch everything, always exit 0.
-// .finally() ensures the process exits immediately even when lingering
-// handles (stdin listeners, network connections, timers) would keep it alive.
+// Fail-open: catch everything, always exit code 0 (Claude Code treats some
+// non-zero hook exit codes as blocking). Prefer a natural exit — calling
+// process.exit() while libuv handles are still closing asserts on Windows.
+// readStdin pauses stdin and unrefs its timer, so the loop normally drains
+// within milliseconds. The short net below catches any unexpected lingering
+// handle without riding the 10s hard net into the platform hook timeout.
 main()
   .catch(() => {})
-  .finally(() => process.exit(0));
+  .finally(() => {
+    process.exitCode = 0;
+    setTimeout(() => process.exit(0), 1_500).unref();
+  });

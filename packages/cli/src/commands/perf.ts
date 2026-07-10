@@ -7,12 +7,12 @@
  */
 
 import {
-  loadConfig,
   readPerfLogs,
   generatePerfStats,
   clearPerfLogs,
   type PerfStatsReport,
 } from "@varveai/adit-core";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 /** Show performance stats report */
 export function perfCommand(opts?: {
@@ -21,7 +21,8 @@ export function perfCommand(opts?: {
   category?: string;
   json?: boolean;
 }): void {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit perf");
+  if (!config) return;
   const entries = readPerfLogs(config.dataDir, opts?.from, opts?.to);
 
   // Filter by category if specified
@@ -41,7 +42,8 @@ export function perfCommand(opts?: {
 
 /** Clear all performance logs */
 export function perfClearCommand(opts?: { json?: boolean }): void {
-  const config = loadConfig();
+  const config = loadInitializedProjectConfig("adit perf");
+  if (!config) return;
   const deleted = clearPerfLogs(config.dataDir);
 
   if (opts?.json) {

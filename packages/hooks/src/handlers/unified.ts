@@ -8,24 +8,63 @@
 import {
   getLatestEnvSnapshot,
   endSession,
+  endStaleSessions,
   withPerf,
+  insertDiff,
+  generateId,
+  type LocalRepository,
 } from "@varveai/adit-core";
 import {
-  getChangedFiles,
   createTimelineManager,
   captureEnvironment,
   diffEnvironments,
+  getCurrentBranch,
+  getHeadSha,
+  type FileChange,
 } from "@varveai/adit-engine";
 import { initHookContext, type HookContext } from "../common/context.js";
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import {
+  assistantTextFromTranscriptEntry,
+  type TranscriptEntryLike,
+} from "../common/transcript-entry.js";
+import {
+  detectAndRecordCommits,
+  initializeSessionRepoBaselines,
+} from "../common/commit-attribution.js";
+import { debugLog } from "../common/debug-log.js";
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type { NormalizedHookInput } from "../adapters/types.js";
+import {
+  extractClaudeMutationsFromTranscript,
+  extractCodexMutationsFromTranscript,
+  extractGeminiMutationsFromTranscript,
+  extractCursorMutationsFromTranscript,
+  buildDiffStat,
+  buildBoundedDiffText,
+  type AgentFileMutation,
+} from "../mutations/index.js";
 
 /**
  * Dispatch a normalized hook input to the appropriate handler.
  * This is the single entry point for all platform hook events.
  */
-export async function dispatchHook(input: NormalizedHookInput): Promise<void> {
-  const ctx = await initHookContext(input.cwd, input.platformCli ?? "other", input.platformSessionId);
+export interface DispatchHookOptions {
+  projectRoot?: string | null;
+}
+
+export async function dispatchHook(
+  input: NormalizedHookInput,
+  options: DispatchHookOptions = {},
+): Promise<void> {
+  const ctx = await initHookContext(
+    input.cwd,
+    input.platformCli ?? "other",
+    input.platformSessionId,
+    { projectRoot: options.projectRoot },
+  );
+  if (!ctx) return;
+
   const dataDir = ctx.config.dataDir;
 
   try {
@@ -72,8 +111,9 @@ export async function dispatchHook(input: NormalizedHookInput): Promise<void> {
     // Auto-sync to cloud on stable hook boundaries (fail-open).
     // Uses dynamic import so @varveai/adit-cloud is not a build-time dependency.
     // The module name is constructed to prevent TypeScript from resolving it.
-    // Force sync only on session-end to flush final data. Other hook events,
-    // including stop/session.idle, use the count/time thresholds in triggerAutoSync.
+    // All stable hook boundaries, including session-end, use the count/time
+    // thresholds in triggerAutoSync. Session-end force sync is temporarily disabled
+    // because some SDK-driven Claude queries emit SessionEnd after each turn.
     // prompt-submit is deliberately skipped so cloud does not receive half a turn
     // containing a user prompt without its assistant response.
     if (shouldTriggerCloudAutoSync(input.hookType)) {
@@ -88,9 +128,10 @@ export async function dispatchHook(input: NormalizedHookInput): Promise<void> {
             ) => Promise<void>;
           };
           // Awaited so db stays open until triggerAutoSync finishes querying and pushing.
-          const force = input.hookType === "session-end";
+          // Temporarily disabled: SessionEnd must not bypass the normal sync threshold.
+          // const force = input.hookType === "session-end";
           await cloudModule.triggerAutoSync(ctx.db, ctx.config.projectId, {
-            ...(force ? { force: true } : {}),
+            // ...(force ? { force: true } : {}),
             projectRoot: ctx.config.projectRoot,
           });
         });
@@ -113,9 +154,8 @@ async function handlePromptSubmitUnified(ctx: HookContext, input: NormalizedHook
 
   const timeline = createTimelineManager(ctx.db, ctx.config);
 
-  // Only record the prompt text. Manual-edit detection (getChangedFiles) is
-  // deferred to handleStopUnified so this blocking UserPromptSubmit hook
-  // stays fast and doesn't run `git status` on every keystroke-enter.
+  // Only record the prompt text. Per-turn file mutation extraction is deferred
+  // to handleStopUnified so this blocking UserPromptSubmit hook stays fast.
   await timeline.recordEvent({
     sessionId: ctx.session.id,
     eventType: "prompt_submit",
@@ -127,13 +167,6 @@ async function handlePromptSubmitUnified(ctx: HookContext, input: NormalizedHook
 /** Handle stop (assistant response complete) */
 async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
   const timeline = createTimelineManager(ctx.db, ctx.config);
-
-  // Use getChangedFiles directly so the result can be reused by captureEnvironment,
-  // avoiding a duplicate `git status` call.
-  const changedFiles = await withPerf(ctx.config.dataDir, "git", "getChangedFiles", () =>
-    getChangedFiles(input.cwd),
-  );
-  const dirty = changedFiles.length > 0;
 
   const recentPrompts = await timeline.list({
     sessionId: ctx.session.id,
@@ -149,24 +182,62 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     ?? await recoverAssistantMessageFromTranscript(input.transcriptPath);
   // Fall back to stop_reason for backward compatibility, then to "completed".
   const responseText = recoveredAssistantMessage ?? input.stopReason ?? "completed";
-  const checkpointLabel = input.stopReason ?? "completed";
 
   // Debug: log response resolution chain to trace why "completed" is recorded
-  try {
-    appendFileSync("/tmp/adit-hook-debug.jsonl", JSON.stringify({
-      timestamp: new Date().toISOString(),
-      phase: "stop-response-resolution",
-      hookType: input.hookType,
-      platformCli: input.platformCli,
-      hasLastAssistantMessage: !!input.lastAssistantMessage,
-      hasTranscriptPath: !!input.transcriptPath,
-      transcriptRecoveryResult: recoveredAssistantMessage ? "found" : "not-found",
-      stopReason: input.stopReason,
-      finalResponseText: responseText,
-      rawPlatformDataKeys: input.rawPlatformData ? Object.keys(input.rawPlatformData) : [],
-      rawPlatformData: input.rawPlatformData,
-    }) + "\n");
-  } catch { /* best-effort */ }
+  debugLog({
+    phase: "stop-response-resolution",
+    hookType: input.hookType,
+    platformCli: input.platformCli,
+    hasLastAssistantMessage: !!input.lastAssistantMessage,
+    hasTranscriptPath: !!input.transcriptPath,
+    transcriptRecoveryResult: recoveredAssistantMessage ? "found" : "not-found",
+    stopReason: input.stopReason,
+    finalResponseText: responseText,
+    rawPlatformDataKeys: input.rawPlatformData ? Object.keys(input.rawPlatformData) : [],
+    rawPlatformData: input.rawPlatformData,
+  });
+
+  // Extract file-edit mutations from the platform transcript.
+  // Replaces the old git working-tree scan + auto-checkpoint flow.
+  let mutations: AgentFileMutation[] = [];
+  let mutationStatJson: string | null = null;
+  const isClaudeFamily =
+    input.platformCli === "claude-code" || input.platformCli === "claude-vscode";
+  if (
+    (isClaudeFamily || input.platformCli === "codex" || input.platformCli === "gemini" || input.platformCli === "cursor") &&
+    input.transcriptPath
+  ) {
+    try {
+      let extracted;
+      if (input.platformCli === "codex") {
+        extracted = extractCodexMutationsFromTranscript(input.transcriptPath);
+      } else if (input.platformCli === "gemini") {
+        extracted = extractGeminiMutationsFromTranscript(input.transcriptPath);
+      } else if (input.platformCli === "cursor") {
+        extracted = extractCursorMutationsFromTranscript(input.transcriptPath);
+      } else {
+        extracted = extractClaudeMutationsFromTranscript(input.transcriptPath, {
+          provider: input.platformCli === "claude-vscode" ? "claude-vscode" : "claude-code",
+        });
+      }
+      if (extracted) {
+        mutations = extracted.mutations;
+        if (mutations.length > 0) {
+          mutationStatJson = JSON.stringify(buildDiffStat(mutations));
+        }
+      }
+    } catch (err) {
+      // Best-effort: hook must not fail due to transcript parse errors
+      debugLog({
+        phase: "mutation-extraction-failed",
+        transcriptPath: input.transcriptPath,
+        error: String(err),
+      });
+    }
+  }
+
+  const changedFiles = changesFromMutations(mutations);
+  const workspaceGitState = await resolveWorkspaceGitState(ctx, input.cwd, changedFiles);
 
   const event = await timeline.recordEvent({
     sessionId: ctx.session.id,
@@ -174,25 +245,54 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     actor: "assistant",
     promptText: lastPrompt,
     responseText,
+    diffStatJson: mutationStatJson,
+    ...(workspaceGitState ? {
+      gitBranch: workspaceGitState.gitBranch,
+      gitHeadSha: workspaceGitState.gitHeadSha,
+    } : {}),
   });
 
-  if (dirty) {
-    await timeline.createCheckpoint(
-      event.id,
-      `[adit] assistant response (${checkpointLabel})`,
-      changedFiles,
-    );
+  // Persist bounded diff_text from mutations (replaces old git checkpoint path)
+  if (mutations.length > 0) {
+    const diffText = buildBoundedDiffText(mutations);
+    if (diffText.length > 0) {
+      try {
+        insertDiff(ctx.db, {
+          id: generateId(),
+          eventId: event.id,
+          diffText,
+        });
+      } catch (err) {
+        // Best-effort; don't fail the hook over a diff write
+        debugLog({
+          phase: "mutation-diff-insert-failed",
+          error: String(err),
+        });
+      }
+    }
   }
+
+  // Attribute commits made during this turn (fail-open inside).
+  await withPerf(ctx.config.dataDir, "git", "commitAttribution", () =>
+    detectAndRecordCommits(ctx, timeline),
+  );
 
   if (ctx.config.captureEnv) {
     try {
       // Get previous snapshot before capturing new one
       const prevSnapshot = getLatestEnvSnapshot(ctx.db, ctx.session.id);
-      // Pass pre-computed changed files to avoid duplicate git status call
+      // Pass per-turn mutation paths when available. Workspace stop hooks must
+      // not scan the whole dirty working tree and accidentally attribute stale
+      // edits to this turn.
       await withPerf(ctx.config.dataDir, "snapshot", "captureEnvironment", () =>
-        captureEnvironment(ctx.db, ctx.config, ctx.session.id, {
-          changedFiles,
-        }),
+        captureEnvironment(
+          ctx.db,
+          ctx.config,
+          ctx.session.id,
+          ctx.config.projectType === "workspace"
+            ? { changedFiles }
+            : undefined,
+        ),
       );
 
       // Detect env drift if we have a previous snapshot
@@ -218,6 +318,109 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
 
 }
 
+interface WorkspaceGitState {
+  gitBranch: string | null;
+  gitHeadSha: string | null;
+}
+
+function changesFromMutations(mutations: AgentFileMutation[]): FileChange[] {
+  const changes: FileChange[] = [];
+  const seen = new Set<string>();
+
+  for (const mutation of mutations) {
+    if (mutation.status !== "completed") continue;
+    const path = mutation.path.trim();
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    changes.push({
+      path,
+      status: mutationKindToFileStatus(mutation.kind),
+    });
+  }
+
+  return changes;
+}
+
+function mutationKindToFileStatus(kind: AgentFileMutation["kind"]): FileChange["status"] {
+  if (kind === "add") return "A";
+  if (kind === "delete") return "D";
+  if (kind === "rename") return "R";
+  return "M";
+}
+
+async function resolveWorkspaceGitState(
+  ctx: HookContext,
+  cwd: string,
+  changedFiles: FileChange[],
+): Promise<WorkspaceGitState | null> {
+  if (ctx.config.projectType !== "workspace") return null;
+  if (changedFiles.length === 0) return { gitBranch: null, gitHeadSha: null };
+
+  const repositories = matchedWorkspaceRepositories(ctx, cwd, changedFiles);
+  if (repositories.length === 0) return { gitBranch: null, gitHeadSha: null };
+
+  const states = await Promise.all(
+    repositories.map(async (repo) => ({
+      branch: await safeGetCurrentBranch(repo.path),
+      headSha: await safeGetHeadSha(repo.path),
+    })),
+  );
+
+  return {
+    gitBranch: joinNullable(states.map((state) => state.branch)),
+    gitHeadSha: joinNullable(states.map((state) => state.headSha)),
+  };
+}
+
+function matchedWorkspaceRepositories(
+  ctx: HookContext,
+  cwd: string,
+  changedFiles: FileChange[],
+): LocalRepository[] {
+  const matched = new Map<string, LocalRepository>();
+
+  for (const change of changedFiles) {
+    const absPath = absoluteMutationPath(cwd, change.path);
+    const repo = ctx.config.repositories.find((candidate) =>
+      isPathInsideOrEqual(absPath, resolve(candidate.path)),
+    );
+    if (repo) matched.set(repo.path, repo);
+  }
+
+  return Array.from(matched.values());
+}
+
+function absoluteMutationPath(cwd: string, path: string): string {
+  const normalized = path.replace(/\\/gu, "/");
+  return resolve(isAbsolute(normalized) ? normalized : join(cwd, normalized));
+}
+
+function isPathInsideOrEqual(path: string, parent: string): boolean {
+  const rel = relative(parent, path);
+  return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function joinNullable(values: Array<string | null>): string | null {
+  const filtered = values.filter((value): value is string => !!value);
+  return filtered.length > 0 ? filtered.join(",") : null;
+}
+
+async function safeGetCurrentBranch(cwd: string): Promise<string | null> {
+  try {
+    return await getCurrentBranch(cwd);
+  } catch {
+    return null;
+  }
+}
+
+async function safeGetHeadSha(cwd: string): Promise<string | null> {
+  try {
+    return await getHeadSha(cwd);
+  } catch {
+    return null;
+  }
+}
+
 function extractLastAssistantTextFromTranscript(transcriptPath: string): string | undefined {
   if (!transcriptPath || !existsSync(transcriptPath)) return undefined;
   try {
@@ -226,18 +429,8 @@ function extractLastAssistantTextFromTranscript(transcriptPath: string): string 
       .filter((l) => l.trim().length > 0);
     for (let i = lines.length - 1; i >= 0; i--) {
       try {
-        const entry = JSON.parse(lines[i]) as {
-          role?: string;
-          message?: { content?: Array<{ type?: string; text?: string }> };
-        };
-        if (entry.role !== "assistant") continue;
-        const content = entry.message?.content;
-        if (!Array.isArray(content)) continue;
-        const text = content
-          .filter((c): c is { type: string; text: string } => c?.type === "text" && typeof c.text === "string")
-          .map((c) => c.text.trim())
-          .filter((t) => t.length > 0)
-          .join("\n");
+        const entry = JSON.parse(lines[i]) as TranscriptEntryLike;
+        const text = assistantTextFromTranscriptEntry(entry);
         if (text) return text;
       } catch {
         // ignore malformed lines
@@ -262,9 +455,31 @@ async function recoverAssistantMessageFromTranscript(transcriptPath?: string): P
   return undefined;
 }
 
+/** How long a session may sit with no events before the lazy sweep closes it */
+const STALE_SESSION_MAX_IDLE_MS = 24 * 60 * 60 * 1000;
+
 /** Handle session start — capture initial env snapshot and record metadata */
 async function handleSessionStart(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
   const timeline = createTimelineManager(ctx.db, ctx.config);
+
+  // Lazily close zombie sessions for this platform. Codex has no SessionEnd
+  // hook event, so its sessions would otherwise stay active forever and
+  // become targets for the sessionless getActiveSession fallback.
+  if (input.platformCli) {
+    try {
+      endStaleSessions(ctx.db, {
+        projectId: ctx.config.projectId,
+        platform: input.platformCli,
+        cutoffIso: new Date(Date.now() - STALE_SESSION_MAX_IDLE_MS).toISOString(),
+        excludeSessionId: ctx.session.id,
+      });
+    } catch {
+      // Fail-open
+    }
+  }
+
+  // Seed per-repo HEAD baselines so first-turn commits are attributable.
+  await initializeSessionRepoBaselines(ctx);
 
   // Record session start event with platform metadata
   const metadata: Record<string, unknown> = {};
@@ -318,6 +533,12 @@ async function handleSessionEnd(ctx: HookContext, input: NormalizedHookInput): P
       // Fail-open
     }
   }
+
+  // Sweep commits from the final turn before the session closes.
+  const timeline = createTimelineManager(ctx.db, ctx.config);
+  await withPerf(ctx.config.dataDir, "git", "commitAttribution", () =>
+    detectAndRecordCommits(ctx, timeline),
+  );
 
   // Mark session as completed with end reason
   const status = input.sessionEndReason === "error" ? "error" : "completed";

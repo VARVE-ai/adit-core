@@ -1,5 +1,8 @@
 /**
  * Event detail panel — shows full details of the selected event.
+ *
+ * Every row renders as a single truncated line: wrapped rows break ink's
+ * frame-height math and leave stale frames stacked on screen.
  */
 
 import React from "react";
@@ -33,6 +36,21 @@ function prettyJson(json: string, maxLen: number): string {
   }
 }
 
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}): React.ReactElement {
+  return (
+    <Text wrap="truncate">
+      <Text dimColor>{label}</Text>
+      {children}
+    </Text>
+  );
+}
+
 export function EventDetail({
   event,
 }: EventDetailProps): React.ReactElement {
@@ -53,103 +71,87 @@ export function EventDetail({
       <Text bold>Event Detail</Text>
       <Text dimColor>{"─".repeat(30)}</Text>
 
-      <Box flexDirection="row">
-        <Text dimColor>ID:{"        "}</Text>
+      <Field label={`ID:${"        "}`}>
         <Text>{event.id}</Text>
-      </Box>
-      <Box flexDirection="row">
-        <Text dimColor>Type:{"      "}</Text>
+      </Field>
+      <Field label={`Type:${"      "}`}>
         <Text>{event.eventType}</Text>
-      </Box>
-      <Box flexDirection="row">
-        <Text dimColor>Actor:{"     "}</Text>
+      </Field>
+      <Field label={`Actor:${"     "}`}>
         <Text>{event.actor}</Text>
-      </Box>
-      <Box flexDirection="row">
-        <Text dimColor>Seq:{"       "}</Text>
+      </Field>
+      <Field label={`Seq:${"       "}`}>
         <Text>{String(event.sequence)}</Text>
-      </Box>
-      <Box flexDirection="row">
-        <Text dimColor>Status:{"    "}</Text>
+      </Field>
+      <Field label={`Status:${"    "}`}>
         <Text color={event.status === "error" ? "red" : "green"}>
           {event.status}
         </Text>
-      </Box>
-      <Box flexDirection="row">
-        <Text dimColor>Started:{"   "}</Text>
+      </Field>
+      <Field label={`Started:${"   "}`}>
         <Text>{event.startedAt}</Text>
-      </Box>
+      </Field>
 
       {event.endedAt && (
-        <Box flexDirection="row">
-          <Text dimColor>Ended:{"     "}</Text>
+        <Field label={`Ended:${"     "}`}>
           <Text>{event.endedAt}</Text>
           <Text dimColor> ({formatDuration(event.startedAt, event.endedAt)})</Text>
-        </Box>
+        </Field>
       )}
 
-      <Box flexDirection="row">
-        <Text dimColor>Session:{"   "}</Text>
+      <Field label={`Session:${"   "}`}>
         <Text>{event.sessionId}</Text>
-      </Box>
+      </Field>
 
       {event.parentEventId && (
-        <Box flexDirection="row">
-          <Text dimColor>Parent:{"    "}</Text>
+        <Field label={`Parent:${"    "}`}>
           <Text>{event.parentEventId}</Text>
-        </Box>
+        </Field>
       )}
 
       {event.clientId && (
-        <Box flexDirection="row">
-          <Text dimColor>Client:{"    "}</Text>
+        <Field label={`Client:${"    "}`}>
           <Text>{event.clientId}</Text>
-        </Box>
+        </Field>
       )}
 
       {event.gitBranch && (
-        <Box flexDirection="row">
-          <Text dimColor>Branch:{"    "}</Text>
+        <Field label={`Branch:${"    "}`}>
           <Text>{event.gitBranch}</Text>
           {event.gitHeadSha && (
             <Text dimColor> @ {event.gitHeadSha.substring(0, 8)}</Text>
           )}
-        </Box>
+        </Field>
       )}
 
       {event.checkpointSha && (
-        <Box flexDirection="row">
-          <Text dimColor>Checkpoint:</Text>
+        <Field label="Checkpoint:">
           <Text color="green"> {event.checkpointSha.substring(0, 10)}</Text>
-        </Box>
+        </Field>
       )}
 
       {event.checkpointRef && (
-        <Box flexDirection="row">
-          <Text dimColor>Ref:{"       "}</Text>
+        <Field label={`Ref:${"       "}`}>
           <Text>{event.checkpointRef}</Text>
-        </Box>
+        </Field>
       )}
 
       {event.envSnapshotId && (
-        <Box flexDirection="row">
-          <Text dimColor>Env Snap:{"  "}</Text>
+        <Field label={`Env Snap:${"  "}`}>
           <Text>{event.envSnapshotId}</Text>
-        </Box>
+        </Field>
       )}
 
       {event.planTaskId && (
-        <Box flexDirection="row">
-          <Text dimColor>Plan Task:{" "}</Text>
+        <Field label={`Plan Task:${" "}`}>
           <Text>{event.planTaskId}</Text>
-        </Box>
+        </Field>
       )}
 
       {event.toolName && (
-        <Box flexDirection="row">
-          <Text dimColor>Tool:{"      "}</Text>
+        <Field label={`Tool:${"      "}`}>
           <Text color="yellow">{event.toolName}</Text>
-        </Box>
+        </Field>
       )}
 
       {event.promptText && (
@@ -197,7 +199,7 @@ export function EventDetail({
         <Box flexDirection="column" marginTop={1}>
           <Text bold dimColor>Files ({stats.length}):</Text>
           {stats.slice(0, 8).map((f) => (
-            <Text key={f.path}>
+            <Text key={f.path} wrap="truncate">
               <Text color={f.status === "A" ? "green" : f.status === "D" ? "red" : "yellow"}>
                 {f.status}
               </Text>
@@ -212,21 +214,23 @@ export function EventDetail({
       )}
 
       {labels.length > 0 && (
-        <Box flexDirection="row" marginTop={1}>
-          <Text dimColor>Labels: </Text>
-          <Text color="cyan">{labels.join(", ")}</Text>
+        <Box marginTop={1}>
+          <Text wrap="truncate">
+            <Text dimColor>Labels: </Text>
+            <Text color="cyan">{labels.join(", ")}</Text>
+          </Text>
         </Box>
       )}
 
       {error && (
         <Box flexDirection="column" marginTop={1}>
-          <Text color="red" bold>Error: {error.category}</Text>
-          <Text color="red">{truncate(error.message, 100)}</Text>
+          <Text color="red" bold wrap="truncate">Error: {error.category}</Text>
+          <Text color="red" wrap="truncate">{truncate(error.message, 100)}</Text>
         </Box>
       )}
 
       <Box marginTop={1}>
-        <Text dimColor>[d]iff [p]rompt [e]nv [r]evert</Text>
+        <Text dimColor>[d]iff [p]rompt [e]nv</Text>
       </Box>
     </Box>
   );

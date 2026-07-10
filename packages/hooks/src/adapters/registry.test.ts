@@ -1,5 +1,9 @@
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import { describe, it, expect } from "vitest";
-import { getAdapter, listAdapters, detectPlatform, detectPlatformFromPayload, registerAdapter } from "./registry.js";
+import { getAdapter, listAdapters, detectPlatform, registerAdapter } from "./registry.js";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { claudeVscodeAdapter } from "./claude-vscode.js";
 import { opencodeAdapter } from "./opencode.js";
@@ -98,11 +102,12 @@ describe("Adapter Registry", () => {
 
 describe("Claude Code Adapter", () => {
   it("has correct hook mappings", () => {
-    expect(claudeCodeAdapter.hookMappings).toHaveLength(8);
+    expect(claudeCodeAdapter.hookMappings).toHaveLength(9);
 
     const mappings = claudeCodeAdapter.hookMappings.map((m) => m.platformEvent);
     expect(mappings).toContain("UserPromptSubmit");
     expect(mappings).toContain("Stop");
+    expect(mappings).toContain("StopFailure");
     expect(mappings).toContain("SessionStart");
     expect(mappings).toContain("SessionEnd");
     expect(mappings).toContain("TaskCompleted");
@@ -115,7 +120,7 @@ describe("Claude Code Adapter", () => {
   it("parseInput normalizes prompt-submit", () => {
     const input = claudeCodeAdapter.parseInput(
       { cwd: "/project", prompt: "hello world" },
-      "UserPromptSubmit",
+      "prompt-submit",
     );
     expect(input.hookType).toBe("prompt-submit");
     expect(input.prompt).toBe("hello world");
@@ -125,7 +130,7 @@ describe("Claude Code Adapter", () => {
   it("parseInput normalizes stop", () => {
     const input = claudeCodeAdapter.parseInput(
       { cwd: "/project", stop_reason: "end_turn" },
-      "Stop",
+      "stop",
     );
     expect(input.hookType).toBe("stop");
     expect(input.stopReason).toBe("end_turn");
@@ -134,7 +139,7 @@ describe("Claude Code Adapter", () => {
   it("parseInput normalizes session-start", () => {
     const input = claudeCodeAdapter.parseInput(
       { cwd: "/project" },
-      "SessionStart",
+      "session-start",
     );
     expect(input.hookType).toBe("session-start");
   });
@@ -149,7 +154,7 @@ describe("Claude Code Adapter", () => {
         teammate_name: "implementer",
         team_name: "my-team",
       },
-      "TaskCompleted",
+      "task-completed",
     );
     expect(input.hookType).toBe("task-completed");
     expect(input.taskId).toBe("task-001");
@@ -167,7 +172,7 @@ describe("Claude Code Adapter", () => {
         title: "Permission needed",
         notification_type: "permission_prompt",
       },
-      "Notification",
+      "notification",
     );
     expect(input.hookType).toBe("notification");
     expect(input.notificationMessage).toBe("Claude needs your permission");
@@ -182,7 +187,7 @@ describe("Claude Code Adapter", () => {
         agent_id: "agent-abc123",
         agent_type: "Explore",
       },
-      "SubagentStart",
+      "subagent-start",
     );
     expect(input.hookType).toBe("subagent-start");
     expect(input.agentId).toBe("agent-abc123");
@@ -198,7 +203,7 @@ describe("Claude Code Adapter", () => {
         agent_transcript_path: "/path/to/transcript.jsonl",
         last_assistant_message: "Analysis complete.",
       },
-      "SubagentStop",
+      "subagent-stop",
     );
     expect(input.hookType).toBe("subagent-stop");
     expect(input.agentId).toBe("agent-def456");
@@ -210,7 +215,7 @@ describe("Claude Code Adapter", () => {
   it("reclassifies task-notification prompt as notification", () => {
     const input = claudeCodeAdapter.parseInput(
       { cwd: "/project", prompt: "<task-notification>Task done</task-notification>" },
-      "UserPromptSubmit",
+      "prompt-submit",
     );
     expect(input.hookType).toBe("notification");
     expect(input.prompt).toBeUndefined();
@@ -399,13 +404,16 @@ describe("OpenCode Adapter", () => {
   });
 
   it("generateHookConfig produces plugin file content", () => {
-    const config = opencodeAdapter.generateHookConfig("npx adit-hook");
+    const config = opencodeAdapter.generateHookConfig("npx adit-hook", "/project");
     expect(config.configPath).toBe(".opencode/plugins/adit.js");
     expect(config.content.plugin).toBeDefined();
 
     const pluginContent = config.content.plugin as string;
     expect(pluginContent).toContain("@varveai/adit-auto-generated");
     expect(pluginContent).toContain("adit-hook");
+    expect(pluginContent).toContain("--platform");
+    expect(pluginContent).toContain("opencode");
+    expect(pluginContent).toContain("--project-root-b64");
     expect(pluginContent).toContain("OPENCODE");
     // Core hooks
     expect(pluginContent).toContain("chat.message");
@@ -454,6 +462,28 @@ describe("OpenCode Adapter", () => {
     expect(result.valid).toBe(false);
     expect(result.checks.some((c) => !c.ok && c.detail.includes("Not found"))).toBe(true);
   });
+
+  it("validateInstallation marks old OpenCode plugin as needing upgrade", async () => {
+    const projectRoot = join(tmpdir(), `adit-opencode-test-${randomBytes(8).toString("hex")}`);
+    try {
+      mkdirSync(join(projectRoot, ".opencode", "plugins"), { recursive: true });
+      mkdirSync(join(projectRoot, ".opencode", "commands"), { recursive: true });
+      mkdirSync(join(projectRoot, ".opencode", "tools"), { recursive: true });
+      writeFileSync(
+        join(projectRoot, ".opencode", "plugins", "adit.js"),
+        "// @varveai/adit-auto-generated\nconst ADIT_BASE_ARGS = [];\n",
+      );
+      writeFileSync(join(projectRoot, ".opencode", "commands", "adit.md"), "");
+      writeFileSync(join(projectRoot, ".opencode", "tools", "adit.ts"), "");
+
+      const result = await opencodeAdapter.validateInstallation(projectRoot);
+
+      expect(result.valid).toBe(false);
+      expect(result.checks.find((c) => c.name === "ADIT plugin")?.ok).toBe(false);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("Claude Code VS Code Adapter", () => {
@@ -470,13 +500,13 @@ describe("Claude Code VS Code Adapter", () => {
 
   it("shares hook mappings with claude-code adapter", () => {
     expect(claudeVscodeAdapter.hookMappings).toBe(claudeCodeAdapter.hookMappings);
-    expect(claudeVscodeAdapter.hookMappings).toHaveLength(8);
+    expect(claudeVscodeAdapter.hookMappings).toHaveLength(9);
   });
 
   it("parseInput overrides platformCli to claude-vscode", () => {
     const input = claudeVscodeAdapter.parseInput(
       { cwd: "/project", prompt: "hello" },
-      "UserPromptSubmit",
+      "prompt-submit",
     );
     expect(input.hookType).toBe("prompt-submit");
     expect(input.platformCli).toBe("claude-vscode");
@@ -491,7 +521,7 @@ describe("Claude Code VS Code Adapter", () => {
         stop_reason: "end_turn",
         last_assistant_message: "Done.",
       },
-      "Stop",
+      "stop",
     );
     expect(input.hookType).toBe("stop");
     expect(input.platformCli).toBe("claude-vscode");
@@ -506,84 +536,4 @@ describe("Claude Code VS Code Adapter", () => {
     expect(vscodeConfig).toEqual(cliConfig);
   });
 
-  it("getResumeCommand returns null", () => {
-    expect(claudeVscodeAdapter.getResumeCommand("/project")).toBeNull();
-  });
-});
-
-describe("detectPlatformFromPayload", () => {
-  it("detects Cursor from cursor_version field", () => {
-    const result = detectPlatformFromPayload({
-      cursor_version: "3.1.15",
-      conversation_id: "abc-123",
-      hook_event_name: "stop",
-      status: "completed",
-    });
-    expect(result).toBe("cursor");
-  });
-
-  it("detects Cursor from Cursor-native hook_event_name (beforeSubmitPrompt)", () => {
-    const result = detectPlatformFromPayload({
-      hook_event_name: "beforeSubmitPrompt",
-      conversation_id: "abc-123",
-      prompt: "hello",
-    });
-    expect(result).toBe("cursor");
-  });
-
-  it("detects Cursor from Cursor-native hook_event_name (stop)", () => {
-    const result = detectPlatformFromPayload({
-      hook_event_name: "stop",
-      status: "completed",
-      conversation_id: "abc-123",
-    });
-    expect(result).toBe("cursor");
-  });
-
-  it("detects Cursor from Cursor-native hook_event_name (sessionStart)", () => {
-    const result = detectPlatformFromPayload({
-      hook_event_name: "sessionStart",
-      session_id: "sess-1",
-    });
-    expect(result).toBe("cursor");
-  });
-
-  it("detects Cursor from Cursor-native hook_event_name (afterAgentResponse)", () => {
-    const result = detectPlatformFromPayload({
-      hook_event_name: "afterAgentResponse",
-      conversation_id: "abc-123",
-      message: "Agent done",
-    });
-    expect(result).toBe("cursor");
-  });
-
-  it("returns null for Claude Code payloads", () => {
-    // Claude Code uses CamelCase hook_event_name values
-    const result = detectPlatformFromPayload({
-      hook_event_name: "UserPromptSubmit",
-      session_id: "sess-1",
-    });
-    expect(result).toBeNull();
-  });
-
-  it("returns null for unrecognized payloads", () => {
-    expect(detectPlatformFromPayload({})).toBeNull();
-    expect(detectPlatformFromPayload({ foo: "bar" })).toBeNull();
-  });
-
-  it("detects Gemini payloads by unique event names", () => {
-    const result = detectPlatformFromPayload({
-      hook_event_name: "AfterAgent",
-      session_id: "sess-1",
-    });
-    expect(result).toBe("gemini");
-  });
-
-  it("detects Gemini payloads with BeforeAgent event", () => {
-    const result = detectPlatformFromPayload({
-      hook_event_name: "BeforeAgent",
-      prompt: "hello",
-    });
-    expect(result).toBe("gemini");
-  });
 });

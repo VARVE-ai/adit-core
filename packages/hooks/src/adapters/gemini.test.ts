@@ -69,7 +69,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "BeforeAgent");
+      const result = geminiAdapter.parseInput(raw, "prompt-submit");
 
       expect(result.hookType).toBe("prompt-submit");
       expect(result.platformCli).toBe("gemini");
@@ -91,7 +91,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "AfterAgent");
+      const result = geminiAdapter.parseInput(raw, "stop");
 
       expect(result.hookType).toBe("stop");
       expect(result.platformSessionId).toBe("session123");
@@ -112,7 +112,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "AfterTool");
+      const result = geminiAdapter.parseInput(raw, "notification");
 
       expect(result.hookType).toBe("notification");
       expect(result.toolName).toBe("readFile");
@@ -132,7 +132,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "Notification");
+      const result = geminiAdapter.parseInput(raw, "notification");
 
       expect(result.hookType).toBe("notification");
       expect(result.notificationType).toBe("info");
@@ -150,7 +150,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "SessionStart");
+      const result = geminiAdapter.parseInput(raw, "session-start");
 
       expect(result.hookType).toBe("session-start");
       expect(result.sessionSource).toBe("startup");
@@ -166,7 +166,7 @@ describe("Gemini CLI Hook Chaining", () => {
         model: "gemini-pro"
       };
 
-      const result = geminiAdapter.parseInput(raw, "SessionEnd");
+      const result = geminiAdapter.parseInput(raw, "session-end");
 
       expect(result.hookType).toBe("session-end");
       expect(result.sessionEndReason).toBe("exit");
@@ -188,15 +188,27 @@ describe("Gemini CLI Hook Chaining", () => {
       expect(config.content.hooks.Notification).toBeDefined();
     });
 
-    it("uses explicit platform argument and timeout 5000", () => {
+    it("limits AfterTool to shell commands via matcher", () => {
       const config = geminiAdapter.generateHookConfig("npx adit-hook");
+      const entry = config.content.hooks.AfterTool[0] as { matcher?: string };
+      expect(entry.matcher).toBe("run_shell_command");
+      // Other events carry no matcher
+      const sessionEntry = config.content.hooks.SessionStart[0] as { matcher?: string };
+      expect(sessionEntry.matcher).toBeUndefined();
+    });
+
+    it("uses explicit platform argument and a 10s millisecond timeout", () => {
+      const config = geminiAdapter.generateHookConfig("npx adit-hook", "/project");
 
       const entry = config.content.hooks.SessionStart[0];
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("--platform gemini");
+      expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("--project-root-b64");
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).not.toContain("GEMINI=1");
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("npx adit-hook");
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("session-start");
-      expect((entry as { hooks: Array<{ command: string }> }).hooks[0].timeout).toBe(5000);
+      // Gemini timeouts are milliseconds — 10000 = 10s, matching the
+      // adit-hook self-kill guard (NOT seconds like other platforms).
+      expect((entry as { hooks: Array<{ command: string }> }).hooks[0].timeout).toBe(10000);
     });
   });
 
@@ -346,17 +358,20 @@ describe("Gemini CLI Hook Chaining", () => {
     expect(settings.permissions).toEqual({ allow: ["read", "write"] });
   });
 
-  it("handles corrupted settings file gracefully", async () => {
+  it("refuses to overwrite a corrupted settings file", async () => {
     const geminiDir = join(projectRoot, ".gemini");
     mkdirSync(geminiDir, { recursive: true });
-    writeFileSync(join(geminiDir, "settings.json"), "{ invalid json }}}");
+    const settingsPath = join(geminiDir, "settings.json");
+    writeFileSync(settingsPath, "{ invalid json }}}");
 
-    // Should not throw — starts fresh
-    await geminiAdapter.installHooks(projectRoot, "npx adit-hook");
+    // Must throw instead of silently rebuilding the file — the corrupt
+    // file may hold the user's own settings.
+    await expect(
+      geminiAdapter.installHooks(projectRoot, "npx adit-hook"),
+    ).rejects.toThrow("invalid JSON");
 
-    const settings = readSettings(projectRoot);
-    const hooks = settings.hooks as Record<string, unknown[]>;
-    expect(hooks.AfterAgent).toBeDefined();
+    // The corrupted file is left untouched for the user to fix.
+    expect(readFileSync(settingsPath, "utf-8")).toBe("{ invalid json }}}");
   });
 
   it("uninstallHooks removes only ADIT entries, preserves others", async () => {
@@ -455,5 +470,35 @@ describe("Gemini CLI Hook Chaining", () => {
     const result = await geminiAdapter.validateInstallation(projectRoot);
     expect(result.valid).toBe(true);
     expect(result.checks.every((c) => c.ok)).toBe(true);
+  });
+
+  it("validateInstallation marks old ADIT hook commands as needing upgrade", async () => {
+    writeSettings(projectRoot, {
+      hooks: {
+        SessionStart: [
+          { hooks: [{ type: "command", command: "GEMINI=1 npx adit-hook session-start" }] },
+        ],
+        BeforeAgent: [
+          { hooks: [{ type: "command", command: "GEMINI=1 npx adit-hook prompt-submit" }] },
+        ],
+        AfterAgent: [
+          { hooks: [{ type: "command", command: "GEMINI=1 npx adit-hook stop" }] },
+        ],
+        SessionEnd: [
+          { hooks: [{ type: "command", command: "GEMINI=1 npx adit-hook session-end" }] },
+        ],
+        AfterTool: [
+          { hooks: [{ type: "command", command: "GEMINI=1 npx adit-hook notification" }] },
+        ],
+        Notification: [
+          { hooks: [{ type: "command", command: "GEMINI=1 npx adit-hook notification" }] },
+        ],
+      },
+    });
+
+    const result = await geminiAdapter.validateInstallation(projectRoot);
+
+    expect(result.valid).toBe(false);
+    expect(result.checks.find((c) => c.name === "Hook configuration")?.ok).toBe(false);
   });
 });

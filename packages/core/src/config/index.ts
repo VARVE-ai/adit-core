@@ -9,9 +9,17 @@ import { resolve, join } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
+import {
+  computeLocalRepositoryId,
+  computeRepoProjectId,
+  discoverWorkspaceRepositories,
+  readWorkspaceManifest,
+  type LocalRepository,
+  type ProjectType,
+} from "./project.js";
 
 export interface AditConfig {
-  /** Project root directory (where .git lives) */
+  /** Project root directory. For workspace projects this is the workspace root. */
   projectRoot: string;
   /** Data directory for ADIT state */
   dataDir: string;
@@ -19,8 +27,12 @@ export interface AditConfig {
   dbPath: string;
   /** Unique client identifier for this machine */
   clientId: string;
-  /** Project identifier (hash of remote + root) */
+  /** Project identifier. For workspace projects this is the workspace ID. */
   projectId: string;
+  /** Local project type */
+  projectType: ProjectType;
+  /** Git repositories that belong to this local project */
+  repositories: LocalRepository[];
   /** Git ref prefix for checkpoints */
   refPrefix: string;
   /** Whether to capture environment snapshots */
@@ -55,10 +67,7 @@ function getClientId(): string {
 
 /** Compute project ID from git remote and project root */
 function computeProjectId(projectRoot: string, remoteUrl?: string): string {
-  const input = remoteUrl
-    ? `${remoteUrl}:${projectRoot}`
-    : projectRoot;
-  return createHash("sha256").update(input).digest("hex").substring(0, 16);
+  return computeRepoProjectId(projectRoot, remoteUrl);
 }
 
 /** Extract the project directory name from a root path, regardless of platform separators. */
@@ -74,7 +83,7 @@ export function projectNameFromRoot(projectRoot: string): string {
 /** Find the git root by walking up from cwd */
 export function findGitRoot(startDir?: string): string | null {
   let dir = resolve(startDir ?? process.cwd());
-  while (dir !== "/") {
+  while (true) {
     if (existsSync(join(dir, ".git"))) {
       return dir;
     }
@@ -113,7 +122,26 @@ export function loadConfig(cwd?: string): AditConfig {
     process.env.ADIT_CLIENT_ID ?? getClientId();
 
   const remoteUrl = process.env.ADIT_REMOTE_URL;
-  const projectId = computeProjectId(projectRoot, remoteUrl);
+  const workspaceManifest = readWorkspaceManifest(projectRoot);
+  const projectType: ProjectType = workspaceManifest ? "workspace" : "repo";
+  const projectId = workspaceManifest?.workspaceId ?? computeProjectId(projectRoot, remoteUrl);
+  const repositories: LocalRepository[] = workspaceManifest
+    ? discoverWorkspaceRepositories(projectRoot).map((repo) => ({
+        localRepositoryId: computeLocalRepositoryId(projectId, repo.relativePath),
+        relativePath: repo.relativePath,
+        displayName: repo.displayName,
+        repositoryUrl: null,
+        canonicalRepoKey: null,
+        path: repo.path,
+      }))
+    : [{
+        localRepositoryId: projectId,
+        relativePath: ".",
+        displayName: projectNameFromRoot(projectRoot),
+        repositoryUrl: remoteUrl ?? null,
+        canonicalRepoKey: null,
+        path: projectRoot,
+      }];
 
   // Load file-based settings (lowest priority — env vars override)
   const fileSettings = loadSettingsFile(projectRoot);
@@ -124,6 +152,8 @@ export function loadConfig(cwd?: string): AditConfig {
     dbPath,
     clientId,
     projectId,
+    projectType,
+    repositories,
     refPrefix: "refs/adit/checkpoints",
     captureEnv: process.env.ADIT_CAPTURE_ENV !== undefined
       ? process.env.ADIT_CAPTURE_ENV !== "false"

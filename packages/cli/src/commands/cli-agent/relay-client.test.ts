@@ -105,4 +105,70 @@ describe("CliAgentRelayWebSocket", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+
+  it("keeps the active connection when a stale socket closes late", async () => {
+    const server = new WebSocketServer({ port: 0 });
+    const port = await waitForListening(server);
+    const serverSockets: WebSocket[] = [];
+
+    server.on("connection", (socket) => {
+      const index = serverSockets.length;
+      serverSockets.push(socket);
+      socket.once("message", () => {
+        socket.send(
+          JSON.stringify({
+            type: "hello.ok",
+            connection: { id: `connection-${index + 1}` },
+            panel: { id: `panel-${index + 1}`, name: "test-coding2" },
+          }),
+        );
+      });
+    });
+
+    process.env.ADIT_CLI_AGENT_WS_URL = `ws://127.0.0.1:${port}/ws/coding/cli-agent`;
+    const relay = new CliAgentRelayWebSocket({
+      serverUrl: "http://cloud.test",
+      accessToken: async () => "access-token",
+      register: {
+        provider: "codex",
+        terminalId: "terminal-1",
+        projectRoot: "/tmp/test-coding2",
+        projectId: "project-1",
+        projectName: "test-coding2",
+      },
+      onHello: () => {},
+      onCommand: () => {},
+    });
+
+    try {
+      relay.connect();
+      await waitFor(() => relay.currentConnectionId === "connection-1");
+
+      // Simulate a socket stuck in the closing handshake: the relay loop keeps
+      // calling connect() while disconnected, which dials a replacement socket.
+      const staleSocket = (relay as unknown as { socket: WebSocket | null }).socket;
+      expect(staleSocket).not.toBeNull();
+      Object.defineProperty(staleSocket!, "readyState", {
+        value: staleSocket!.CLOSING,
+        configurable: true,
+      });
+      relay.connect();
+      await waitFor(() => relay.currentConnectionId === "connection-2");
+      delete (staleSocket as unknown as Record<string, unknown>).readyState;
+
+      // The stale socket's late close event must not clobber the new connection.
+      const staleClosed = new Promise<void>((resolve) => {
+        staleSocket!.once("close", () => resolve());
+      });
+      serverSockets[0]?.close();
+      await staleClosed;
+
+      expect(relay.currentConnectionId).toBe("connection-2");
+      expect(relay.isOpen).toBe(true);
+    } finally {
+      relay.close();
+      for (const socket of serverSockets) socket.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 });
