@@ -442,7 +442,7 @@ describe("dispatchHook", () => {
     );
   });
 
-  it("force-syncs on session-end before closing the database", async () => {
+  it("applies normal auto-sync thresholds on session-end", async () => {
     const input: NormalizedHookInput = {
       cwd: "/test",
       hookType: "session-end",
@@ -454,7 +454,7 @@ describe("dispatchHook", () => {
     expect(mockTriggerAutoSync).toHaveBeenCalledWith(
       expect.anything(),
       "proj-001",
-      { force: true, projectRoot: "/test" },
+      { projectRoot: "/test" },
     );
   });
 

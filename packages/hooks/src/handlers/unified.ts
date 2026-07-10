@@ -111,8 +111,9 @@ export async function dispatchHook(
     // Auto-sync to cloud on stable hook boundaries (fail-open).
     // Uses dynamic import so @varveai/adit-cloud is not a build-time dependency.
     // The module name is constructed to prevent TypeScript from resolving it.
-    // Force sync only on session-end to flush final data. Other hook events,
-    // including stop/session.idle, use the count/time thresholds in triggerAutoSync.
+    // All stable hook boundaries, including session-end, use the count/time
+    // thresholds in triggerAutoSync. Session-end force sync is temporarily disabled
+    // because some SDK-driven Claude queries emit SessionEnd after each turn.
     // prompt-submit is deliberately skipped so cloud does not receive half a turn
     // containing a user prompt without its assistant response.
     if (shouldTriggerCloudAutoSync(input.hookType)) {
@@ -127,9 +128,10 @@ export async function dispatchHook(
             ) => Promise<void>;
           };
           // Awaited so db stays open until triggerAutoSync finishes querying and pushing.
-          const force = input.hookType === "session-end";
+          // Temporarily disabled: SessionEnd must not bypass the normal sync threshold.
+          // const force = input.hookType === "session-end";
           await cloudModule.triggerAutoSync(ctx.db, ctx.config.projectId, {
-            ...(force ? { force: true } : {}),
+            // ...(force ? { force: true } : {}),
             projectRoot: ctx.config.projectRoot,
           });
         });
