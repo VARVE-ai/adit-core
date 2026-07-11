@@ -67,3 +67,51 @@ jobs:
             sqlite: version,
           });
           NODE
+
+  windows-x64:
+    name: Windows x64 / Node ${{ matrix.node }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24, 25, 26]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      - name: Verify x64 runner
+        run: node -e "if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error(process.platform + '-' + process.arch)"
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and pack core
+        shell: pwsh
+        run: |
+          pnpm --filter @varveai/adit-core build
+          $packDir = Join-Path $env:RUNNER_TEMP "adit-pack"
+          New-Item -ItemType Directory -Force -Path $packDir | Out-Null
+          pnpm --dir packages/core pack --pack-destination $packDir
+
+      - name: Install packed core and load SQLite
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP "adit-install"
+          $tarball = Join-Path $env:RUNNER_TEMP "adit-pack/varveai-adit-core-0.0.0.tgz"
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+          Set-Location $installDir
+          npm init --yes
+          npm install --no-audit --no-fund $tarball
+          node -e "const Database = require('better-sqlite3'); const database = new Database(':memory:'); const { version } = database.prepare('select sqlite_version() as version').get(); database.close(); console.log({ node: process.versions.node, abi: process.versions.modules, platform: process.platform, arch: process.arch, sqlite: version });"
