@@ -46,7 +46,7 @@ jobs:
         run: |
           pnpm --filter @varveai/adit-core build
           mkdir -p "$RUNNER_TEMP/adit-pack"
-          pnpm --filter @varveai/adit-core pack --pack-destination "$RUNNER_TEMP/adit-pack"
+          pnpm --dir packages/core pack --pack-destination "$RUNNER_TEMP/adit-pack"
 
       - name: Install packed core and load SQLite
         run: |
