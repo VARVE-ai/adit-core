@@ -31,10 +31,14 @@ describe("native install preflight", () => {
     });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("Native dependency preflight failed");
+    expect(result.stderr).toContain("Installation stopped: no compatible SQLite binary");
+    expect(result.stderr).toContain("Your project is fine");
+    expect(result.stderr).toContain("Fastest fix (recommended)");
+    expect(result.stderr).toContain("Node.js 22, 24, 25, or 26");
     expect(result.stderr).toContain("better-sqlite3@12.10.0");
-    expect(result.stderr).toContain("Node ABI 115");
-    expect(result.stderr).toContain("ADIT_ALLOW_NATIVE_BUILD=1");
+    expect(result.stderr).toContain("Node.js 20 | win32-x64 | ABI 115");
+    expect(result.stderr).toContain("$env:ADIT_ALLOW_NATIVE_BUILD=\"1\"");
+    expect(result.stderr).toContain("does not make an incompatible native dependency work");
   });
 
   it("allows users to explicitly continue with a native build", () => {
