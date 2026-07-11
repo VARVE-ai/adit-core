@@ -12,10 +12,10 @@ const scriptPath = resolve(testDir, "../../scripts/check-native-install.js");
 describe("native install preflight", () => {
   it("stays quiet when a known better-sqlite3 prebuild exists", () => {
     const result = runCheck({
-      ADIT_NATIVE_CHECK_BETTER_SQLITE3_VERSION: "12.6.2",
-      ADIT_NATIVE_CHECK_PLATFORM: "win32",
-      ADIT_NATIVE_CHECK_ARCH: "x64",
-      ADIT_NATIVE_CHECK_MODULES: "115",
+      ADIT_NATIVE_CHECK_BETTER_SQLITE3_VERSION: "12.10.0",
+      ADIT_NATIVE_CHECK_PLATFORM: "darwin",
+      ADIT_NATIVE_CHECK_ARCH: "arm64",
+      ADIT_NATIVE_CHECK_MODULES: "147",
     });
 
     expect(result.status).toBe(0);
