@@ -88,6 +88,10 @@ adit hook list
 
 ### npm
 
+ADIT installs without native build tools on Node.js 22, 24, 25, and 26.
+Node.js 20 and 23 require a local native build toolchain; switching to one of
+the prebuilt-supported versions is recommended for the simplest installation.
+
 ```bash
 npm install -g @varveai/adit-cli
 adit --help
