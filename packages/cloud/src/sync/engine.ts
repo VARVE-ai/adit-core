@@ -10,7 +10,12 @@
  */
 
 import type Database from "better-sqlite3";
-import { getSyncState, upsertSyncState, withPerf } from "@varveai/adit-core";
+import {
+  applyAuthoritativeSyncState,
+  getSyncState,
+  upsertSyncState,
+  withPerf,
+} from "@varveai/adit-core";
 import type { ProjectType, SyncState } from "@varveai/adit-core";
 import type { CloudClient } from "../http/client.js";
 import { buildSyncBatch, batchRecordCount, countUnsyncedRecords } from "./serializer.js";
@@ -45,8 +50,11 @@ interface PushResponse {
   accepted: number;
   duplicates: number;
   conflicts: SyncConflict[];
-  newSyncCursor: string;
+  /** Legacy global cursor. Only used with servers that lack project cursors. */
+  newSyncCursor: string | null;
   newSyncVersion: number;
+  /** Authoritative cursor for the project included in this push. */
+  projectCursor?: ProjectCursor | null;
 }
 
 /** Per-project cursor entry returned by the server in projectCursors. */
@@ -145,6 +153,9 @@ export class SyncEngine {
       const projectEntry = serverStatus.projectCursor ?? serverStatus.projectCursors?.[this.projectId];
       const supportsProjectCursors =
         serverStatus.projectCursor !== undefined || serverStatus.projectCursors !== undefined;
+      const persistSyncState = supportsProjectCursors
+        ? applyAuthoritativeSyncState
+        : upsertSyncState;
       const isNewProject =
         supportsProjectCursors && (projectEntry === undefined || projectEntry.serverProjectId === null);
       if (projectEntry !== undefined) {
@@ -205,7 +216,7 @@ export class SyncEngine {
         totalRecords: 0,
       };
 
-      upsertSyncState(this.db, {
+      persistSyncState(this.db, {
         serverUrl: this.serverUrl,
         clientId: this.cloudClientId,
         lastSyncedEventId: cursor,
@@ -253,15 +264,26 @@ export class SyncEngine {
           handleConflicts(response.conflicts);
         }
 
-        // Update cursor
+        // Updated servers return the authoritative cursor for this project.
+        // The top-level newSyncCursor is global and is only safe for legacy
+        // servers that do not support project cursors.
         const prevCursor = cursor;
-        cursor = response.newSyncCursor;
+        if (supportsProjectCursors) {
+          if (response.projectCursor === undefined) {
+            throw new Error(
+              "Cloud server supports project cursors but omitted projectCursor from sync response",
+            );
+          }
+          cursor = response.projectCursor?.lastSyncedEventId ?? null;
+        } else {
+          cursor = response.newSyncCursor;
+        }
         syncVersion = response.newSyncVersion;
         result.newSyncCursor = cursor;
 
         // Persist progress after each batch (crash-safe), including the
         // duplicate-only path below so local threshold checks use server truth.
-        upsertSyncState(this.db, {
+        persistSyncState(this.db, {
           serverUrl: this.serverUrl,
           clientId: this.cloudClientId,
           lastSyncedEventId: cursor,

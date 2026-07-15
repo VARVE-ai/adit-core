@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("@varveai/adit-core", () => ({
+  applyAuthoritativeSyncState: vi.fn(),
   getSyncState: vi.fn(() => null),
   upsertSyncState: vi.fn(),
   withPerf: vi.fn((_dir: string, _cat: string, _op: string, fn: () => unknown) => fn()),
@@ -24,12 +25,16 @@ vi.mock("./conflicts.js", () => ({
 }));
 
 import { SyncEngine } from "./engine.js";
-import { upsertSyncState } from "@varveai/adit-core";
+import {
+  applyAuthoritativeSyncState,
+  upsertSyncState,
+} from "@varveai/adit-core";
 import { buildSyncBatch, batchRecordCount, countUnsyncedRecords } from "./serializer.js";
 
 const mockBuildSyncBatch = vi.mocked(buildSyncBatch);
 const mockBatchRecordCount = vi.mocked(batchRecordCount);
 const mockCountUnsyncedRecords = vi.mocked(countUnsyncedRecords);
+const mockApplyAuthoritativeSyncState = vi.mocked(applyAuthoritativeSyncState);
 const mockUpsertSyncState = vi.mocked(upsertSyncState);
 
 function createEngine(
@@ -60,6 +65,10 @@ function createEngine(
       conflicts: [],
       newSyncCursor: "cursor-1",
       newSyncVersion: 1,
+      projectCursor: {
+        lastSyncedEventId: "cursor-1",
+        lastSyncedAt: "2025-01-01T00:00:00Z",
+      },
     }),
   };
 
@@ -112,6 +121,10 @@ describe("SyncEngine", () => {
       conflicts: [],
       newSyncCursor: "cursor-after-10",
       newSyncVersion: 1,
+      projectCursor: {
+        lastSyncedEventId: "cursor-after-10",
+        lastSyncedAt: "2025-01-01T00:00:00Z",
+      },
     });
 
     const result = await engine.sync();
@@ -119,7 +132,7 @@ describe("SyncEngine", () => {
     expect(result.batches).toBe(1);
     expect(result.totalRecords).toBe(10);
     expect(result.accepted).toBe(10);
-    expect(mockUpsertSyncState).toHaveBeenCalledWith(
+    expect(mockApplyAuthoritativeSyncState).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
         lastSyncedEventId: "cursor-after-10",
@@ -144,6 +157,10 @@ describe("SyncEngine", () => {
         conflicts: [],
         newSyncCursor: "cursor-100",
         newSyncVersion: 1,
+        projectCursor: {
+          lastSyncedEventId: "cursor-100",
+          lastSyncedAt: "2025-01-01T00:00:00Z",
+        },
       })
       .mockResolvedValueOnce({
         accepted: 50,
@@ -151,6 +168,10 @@ describe("SyncEngine", () => {
         conflicts: [],
         newSyncCursor: "cursor-150",
         newSyncVersion: 2,
+        projectCursor: {
+          lastSyncedEventId: "cursor-150",
+          lastSyncedAt: "2025-01-01T00:00:00Z",
+        },
       });
 
     const result = await engine.sync();
@@ -172,6 +193,10 @@ describe("SyncEngine", () => {
       conflicts: [],
       newSyncCursor: null, // cursor unchanged (was null, still null)
       newSyncVersion: 0,
+      projectCursor: {
+        lastSyncedEventId: null,
+        lastSyncedAt: null,
+      },
     });
 
     const result = await engine.sync();
@@ -196,6 +221,10 @@ describe("SyncEngine", () => {
       conflicts: [],
       newSyncCursor: "cursor-advanced",
       newSyncVersion: 1,
+      projectCursor: {
+        lastSyncedEventId: "cursor-advanced",
+        lastSyncedAt: "2025-01-01T00:00:00Z",
+      },
     });
 
     const result = await engine.sync();
@@ -222,6 +251,10 @@ describe("SyncEngine", () => {
         conflicts: [{ type: "event", id: "evt-001", resolution: "server_wins" }],
         newSyncCursor: "cursor-100",
         newSyncVersion: 1,
+        projectCursor: {
+          lastSyncedEventId: "cursor-100",
+          lastSyncedAt: "2025-01-01T00:00:00Z",
+        },
       })
       .mockResolvedValueOnce({
         accepted: 49,
@@ -229,6 +262,10 @@ describe("SyncEngine", () => {
         conflicts: [{ type: "session", id: "sess-001", resolution: "server_wins" }],
         newSyncCursor: "cursor-150",
         newSyncVersion: 2,
+        projectCursor: {
+          lastSyncedEventId: "cursor-150",
+          lastSyncedAt: "2025-01-01T00:00:00Z",
+        },
       });
 
     const result = await engine.sync();
@@ -250,6 +287,10 @@ describe("SyncEngine", () => {
       conflicts: [],
       newSyncCursor: "cursor-1",
       newSyncVersion: 1,
+      projectCursor: {
+        lastSyncedEventId: "cursor-1",
+        lastSyncedAt: "2025-01-01T00:00:00Z",
+      },
     });
 
     await engine.sync();
@@ -304,6 +345,10 @@ describe("SyncEngine", () => {
       conflicts: [],
       newSyncCursor: "cursor-1",
       newSyncVersion: 1,
+      projectCursor: {
+        lastSyncedEventId: "cursor-1",
+        lastSyncedAt: "2025-01-01T00:00:00Z",
+      },
     });
 
     await workspaceEngine.sync();
@@ -348,6 +393,10 @@ describe("SyncEngine", () => {
         conflicts: [],
         newSyncCursor: "project-cursor-47",
         newSyncVersion: 6,
+        projectCursor: {
+          lastSyncedEventId: "project-cursor-47",
+          lastSyncedAt: "2025-01-02T00:05:00Z",
+        },
       });
 
       const result = await engine.sync();
@@ -364,6 +413,8 @@ describe("SyncEngine", () => {
         "client-001",
         500,
       );
+      expect(mockApplyAuthoritativeSyncState).toHaveBeenCalled();
+      expect(mockUpsertSyncState).not.toHaveBeenCalled();
     });
 
     it("does full push when projectCursors exists but project has no entry", async () => {
@@ -395,6 +446,10 @@ describe("SyncEngine", () => {
         conflicts: [],
         newSyncCursor: "new-cursor",
         newSyncVersion: 6,
+        projectCursor: {
+          lastSyncedEventId: "new-cursor",
+          lastSyncedAt: "2025-01-02T00:05:00Z",
+        },
       });
 
       const result = await engine.sync();
@@ -443,6 +498,10 @@ describe("SyncEngine", () => {
         conflicts: [],
         newSyncCursor: "new-cursor",
         newSyncVersion: 6,
+        projectCursor: {
+          lastSyncedEventId: "new-cursor",
+          lastSyncedAt: "2025-01-02T00:05:00Z",
+        },
       });
 
       await engine.sync();
@@ -489,6 +548,47 @@ describe("SyncEngine", () => {
         "proj-001",
         "client-001",
         500,
+      );
+      expect(mockUpsertSyncState).toHaveBeenCalled();
+      expect(mockApplyAuthoritativeSyncState).not.toHaveBeenCalled();
+    });
+
+    it("persists the project cursor instead of the global push cursor", async () => {
+      const { engine, mockClient } = createEngine({ batchSize: 500 });
+      mockClient.get.mockResolvedValue({
+        lastSyncedEventId: "evt-debug-1783148414696-6",
+        syncVersion: 2167,
+        lastSyncedAt: "2026-07-13T08:52:27.222Z",
+        projectCursor: {
+          localProjectId: "proj-001",
+          serverProjectId: "server-project-001",
+          lastSyncedEventId: "01KXDAPNWZJZN7YWFZ3CWCGF35",
+          lastSyncedAt: "2026-07-13T08:52:27.222Z",
+        },
+      });
+      mockBuildSyncBatch.mockReturnValue({ batch: { events: [{}], sessions: [] }, diffByteCapApplied: false } as never);
+      mockBatchRecordCount.mockReturnValue(3);
+      mockClient.post.mockResolvedValue({
+        accepted: 3,
+        duplicates: 0,
+        conflicts: [],
+        newSyncCursor: "evt-debug-1783148414696-6",
+        newSyncVersion: 2168,
+        projectCursor: {
+          lastSyncedEventId: "01KXDAX3F9ZNGCF1F80QX0JYQE",
+          lastSyncedAt: "2026-07-13T08:56:04.752Z",
+        },
+      });
+
+      const result = await engine.sync();
+
+      expect(result.newSyncCursor).toBe("01KXDAX3F9ZNGCF1F80QX0JYQE");
+      expect(mockApplyAuthoritativeSyncState).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          lastSyncedEventId: "01KXDAX3F9ZNGCF1F80QX0JYQE",
+          syncVersion: 2168,
+        }),
       );
     });
 

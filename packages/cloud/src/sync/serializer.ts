@@ -332,7 +332,7 @@ export function countUnsyncedRecords(
     let sql = `SELECT COUNT(*) as cnt FROM sessions WHERE project_id = ? AND (id > ?`;
     params.push(afterEventId);
     if (lastSyncedAt) {
-      sql += ` OR ended_at > ?`;
+      sql += ` OR julianday(ended_at) > julianday(?)`;
       params.push(lastSyncedAt);
     }
     sql += `)`;
@@ -378,7 +378,7 @@ function querySessions(
     const conditions = ["project_id = ?", "(id > ?"];
     params.push(projectId, afterId);
     if (lastSyncedAt) {
-      conditions[1] += " OR ended_at > ?";
+      conditions[1] += " OR julianday(ended_at) > julianday(?)";
       params.push(lastSyncedAt);
     }
     conditions[1] += ")";
@@ -536,7 +536,7 @@ function queryPlans(
     const conditions = ["project_id = ?", "(id > ?"];
     params.push(projectId, afterId);
     if (lastSyncedAt) {
-      conditions[1] += " OR updated_at > ?";
+      conditions[1] += " OR julianday(updated_at) > julianday(?)";
       params.push(lastSyncedAt);
     }
     conditions[1] += ")";

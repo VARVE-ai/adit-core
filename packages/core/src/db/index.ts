@@ -56,6 +56,7 @@ export {
 export {
   getSyncState,
   upsertSyncState,
+  applyAuthoritativeSyncState,
   clearSyncState,
   type SyncState,
 } from "./sync-state.js";

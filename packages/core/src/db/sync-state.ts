@@ -73,6 +73,32 @@ export function upsertSyncState(
   );
 }
 
+/** Apply the server's authoritative per-project cursor, including resets. */
+export function applyAuthoritativeSyncState(
+  db: Database.Database,
+  state: SyncState,
+): void {
+  db.prepare(
+    `INSERT INTO sync_state (server_url, client_id, last_synced_event_id, last_synced_at, sync_version)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT (server_url) DO UPDATE SET
+       client_id = excluded.client_id,
+       last_synced_event_id = excluded.last_synced_event_id,
+       last_synced_at = excluded.last_synced_at,
+       sync_version = CASE
+         WHEN excluded.sync_version > sync_state.sync_version
+         THEN excluded.sync_version
+         ELSE sync_state.sync_version
+       END`,
+  ).run(
+    state.serverUrl,
+    state.clientId,
+    state.lastSyncedEventId,
+    state.lastSyncedAt,
+    state.syncVersion,
+  );
+}
+
 /** Remove sync state for a server (on logout) */
 export function clearSyncState(
   db: Database.Database,

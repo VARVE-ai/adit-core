@@ -69,6 +69,7 @@ export {
   listEnvSnapshots,
   getSyncState,
   upsertSyncState,
+  applyAuthoritativeSyncState,
   clearSyncState,
   upsertTranscriptUpload,
   getTranscriptUpload,
