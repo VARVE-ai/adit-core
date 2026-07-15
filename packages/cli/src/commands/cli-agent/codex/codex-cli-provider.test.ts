@@ -1901,3 +1901,175 @@ describe("CodexCliProvider thread isolation", () => {
     provider.stop();
   });
 });
+
+describe("CodexCliProvider app-server errors", () => {
+  const thread = "019e2110-d96f-7e40-882e-b524fa9148e4";
+
+  function errorEvents(
+    events: Array<{ type: string; payload: Record<string, unknown> }>,
+  ): Array<Record<string, unknown>> {
+    return events.filter((event) => event.type === "error").map((event) => event.payload);
+  }
+
+  it("reads flat and nested error notification text and stamps the session id", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    await provider.takeover();
+    mocks.appServerOptions?.onNotification?.({
+      method: "error",
+      params: { threadId: thread, error: { message: "upstream 400" } },
+    });
+    mocks.appServerOptions?.onNotification?.({
+      method: "error",
+      params: { threadId: thread, message: "legacy shape" },
+    });
+    await tick();
+
+    expect(errorEvents(events)).toEqual([
+      expect.objectContaining({ message: "upstream 400", sessionId: thread }),
+      expect.objectContaining({ message: "legacy shape", sessionId: thread }),
+    ]);
+
+    provider.stop();
+  });
+
+  it("emits a single card when the failed turn repeats the error notification", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    await provider.takeover();
+    await provider.sendPrompt("hello");
+
+    const message = "The 'gpt-5.6-sol' model requires a newer version of Codex.";
+    mocks.appServerOptions?.onNotification?.({
+      method: "error",
+      params: { threadId: thread, turnId: "turn-1", error: { message } },
+    });
+    mocks.appServerOptions?.onNotification?.({
+      method: "turn/completed",
+      params: { threadId: thread, turn: { id: "turn-1", status: "failed", error: { message } } },
+    });
+    await tick();
+
+    expect(errorEvents(events)).toEqual([
+      expect.objectContaining({ message, sessionId: thread }),
+    ]);
+    expect(provider.state.busy).toBe(false);
+
+    provider.stop();
+  });
+
+  it("defers a message-less error notification to the turn failure", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    await provider.takeover();
+    await provider.sendPrompt("hello");
+
+    mocks.appServerOptions?.onNotification?.({ method: "error", params: {} });
+    await tick();
+    expect(errorEvents(events)).toHaveLength(0);
+
+    mocks.appServerOptions?.onNotification?.({
+      method: "turn/completed",
+      params: { threadId: thread, turn: { id: "turn-1", status: "failed", error: { message: "HTTP 400" } } },
+    });
+    await tick();
+
+    expect(errorEvents(events)).toEqual([
+      expect.objectContaining({ message: "HTTP 400", sessionId: thread }),
+    ]);
+
+    provider.stop();
+  });
+
+  it("still reports a message-less error notification when no turn is active", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    await provider.takeover();
+    mocks.appServerOptions?.onNotification?.({ method: "error", params: {} });
+    await tick();
+
+    expect(errorEvents(events)).toEqual([
+      expect.objectContaining({ message: "Codex app-server error" }),
+    ]);
+
+    provider.stop();
+  });
+
+  it("keeps both cards when the turn failure differs from the notification", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    await provider.takeover();
+    await provider.sendPrompt("hello");
+
+    mocks.appServerOptions?.onNotification?.({
+      method: "error",
+      params: { threadId: thread, turnId: "turn-1", error: { message: "stream disconnected" } },
+    });
+    mocks.appServerOptions?.onNotification?.({
+      method: "turn/completed",
+      params: { threadId: thread, turn: { id: "turn-1", status: "failed", error: { message: "HTTP 400" } } },
+    });
+    await tick();
+
+    expect(errorEvents(events)).toEqual([
+      expect.objectContaining({ message: "stream disconnected", sessionId: thread }),
+      expect.objectContaining({ message: "HTTP 400", sessionId: thread }),
+    ]);
+
+    provider.stop();
+  });
+
+  it("reports a turn failure that had no preceding error notification", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    await provider.takeover();
+    await provider.sendPrompt("hello");
+    mocks.appServerOptions?.onNotification?.({
+      method: "turn/completed",
+      params: { threadId: thread, turn: { id: "turn-1", status: "failed", error: { message: "boom" } } },
+    });
+    await tick();
+
+    expect(errorEvents(events)).toEqual([
+      expect.objectContaining({ message: "boom", sessionId: thread }),
+    ]);
+
+    provider.stop();
+  });
+});
