@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { loadCredentials } from "@varveai/adit-cloud";
 import pc from "picocolors";
 import { CLI_VERSION } from "./version.js";
 
@@ -8,6 +9,9 @@ const UPDATE_CHECK_TTL_MS = 10 * 60 * 1000;
 const UPDATE_CHECK_TIMEOUT_MS = 1500;
 const NPM_LATEST_URL =
   "https://registry.npmjs.org/@varveai%2fadit-cli/latest";
+const DEFAULT_VERSION_POLICY_URL =
+  "https://adit-cloud.varve.ai/api/client-version-policy";
+const DEFAULT_UPGRADE_COMMAND = "npm install -g @varveai/adit-cli@latest";
 
 export const UPDATE_CHECK_COMMANDS = new Set([
   "init",
@@ -29,8 +33,13 @@ export const UPDATE_CHECK_COMMANDS = new Set([
 ]);
 
 interface VersionCheckCache {
-  checkedAt: number;
-  latestVersion: string;
+  checkedAt?: number;
+  latestVersion?: string;
+}
+
+export interface VersionPolicyDecision {
+  decision: "ok" | "block";
+  currentVersion: string;
 }
 
 interface FetchLikeResponse {
@@ -60,6 +69,7 @@ export interface UpdateCheckOptions {
   now?: number;
   stderr?: WritableLike;
   cachePath?: string;
+  cloudServerUrl?: string | null;
 }
 
 interface UpdateWarningWrapperOptions<T extends unknown[]> {
@@ -77,12 +87,17 @@ export function withUpdateWarning<T extends unknown[]>(
         ? options.json(...args)
         : (options.json ?? inferJsonOption(args));
 
-    await maybeWarnForUpdate({
+    const blocked = await maybeWarnForUpdate({
       commandId,
+      cloudServerUrl: loadCredentials()?.serverUrl ?? null,
       env: process.env,
       json,
       stderr: process.stderr,
     });
+    if (blocked) {
+      process.exitCode = 1;
+      return;
+    }
 
     return handler(...args);
   };
@@ -90,23 +105,46 @@ export function withUpdateWarning<T extends unknown[]>(
 
 export async function maybeWarnForUpdate(
   options: UpdateCheckOptions,
-): Promise<void> {
+): Promise<boolean> {
   const env = options.env ?? process.env;
-  if (!UPDATE_CHECK_COMMANDS.has(options.commandId)) return;
-  if (isUpdateCheckDisabled(env)) return;
-  if (isCi(env)) return;
+  if (!UPDATE_CHECK_COMMANDS.has(options.commandId)) return false;
 
   const currentVersion = options.currentVersion ?? CLI_VERSION;
+  const cachePath = options.cachePath ?? getVersionCheckCachePath();
+  const now = options.now ?? Date.now();
+
+  const policy = await getVersionPolicyDecision({
+    currentVersion,
+    cloudServerUrl: options.cloudServerUrl,
+    env,
+    fetchImpl: options.fetchImpl ?? fetch,
+  });
+
+  if (policy?.decision === "block") {
+    const stderr = options.stderr ?? process.stderr;
+    stderr.write(
+      formatCriticalUpdateBlock(
+        policy,
+        options.json ?? false,
+        shouldColorUpdateWarning(stderr, options.json ?? false),
+      ),
+    );
+    return true;
+  }
+
+  if (isUpdateCheckDisabled(env)) return false;
+  if (isCi(env)) return false;
+
   const latestVersion = await getLatestVersion({
-    cachePath: options.cachePath ?? getVersionCheckCachePath(),
+    cachePath,
     currentVersion,
     env,
     fetchImpl: options.fetchImpl ?? fetch,
-    now: options.now ?? Date.now(),
+    now,
   });
 
-  if (!latestVersion) return;
-  if (compareVersions(currentVersion, latestVersion) >= 0) return;
+  if (!latestVersion) return false;
+  if (compareVersions(currentVersion, latestVersion) >= 0) return false;
 
   const stderr = options.stderr ?? process.stderr;
   stderr.write(
@@ -117,6 +155,7 @@ export async function maybeWarnForUpdate(
       shouldColorUpdateWarning(stderr, options.json ?? false),
     ),
   );
+  return false;
 }
 
 export function getVersionCheckCachePath(): string {
@@ -142,6 +181,27 @@ export function formatUpdateWarning(
     `${heading} ${current} -> ${latest}`,
     `Run: ${command}`,
   ];
+  return `${json ? "" : "\n"}${lines.join("\n")}\n\n`;
+}
+
+export function formatCriticalUpdateBlock(
+  policy: VersionPolicyDecision,
+  json = false,
+  color = false,
+): string {
+  const colors = pc.createColors(color);
+  const heading = color
+    ? colors.red(colors.bold("ADIT update required:"))
+    : "ADIT update required:";
+  const current = color ? colors.dim(policy.currentVersion) : policy.currentVersion;
+  const command = color
+    ? colors.green(colors.bold(DEFAULT_UPGRADE_COMMAND))
+    : DEFAULT_UPGRADE_COMMAND;
+  const lines = [
+    `${heading} version ${current} is blocked by adit-cloud policy.`,
+  ];
+  lines.push(`Run: ${command}`);
+
   return `${json ? "" : "\n"}${lines.join("\n")}\n\n`;
 }
 
@@ -188,7 +248,7 @@ async function getLatestVersion(options: {
   now: number;
 }): Promise<string | null> {
   const cached = readFreshCache(options.cachePath, options.now);
-  if (cached) return cached.latestVersion;
+  if (cached?.latestVersion) return cached.latestVersion;
 
   try {
     const latestVersion = await fetchLatestVersion(
@@ -197,10 +257,30 @@ async function getLatestVersion(options: {
       options.env,
     );
     writeCache(options.cachePath, {
+      ...(readCache(options.cachePath) ?? {}),
       checkedAt: options.now,
       latestVersion,
     });
     return latestVersion;
+  } catch {
+    return null;
+  }
+}
+
+async function getVersionPolicyDecision(options: {
+  currentVersion: string;
+  cloudServerUrl?: string | null;
+  env: NodeJS.ProcessEnv;
+  fetchImpl: FetchLike;
+}): Promise<VersionPolicyDecision | null> {
+  const policyUrl = getVersionPolicyUrl(options.env, options.cloudServerUrl);
+
+  try {
+    return await fetchVersionPolicy(
+      options.fetchImpl,
+      options.currentVersion,
+      policyUrl,
+    );
   } catch {
     return null;
   }
@@ -235,13 +315,54 @@ async function fetchLatestVersion(
   }
 }
 
+async function fetchVersionPolicy(
+  fetchImpl: FetchLike,
+  currentVersion: string,
+  policyUrl: string,
+): Promise<VersionPolicyDecision> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), UPDATE_CHECK_TIMEOUT_MS);
+
+  try {
+    const url = new URL(policyUrl);
+    url.searchParams.set("version", currentVersion);
+    const response = await fetchImpl(url.toString(), {
+      headers: {
+        accept: "application/json",
+        "user-agent": `adit-cli/${currentVersion}`,
+      },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error("Version policy check failed");
+
+    const data = responseDataToRecord(await response.json());
+    return responseDataToPolicyDecision(data, currentVersion);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function getVersionPolicyUrl(
+  env: NodeJS.ProcessEnv,
+  cloudServerUrl?: string | null,
+): string {
+  const serverUrl = env.ADIT_CLOUD_URL?.trim() || cloudServerUrl?.trim();
+  if (serverUrl) {
+    return `${serverUrl.replace(/\/$/, "")}/api/client-version-policy`;
+  }
+
+  return DEFAULT_VERSION_POLICY_URL;
+}
+
 function readFreshCache(
   cachePath: string,
   now: number,
 ): VersionCheckCache | null {
   const cache = readCache(cachePath);
   if (!cache) return null;
+  if (typeof cache.checkedAt !== "number") return null;
   if (now - cache.checkedAt > UPDATE_CHECK_TTL_MS) return null;
+  if (!cache.latestVersion) return null;
   return cache;
 }
 
@@ -253,17 +374,17 @@ function readCache(cachePath: string): VersionCheckCache | null {
       checkedAt?: unknown;
       latestVersion?: unknown;
     };
+    const cache: VersionCheckCache = {};
     if (
-      typeof parsed.checkedAt !== "number" ||
-      typeof parsed.latestVersion !== "string" ||
-      !parseVersion(parsed.latestVersion)
+      typeof parsed.checkedAt === "number" &&
+      typeof parsed.latestVersion === "string" &&
+      parseVersion(parsed.latestVersion)
     ) {
-      return null;
+      cache.checkedAt = parsed.checkedAt;
+      cache.latestVersion = parsed.latestVersion;
     }
-    return {
-      checkedAt: parsed.checkedAt,
-      latestVersion: parsed.latestVersion,
-    };
+
+    return cache.latestVersion ? cache : null;
   } catch {
     return null;
   }
@@ -281,6 +402,37 @@ function writeCache(cachePath: string, cache: VersionCheckCache): void {
 function responseDataToRecord(data: unknown): Record<string, unknown> {
   if (!data || typeof data !== "object" || Array.isArray(data)) return {};
   return data as Record<string, unknown>;
+}
+
+function responseDataToPolicyDecision(
+  data: Record<string, unknown>,
+  fallbackCurrentVersion: string,
+): VersionPolicyDecision {
+  const decision = responseDataToPolicyDecisionOrNull(data, fallbackCurrentVersion);
+  if (!decision) {
+    throw new Error("Version policy response did not include a valid decision");
+  }
+  return decision;
+}
+
+function responseDataToPolicyDecisionOrNull(
+  data: unknown,
+  fallbackCurrentVersion: string,
+): VersionPolicyDecision | null {
+  const record = responseDataToRecord(data);
+  const decision = record.decision;
+  if (decision !== "ok" && decision !== "block") return null;
+
+  const currentVersion =
+    typeof record.currentVersion === "string" && parseVersion(record.currentVersion)
+      ? record.currentVersion
+      : fallbackCurrentVersion;
+  if (!parseVersion(currentVersion)) return null;
+
+  return {
+    decision,
+    currentVersion,
+  };
 }
 
 function parseVersion(
