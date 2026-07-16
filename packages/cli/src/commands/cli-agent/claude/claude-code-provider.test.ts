@@ -36,6 +36,7 @@ import {
   normalizeClaudeSdkTranscriptEntrypoints,
   normalizeClaudeTodoWriteInput,
 } from "./provider.js";
+import { emitClaudeResultError } from "./sdk-event-emitters.js";
 
 function mockChildProcess() {
   const child = new EventEmitter() as EventEmitter & {
@@ -2786,5 +2787,210 @@ describe("buildClaudeCloudRelayEnv", () => {
     expect(env.TERM).toBe("xterm-256color");
     expect(env.COLORTERM).toBe("truecolor");
     expect(env.FORCE_COLOR).toBe("3");
+  });
+});
+
+describe("ClaudeCodeProvider stream errors", () => {
+  const sessionId = "11111111-1111-1111-1111-111111111111";
+
+  function mockRemoteRun(run: () => AsyncGenerator<Record<string, unknown>, void, unknown>): void {
+    mocks.query.mockImplementation((
+      input: {
+        prompt?: AsyncIterable<Record<string, unknown>>;
+        options?: { includePartialMessages?: boolean };
+      },
+    ) => {
+      if (!input.options?.includePartialMessages || !input.prompt) {
+        return createCapabilityQuery();
+      }
+      return {
+        supportedCommands: vi.fn(async () => []),
+        mcpServerStatus: vi.fn(async () => []),
+        getContextUsage: vi.fn(async () => ({
+          totalTokens: 100,
+          maxTokens: 200,
+          percentage: 50,
+          model: "claude-test",
+        })),
+        close: mocks.remoteClose,
+        interrupt: mocks.remoteInterrupt,
+        [Symbol.asyncIterator]: run,
+      };
+    });
+  }
+
+  async function waitFor(predicate: () => boolean): Promise<void> {
+    for (let attempt = 0; attempt < 50 && !predicate(); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  it("keeps only the assistant reply when the error result repeats it", async () => {
+    const resultText = "Failed to authenticate. API Error: 401 OAuth access token has been revoked.";
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    mockRemoteRun(async function* () {
+      yield {
+        type: "assistant",
+        session_id: sessionId,
+        message: {
+          id: "msg-auth-1",
+          role: "assistant",
+          model: "<synthetic>",
+          content: [{ type: "text", text: resultText }],
+        },
+      };
+      yield {
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        result: resultText,
+        session_id: sessionId,
+        usage: { input_tokens: 1, output_tokens: 0 },
+        total_cost_usd: 0,
+      };
+      throw new Error(`Claude Code returned an error result: ${resultText}`);
+    });
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      await waitFor(() => events.some((event) =>
+        event.type === "message" && event.payload.role === "assistant"
+      ));
+      await tick();
+
+      expect(events.filter((event) => event.type === "error")).toEqual([]);
+      expect(
+        events.filter((event) => event.type === "message" && event.payload.role === "assistant"),
+      ).toEqual([
+        expect.objectContaining({
+          payload: expect.objectContaining({ text: resultText, sessionId }),
+        }),
+      ]);
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("surfaces the result text when no assistant reply carried it", async () => {
+    const resultText = "Failed to authenticate. API Error: 401 OAuth access token has been revoked.";
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    mockRemoteRun(async function* () {
+      yield {
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        result: resultText,
+        session_id: sessionId,
+        usage: { input_tokens: 1, output_tokens: 0 },
+        total_cost_usd: 0,
+      };
+      throw new Error(`Claude Code returned an error result: ${resultText}`);
+    });
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      await tick();
+      await tick();
+
+      expect(events.filter((event) => event.type === "error")).toEqual([
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            title: "Claude request failed",
+            message: resultText,
+            sessionId,
+          }),
+        }),
+      ]);
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("stamps the session id on unexpected stream errors", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    mockRemoteRun(async function* () {
+      yield {
+        type: "result",
+        subtype: "success",
+        session_id: sessionId,
+        usage: { input_tokens: 1, output_tokens: 1 },
+        total_cost_usd: 0,
+      };
+      throw new Error("socket hang up");
+    });
+
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("hello");
+      await tick();
+      await tick();
+
+      const errorEvents = events.filter((event) => event.type === "error");
+      expect(errorEvents).toEqual([
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            message: "socket hang up",
+            sessionId,
+          }),
+        }),
+      ]);
+      expect(typeof errorEvents[0]?.payload.createdAt).toBe("number");
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("falls back to the subtype label when the error result has no text", () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const ctx = {
+      activeModelId: () => null,
+      activePromptMode: () => null,
+      lastAssistantTextBySession: new Map<string, string>(),
+      pushEvent: (type: string, payload: Record<string, unknown>) => events.push({ type, payload }),
+    } as unknown as Parameters<typeof emitClaudeResultError>[2];
+
+    emitClaudeResultError(
+      {
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+      } as unknown as Parameters<typeof emitClaudeResultError>[0],
+      sessionId,
+      ctx,
+    );
+
+    expect(events).toEqual([
+      {
+        type: "error",
+        payload: expect.objectContaining({
+          title: "Claude request failed",
+          message: "Claude SDK result failed: error_during_execution",
+          sessionId,
+        }),
+      },
+    ]);
   });
 });

@@ -118,6 +118,7 @@ export interface ClaudeSdkEventContext {
   remoteAbortSignalAborted: () => boolean;
   contextCompactionToolBySession: Map<string, ContextCompactionToolState>;
   lastAssistantMessageBySession: Map<string, string>;
+  lastAssistantTextBySession: Map<string, string>;
   toolUseById: Map<string, ClaudeToolUseState>;
   partialAssistantStreams: Map<string, PartialAssistantStreamState>;
   streamedTextMessageIds: Set<string>;
@@ -270,6 +271,7 @@ export async function emitClaudeAssistantMessage(
         }, ctx);
         if (!completed) return;
       }
+      ctx.lastAssistantTextBySession.set(sessionId, part.text);
       ctx.pushEvent("message", {
         role: "assistant",
         sessionId,
@@ -508,6 +510,7 @@ export function emitClaudeResultError(
     subtype?: unknown;
     is_error?: unknown;
     errors?: unknown;
+    result?: unknown;
     api_error_status?: unknown;
   };
   const subtype = readString(result.subtype);
@@ -525,11 +528,22 @@ export function emitClaudeResultError(
   ) {
     return;
   }
+  // Auth/API failures arrive as subtype "success" with is_error set; the
+  // human-readable text lives in the result field, not in errors.
+  const resultText = readString(result.result);
+  // The CLI surfaces these failures as a synthetic assistant reply carrying
+  // the same text; an error card on top would repeat the transcript.
+  if (
+    errors.length === 0 &&
+    resultText &&
+    ctx.lastAssistantTextBySession.get(sessionId)?.trim() === resultText.trim()
+  ) {
+    return;
+  }
   const messageText = errors.length > 0
     ? errors.join("\n")
-    : subtype
-      ? `Claude SDK result failed: ${subtype}`
-      : "Claude SDK result failed.";
+    : resultText ??
+      (subtype ? `Claude SDK result failed: ${subtype}` : "Claude SDK result failed.");
   ctx.pushEvent("error", {
     title: "Claude request failed",
     message: messageText,
