@@ -181,6 +181,68 @@ describe("SyncEngine", () => {
     expect(result.accepted).toBe(150);
   });
 
+  it("shrinks the sync batch when the push payload would exceed the byte cap", async () => {
+    const { engine, mockClient } = createEngine({ batchSize: 500 });
+    const bigText = "x".repeat(20_000);
+
+    mockBuildSyncBatch.mockImplementation((_db, afterId, _lastSyncedAt, _projectId, _clientId, limit) => {
+      if (afterId) {
+        return {
+          batch: { events: [], sessions: [], envSnapshots: [], plans: [], diffs: [] },
+          diffByteCapApplied: false,
+        } as never;
+      }
+      return {
+        batch: {
+          events: Array.from({ length: limit as number }, (_value, index) => ({
+            id: `event-${index}`,
+            response_text: bigText,
+          })),
+          sessions: [],
+          envSnapshots: [],
+          plans: [],
+          diffs: [],
+        },
+        diffByteCapApplied: false,
+      } as never;
+    });
+    mockBatchRecordCount.mockImplementation((batch: never) =>
+      ((batch as { events?: unknown[] }).events ?? []).length,
+    );
+    mockClient.post.mockResolvedValue({
+      accepted: 1,
+      duplicates: 0,
+      conflicts: [],
+      newSyncCursor: "cursor-after-sized",
+      newSyncVersion: 1,
+      projectCursor: {
+        lastSyncedEventId: "cursor-after-sized",
+        lastSyncedAt: "2025-01-01T00:00:00Z",
+      },
+    });
+
+    const result = await engine.sync();
+
+    expect(result.batches).toBe(1);
+    expect(mockBuildSyncBatch).toHaveBeenNthCalledWith(
+      1,
+      expect.anything(),
+      null,
+      null,
+      "proj-001",
+      "client-001",
+      500,
+    );
+    const secondLimit = mockBuildSyncBatch.mock.calls[1][5] as number;
+    expect(secondLimit).toBeGreaterThan(0);
+    expect(secondLimit).toBeLessThan(500);
+
+    const postedBody = mockClient.post.mock.calls[0][1];
+    expect(Buffer.byteLength(JSON.stringify(postedBody), "utf-8"))
+      .toBeLessThanOrEqual(8 * 1024 * 1024);
+    expect(postedBody.batch.events[0].response_text).toBe(bigText);
+  });
+
   it("breaks on duplicate-only batch with unchanged cursor (infinite loop guard)", async () => {
     const { engine, mockClient } = createEngine({ batchSize: 100 });
     mockBuildSyncBatch.mockReturnValue({ batch: { events: [{}], sessions: [] }, diffByteCapApplied: false } as never);

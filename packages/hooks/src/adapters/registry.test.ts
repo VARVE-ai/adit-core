@@ -212,15 +212,15 @@ describe("Claude Code Adapter", () => {
     expect(input.lastAssistantMessage).toBe("Analysis complete.");
   });
 
-  it("reclassifies task-notification prompt as notification", () => {
+  it("keeps task-notification prompt-submit payloads for unified classification", () => {
     const input = claudeCodeAdapter.parseInput(
       { cwd: "/project", prompt: "<task-notification>Task done</task-notification>" },
       "prompt-submit",
     );
-    expect(input.hookType).toBe("notification");
-    expect(input.prompt).toBeUndefined();
-    expect(input.notificationMessage).toBe("<task-notification>Task done</task-notification>");
-    expect(input.notificationType).toBe("task-notification");
+    expect(input.hookType).toBe("prompt-submit");
+    expect(input.prompt).toBe("<task-notification>Task done</task-notification>");
+    expect(input.notificationMessage).toBeUndefined();
+    expect(input.notificationType).toBeUndefined();
   });
 
   it("generateHookConfig produces valid structure with async hooks", () => {

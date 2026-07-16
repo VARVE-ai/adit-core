@@ -155,6 +155,153 @@ describe("dispatchHook", () => {
     expect(mockRecordEvent).not.toHaveBeenCalled();
   });
 
+  it("records task notifications as lightweight notifications without raw prompt text", async () => {
+    const prompt = "<task-notification>Task done</task-notification>";
+
+    await dispatchHook({
+      cwd: "/test",
+      hookType: "prompt-submit",
+      prompt,
+    });
+
+    expect(mockRecordEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "notification",
+        actor: "system",
+        responseText: "task-notification",
+        toolName: "task-notification",
+      }),
+    );
+    const payload = JSON.parse(mockRecordEvent.mock.calls[0][0].toolInputJson);
+    expect(payload).toMatchObject({
+      source: "task-notification",
+      kind: "task-notification",
+      originalLength: prompt.length,
+    });
+    expect(mockRecordEvent.mock.calls[0][0].toolInputJson).not.toContain(prompt);
+  });
+
+  it("skips Claude-Mem observer prompts when the observed user request already exists", async () => {
+    const { initHookContext } = await import("../common/context.js");
+    const updateRun = vi.fn();
+    const duplicateGet = vi.fn(() => ({ exists: 1 }));
+    const prepare = vi.fn((sql: string) =>
+      sql.startsWith("UPDATE sessions")
+        ? { run: updateRun }
+        : { get: duplicateGet },
+    );
+    vi.mocked(initHookContext).mockResolvedValueOnce({
+      db: { close: vi.fn(), prepare } as never,
+      config: {
+        projectId: "proj-001",
+        projectRoot: "/test",
+        dataDir: "/tmp/adit-test",
+        clientId: "client-001",
+        dbPath: "/tmp/test.db",
+        captureEnv: false,
+      },
+      session: { id: "observer-session", metadataJson: "{}" } as never,
+    });
+
+    await dispatchHook({
+      cwd: "/test",
+      hookType: "prompt-submit",
+      platformCli: "claude-code",
+      platformSessionId: "observer-platform-session",
+      prompt: claudeMemPrompt("Fix the auth bug"),
+    });
+
+    expect(updateRun).toHaveBeenCalled();
+    expect(duplicateGet).toHaveBeenCalledWith("proj-001", "observer-session", "Fix the auth bug");
+    expect(mockRecordEvent).not.toHaveBeenCalled();
+    expect(mockTriggerAutoSync).not.toHaveBeenCalled();
+    expect(mockTriggerTranscriptUpload).not.toHaveBeenCalled();
+  });
+
+  it("salvages a Claude-Mem observed user request as a lightweight notification when unique", async () => {
+    const { initHookContext } = await import("../common/context.js");
+    const prepare = vi.fn((sql: string) =>
+      sql.startsWith("UPDATE sessions")
+        ? { run: vi.fn() }
+        : { get: vi.fn(() => undefined) },
+    );
+    vi.mocked(initHookContext).mockResolvedValueOnce({
+      db: { close: vi.fn(), prepare } as never,
+      config: {
+        projectId: "proj-001",
+        projectRoot: "/test",
+        dataDir: "/tmp/adit-test",
+        clientId: "client-001",
+        dbPath: "/tmp/test.db",
+        captureEnv: false,
+      },
+      session: { id: "observer-session", metadataJson: "{}" } as never,
+    });
+
+    await dispatchHook({
+      cwd: "/test",
+      hookType: "prompt-submit",
+      platformCli: "claude-code",
+      prompt: claudeMemPrompt("A unique user request"),
+    });
+
+    expect(mockRecordEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "notification",
+        actor: "system",
+        responseText: "A unique user request",
+        toolName: "claude-mem-observed-user-request",
+      }),
+    );
+    const payload = JSON.parse(mockRecordEvent.mock.calls[0][0].toolInputJson);
+    expect(payload).toMatchObject({
+      source: "claude-mem-observed-user-request",
+      kind: "claude-mem-observer",
+      observedUserRequestLength: "A unique user request".length,
+    });
+    expect(mockRecordEvent.mock.calls[0][0].toolInputJson).not.toContain("observed_from_primary_session");
+  });
+
+  it("skips prompt-submit events from official subagents", async () => {
+    await dispatchHook({
+      cwd: "/test",
+      hookType: "prompt-submit",
+      prompt: "Explore the codebase",
+      agentId: "agent-001",
+    });
+
+    expect(mockRecordEvent).not.toHaveBeenCalled();
+  });
+
+  it("skips follow-up events for ignored Claude-Mem observer sessions", async () => {
+    const { initHookContext } = await import("../common/context.js");
+    vi.mocked(initHookContext).mockResolvedValueOnce({
+      db: { close: vi.fn() } as never,
+      config: {
+        projectId: "proj-001",
+        projectRoot: "/test",
+        dataDir: "/tmp/adit-test",
+        clientId: "client-001",
+        dbPath: "/tmp/test.db",
+        captureEnv: false,
+      },
+      session: {
+        id: "observer-session",
+        metadataJson: JSON.stringify({ aditIgnored: { reason: "claude-mem-observer" } }),
+      } as never,
+    });
+
+    await dispatchHook({
+      cwd: "/test",
+      hookType: "stop",
+      stopReason: "completed",
+      platformSessionId: "observer-platform-session",
+    });
+
+    expect(mockRecordEvent).not.toHaveBeenCalled();
+    expect(mockTriggerAutoSync).not.toHaveBeenCalled();
+  });
+
   it("routes stop and records assistant_response event", async () => {
     const input: NormalizedHookInput = {
       cwd: "/test",
@@ -628,3 +775,18 @@ describe("dispatchHook", () => {
     await expect(dispatchHook(input)).rejects.toThrow();
   });
 });
+
+function claudeMemPrompt(userRequest: string): string {
+  return `Context: This summary will be shown in a list to help users and Claude choose which conversations are relevant.
+
+Please write a concise summary of this part of a conversation in 2-3 sentences. What happened, what was built/discussed. Use <summary></summary> tags.
+
+User: Hello memory agent, you are continuing to observe the primary Claude session.
+
+<observed_from_primary_session>
+  <user_request>${userRequest}</user_request>
+  <requested_at>2026-06-08</requested_at>
+</observed_from_primary_session>
+
+You are a Claude-Mem, a specialized observer tool for creating searchable memory FOR FUTURE SESSIONS.`;
+}
