@@ -229,6 +229,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private pendingRewinds = new Map<string, PendingRewindRequest>();
   private boundPendingSessionIds = new Set<string>();
   private lastAssistantMessageBySession = new Map<string, string>();
+  private lastAssistantTextBySession = new Map<string, string>();
   private toolUseById = new Map<string, ClaudeToolUseState>();
   private lastAssistantTailKind: "thinking" | "other" | null = null;
   private partialAssistantStreams = new Map<string, PartialAssistantStreamState>();
@@ -887,7 +888,11 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     void this.hydrateCapabilities({ owner: "local", child });
 
     child.on("error", (error) => {
-      this.pushEvent("error", { message: error.message });
+      this.pushEvent("error", {
+        message: error.message,
+        sessionId: this.activeSessionId ?? this.resumeSessionId ?? undefined,
+        createdAt: Date.now(),
+      });
       this.notices.notice(`Failed to start Claude CLI: ${error.message}`);
       if (this.local === child) {
         this.local = null;
@@ -1102,7 +1107,11 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         this.rejectStartingPrompt(first, error instanceof Error ? error : new Error(String(error)));
         if (!(error instanceof AbortError)) {
           const messageText = error instanceof Error ? error.message : String(error);
-          this.pushEvent("error", { message: messageText });
+          this.pushEvent("error", {
+            message: messageText,
+            sessionId: this.currentRunSessionId() ?? canonicalSessionId ?? resumeId ?? undefined,
+            createdAt: Date.now(),
+          });
         }
         this.setThinking(false);
         this.setBusy(false);
@@ -1154,7 +1163,16 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         }
         if (!(error instanceof AbortError)) {
           const messageText = error instanceof Error ? error.message : String(error);
-          this.pushEvent("error", { message: messageText });
+          // The SDK raises this wrapper when the CLI exits right after an
+          // error result; emitClaudeResultError already reported that
+          // failure, so a second card would duplicate it.
+          if (!/^Claude Code returned an error result/u.test(messageText)) {
+            this.pushEvent("error", {
+              message: messageText,
+              sessionId: this.currentRunSessionId() ?? canonicalSessionId ?? resumeId ?? undefined,
+              createdAt: Date.now(),
+            });
+          }
         }
       } finally {
         if (
@@ -1472,6 +1490,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       remoteAbortSignalAborted: () => this.remoteAbortController?.signal.aborted === true,
       contextCompactionToolBySession: this.contextCompactionToolBySession,
       lastAssistantMessageBySession: this.lastAssistantMessageBySession,
+      lastAssistantTextBySession: this.lastAssistantTextBySession,
       toolUseById: this.toolUseById,
       partialAssistantStreams: this.partialAssistantStreams,
       streamedTextMessageIds: this.streamedTextMessageIds,

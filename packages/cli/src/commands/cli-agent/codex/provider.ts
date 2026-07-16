@@ -133,6 +133,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private promptQueue: PendingPrompt[] = [];
   private promptActive = false;
   private activeTurnId: string | null = null;
+  private activeTurnErrorNotice: { turnId: string; message: string | null } | null = null;
   private activePromptMode: CodexPromptMode | null = null;
   private loadedThreadIds = new Set<string>();
   private emptyThreadIds = new Set<string>();
@@ -738,7 +739,11 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.emitState();
 
     child.on("error", (error) => {
-      this.pushEvent("error", { message: error.message });
+      this.pushEvent("error", {
+        message: error.message,
+        sessionId: this.activeSessionId ?? this.resumeSessionId ?? undefined,
+        createdAt: Date.now(),
+      });
       this.notices.notice(`Failed to start Codex CLI: ${error.message}`);
       if (this.local === child) {
         this.local = null;
@@ -975,8 +980,27 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     const method = message.method;
     const params = asRecord(message.params) ?? {};
     if (method === "error") {
+      // Older app-server builds send a flat params.message; newer ones nest
+      // the text in params.error.message.
+      const message = readString(params.message) ??
+        readString(asRecord(params.error)?.message) ??
+        readString(params.error);
+      const threadId = readString(params.threadId);
+      if (this.activeTurnId && this.isCurrentThreadNotification(threadId)) {
+        this.activeTurnErrorNotice = {
+          turnId: readString(params.turnId) ?? this.activeTurnId,
+          message,
+        };
+        // Without text the card would be pure noise; the failed
+        // turn/completed that follows carries the real error message.
+        if (!message) return;
+      }
       this.pushEvent("error", {
-        message: readString(params.message) ?? "Codex app-server error",
+        message: message ?? "Codex app-server error",
+        sessionId: threadId ??
+          this.activeSessionId ??
+          this.resumeSessionId ??
+          undefined,
         createdAt: Date.now(),
       });
       return;
@@ -1024,13 +1048,23 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       const threadId = readString(params.threadId);
       const turn = asRecord(params.turn);
       const status = readString(turn?.status);
+      const turnId = readString(turn?.id);
+      const notice = this.activeTurnErrorNotice;
+      const noticeMatchesTurn = notice !== null && (!turnId || notice.turnId === turnId);
+      if (noticeMatchesTurn) this.activeTurnErrorNotice = null;
       if (status === "failed") {
         const error = asRecord(turn?.error);
-        this.pushEvent("error", {
-          message: readString(error?.message) ?? "Codex turn failed",
-          sessionId: threadId ?? this.activeSessionId ?? this.resumeSessionId ?? undefined,
-          createdAt: Date.now(),
-        });
+        const message = readString(error?.message) ?? "Codex turn failed";
+        // The `error` notification for this turn already rendered the same
+        // text; a second card would just duplicate it.
+        const alreadyReported = noticeMatchesTurn && notice?.message === message;
+        if (!alreadyReported) {
+          this.pushEvent("error", {
+            message,
+            sessionId: threadId ?? this.activeSessionId ?? this.resumeSessionId ?? undefined,
+            createdAt: Date.now(),
+          });
+        }
       }
       if (!this.isCurrentThreadNotification(threadId)) return;
       this.activeTurnId = null;
