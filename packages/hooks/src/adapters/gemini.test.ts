@@ -46,15 +46,13 @@ describe("Gemini CLI Hook Chaining", () => {
     } catch { /* best-effort */ }
   });
 
-  it("has 6 hook mappings", () => {
-    expect(geminiAdapter.hookMappings).toHaveLength(6);
+  it("has 4 hook mappings", () => {
+    expect(geminiAdapter.hookMappings).toHaveLength(4);
     expect(geminiAdapter.hookMappings.map(m => m.platformEvent)).toEqual([
       "SessionStart",
       "BeforeAgent",
       "AfterAgent",
-      "SessionEnd",
-      "AfterTool",
-      "Notification"
+      "SessionEnd"
     ]);
   });
 
@@ -179,20 +177,18 @@ describe("Gemini CLI Hook Chaining", () => {
 
       expect(config.configPath).toBe(".gemini/settings.json");
       expect(config.content.hooks).toBeDefined();
-      expect(Object.keys(config.content.hooks)).toHaveLength(6);
+      expect(Object.keys(config.content.hooks)).toHaveLength(4);
       expect(config.content.hooks.SessionStart).toBeDefined();
       expect(config.content.hooks.BeforeAgent).toBeDefined();
       expect(config.content.hooks.AfterAgent).toBeDefined();
       expect(config.content.hooks.SessionEnd).toBeDefined();
-      expect(config.content.hooks.AfterTool).toBeDefined();
-      expect(config.content.hooks.Notification).toBeDefined();
+      // notification collection was retired — no AfterTool/Notification hooks
+      expect(config.content.hooks.AfterTool).toBeUndefined();
+      expect(config.content.hooks.Notification).toBeUndefined();
     });
 
-    it("limits AfterTool to shell commands via matcher", () => {
+    it("carries no matcher on lifecycle hook entries", () => {
       const config = geminiAdapter.generateHookConfig("npx adit-hook");
-      const entry = config.content.hooks.AfterTool[0] as { matcher?: string };
-      expect(entry.matcher).toBe("run_shell_command");
-      // Other events carry no matcher
       const sessionEntry = config.content.hooks.SessionStart[0] as { matcher?: string };
       expect(sessionEntry.matcher).toBeUndefined();
     });
@@ -222,8 +218,9 @@ describe("Gemini CLI Hook Chaining", () => {
     expect(hooks.BeforeAgent).toBeDefined();
     expect(hooks.AfterAgent).toBeDefined();
     expect(hooks.SessionEnd).toBeDefined();
-    expect(hooks.AfterTool).toBeDefined();
-    expect(hooks.Notification).toBeDefined();
+    // notification collection was retired
+    expect(hooks.AfterTool).toBeUndefined();
+    expect(hooks.Notification).toBeUndefined();
 
     // Each event should have exactly one matcher group with one ADIT hook
     const stopEntries = hooks.AfterAgent as Array<{ hooks: Array<{ command: string }> }>;

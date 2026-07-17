@@ -51,6 +51,35 @@ describe("assistantTextFromTranscriptEntry", () => {
     ).toBe("answer");
   });
 
+  it("reads OpenCode plugin transcript lines (top-level role + parts)", () => {
+    expect(
+      assistantTextFromTranscriptEntry({
+        role: "assistant",
+        parts: [
+          { type: "step-start" },
+          { type: "reasoning", text: "thinking…" },
+          { type: "text", text: "OpenCode reply" },
+          { type: "tool", tool: "bash" },
+        ],
+      }),
+    ).toBe("OpenCode reply");
+    // user lines with parts stay excluded
+    expect(
+      assistantTextFromTranscriptEntry({
+        role: "user",
+        parts: [{ type: "text", text: "question" }],
+      }),
+    ).toBeUndefined();
+    // message.content wins when both exist
+    expect(
+      assistantTextFromTranscriptEntry({
+        role: "assistant",
+        message: { content: [{ type: "text", text: "from message" }] },
+        parts: [{ type: "text", text: "from parts" }],
+      }),
+    ).toBe("from message");
+  });
+
   it("returns undefined for non-assistant entries and empty text", () => {
     expect(
       assistantTextFromTranscriptEntry({ role: "user", message: { content: [{ type: "text", text: "q" }] } }),

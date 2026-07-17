@@ -15,7 +15,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import type { AgentFileMutation, MutationKind, MutationSource } from "./types.js";
-import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES, MAX_EVENT_DIFF_BYTES } from "./constants.js";
+import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES, MAX_EVENT_DIFF_BYTES, utf8ByteLength } from "./constants.js";
 
 const FILE_EDIT_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 
@@ -181,7 +181,10 @@ function largestContentBytes(tur: Record<string, unknown>): number {
   let max = 0;
   for (const key of ["content", "originalFile", "original_file", "updated_file"]) {
     const v = tur[key];
-    if (typeof v === "string" && v.length > max) max = v.length;
+    if (typeof v === "string") {
+      const bytes = utf8ByteLength(v);
+      if (bytes > max) max = bytes;
+    }
   }
   return max;
 }
@@ -257,10 +260,10 @@ function buildMutation(
   const sp = tur.structuredPatch;
   if (Array.isArray(sp) && sp.length > 0) {
     const diff = structuredPatchToUnifiedDiff(sp as Array<Record<string, unknown>>);
-    if (diff.length > MAX_FILE_DIFF_BYTES) {
+    if (utf8ByteLength(diff) > MAX_FILE_DIFF_BYTES) {
       m.omitted = {
         reason: "diff_too_large",
-        bytes: diff.length,
+        bytes: utf8ByteLength(diff),
         limitBytes: MAX_FILE_DIFF_BYTES,
       };
       return m;
@@ -273,10 +276,10 @@ function buildMutation(
   // 2. Write with full content (file create or overwrite with empty patch)
   if (blk.name === "Write" && typeof tur.content === "string") {
     const diff = wholeFileAdditionsDiff(tur.content);
-    if (diff.length > MAX_FILE_DIFF_BYTES) {
+    if (utf8ByteLength(diff) > MAX_FILE_DIFF_BYTES) {
       m.omitted = {
         reason: "diff_too_large",
-        bytes: diff.length,
+        bytes: utf8ByteLength(diff),
         limitBytes: MAX_FILE_DIFF_BYTES,
       };
       return m;
@@ -293,10 +296,10 @@ function buildMutation(
     typeof tur.updated_file === "string"
   ) {
     const diff = lineDiffUnified(tur.original_file, tur.updated_file);
-    if (diff.length > MAX_FILE_DIFF_BYTES) {
+    if (utf8ByteLength(diff) > MAX_FILE_DIFF_BYTES) {
       m.omitted = {
         reason: "diff_too_large",
-        bytes: diff.length,
+        bytes: utf8ByteLength(diff),
         limitBytes: MAX_FILE_DIFF_BYTES,
       };
       return m;

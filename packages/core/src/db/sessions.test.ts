@@ -9,6 +9,9 @@ import {
   insertSession,
   getActiveSession,
   getSessionById,
+  getSessionByPlatformSessionId,
+  reviveSession,
+  endSession,
   endStaleSessions,
 } from "./sessions.js";
 import { insertEvent } from "./events.js";
@@ -166,5 +169,66 @@ describe("endStaleSessions", () => {
     expect(getSessionById(db, "stale-codex")?.status).toBe("completed");
     expect(getSessionById(db, "stale-claude")?.status).toBe("active");
     expect(getSessionById(db, "current-codex")?.status).toBe("active");
+  });
+});
+
+
+describe("getSessionByPlatformSessionId resume reuse", () => {
+  let db: Database.Database;
+  let dbPath: string;
+
+  beforeEach(() => {
+    dbPath = tempDbPath();
+    db = openDatabase(dbPath);
+    insertSession(db, {
+      id: "ulid-1",
+      projectId: PROJECT,
+      clientId: CLIENT,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: isoHoursAgo(3),
+      vclockJson: "{}",
+      platformSessionId: "platform-abc",
+    });
+  });
+
+  afterEach(() => {
+    closeDatabase(db);
+    if (existsSync(dbPath)) unlinkSync(dbPath);
+  });
+
+  it("returns a closed session for the same platform session id instead of null", () => {
+    endSession(db, "ulid-1", "completed");
+
+    const found = getSessionByPlatformSessionId(db, "platform-abc");
+    expect(found?.id).toBe("ulid-1");
+    expect(found?.status).toBe("completed");
+  });
+
+  it("prefers a still-active row over a newer closed row", () => {
+    endSession(db, "ulid-1", "completed");
+    insertSession(db, {
+      id: "ulid-2",
+      projectId: PROJECT,
+      clientId: CLIENT,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: isoHoursAgo(1),
+      vclockJson: "{}",
+      platformSessionId: "platform-abc",
+    });
+
+    const found = getSessionByPlatformSessionId(db, "platform-abc");
+    expect(found?.id).toBe("ulid-2");
+    expect(found?.status).toBe("active");
+  });
+
+  it("reviveSession reopens a closed session and clears ended_at", () => {
+    endSession(db, "ulid-1", "completed");
+    reviveSession(db, "ulid-1");
+
+    const revived = getSessionById(db, "ulid-1");
+    expect(revived?.status).toBe("active");
+    expect(revived?.endedAt).toBeNull();
   });
 });

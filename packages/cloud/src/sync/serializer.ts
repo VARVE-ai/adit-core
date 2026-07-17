@@ -11,6 +11,21 @@ import type Database from "better-sqlite3";
 /** Total diff_text byte cap per push payload. Mirrors agent-file-mutation-capture-plan.md. */
 const MAX_SYNC_DIFF_BYTES = 2 * 1024 * 1024;
 
+/** Real UTF-8 byte length — String.length undercounts CJK/emoji up to 3x. */
+function utf8ByteLength(text: string): number {
+  return Buffer.byteLength(text, "utf8");
+}
+
+/**
+ * Cut a string to at most maxBytes of UTF-8, without leaving a broken
+ * multi-byte sequence (a trailing U+FFFD from a split code point is dropped).
+ */
+function truncateToUtf8Bytes(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  const cut = Buffer.from(text, "utf8").subarray(0, maxBytes).toString("utf8");
+  return cut.endsWith("�") ? cut.slice(0, -1) : cut;
+}
+
 /**
  * Server-facing record types.
  * These use snake_case field names matching the adit-cloud PostgreSQL schema.
@@ -260,7 +275,10 @@ function applyDiffByteCap(
 
   for (let i = 0; i < batch.events.length; i++) {
     const eventDiffs = diffsByEvent.get(batch.events[i].id) ?? [];
-    const size = eventDiffs.reduce((sum, d) => sum + d.diff_text.length, 0);
+    // Real UTF-8 bytes: String.length counts UTF-16 code units and undercounts
+    // CJK/emoji up to 3x, which is exactly how oversized payloads slipped past
+    // this cap and hit the server's request-size limit.
+    const size = eventDiffs.reduce((sum, d) => sum + utf8ByteLength(d.diff_text), 0);
 
     if (total + size > cap) {
       if (i === 0) {
@@ -269,12 +287,14 @@ function applyDiffByteCap(
         // stall on it forever.
         let budget = cap;
         for (const diff of eventDiffs) {
-          if (diff.diff_text.length > budget) {
+          if (utf8ByteLength(diff.diff_text) > budget) {
             diff.diff_text =
-              diff.diff_text.slice(0, Math.max(0, budget - DIFF_TRUNCATION_MARKER.length)) +
-              DIFF_TRUNCATION_MARKER;
+              truncateToUtf8Bytes(
+                diff.diff_text,
+                Math.max(0, budget - utf8ByteLength(DIFF_TRUNCATION_MARKER)),
+              ) + DIFF_TRUNCATION_MARKER;
           }
-          budget = Math.max(0, budget - diff.diff_text.length);
+          budget = Math.max(0, budget - utf8ByteLength(diff.diff_text));
           keptDiffs.push(diff);
         }
         cutIndex = 1;

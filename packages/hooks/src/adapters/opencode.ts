@@ -278,9 +278,6 @@ const HOOK_MAPPINGS: HookMapping[] = [
   // /exit does not fire session.deleted; command.executed is intercepted
   // synchronously in the plugin to flush cloud sync before process exit.
   { platformEvent: "command.executed", aditHandler: "session-end" },
-  { platformEvent: "message.part.updated", aditHandler: "notification" },
-  { platformEvent: "session.diff", aditHandler: "notification" },
-  { platformEvent: "todo.updated", aditHandler: "task-completed" },
 ];
 
 /** Map OpenCode hook/event types to ADIT hook types */
@@ -292,8 +289,6 @@ const EVENT_TO_ADIT: Record<string, AditHookType> = {
   "session.created": "session-start",
   "session.deleted": "session-end",
   "session.error": "session-end",
-  "notification": "notification",
-  "task-completed": "task-completed",
 };
 
 /** Check if a file is an ADIT-generated plugin */
@@ -314,9 +309,6 @@ function isAditPlugin(content: string): boolean {
  * - session.created/deleted   → session-start/session-end
  * - session.error             → session-end
  * - command.executed          → session-end (exit/quit/q only, synchronous)
- * - message.part.updated      → notification (tool results, step finishes)
- * - session.diff              → notification (file-level diffs)
- * - todo.updated              → task-completed (AI task tracking)
  *
  * Note: OpenCode's Plugin API has no "stop" hook key. The equivalent is the
  * "session.idle" event, which fires when the assistant finishes a response.
@@ -716,77 +708,6 @@ exports.AditPlugin = async (ctx) => {
               reason: "error",
               error: props.error,
             });
-            break;
-          }
-
-          // --- Message parts (tool results, step finishes) ---
-          case "message.part.updated": {
-            const part = props.part;
-            if (!part) break;
-
-            // Tool completion — captures tool name, input, output, timing
-            if (part.type === "tool" && part.state && part.state.status === "completed") {
-              spawnAditHook("notification", {
-                cwd,
-                session_id: part.sessionID,
-                notification_type: "tool_result",
-                title: part.state.title || part.tool,
-                message: "Tool " + part.tool + ": " + (part.state.title || "completed"),
-                tool_name: part.tool,
-                tool_input: part.state.input,
-                tool_output: part.state.output,
-                tool_time: part.state.time,
-                tool_metadata: part.state.metadata,
-              });
-            }
-
-            // Tool error
-            if (part.type === "tool" && part.state && part.state.status === "error") {
-              spawnAditHook("notification", {
-                cwd,
-                session_id: part.sessionID,
-                notification_type: "tool_error",
-                title: part.tool + " error",
-                message: "Tool " + part.tool + " failed: " + (part.state.error || "unknown"),
-                tool_name: part.tool,
-                tool_input: part.state.input,
-                error: part.state.error,
-              });
-            }
-
-            break;
-          }
-
-          // --- AI task tracking ---
-          case "todo.updated": {
-            const todos = props.todos;
-            if (!Array.isArray(todos)) break;
-
-            // Record the full todo list state as a notification so the
-            // complete task plan (pending, in_progress, completed) is
-            // captured and synced to the server.
-            spawnAditHook("notification", {
-              cwd,
-              session_id: props.sessionID,
-              notification_type: "todo_updated",
-              title: "Todo list updated (" + todos.length + " items)",
-              message: JSON.stringify(todos),
-            });
-
-            // Also emit individual task-completed events for completed
-            // todos (backward compatibility + semantic milestone tracking).
-            for (let i = 0; i < todos.length; i++) {
-              const todo = todos[i];
-              if (todo.status === "completed") {
-                spawnAditHook("task-completed", {
-                  cwd,
-                  session_id: props.sessionID,
-                  task_id: todo.id,
-                  task_subject: todo.content,
-                  task_description: "Priority: " + (todo.priority || "medium"),
-                });
-              }
-            }
             break;
           }
 

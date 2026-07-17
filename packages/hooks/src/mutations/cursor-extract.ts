@@ -19,7 +19,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import type { AgentFileMutation, MutationKind, MutationSource } from "./types.js";
-import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES } from "./constants.js";
+import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES, utf8ByteLength } from "./constants.js";
 import { transcriptEntryRole } from "../common/transcript-entry.js";
 
 const CURSOR_FILE_EDIT_TOOLS = new Set(["Write", "StrReplace", "Edit", "Overwrite"]);
@@ -225,10 +225,10 @@ function sourceForTool(toolName: string): MutationSource {
 }
 
 function finalizeWithCap(m: AgentFileMutation, diff: string): AgentFileMutation {
-  if (diff.length > MAX_FILE_DIFF_BYTES) {
+  if (utf8ByteLength(diff) > MAX_FILE_DIFF_BYTES) {
     m.omitted = {
       reason: "diff_too_large",
-      bytes: diff.length,
+      bytes: utf8ByteLength(diff),
       limitBytes: MAX_FILE_DIFF_BYTES,
     };
     return m;

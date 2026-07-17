@@ -32,23 +32,25 @@ async function main(): Promise<void> {
 
   const raw = await readStdin();
 
-  // Debug: log raw hook data (only when ADIT_DEBUG is set)
+  // Debug: log hook envelope shape only (ADIT_DEBUG). Never log the raw
+  // payload or message bodies — they contain prompt and tool I/O plaintext
+  // and the debug file lands in a world-readable tmp dir on some platforms.
   debugLog({
     argv: process.argv,
     platform,
     command: hookArgs.hookType,
-    raw,
+    rawKeys: Object.keys(raw),
   });
 
   const adapter = getAdapter(platform);
   const input = adapter.parseInput(raw, hookArgs.hookType);
 
-  // Debug: log parsed input to see what the adapter extracted
+  // Debug: log parsed input shape to see what the adapter extracted
   debugLog({
     phase: "parsed",
     platform,
     hookType: input.hookType,
-    lastAssistantMessage: input.lastAssistantMessage,
+    lastAssistantMessageLength: input.lastAssistantMessage?.length ?? 0,
     stopReason: input.stopReason,
     transcriptPath: input.transcriptPath,
     rawKeys: Object.keys(raw),

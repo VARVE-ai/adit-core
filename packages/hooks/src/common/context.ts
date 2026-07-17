@@ -12,6 +12,7 @@ import {
   getActiveSession,
   getSessionByPlatformSessionId,
   insertSession,
+  reviveSession,
   generateId,
   createClock,
   serialize,
@@ -54,6 +55,13 @@ export async function initHookContext(
   let session: AditSession | null = null;
   if (platformSessionId) {
     session = getSessionByPlatformSessionId(db, platformSessionId);
+    // Resume of a closed platform session: reattach to the same row instead
+    // of minting a duplicate, and reopen it so later lifecycle handling
+    // (session-end, stale sweeps) behaves normally.
+    if (session && session.status !== "active") {
+      reviveSession(db, session.id);
+      session = { ...session, status: "active", endedAt: null };
+    }
   } else {
     session = getActiveSession(db, config.projectId, config.clientId, platform);
   }

@@ -9,7 +9,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type { AgentFileMutation, MutationKind } from "./types.js";
-import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES } from "./constants.js";
+import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES, utf8ByteLength } from "./constants.js";
 
 interface CodexRawEntry {
   type?: string;
@@ -164,10 +164,10 @@ function mutationsFromPatchApply(payload: PatchApplyPayload): AgentFileMutation[
     // unified_diff (no original-file snapshot), so we skip this guard for them
     // and let the diff-size check below catch any oversized payload.
     const contentField = typeof change.content === "string" ? change.content : "";
-    if (contentField.length > MAX_FILE_BYTES) {
+    if (utf8ByteLength(contentField) > MAX_FILE_BYTES) {
       mutation.omitted = {
         reason: "file_too_large",
-        bytes: contentField.length,
+        bytes: utf8ByteLength(contentField),
         limitBytes: MAX_FILE_BYTES,
       };
       mutations.push(mutation);
@@ -176,10 +176,10 @@ function mutationsFromPatchApply(payload: PatchApplyPayload): AgentFileMutation[
 
     const diff = diffFromCodexChange(path, change);
     if (diff) {
-      if (diff.length > MAX_FILE_DIFF_BYTES) {
+      if (utf8ByteLength(diff) > MAX_FILE_DIFF_BYTES) {
         mutation.omitted = {
           reason: "diff_too_large",
-          bytes: diff.length,
+          bytes: utf8ByteLength(diff),
           limitBytes: MAX_FILE_DIFF_BYTES,
         };
       } else {

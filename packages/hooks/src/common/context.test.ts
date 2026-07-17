@@ -10,6 +10,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   closeDatabase,
   createClock,
+  endSession,
+  getSessionById,
   insertSession,
   loadConfig,
   openDatabase,
@@ -86,6 +88,37 @@ describe("initHookContext", () => {
     expect(ctx?.session.id).not.toBe("claude-session");
     expect(ctx?.session.platform).toBe("codex");
     expect(ctx?.session.platformSessionId).toBe("codex-platform-session");
+
+    closeDatabase(ctx!.db);
+  });
+
+  it("reattaches to a closed session on resume and revives it instead of duplicating", async () => {
+    insertSession(db, {
+      id: "resumed-session",
+      projectId,
+      clientId,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: "2026-05-11T02:00:00.000Z",
+      vclockJson: serialize(createClock(clientId)),
+      platformSessionId: "claude-platform-resume",
+    });
+    endSession(db, "resumed-session", "completed");
+
+    const { initHookContext } = await loadContextModule();
+    const ctx = await initHookContext(
+      dir,
+      "claude-code",
+      "claude-platform-resume",
+      { projectRoot: dir },
+    );
+
+    expect(ctx?.session.id).toBe("resumed-session");
+    expect(ctx?.session.status).toBe("active");
+    expect(ctx?.session.endedAt).toBeNull();
+    const persisted = getSessionById(ctx!.db, "resumed-session");
+    expect(persisted?.status).toBe("active");
+    expect(persisted?.endedAt).toBeNull();
 
     closeDatabase(ctx!.db);
   });

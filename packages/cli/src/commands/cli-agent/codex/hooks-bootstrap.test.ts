@@ -297,7 +297,8 @@ describe("ensurePersistentCodexHooksInstalled", () => {
         `node /tmp/adit-hook --platform codex ${fixedRootArg} prompt-submit`,
       );
       expect(hooks).toContain(`node /tmp/adit-hook --platform codex ${fixedRootArg} stop`);
-      expect(hooks).toContain(
+      // notification collection was retired — no PostToolUse hook installed
+      expect(hooks).not.toContain(
         `node /tmp/adit-hook --platform codex ${fixedRootArg} notification`,
       );
       expect(existsSync(join(dir, ".codex", "config.toml"))).toBe(false);
@@ -330,7 +331,8 @@ describe("ensurePersistentCodexHooksInstalled", () => {
 
       const hooks = readFileSync(join(dir, ".codex", "hooks.json"), "utf8");
       expect(installedAgain).toBe(false);
-      expect((hooks.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(4);
+      // 3 hook mappings: session-start, prompt-submit, stop
+      expect((hooks.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(3);
     } finally {
       if (previousCodexHome === undefined) {
         delete process.env.CODEX_HOME;

@@ -32,8 +32,6 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "StopFailure", aditHandler: "stop" },
   { platformEvent: "SessionStart", aditHandler: "session-start" },
   { platformEvent: "SessionEnd", aditHandler: "session-end" },
-  { platformEvent: "TaskCompleted", aditHandler: "task-completed" },
-  { platformEvent: "Notification", aditHandler: "notification" },
   { platformEvent: "SubagentStart", aditHandler: "subagent-start" },
   { platformEvent: "SubagentStop", aditHandler: "subagent-stop" },
 ];
@@ -172,8 +170,6 @@ export const claudeCodeAdapter: PlatformAdapter = {
           StopFailure: makeHookEntry("stop"),
           SessionStart: makeHookEntry("session-start"),
           SessionEnd: makeHookEntry("session-end"),
-          TaskCompleted: makeHookEntry("task-completed"),
-          Notification: makeHookEntry("notification"),
           SubagentStart: makeHookEntry("subagent-start"),
           SubagentStop: makeHookEntry("subagent-stop"),
         },

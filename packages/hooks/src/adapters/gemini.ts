@@ -28,13 +28,6 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "BeforeAgent", aditHandler: "prompt-submit" },
   { platformEvent: "AfterAgent", aditHandler: "stop" },
   { platformEvent: "SessionEnd", aditHandler: "session-end" },
-  // Shell commands only (matcher is regex-tested against the tool name).
-  // File edits are extracted from the transcript at stop; matching all
-  // tools would record a notification event for every read-only call.
-  // Gemini's shell tool is named run_shell_command (verified against the
-  // installed gemini-cli 0.41.2 bundle: TOOL_NAME_MAPPING maps Bash to it).
-  { platformEvent: "AfterTool", aditHandler: "notification", matcher: "run_shell_command" },
-  { platformEvent: "Notification", aditHandler: "notification" },
 ];
 
 export const geminiAdapter: PlatformAdapter = {
@@ -86,9 +79,6 @@ export const geminiAdapter: PlatformAdapter = {
       timeout: 10000,
     });
     const makeHookEntry = (hookType: AditHookType) => [{ hooks: [makeHook(hookType)] }];
-    const makeMatcherEntry = (matcher: string, hookType: AditHookType) => [
-      { matcher, hooks: [makeHook(hookType)] },
-    ];
 
     return {
       configPath: ".gemini/settings.json",
@@ -98,8 +88,6 @@ export const geminiAdapter: PlatformAdapter = {
           BeforeAgent: makeHookEntry("prompt-submit"),
           AfterAgent: makeHookEntry("stop"),
           SessionEnd: makeHookEntry("session-end"),
-          AfterTool: makeMatcherEntry("run_shell_command", "notification"),
-          Notification: makeHookEntry("notification"),
         },
       },
     };

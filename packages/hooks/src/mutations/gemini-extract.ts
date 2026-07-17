@@ -15,7 +15,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import type { AgentFileMutation, MutationKind, MutationSource } from "./types.js";
-import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES } from "./constants.js";
+import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES, utf8ByteLength } from "./constants.js";
 
 const GEMINI_FILE_EDIT_TOOLS = new Set(["write_file", "replace", "edit", "insert"]);
 
@@ -146,10 +146,10 @@ function buildMutation(tc: GeminiToolCall): AgentFileMutation | null {
   const fileDiff = tc.resultDisplay?.fileDiff;
   if (typeof fileDiff === "string" && fileDiff.length > 0) {
     const diff = normalizeGeminiFileDiff(fileDiff);
-    if (diff.length > MAX_FILE_DIFF_BYTES) {
+    if (utf8ByteLength(diff) > MAX_FILE_DIFF_BYTES) {
       m.omitted = {
         reason: "diff_too_large",
-        bytes: diff.length,
+        bytes: utf8ByteLength(diff),
         limitBytes: MAX_FILE_DIFF_BYTES,
       };
       return m;
@@ -162,10 +162,10 @@ function buildMutation(tc: GeminiToolCall): AgentFileMutation | null {
   // Fallback: synthesize pure additions from write_file content
   if (toolName === "write_file" && typeof args.content === "string") {
     const diff = wholeFileAdditionsDiff(args.content);
-    if (diff.length > MAX_FILE_DIFF_BYTES) {
+    if (utf8ByteLength(diff) > MAX_FILE_DIFF_BYTES) {
       m.omitted = {
         reason: "diff_too_large",
-        bytes: diff.length,
+        bytes: utf8ByteLength(diff),
         limitBytes: MAX_FILE_DIFF_BYTES,
       };
       return m;
@@ -182,10 +182,10 @@ function buildMutation(tc: GeminiToolCall): AgentFileMutation | null {
     typeof args.new_string === "string"
   ) {
     const diff = synthesizeReplaceDiff(args.old_string, args.new_string);
-    if (diff.length > MAX_FILE_DIFF_BYTES) {
+    if (utf8ByteLength(diff) > MAX_FILE_DIFF_BYTES) {
       m.omitted = {
         reason: "diff_too_large",
-        bytes: diff.length,
+        bytes: utf8ByteLength(diff),
         limitBytes: MAX_FILE_DIFF_BYTES,
       };
       return m;

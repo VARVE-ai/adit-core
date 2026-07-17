@@ -47,7 +47,6 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "SessionStart", aditHandler: "session-start", matcher: "startup|resume" },
   { platformEvent: "UserPromptSubmit", aditHandler: "prompt-submit" },
   { platformEvent: "Stop", aditHandler: "stop" },
-  { platformEvent: "PostToolUse", aditHandler: "notification", matcher: "Bash" },
 ];
 
 export const codexAdapter: PlatformAdapter = {
@@ -115,7 +114,6 @@ export const codexAdapter: PlatformAdapter = {
           SessionStart: makeMatcherEntry("startup|resume", "session-start"),
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
-          PostToolUse: makeMatcherEntry("Bash", "notification"),
         },
       },
     };

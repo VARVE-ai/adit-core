@@ -59,8 +59,9 @@ describe("Claude Code Hook Chaining", () => {
     expect(hooks.StopFailure).toBeDefined();
     expect(hooks.SessionStart).toBeDefined();
     expect(hooks.SessionEnd).toBeDefined();
-    expect(hooks.TaskCompleted).toBeDefined();
-    expect(hooks.Notification).toBeDefined();
+    // notification / task-completed collection was retired
+    expect(hooks.TaskCompleted).toBeUndefined();
+    expect(hooks.Notification).toBeUndefined();
     expect(hooks.SubagentStart).toBeDefined();
     expect(hooks.SubagentStop).toBeDefined();
 

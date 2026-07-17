@@ -40,6 +40,7 @@ export {
   getSessionById,
   getActiveSession,
   getSessionByPlatformSessionId,
+  reviveSession,
   endSession,
   endStaleSessions,
   listSessions,

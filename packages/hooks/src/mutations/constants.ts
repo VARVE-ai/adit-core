@@ -31,3 +31,12 @@ export const MAX_EVENT_DIFF_BYTES = 512 * 1024;
  * huge payloads to the server.
  */
 export const MAX_SYNC_DIFF_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Real UTF-8 byte length for cap checks. String.length counts UTF-16 code
+ * units and undercounts CJK/emoji by up to 3x, letting payloads blow past
+ * the *_BYTES limits above — every cap comparison must go through this.
+ */
+export function utf8ByteLength(text: string): number {
+  return Buffer.byteLength(text, "utf8");
+}
