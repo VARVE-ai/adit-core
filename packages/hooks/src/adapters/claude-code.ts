@@ -99,15 +99,6 @@ Shows intents (development plans) and tasks from the connected adit-cloud projec
 `,
 };
 
-/**
- * Detect system-injected prompts that Claude Code sends through UserPromptSubmit
- * (e.g. background task completion callbacks wrapped in <task-notification> XML).
- */
-function isSystemInjectedPrompt(prompt: unknown): boolean {
-  if (typeof prompt !== "string") return false;
-  return prompt.trimStart().startsWith("<task-notification>");
-}
-
 export const claudeCodeAdapter: PlatformAdapter = {
   platform: "claude-code" as Platform,
   displayName: "Claude Code",
@@ -116,17 +107,8 @@ export const claudeCodeAdapter: PlatformAdapter = {
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {
     // Hook commands always pass the ADIT hook type directly (baked into the
     // installed command string by buildAditHookCommand).
-    let aditHookType = hookType as AditHookType;
+    const aditHookType = hookType as AditHookType;
     const cwd = (raw.cwd as string) ?? process.cwd();
-
-    // Claude Code sends <task-notification> XML blocks through UserPromptSubmit
-    // when background tasks complete. Reclassify these as notification events
-    // so they don't pollute the user prompt timeline.
-    const isReclassifiedNotification =
-      aditHookType === "prompt-submit" && isSystemInjectedPrompt(raw.prompt);
-    if (isReclassifiedNotification) {
-      aditHookType = "notification";
-    }
 
     return {
       cwd,
@@ -135,7 +117,7 @@ export const claudeCodeAdapter: PlatformAdapter = {
       platformSessionId: raw.session_id as string | undefined,
       transcriptPath: raw.transcript_path as string | undefined,
       // Prompt
-      prompt: isReclassifiedNotification ? undefined : (raw.prompt as string | undefined),
+      prompt: raw.prompt as string | undefined,
       // Tool use fields (Claude Code sends tool_response for tool results)
       toolName: raw.tool_name as string | undefined,
       toolInput: raw.tool_input as Record<string, unknown> | undefined,
@@ -151,15 +133,9 @@ export const claudeCodeAdapter: PlatformAdapter = {
       teammateName: raw.teammate_name as string | undefined,
       teamName: raw.team_name as string | undefined,
       // Notification
-      notificationMessage: isReclassifiedNotification
-        ? (raw.prompt as string)
-        : (raw.message as string | undefined),
-      notificationTitle: isReclassifiedNotification
-        ? "task-notification"
-        : (raw.title as string | undefined),
-      notificationType: isReclassifiedNotification
-        ? "task-notification"
-        : (raw.notification_type as string | undefined),
+      notificationMessage: raw.message as string | undefined,
+      notificationTitle: raw.title as string | undefined,
+      notificationType: raw.notification_type as string | undefined,
       // Subagent
       agentId: raw.agent_id as string | undefined,
       agentType: raw.agent_type as string | undefined,

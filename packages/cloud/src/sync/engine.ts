@@ -10,13 +10,20 @@
  */
 
 import type Database from "better-sqlite3";
-import { getSyncState, upsertSyncState, withPerf } from "@varveai/adit-core";
+import {
+  applyAuthoritativeSyncState,
+  getSyncState,
+  upsertSyncState,
+  withPerf,
+} from "@varveai/adit-core";
 import type { ProjectType, SyncState } from "@varveai/adit-core";
 import type { CloudClient } from "../http/client.js";
 import { buildSyncBatch, batchRecordCount, countUnsyncedRecords } from "./serializer.js";
 import { handleConflicts, type SyncConflict } from "./conflicts.js";
 
 export type { SyncConflict } from "./conflicts.js";
+
+const MAX_SYNC_PUSH_PAYLOAD_BYTES = 8 * 1024 * 1024;
 
 export interface SyncResult {
   /** Total records accepted by server */
@@ -45,8 +52,11 @@ interface PushResponse {
   accepted: number;
   duplicates: number;
   conflicts: SyncConflict[];
-  newSyncCursor: string;
+  /** Legacy global cursor. Only used with servers that lack project cursors. */
+  newSyncCursor: string | null;
   newSyncVersion: number;
+  /** Authoritative cursor for the project included in this push. */
+  projectCursor?: ProjectCursor | null;
 }
 
 /** Per-project cursor entry returned by the server in projectCursors. */
@@ -56,6 +66,26 @@ interface ProjectCursor {
   canonicalRepoKey?: string | null;
   lastSyncedEventId: string | null;
   lastSyncedAt: string | null;
+}
+
+interface SyncPushPayload {
+  clientId: string;
+  localProjectId: string;
+  syncVersion: number;
+  batch: ReturnType<typeof buildSyncBatch>["batch"];
+  projectType: ProjectType;
+  repositories: SyncRepositoryPayload[];
+  projectName?: string;
+  remoteUrl?: string;
+  canonicalRepoKey?: string;
+}
+
+interface SizedSyncPush {
+  batch: ReturnType<typeof buildSyncBatch>["batch"];
+  count: number;
+  diffByteCapApplied: boolean;
+  payloadByteCapApplied: boolean;
+  payload: SyncPushPayload;
 }
 
 /**
@@ -145,6 +175,9 @@ export class SyncEngine {
       const projectEntry = serverStatus.projectCursor ?? serverStatus.projectCursors?.[this.projectId];
       const supportsProjectCursors =
         serverStatus.projectCursor !== undefined || serverStatus.projectCursors !== undefined;
+      const persistSyncState = supportsProjectCursors
+        ? applyAuthoritativeSyncState
+        : upsertSyncState;
       const isNewProject =
         supportsProjectCursors && (projectEntry === undefined || projectEntry.serverProjectId === null);
       if (projectEntry !== undefined) {
@@ -205,7 +238,7 @@ export class SyncEngine {
         totalRecords: 0,
       };
 
-      upsertSyncState(this.db, {
+      persistSyncState(this.db, {
         serverUrl: this.serverUrl,
         clientId: this.cloudClientId,
         lastSyncedEventId: cursor,
@@ -215,31 +248,17 @@ export class SyncEngine {
 
       // 3. Push batches until no more records
       while (true) {
-        const { batch, diffByteCapApplied } = buildSyncBatch(
-          this.db,
-          cursor,
-          lastSyncedAt,
-          this.projectId,
-          this.cloudClientId,
-          this.batchSize,
-        );
-
-        const count = batchRecordCount(batch);
+        const {
+          count,
+          diffByteCapApplied,
+          payloadByteCapApplied,
+          payload,
+        } = this.buildSizedPush(cursor, lastSyncedAt, syncVersion, isNewProject);
         if (count === 0) break; // All synced
 
         const response = await this.client.post<PushResponse>(
           "/api/sync/push",
-          {
-            clientId: this.cloudClientId,
-            localProjectId: this.projectId,
-            syncVersion,
-            batch,
-            projectType: this.projectType,
-            repositories: this.repositories,
-            ...(isNewProject && this.projectName ? { projectName: this.projectName } : {}),
-            ...(this.remoteUrl ? { remoteUrl: this.remoteUrl } : {}),
-            ...(this.canonicalRepoKey ? { canonicalRepoKey: this.canonicalRepoKey } : {}),
-          },
+          payload,
         );
 
         result.accepted += response.accepted;
@@ -253,15 +272,26 @@ export class SyncEngine {
           handleConflicts(response.conflicts);
         }
 
-        // Update cursor
+        // Updated servers return the authoritative cursor for this project.
+        // The top-level newSyncCursor is global and is only safe for legacy
+        // servers that do not support project cursors.
         const prevCursor = cursor;
-        cursor = response.newSyncCursor;
+        if (supportsProjectCursors) {
+          if (response.projectCursor === undefined) {
+            throw new Error(
+              "Cloud server supports project cursors but omitted projectCursor from sync response",
+            );
+          }
+          cursor = response.projectCursor?.lastSyncedEventId ?? null;
+        } else {
+          cursor = response.newSyncCursor;
+        }
         syncVersion = response.newSyncVersion;
         result.newSyncCursor = cursor;
 
         // Persist progress after each batch (crash-safe), including the
         // duplicate-only path below so local threshold checks use server truth.
-        upsertSyncState(this.db, {
+        persistSyncState(this.db, {
           serverUrl: this.serverUrl,
           clientId: this.cloudClientId,
           lastSyncedEventId: cursor,
@@ -281,8 +311,9 @@ export class SyncEngine {
         }
 
         // If batch was smaller than limit, we're done — unless the diff
-        // byte cap trimmed trailing events, which are still unsynced.
-        if (count < this.batchSize && !diffByteCapApplied) break;
+        // byte cap or payload byte cap trimmed trailing records, which are
+        // still unsynced.
+        if (count < this.batchSize && !diffByteCapApplied && !payloadByteCapApplied) break;
       }
 
 
@@ -304,6 +335,67 @@ export class SyncEngine {
   /** Get local sync state */
   getLocalStatus(): SyncState | null {
     return getSyncState(this.db, this.serverUrl);
+  }
+
+  private buildSizedPush(
+    cursor: string | null,
+    lastSyncedAt: string | null,
+    syncVersion: number,
+    isNewProject: boolean,
+  ): SizedSyncPush {
+    let limit = this.batchSize;
+    let payloadByteCapApplied = false;
+
+    while (true) {
+      const { batch, diffByteCapApplied } = buildSyncBatch(
+        this.db,
+        cursor,
+        lastSyncedAt,
+        this.projectId,
+        this.cloudClientId,
+        limit,
+      );
+      const count = batchRecordCount(batch);
+      const payload = this.createPushPayload(batch, syncVersion, isNewProject);
+      const payloadBytes = Buffer.byteLength(JSON.stringify(payload), "utf-8");
+
+      if (count === 0 || payloadBytes <= MAX_SYNC_PUSH_PAYLOAD_BYTES || limit <= 1) {
+        if (payloadBytes > MAX_SYNC_PUSH_PAYLOAD_BYTES && process.env.ADIT_DEBUG) {
+          process.stderr.write(
+            `[adit-cloud] sync: minimal push payload is ${payloadBytes} bytes, above ${MAX_SYNC_PUSH_PAYLOAD_BYTES}; sending without truncation\n`,
+          );
+        }
+        return {
+          batch,
+          count,
+          diffByteCapApplied,
+          payloadByteCapApplied,
+          payload,
+        };
+      }
+
+      payloadByteCapApplied = true;
+      const ratio = MAX_SYNC_PUSH_PAYLOAD_BYTES / payloadBytes;
+      limit = Math.max(1, Math.min(limit - 1, Math.floor(limit * ratio * 0.9)));
+    }
+  }
+
+  private createPushPayload(
+    batch: ReturnType<typeof buildSyncBatch>["batch"],
+    syncVersion: number,
+    isNewProject: boolean,
+  ): SyncPushPayload {
+    return {
+      clientId: this.cloudClientId,
+      localProjectId: this.projectId,
+      syncVersion,
+      batch,
+      projectType: this.projectType,
+      repositories: this.repositories,
+      ...(isNewProject && this.projectName ? { projectName: this.projectName } : {}),
+      ...(this.remoteUrl ? { remoteUrl: this.remoteUrl } : {}),
+      ...(this.canonicalRepoKey ? { canonicalRepoKey: this.canonicalRepoKey } : {}),
+    };
   }
 }
 

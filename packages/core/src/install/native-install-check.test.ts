@@ -12,10 +12,10 @@ const scriptPath = resolve(testDir, "../../scripts/check-native-install.js");
 describe("native install preflight", () => {
   it("stays quiet when a known better-sqlite3 prebuild exists", () => {
     const result = runCheck({
-      ADIT_NATIVE_CHECK_BETTER_SQLITE3_VERSION: "12.6.2",
-      ADIT_NATIVE_CHECK_PLATFORM: "win32",
-      ADIT_NATIVE_CHECK_ARCH: "x64",
-      ADIT_NATIVE_CHECK_MODULES: "115",
+      ADIT_NATIVE_CHECK_BETTER_SQLITE3_VERSION: "12.10.0",
+      ADIT_NATIVE_CHECK_PLATFORM: "darwin",
+      ADIT_NATIVE_CHECK_ARCH: "arm64",
+      ADIT_NATIVE_CHECK_MODULES: "147",
     });
 
     expect(result.status).toBe(0);
@@ -31,10 +31,14 @@ describe("native install preflight", () => {
     });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("Native dependency preflight failed");
+    expect(result.stderr).toContain("Installation stopped: no compatible SQLite binary");
+    expect(result.stderr).toContain("Your project is fine");
+    expect(result.stderr).toContain("Fastest fix (recommended)");
+    expect(result.stderr).toContain("Node.js 22, 24, 25, or 26");
     expect(result.stderr).toContain("better-sqlite3@12.10.0");
-    expect(result.stderr).toContain("Node ABI 115");
-    expect(result.stderr).toContain("ADIT_ALLOW_NATIVE_BUILD=1");
+    expect(result.stderr).toContain("Node.js 20 | win32-x64 | ABI 115");
+    expect(result.stderr).toContain("$env:ADIT_ALLOW_NATIVE_BUILD=\"1\"");
+    expect(result.stderr).toContain("does not make an incompatible native dependency work");
   });
 
   it("allows users to explicitly continue with a native build", () => {

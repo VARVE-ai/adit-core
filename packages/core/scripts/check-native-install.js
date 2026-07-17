@@ -153,43 +153,50 @@ function failWithGuidance(details) {
 
 function buildGuidance(details) {
   const nodeLabel = nodeAbiLabels[details.nodeModules] ?? `Node ABI ${details.nodeModules}`;
-  const supportedNode = formatSupportedNode(
-    details.supportedNodeModules,
-    details.betterSqlite3Version,
-  );
+  const supportedNode = formatSupportedNode(details.supportedNodeModules);
+  const isWindows = details.target.startsWith("win32-");
+  const nativeBuildRequirements = isWindows
+    ? "Install Python and Windows Build Tools, then run in PowerShell:"
+    : "Install Python, make, and a C++ compiler, then run:";
+  const nativeBuildCommand = isWindows
+    ? "$env:ADIT_ALLOW_NATIVE_BUILD=\"1\"; npm install -g @varveai/adit-cli"
+    : "ADIT_ALLOW_NATIVE_BUILD=1 npm install -g @varveai/adit-cli";
 
   return [
     "",
-    "[ADIT] Native dependency preflight failed.",
+    "[ADIT] Installation stopped: no compatible SQLite binary",
     "",
-    details.reason,
-    `Current environment: ${nodeLabel}, ${details.target}, Node ABI ${details.nodeModules}.`,
+    "Your project is fine. ADIT does not have a ready-to-use SQLite binary for:",
+    `  ${nodeLabel} | ${details.target} | ABI ${details.nodeModules}`,
     "",
-    "npm would likely fall back to native compilation via node-gyp. That can fail",
-    "without Python, make, a C++ compiler, or Windows Build Tools installed.",
+    "Fastest fix (recommended):",
+    `  Switch to ${supportedNode}, then retry:`,
+    "    npm install -g @varveai/adit-cli",
     "",
-    "Recommended fixes:",
-    `  - Use a supported Node.js/platform combination${supportedNode}.`,
-    "  - Or install native build tools and retry while explicitly allowing native builds.",
+    `Need to keep ${nodeLabel}?`,
+    `  ${nativeBuildRequirements}`,
+    `    ${nativeBuildCommand}`,
     "",
-    "Retry examples:",
-    "  macOS/Linux: ADIT_ALLOW_NATIVE_BUILD=1 npm install -g @varveai/adit-cli",
-    "  PowerShell:  $env:ADIT_ALLOW_NATIVE_BUILD=\"1\"; npm install -g @varveai/adit-cli",
-    "  cmd.exe:     set ADIT_ALLOW_NATIVE_BUILD=1 && npm install -g @varveai/adit-cli",
+    "Technical details:",
+    `  ${details.reason}`,
     "",
-    "To bypass only this ADIT preflight check, set ADIT_SKIP_NATIVE_PREBUILD_CHECK=1.",
+    "Advanced: ADIT_SKIP_NATIVE_PREBUILD_CHECK=1 skips only this safety check;",
+    "it does not make an incompatible native dependency work.",
     "",
   ].join("\n");
 }
 
-function formatSupportedNode(supportedNodeModules, betterSqlite3Version) {
-  if (supportedNodeModules.length === 0) return ".";
+function formatSupportedNode(supportedNodeModules) {
+  if (supportedNodeModules.length === 0) return "a supported Node.js version";
 
-  const labels = supportedNodeModules
-    .map((nodeModules) => nodeAbiLabels[nodeModules] ?? `ABI ${nodeModules}`)
-    .join(", ");
+  const labels = supportedNodeModules.map((nodeModules) =>
+    (nodeAbiLabels[nodeModules] ?? `ABI ${nodeModules}`).replace("Node.js ", ""),
+  );
 
-  return ` (${labels} for better-sqlite3@${betterSqlite3Version})`;
+  if (labels.length === 1) return `Node.js ${labels[0]}`;
+  if (labels.length === 2) return `Node.js ${labels[0]} or ${labels[1]}`;
+
+  return `Node.js ${labels.slice(0, -1).join(", ")}, or ${labels.at(-1)}`;
 }
 
 function isTruthy(value) {

@@ -32,6 +32,10 @@ import {
   initializeSessionRepoBaselines,
 } from "../common/commit-attribution.js";
 import { debugLog } from "../common/debug-log.js";
+import {
+  classifyPromptSubmit,
+  type PromptSubmitClassification,
+} from "../common/system-prompt.js";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { NormalizedHookInput } from "../adapters/types.js";
@@ -68,6 +72,24 @@ export async function dispatchHook(
   const dataDir = ctx.config.dataDir;
 
   try {
+    if (isIgnoredSystemSession(ctx)) {
+      if (input.hookType === "session-end") {
+        endSession(ctx.db, ctx.session.id, "completed");
+      }
+      return;
+    }
+
+    const classification =
+      input.hookType === "prompt-submit"
+        ? classifyPromptSubmit(input.prompt, { agentId: input.agentId })
+        : null;
+    if (classification && classification.kind !== "user") {
+      await withPerf(dataDir, "hook", `system-${classification.kind}`, () =>
+        handleClassifiedPromptSubmit(ctx, input, classification),
+      );
+      return;
+    }
+
     await withPerf(dataDir, "hook", input.hookType, async () => {
       switch (input.hookType) {
         case "prompt-submit":
@@ -141,6 +163,133 @@ export async function dispatchHook(
     }
   } finally {
     ctx.db.close();
+  }
+}
+
+interface IgnoredSessionMetadata {
+  aditIgnored?: {
+    reason?: string;
+    kind?: string;
+    originalLength?: number;
+    originalHash?: string;
+    markedAt?: string;
+  };
+}
+
+function isIgnoredSystemSession(ctx: HookContext): boolean {
+  const metadata = parseSessionMetadata(ctx.session.metadataJson);
+  return metadata.aditIgnored?.reason === "claude-mem-observer";
+}
+
+async function handleClassifiedPromptSubmit(
+  ctx: HookContext,
+  _input: NormalizedHookInput,
+  classification: PromptSubmitClassification,
+): Promise<void> {
+  switch (classification.kind) {
+    case "task-notification":
+      await recordLightweightSystemNotification(ctx, {
+        source: "task-notification",
+        responseText: "task-notification",
+        toolName: "task-notification",
+        classification,
+      });
+      return;
+    case "claude-mem-observer": {
+      markIgnoredSystemSession(ctx, classification);
+      const observedUserRequest = classification.observedUserRequest;
+      if (
+        observedUserRequest &&
+        !hasExistingPromptSubmit(ctx, observedUserRequest)
+      ) {
+        await recordLightweightSystemNotification(ctx, {
+          source: "claude-mem-observed-user-request",
+          responseText: observedUserRequest,
+          toolName: "claude-mem-observed-user-request",
+          classification,
+        });
+      }
+      return;
+    }
+    case "subagent-prompt":
+      return;
+    case "user":
+      return;
+  }
+}
+
+async function recordLightweightSystemNotification(
+  ctx: HookContext,
+  input: {
+    source: string;
+    responseText: string;
+    toolName: string;
+    classification: PromptSubmitClassification;
+  },
+): Promise<void> {
+  const timeline = createTimelineManager(ctx.db, ctx.config);
+  const metadata: Record<string, unknown> = {
+    source: input.source,
+    kind: input.classification.kind,
+    originalLength: input.classification.originalLength,
+    originalHash: input.classification.originalHash,
+  };
+  if (input.classification.observedUserRequest) {
+    metadata.observedUserRequestLength = input.classification.observedUserRequest.length;
+  }
+
+  await timeline.recordEvent({
+    sessionId: ctx.session.id,
+    eventType: "notification",
+    actor: "system",
+    responseText: input.responseText,
+    toolName: input.toolName,
+    toolInputJson: JSON.stringify(metadata),
+  });
+}
+
+function markIgnoredSystemSession(
+  ctx: HookContext,
+  classification: PromptSubmitClassification,
+): void {
+  const metadata = parseSessionMetadata(ctx.session.metadataJson);
+  metadata.aditIgnored = {
+    reason: "claude-mem-observer",
+    kind: classification.kind,
+    originalLength: classification.originalLength,
+    originalHash: classification.originalHash,
+    markedAt: new Date().toISOString(),
+  };
+  const metadataJson = JSON.stringify(metadata);
+  ctx.db.prepare("UPDATE sessions SET metadata_json = ? WHERE id = ?").run(metadataJson, ctx.session.id);
+  ctx.session.metadataJson = metadataJson;
+}
+
+function hasExistingPromptSubmit(ctx: HookContext, promptText: string): boolean {
+  const row = ctx.db
+    .prepare(
+      `SELECT 1 FROM events e
+       JOIN sessions s ON e.session_id = s.id
+       WHERE s.project_id = ?
+         AND e.session_id != ?
+         AND e.event_type = 'prompt_submit'
+         AND e.prompt_text = ?
+         AND e.deleted_at IS NULL
+       LIMIT 1`,
+    )
+    .get(ctx.config.projectId, ctx.session.id, promptText);
+  return !!row;
+}
+
+function parseSessionMetadata(metadataJson: string | null): IgnoredSessionMetadata & Record<string, unknown> {
+  if (!metadataJson) return {};
+  try {
+    const parsed = JSON.parse(metadataJson);
+    return parsed && typeof parsed === "object"
+      ? parsed as IgnoredSessionMetadata & Record<string, unknown>
+      : {};
+  } catch {
+    return {};
   }
 }
 

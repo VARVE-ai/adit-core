@@ -11,7 +11,7 @@ import {
   insertSession,
   openDatabase,
 } from "@varveai/adit-core";
-import { buildSyncBatch } from "./serializer.js";
+import { buildSyncBatch, countUnsyncedRecords } from "./serializer.js";
 
 const PROJECT_ID = "proj-serializer";
 const LOCAL_CLIENT_ID = "local-client";
@@ -49,6 +49,8 @@ function insertTestEvent(
     sequence: number;
     promptText?: string;
     responseText?: string;
+    toolInputJson?: string;
+    toolOutputJson?: string;
   },
 ): void {
   insertEvent(db, {
@@ -59,6 +61,8 @@ function insertTestEvent(
     actor: input.eventType === "prompt_submit" ? "user" : "assistant",
     promptText: input.promptText ?? null,
     responseText: input.responseText ?? null,
+    toolInputJson: input.toolInputJson ?? null,
+    toolOutputJson: input.toolOutputJson ?? null,
     startedAt: "2026-05-18T00:00:00.000Z",
     status: "success",
     vclockJson: "{}",
@@ -152,6 +156,46 @@ describe("sync serializer", () => {
       "01H000000000000000000000020",
       "01H000000000000000000000030",
     ]);
+  });
+
+  it("compares mutable record timestamps across SQLite and ISO timezone formats", () => {
+    const olderSessionId = "01H000000000000000000000001";
+    const newerSessionId = "01H000000000000000000000002";
+    const cursor = "01H000000000000000000000099";
+    const lastSyncedAt = "2026-07-13T08:30:00.000Z";
+    insertTestSession(db, olderSessionId);
+    insertTestSession(db, newerSessionId);
+
+    db.prepare("UPDATE sessions SET ended_at = ?, status = 'completed' WHERE id = ?")
+      .run("2026-07-13T16:00:00+08:00", olderSessionId);
+    db.prepare("UPDATE sessions SET ended_at = ?, status = 'completed' WHERE id = ?")
+      .run("2026-07-13T17:00:00+08:00", newerSessionId);
+    db.prepare(
+      `INSERT INTO plans (
+        id, project_id, plan_type, title, content_md, status,
+        created_at, updated_at, vclock_json
+      ) VALUES (?, ?, 'task', 'Mixed timestamp plan', '# Plan', 'active', ?, ?, '{}')`,
+    ).run(
+      "01H000000000000000000000003",
+      PROJECT_ID,
+      "2026-07-13 08:00:00",
+      "2026-07-13 09:00:00",
+    );
+
+    const { batch } = buildSyncBatch(
+      db,
+      cursor,
+      lastSyncedAt,
+      PROJECT_ID,
+      CLOUD_CLIENT_ID,
+      500,
+    );
+
+    expect(batch.sessions.map((session) => session.id)).toEqual([newerSessionId]);
+    expect(batch.plans.map((plan) => plan.id)).toEqual([
+      "01H000000000000000000000003",
+    ]);
+    expect(countUnsyncedRecords(db, cursor, lastSyncedAt, PROJECT_ID)).toBe(1);
   });
 
   it("treats multiple prompts as closed once the session has a following assistant response", () => {
@@ -289,5 +333,28 @@ describe("sync serializer", () => {
     expect(batch.diffs).toHaveLength(1);
     expect(batch.diffs[0].diff_text.length).toBeLessThanOrEqual(2 * 1024 * 1024);
     expect(batch.diffs[0].diff_text.endsWith("[truncated by adit sync: diff exceeds batch byte cap]")).toBe(true);
+  });
+
+  it("does not modify event text fields while building sync batches", () => {
+    const sessionId = "01H000000000000000000000001";
+    insertTestSession(db, sessionId);
+    const prompt = "p".repeat(140_000);
+
+    insertTestEvent(db, {
+      id: "01H000000000000000000000010",
+      sessionId,
+      eventType: "prompt_submit",
+      sequence: 1,
+      promptText: prompt,
+      responseText: "small response",
+      toolInputJson: JSON.stringify({ command: "git status" }),
+    });
+
+    const { batch } = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
+    const event = batch.events[0];
+
+    expect(event.prompt_text).toBe(prompt);
+    expect(event.response_text).toBe("small response");
+    expect(event.tool_input_json).toBe(JSON.stringify({ command: "git status" }));
   });
 });

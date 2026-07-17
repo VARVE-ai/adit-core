@@ -341,6 +341,29 @@ function enqueueCommand(input: {
   }
 }
 
+function commandErrorSessionId(
+  provider: ClaudeCodeProvider,
+  command: RelayCommand,
+  previousActiveSessionId: string | null,
+): string | null {
+  const payloadSessionId = readString(command.payload.sessionId);
+  const pendingSessionId =
+    readString(command.payload.pendingSessionId) ??
+    (isPendingSessionId(payloadSessionId) ? payloadSessionId : null);
+  if (pendingSessionId) {
+    const activeSessionId = provider.state.activeSessionId;
+    if (
+      activeSessionId &&
+      activeSessionId !== previousActiveSessionId &&
+      !isPendingSessionId(activeSessionId)
+    ) {
+      return activeSessionId;
+    }
+    return pendingSessionId;
+  }
+  return payloadSessionId ?? provider.state.activeSessionId ?? provider.state.resumeSessionId;
+}
+
 async function drainCommandQueue(input: {
   provider: ClaudeCodeProvider;
   commands: RelayCommand[];
@@ -352,17 +375,20 @@ async function drainCommandQueue(input: {
     const command = input.commands.shift();
     if (!command) return processed;
     processed = true;
+    const previousActiveSessionId = input.provider.state.activeSessionId;
     try {
       await processCommand(input.provider, command);
       input.ws?.ack(command.id);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      input.ws?.commandError(command.id, message);
+      const sessionId = commandErrorSessionId(input.provider, command, previousActiveSessionId);
+      input.ws?.commandError(command.id, message, sessionId);
       input.enqueueEvent({
         type: "error",
         payload: {
           message,
           commandId: command.id,
+          ...(sessionId ? { sessionId } : {}),
           createdAt: Date.now(),
         },
       });
