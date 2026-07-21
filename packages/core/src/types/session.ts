@@ -34,6 +34,12 @@ export interface SessionMetadata {
   nodeVersion?: string;
   pythonVersion?: string;
   osInfo?: string;
+  /** AI model reported by the CLI at session start */
+  model?: string;
+  /** How the session started, e.g. "startup" | "resume" (platform-reported) */
+  source?: string;
+  /** Permission mode reported by the CLI at session start */
+  permissionMode?: string;
 }
 
 /** The session record */

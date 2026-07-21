@@ -25,6 +25,7 @@ const mockList = vi.fn().mockResolvedValue([]);
 vi.mock("@varveai/adit-core", () => ({
   getLatestEnvSnapshot: vi.fn(() => null),
   endSession: vi.fn(),
+  mergeSessionMetadata: vi.fn(),
   withPerf: vi.fn((_dir: string, _cat: string, _op: string, fn: () => unknown) => fn()),
 }));
 
@@ -60,12 +61,13 @@ vi.mock("../common/context.js", () => ({
 }));
 
 import { dispatchHook } from "./unified.js";
-import { endSession } from "@varveai/adit-core";
+import { endSession, mergeSessionMetadata } from "@varveai/adit-core";
 import { getCurrentBranch, getHeadSha } from "@varveai/adit-engine";
 import { triggerAutoSync, triggerTranscriptUpload } from "@varveai/adit-cloud";
 import type { NormalizedHookInput } from "../adapters/types.js";
 
 const mockEndSession = vi.mocked(endSession);
+const mockMergeSessionMetadata = vi.mocked(mergeSessionMetadata);
 const mockGetCurrentBranch = vi.mocked(getCurrentBranch);
 const mockGetHeadSha = vi.mocked(getHeadSha);
 const mockTriggerAutoSync = vi.mocked(triggerAutoSync);
@@ -525,6 +527,36 @@ describe("dispatchHook", () => {
       "sess-001",
       "completed",
     );
+  });
+
+  it("persists session-start launch metadata on the session instead of a checkpoint event", async () => {
+    const input: NormalizedHookInput = {
+      cwd: "/test",
+      hookType: "session-start",
+      sessionSource: "startup",
+      model: "claude-fable-5",
+      permissionMode: "default",
+    };
+
+    await dispatchHook(input);
+
+    expect(mockMergeSessionMetadata).toHaveBeenCalledWith(
+      expect.anything(),
+      "sess-001",
+      { model: "claude-fable-5", source: "startup", permissionMode: "default" },
+    );
+    expect(mockRecordEvent).not.toHaveBeenCalled();
+  });
+
+  it("skips the metadata merge when the platform reports nothing", async () => {
+    const input: NormalizedHookInput = {
+      cwd: "/test",
+      hookType: "session-start",
+    };
+
+    await dispatchHook(input);
+
+    expect(mockMergeSessionMetadata).not.toHaveBeenCalled();
   });
 
   it("triggers cloud auto-sync once on session-start", async () => {

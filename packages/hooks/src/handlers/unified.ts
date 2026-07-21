@@ -8,6 +8,7 @@
 import {
   endSession,
   endStaleSessions,
+  mergeSessionMetadata,
   withPerf,
   insertDiff,
   generateId,
@@ -521,8 +522,6 @@ function staleSessionIdleMsFor(platform: string): number {
 
 /** Handle session start — capture initial env snapshot and record metadata */
 async function handleSessionStart(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  const timeline = createTimelineManager(ctx.db, ctx.config);
-
   // Lazily close zombie sessions for this platform. Codex has no SessionEnd
   // hook event, so its sessions would otherwise stay active forever and
   // become targets for the sessionless getActiveSession fallback.
@@ -542,20 +541,21 @@ async function handleSessionStart(ctx: HookContext, input: NormalizedHookInput):
   // Seed per-repo HEAD baselines so first-turn commits are attributable.
   await initializeSessionRepoBaselines(ctx);
 
-  // Record session start event with platform metadata
+  // Persist launch context (model, source, permission mode) on the session
+  // record. Replaces the legacy "checkpoint" marker event. Metadata-only
+  // updates on revived sessions reach the cloud when the session next ends
+  // (sync detects modified sessions via ended_at).
   const metadata: Record<string, unknown> = {};
   if (input.model) metadata.model = input.model;
   if (input.sessionSource) metadata.source = input.sessionSource;
   if (input.permissionMode) metadata.permissionMode = input.permissionMode;
 
   if (Object.keys(metadata).length > 0) {
-    await timeline.recordEvent({
-      sessionId: ctx.session.id,
-      eventType: "checkpoint",
-      actor: "system",
-      responseText: `Session started (${input.sessionSource ?? "startup"})`,
-      toolInputJson: JSON.stringify(metadata),
-    });
+    try {
+      mergeSessionMetadata(ctx.db, ctx.session.id, metadata);
+    } catch {
+      // Fail-open
+    }
   }
 
   if (ctx.config.captureEnv) {

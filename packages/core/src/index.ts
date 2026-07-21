@@ -41,6 +41,7 @@ export {
   getActiveSession,
   getSessionByPlatformSessionId,
   reviveSession,
+  mergeSessionMetadata,
   endSession,
   endStaleSessions,
   listSessions,

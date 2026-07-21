@@ -14,7 +14,7 @@ export type EventType =
   | "subagent_call" // Subagent spawned
   | "skill_call" // Skill invoked
   | "mcp_call" // MCP server tool call
-  | "checkpoint" // Git checkpoint created
+  | "checkpoint" // DEPRECATED 2026-07: no longer collected (was session-start marker; metadata now lives on the session); kept for historical rows
   | "revert" // User reverted to checkpoint
   | "git_commit" // Commit attributed to this session (gitHeadSha holds the commit sha itself)
   | "env_snapshot" // Environment captured
