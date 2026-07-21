@@ -15,7 +15,7 @@ export interface CloudConfig {
   autoSync: boolean;
   /** Max records per sync batch (server limit: 500) */
   batchSize: number;
-  /** Minimum unsynced events before auto-sync triggers (default: 20) */
+  /** Minimum unsynced events before auto-sync triggers (default: 10) */
   syncThreshold: number;
   /** Hours since last successful sync before auto-sync triggers regardless of count (default: 2) */
   syncTimeoutHours: number;
@@ -128,7 +128,7 @@ function parseSyncTimeoutHours(raw: string | undefined): number {
 }
 
 function parseSyncThreshold(raw: string | undefined): number {
-  const DEFAULT = 20;
+  const DEFAULT = 10;
   if (raw === undefined) return DEFAULT;
   const parsed = parseInt(raw, 10);
   if (Number.isNaN(parsed)) return DEFAULT;

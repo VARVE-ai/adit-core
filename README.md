@@ -323,7 +323,7 @@ Files larger than 500 KB are skipped with a warning.
 | `ADIT_CLOUD_ENABLED` | Set to `false` to disable cloud features | `true` |
 | `ADIT_CLOUD_AUTO_SYNC` | Set to `false` to disable auto-sync | `true` |
 | `ADIT_CLOUD_BATCH_SIZE` | Max records per sync batch; capped at 500 | `500` |
-| `ADIT_CLOUD_SYNC_THRESHOLD` | Unsynced record count that triggers auto-sync | `20` |
+| `ADIT_CLOUD_SYNC_THRESHOLD` | Unsynced event count that triggers auto-sync | `10` |
 | `ADIT_CLOUD_SYNC_TIMEOUT_HOURS` | Hours after last sync that trigger auto-sync | `2` |
 | `ADIT_AUTH_TOKEN` | Static JWT token for CI/CD or non-interactive auth | unset |
 | `ADIT_TRANSCRIPT_UPLOAD` | Set to `false` to disable transcript upload | `true` |

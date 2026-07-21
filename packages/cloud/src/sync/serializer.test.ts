@@ -11,7 +11,7 @@ import {
   insertSession,
   openDatabase,
 } from "@varveai/adit-core";
-import { buildSyncBatch, countUnsyncedRecords } from "./serializer.js";
+import { buildSyncBatch, countUnsyncedEvents, countUnsyncedRecords } from "./serializer.js";
 
 const PROJECT_ID = "proj-serializer";
 const LOCAL_CLIENT_ID = "local-client";
@@ -196,6 +196,32 @@ describe("sync serializer", () => {
       "01H000000000000000000000003",
     ]);
     expect(countUnsyncedRecords(db, cursor, lastSyncedAt, PROJECT_ID)).toBe(1);
+    expect(countUnsyncedEvents(db, cursor, PROJECT_ID)).toBe(0);
+  });
+
+  it("counts only events toward the auto-sync threshold", () => {
+    const sessionId = "01H000000000000000000000001";
+    insertTestSession(db, sessionId);
+    insertTestEvent(db, {
+      id: "01H000000000000000000000010",
+      sessionId,
+      eventType: "prompt_submit",
+      sequence: 1,
+      promptText: "question",
+    });
+    insertTestEvent(db, {
+      id: "01H000000000000000000000020",
+      sessionId,
+      eventType: "assistant_response",
+      sequence: 2,
+      promptText: "question",
+      responseText: "answer",
+    });
+
+    expect(countUnsyncedEvents(db, null, PROJECT_ID)).toBe(2);
+    expect(countUnsyncedEvents(db, "01H000000000000000000000010", PROJECT_ID)).toBe(1);
+    // countUnsyncedRecords additionally counts the new session row
+    expect(countUnsyncedRecords(db, null, null, PROJECT_ID)).toBe(3);
   });
 
   it("treats multiple prompts as closed once the session has a following assistant response", () => {

@@ -316,35 +316,46 @@ function applyDiffByteCap(
   return trimmed;
 }
 
-/** Count total unsynced records across all tables */
-export function countUnsyncedRecords(
+/**
+ * Count unsynced events for a project.
+ *
+ * Used by auto-sync's count-based trigger: only events count toward the
+ * threshold — session records (and diffs, snapshots, plans) ride along
+ * in the batch once a sync is triggered.
+ */
+export function countUnsyncedEvents(
   db: Database.Database,
   afterEventId: string | null,
-  lastSyncedAt: string | null,
   projectId: string,
 ): number {
-  let total = 0;
-
-  // Events
   if (afterEventId) {
-    const eventRow = db
+    const row = db
       .prepare(
         `SELECT COUNT(*) as cnt FROM events e
          JOIN sessions s ON e.session_id = s.id
          WHERE e.id > ? AND s.project_id = ?`,
       )
       .get(afterEventId, projectId) as { cnt: number };
-    total += eventRow.cnt;
-  } else {
-    const eventRow = db
-      .prepare(
-        `SELECT COUNT(*) as cnt FROM events e
-         JOIN sessions s ON e.session_id = s.id
-         WHERE s.project_id = ?`,
-      )
-      .get(projectId) as { cnt: number };
-    total += eventRow.cnt;
+    return row.cnt;
   }
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) as cnt FROM events e
+       JOIN sessions s ON e.session_id = s.id
+       WHERE s.project_id = ?`,
+    )
+    .get(projectId) as { cnt: number };
+  return row.cnt;
+}
+
+/** Count total unsynced records (events + new/modified sessions) */
+export function countUnsyncedRecords(
+  db: Database.Database,
+  afterEventId: string | null,
+  lastSyncedAt: string | null,
+  projectId: string,
+): number {
+  let total = countUnsyncedEvents(db, afterEventId, projectId);
 
   // Sessions (new or modified)
   if (afterEventId) {
