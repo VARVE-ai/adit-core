@@ -21,6 +21,14 @@ export interface GitCommit {
   date: string; // ISO 8601
   message: string;
   branch?: string;
+  /** Changed files (numstat); attached only for recent commits before upload. */
+  files?: GitCommitFileStat[];
+}
+
+export interface GitCommitFileStat {
+  path: string;
+  additions: number;
+  deletions: number;
 }
 
 export interface GitIdentity {

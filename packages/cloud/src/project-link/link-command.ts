@@ -37,6 +37,7 @@ import {
   collectBranches,
   collectCommitLogs,
   collectCommitCount,
+  collectCommitFileStats,
   resolveCommitBranches,
   projectNameFromRemoteUrl,
 } from "./git-collector.js";
@@ -57,6 +58,13 @@ import { normalizeGitHubRepoKey } from "./repo-key.js";
 
 /** Maximum number of commits per upload batch */
 const COMMIT_BATCH_SIZE = 1000;
+
+/**
+ * Only the newest commits get changed-file lists attached. File lists
+ * feed cloud-side content attribution, which only matters for recent
+ * commits; skipping deep history keeps first-link sync fast and small.
+ */
+const COMMIT_FILE_STAT_LIMIT = 500;
 
 /** Minimum staleness before re-uploading branches (1 hour) */
 const BRANCH_STALE_MS = 60 * 60 * 1000;
@@ -517,6 +525,21 @@ async function linkRepositoryCommand(
       if (commitsToUpload.length === 0) {
         log(`  ${commits.length} commits already uploaded by another workspace repository.`);
       } else {
+        // Attach changed-file lists to the newest commits (commits arrive
+        // newest-first from git log). Fail-open: an empty map only means
+        // uploads go out without file lists.
+        currentStep = "Collect commit file stats";
+        const fileStatTargets = commitsToUpload
+          .slice(0, COMMIT_FILE_STAT_LIMIT)
+          .map((c) => c.sha);
+        const fileStatsBySha = await runStep(currentStep, () =>
+          collectCommitFileStats(projectRoot, fileStatTargets)
+        );
+        for (const c of commitsToUpload) {
+          const files = fileStatsBySha.get(c.sha);
+          if (files && files.length > 0) c.files = files;
+        }
+
         for (let i = 0; i < commitsToUpload.length; i += COMMIT_BATCH_SIZE) {
           const batch = commitsToUpload.slice(i, i + COMMIT_BATCH_SIZE);
           currentStep = "Upload commits";
@@ -536,6 +559,7 @@ async function linkRepositoryCommand(
                   date: c.date,
                   message: c.message,
                   branch: c.branch,
+                  ...(c.files && c.files.length > 0 ? { files: c.files } : {}),
                 })),
               },
             )

@@ -11,6 +11,7 @@ const mockCollectDefaultBranch = vi.fn();
 const mockCollectGitIdentity = vi.fn();
 const mockCollectCommitLogs = vi.fn();
 const mockCollectCommitCount = vi.fn();
+const mockCollectCommitFileStats = vi.fn();
 const mockResolveCommitBranches = vi.fn();
 const mockCollectGitRefsFingerprint = vi.fn();
 const mockDiscoverDocuments = vi.fn();
@@ -53,6 +54,7 @@ vi.mock("./git-collector.js", () => ({
   collectGitIdentity: (...args: unknown[]) => mockCollectGitIdentity(...args),
   collectCommitLogs: (...args: unknown[]) => mockCollectCommitLogs(...args),
   collectCommitCount: (...args: unknown[]) => mockCollectCommitCount(...args),
+  collectCommitFileStats: (...args: unknown[]) => mockCollectCommitFileStats(...args),
   resolveCommitBranches: (...args: unknown[]) => mockResolveCommitBranches(...args),
   projectNameFromRemoteUrl: vi.fn(() => "repo-name"),
 }));
@@ -153,6 +155,7 @@ function setupWorkspaceLinkTest(repositories: TestRepository[], commitsByPath: R
   mockCollectGitIdentity.mockResolvedValue({ authorName: null, authorEmail: null });
   mockCollectCommitLogs.mockImplementation((repoPath: string) => Promise.resolve(commitsByPath[repoPath] ?? []));
   mockCollectCommitCount.mockImplementation((repoPath: string) => Promise.resolve(commitsByPath[repoPath]?.length ?? 0));
+  mockCollectCommitFileStats.mockResolvedValue(new Map());
   mockResolveCommitBranches.mockResolvedValue(undefined);
   mockCollectGitRefsFingerprint.mockResolvedValue(null);
   mockDiscoverDocuments.mockReturnValue([]);
@@ -262,6 +265,7 @@ describe("linkCommand workspace repository requests", () => {
     mockCollectGitIdentity.mockResolvedValue({ authorName: null, authorEmail: null });
     mockCollectCommitLogs.mockResolvedValue([]);
     mockCollectCommitCount.mockResolvedValue(0);
+    mockCollectCommitFileStats.mockResolvedValue(new Map());
     mockResolveCommitBranches.mockResolvedValue(undefined);
     mockCollectGitRefsFingerprint.mockResolvedValue(null);
     mockDiscoverDocuments.mockReturnValue([{
@@ -684,6 +688,7 @@ describe("linkCommand workspace repository requests", () => {
     mockCollectGitIdentity.mockResolvedValue({ authorName: null, authorEmail: null });
     mockCollectCommitLogs.mockResolvedValue([]);
     mockCollectCommitCount.mockResolvedValue(0);
+    mockCollectCommitFileStats.mockResolvedValue(new Map());
     mockResolveCommitBranches.mockResolvedValue(undefined);
     mockCollectGitRefsFingerprint.mockResolvedValue(null);
     mockDiscoverDocuments.mockReturnValue([]);
@@ -799,6 +804,7 @@ describe("linkCommand workspace repository requests", () => {
     mockCollectGitIdentity.mockResolvedValue({ authorName: null, authorEmail: null });
     mockCollectCommitLogs.mockResolvedValue([]);
     mockCollectCommitCount.mockResolvedValue(0);
+    mockCollectCommitFileStats.mockResolvedValue(new Map());
     mockResolveCommitBranches.mockResolvedValue(undefined);
     mockCollectGitRefsFingerprint.mockResolvedValue(null);
     mockDiscoverDocuments.mockReturnValue([{
