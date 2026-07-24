@@ -7,11 +7,13 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../cli-process.js", () => ({
   spawnCliProcess: (...args: unknown[]) => mocks.spawnCliProcess(...args),
+  killCliProcessTree: (child: { kill?: () => void } | null | undefined) => child?.kill?.(),
 }));
 
 import {
   CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_FEATURE,
   CodexAppServerClient,
+  isCodexTracingLogLine,
   isRecoverableCodexAppServerToolError,
   isTransientCodexSystemSkillsError,
 } from "./codex-app-server-client.js";
@@ -107,6 +109,70 @@ describe("CodexAppServerClient", () => {
       expect.stringContaining("[codex app-server] 2026 ERROR codex_core::tools::router"),
     );
   });
+
+  it("buffers structured tracing diagnostics instead of printing them", async () => {
+    const child = mockAppServerProcess();
+    mocks.spawnCliProcess.mockReturnValue(child);
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const client = new CodexAppServerClient({ bin: "codex", cwd: "/tmp/project" });
+    await client.start();
+
+    child.stderr.emit(
+      "data",
+      "2026-07-24T06:31:40.581553Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed\n",
+    );
+
+    expect(stderrWrite).not.toHaveBeenCalled();
+
+    process.env.ADIT_DEBUG = "1";
+    child.stderr.emit(
+      "data",
+      "2026-07-24T06:31:45.837547Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed\n",
+    );
+
+    expect(stderrWrite).toHaveBeenCalledWith(
+      expect.stringContaining("[codex app-server] 2026-07-24T06:31:45.837547Z ERROR rmcp::transport::worker"),
+    );
+  });
+
+  it("dumps the buffered diagnostics tail when the app-server exits unexpectedly", async () => {
+    const child = mockAppServerProcess();
+    mocks.spawnCliProcess.mockReturnValue(child);
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const client = new CodexAppServerClient({ bin: "codex", cwd: "/tmp/project" });
+    await client.start();
+
+    child.stderr.emit(
+      "data",
+      "2026-07-24T06:31:40.581553Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed\n" +
+        "2026-07-24T06:31:47.782603Z ERROR codex_rmcp_client::oauth::refresh_transaction: error=failed to refresh OAuth tokens\n",
+    );
+    expect(stderrWrite).not.toHaveBeenCalled();
+
+    child.emit("exit", 1, null);
+
+    const written = stderrWrite.mock.calls.map(([text]) => String(text)).join("");
+    expect(written).toContain("exited unexpectedly (1) — last diagnostics:");
+    expect(written).toContain("rmcp::transport::worker");
+    expect(written).toContain("codex_rmcp_client::oauth::refresh_transaction");
+  });
+
+  it("does not dump buffered diagnostics on an intentional stop", async () => {
+    const child = mockAppServerProcess();
+    mocks.spawnCliProcess.mockReturnValue(child);
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const client = new CodexAppServerClient({ bin: "codex", cwd: "/tmp/project" });
+    await client.start();
+
+    child.stderr.emit(
+      "data",
+      "2026-07-24T06:31:40.581553Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed\n",
+    );
+
+    client.stop();
+
+    expect(stderrWrite).not.toHaveBeenCalled();
+  });
 });
 
 describe("isTransientCodexSystemSkillsError", () => {
@@ -117,6 +183,25 @@ describe("isTransientCodexSystemSkillsError", () => {
     expect(isTransientCodexSystemSkillsError(
       "ERROR codex_core_skills::loader: failed to read skills dir /Users/edy/.codex/skills/custom: No such file or directory (os error 2)",
     )).toBe(false);
+  });
+});
+
+describe("isCodexTracingLogLine", () => {
+  it("matches timestamped tracing lines of any level and leaves plain output alone", () => {
+    expect(isCodexTracingLogLine(
+      "2026-07-24T06:31:40.581553Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed",
+    )).toBe(true);
+    expect(isCodexTracingLogLine(
+      "2026-07-24T06:31:47.782603Z ERROR codex_rmcp_client::oauth::refresh_transaction: error=failed to refresh OAuth tokens for server cloudflare-api",
+    )).toBe(true);
+    expect(isCodexTracingLogLine(
+      "2026-07-24T06:31:40Z WARN codex_core::config: falling back to defaults",
+    )).toBe(true);
+    expect(isCodexTracingLogLine("regular app-server warning")).toBe(false);
+    expect(isCodexTracingLogLine(
+      "thread 'main' panicked at src/main.rs:10: boom",
+    )).toBe(false);
+    expect(isCodexTracingLogLine("2026 ERROR codex_core::tools::router: error=x")).toBe(false);
   });
 });
 

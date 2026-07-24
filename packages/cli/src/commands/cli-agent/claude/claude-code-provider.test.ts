@@ -37,6 +37,7 @@ import {
   normalizeClaudeTodoWriteInput,
 } from "./provider.js";
 import { emitClaudeResultError } from "./sdk-event-emitters.js";
+import { createRelayNotices } from "../relay-console.js";
 
 function mockChildProcess() {
   const child = new EventEmitter() as EventEmitter & {
@@ -2992,5 +2993,31 @@ describe("ClaudeCodeProvider stream errors", () => {
         }),
       },
     ]);
+  });
+});
+
+describe("ClaudeCodeProvider takeover notices", () => {
+  it("reprints the web-owns reminder once the killed local TUI exits", async () => {
+    const output: string[] = [];
+    const notices = createRelayNotices("claude", {
+      write: (text) => void output.push(text),
+      isTTY: () => false,
+      debugEnabled: () => false,
+      restoreTerminal: () => {},
+    });
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      notices,
+    });
+
+    await provider.takeover();
+
+    expect(output).toContainEqual(expect.stringContaining("Web has taken over this session"));
+    expect(output).toContainEqual(expect.stringContaining("Web owns this session"));
+    expect(provider.state.owner).toBe("web");
+
+    provider.stop();
   });
 });

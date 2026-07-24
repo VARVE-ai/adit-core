@@ -106,6 +106,7 @@ import {
   normalizeCodexReclaimInput,
   promptInputForCodexMode,
 } from "./provider.js";
+import { createRelayNotices } from "../relay-console.js";
 
 function mockChildProcess() {
   const child = new EventEmitter() as EventEmitter & {
@@ -2069,6 +2070,69 @@ describe("CodexCliProvider app-server errors", () => {
     expect(errorEvents(events)).toEqual([
       expect.objectContaining({ message: "boom", sessionId: thread }),
     ]);
+
+    provider.stop();
+  });
+});
+
+describe("CodexCliProvider takeover notices", () => {
+  function makeNoticeSink() {
+    const output: string[] = [];
+    const notices = createRelayNotices("codex", {
+      write: (text) => void output.push(text),
+      isTTY: () => false,
+      debugEnabled: () => false,
+      restoreTerminal: () => {},
+    });
+    return { output, notices };
+  }
+
+  it("announces the takeover before the slow app-server prep begins", async () => {
+    const { output, notices } = makeNoticeSink();
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: () => {},
+      notices,
+    });
+
+    await provider.takeover();
+
+    const startedIndex = output.findIndex((line) => line.includes("Web is taking over this session"));
+    const takenOverIndex = output.findIndex((line) => line.includes("Web has taken over this session"));
+    expect(startedIndex).toBeGreaterThan(-1);
+    expect(takenOverIndex).toBeGreaterThan(startedIndex);
+    expect(provider.state.owner).toBe("web");
+
+    provider.stop();
+  });
+
+  it("reports a failed takeover and keeps local control when prep fails", async () => {
+    const { output, notices } = makeNoticeSink();
+    mocks.appRequest.mockImplementation(async (method: string) => {
+      if (method === "adit/capabilities/discover") {
+        throw appServerMethodsError();
+      }
+      if (method === "thread/start") {
+        throw new Error("app-server exploded");
+      }
+      return {};
+    });
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: () => {},
+      notices,
+    });
+
+    await expect(provider.takeover()).rejects.toThrow("app-server exploded");
+
+    expect(output).toContainEqual(expect.stringContaining("Web is taking over this session"));
+    expect(output).toContainEqual(expect.stringContaining("Web takeover failed"));
+    expect(output).not.toContainEqual(expect.stringContaining("Web has taken over this session"));
+    expect(provider.state.owner).toBe("local");
 
     provider.stop();
   });

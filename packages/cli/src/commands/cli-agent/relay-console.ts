@@ -77,6 +77,8 @@ export interface RelayNotices {
   notice(text: string): void;
   debug(text: string): void;
   cloudError(context: string, error: unknown): void;
+  takeoverStarted(): void;
+  takeoverFailed(): void;
   takenOverByWeb(): void;
   webOwnsReminder(): void;
   releasingToLocal(): void;
@@ -119,6 +121,12 @@ export function createRelayNotices(tool: RelayTool, opts: RelayNoticesOptions = 
       } else {
         line(`${context}: ${error instanceof Error ? error.message : String(error)}`);
       }
+    },
+    takeoverStarted(): void {
+      notice(`Web is taking over this session — local ${subject} will hand off shortly…`);
+    },
+    takeoverFailed(): void {
+      notice(`Web takeover failed — local ${subject} keeps control.`);
     },
     takenOverByWeb(): void {
       restoreTerminal();

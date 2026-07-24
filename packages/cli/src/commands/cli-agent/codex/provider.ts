@@ -239,13 +239,25 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       });
     }
 
-    await this.ensureAppServer();
-    await this.hydrateAppServerCapabilities();
-    const resumeId = this.activeSessionId ?? this.resumeSessionId;
-    if (resumeId) {
-      await this.resumeThread(resumeId);
-    } else {
-      await this.startThread("build");
+    // Announced before the slow prep (app-server spawn, capability hydrate,
+    // thread resume) so the local terminal sees the takeover begin at the
+    // same moment the web button starts waiting.
+    this.notices.takeoverStarted();
+    try {
+      await this.ensureAppServer();
+      await this.hydrateAppServerCapabilities();
+      const resumeId = this.activeSessionId ?? this.resumeSessionId;
+      if (resumeId) {
+        await this.resumeThread(resumeId);
+      } else {
+        await this.startThread("build");
+      }
+    } catch (error) {
+      // The local TUI is still running (it only stops after prep succeeds),
+      // so tell the terminal the takeover fizzled instead of leaving the
+      // "taking over" line dangling.
+      this.notices.takeoverFailed();
+      throw error;
     }
 
     const oldLocal = this.local;

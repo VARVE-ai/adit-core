@@ -249,6 +249,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private reclaimBuffer = "";
   private reclaimAttached = false;
   private suppressNextLocalExit = false;
+  private webOwnsNoticeOnLocalExit = false;
   private readonly notices: RelayNotices;
 
   constructor(private readonly opts: ClaudeCodeProviderOptions) {
@@ -333,10 +334,17 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
     this.suppressNextLocalExit = true;
     const oldLocal = this.local;
+    // The dying TUI keeps repainting until it actually exits and can swallow
+    // the notices printed below; the exit handler reprints the reminder once
+    // the terminal is quiet.
+    this.webOwnsNoticeOnLocalExit = Boolean(oldLocal);
     this.local = null;
+    // Ownership flips before the kill signal: the exit handler only reprints
+    // the reminder when web already owns the session, and the child may exit
+    // on any tick after the signal.
+    this.ownerValue = "web";
     killCliProcessTree(oldLocal);
 
-    this.ownerValue = "web";
     this.reclaimingToLocal = false;
     this.pendingLocalReclaimSessionId = null;
     this.localSessionAliases.clear();
@@ -850,6 +858,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.detachReclaimInput();
     this.pendingLocalReclaimSessionId = null;
     this.localSessionAliases.clear();
+    this.webOwnsNoticeOnLocalExit = false;
     killCliProcessTree(this.local);
     this.local = null;
     this.ownerValue = "stopped";
@@ -862,6 +871,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.detachReclaimInput();
     this.stopCapabilityProbe();
     this.reclaimingToLocal = false;
+    this.webOwnsNoticeOnLocalExit = false;
     this.finishWebPrompts(new Error("local mode active"));
     this.remoteQuery = null;
     this.remoteAbortController = null;
@@ -904,6 +914,10 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     child.on("exit", (code, signal) => {
       if (this.suppressNextLocalExit) {
         this.suppressNextLocalExit = false;
+        if (this.webOwnsNoticeOnLocalExit) {
+          this.webOwnsNoticeOnLocalExit = false;
+          if (this.ownerValue === "web") this.notices.webOwnsReminder();
+        }
         return;
       }
       if (this.local === child) {
