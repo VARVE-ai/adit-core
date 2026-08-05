@@ -209,7 +209,6 @@ function codexGuardrailReceipt(stage: "prepared" | "active") {
     provider: "codex",
     promptMode: "plan",
     approvalPolicy: "never",
-    externalToolsDenied: true,
     sandboxPolicy: {
       type: "readOnly",
       networkAccess: false,

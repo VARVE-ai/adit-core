@@ -454,22 +454,6 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
         statusCode: 409,
       });
     }
-    await this.ensureAppServer();
-    let mcpServers: Array<Record<string, unknown>>;
-    try {
-      mcpServers = await this.fetchCodexMcpServers();
-    } catch {
-      throw Object.assign(new Error("Codex could not verify that external MCP tools are disabled"), {
-        statusCode: 409,
-        code: "READ_ONLY_NOT_ENFORCED",
-      });
-    }
-    if (mcpServers.length > 0) {
-      throw Object.assign(new Error("Disable Codex MCP servers before starting read-only collaboration"), {
-        statusCode: 409,
-        code: "READ_ONLY_NOT_ENFORCED",
-      });
-    }
     return this.collaboration.start(
       input,
       (question, collaboration) => new Promise<void>((resolve, reject) => {

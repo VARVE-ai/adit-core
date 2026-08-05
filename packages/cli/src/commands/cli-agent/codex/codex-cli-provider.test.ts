@@ -420,7 +420,8 @@ describe("CodexCliProvider takeover", () => {
         sessionId: threadId,
         guardrailReceipt: expect.objectContaining({
           stage: "prepared",
-          externalToolsDenied: true,
+          promptMode: "plan",
+          sandboxPolicy: { type: "readOnly", networkAccess: false },
         }),
       }),
     }));
@@ -435,7 +436,6 @@ describe("CodexCliProvider takeover", () => {
         guardrailReceipt: expect.objectContaining({
           stage: "active",
           policyVersion: "codex-consultation-read-only-v1",
-          externalToolsDenied: true,
           approvalPolicy: "never",
           sandboxPolicy: { type: "readOnly", networkAccess: false },
         }),
@@ -484,7 +484,7 @@ describe("CodexCliProvider takeover", () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  it("refuses collaboration when Codex exposes MCP servers", async () => {
+  it("allows read-only collaboration when Codex exposes MCP servers", async () => {
     const threadId = "019e2110-d96f-7e40-882e-b524fa9148e4";
     const provider = new CodexCliProvider({
       bin: "codex",
@@ -502,7 +502,13 @@ describe("CodexCliProvider takeover", () => {
       mode: "consultation",
       targetSessionId: threadId,
       question: "Inspect the current implementation.",
-    })).rejects.toMatchObject({ code: "READ_ONLY_NOT_ENFORCED" });
+    })).resolves.toEqual({ sessionId: threadId, providerRunId: "turn-1" });
+
+    expect(mocks.appRequest).toHaveBeenCalledWith("turn/start", expect.objectContaining({
+      threadId,
+      approvalPolicy: "never",
+      sandboxPolicy: { type: "readOnly", networkAccess: false },
+    }));
 
     provider.stop();
   });
