@@ -437,9 +437,18 @@ async function linkRepositoryCommand(
   log("\n[Step 2/6] Uploading git metadata...");
   const step2Start = startStep();
 
-  // 3a. Branches — collect once and reuse for commit branch resolution
+  // 3a. Branches — collect once and reuse for commit branch resolution.
+  // A refs fingerprint change bypasses the time-based cooldown so branch
+  // creations/deletions reach the server snapshot without waiting it out.
+  const currentRefsFingerprint = await runStep(currentStep, () => collectGitRefsFingerprint(projectRoot));
+  const cachedRefsFingerprint = typeof cache.docHashes[REFS_FINGERPRINT_CACHE_KEY] === "string"
+    ? cache.docHashes[REFS_FINGERPRINT_CACHE_KEY]
+    : null;
+  const refsChanged = Boolean(currentRefsFingerprint) &&
+    currentRefsFingerprint !== cachedRefsFingerprint;
   const branchesStale = !cache.lastBranchSyncAt ||
     (Date.now() - new Date(cache.lastBranchSyncAt).getTime() > BRANCH_STALE_MS) ||
+    refsChanged ||
     options.force;
 
   const allBranches = await runStep(currentStep, () => collectBranches(projectRoot));
@@ -482,7 +491,7 @@ async function linkRepositoryCommand(
       log(`  ${branchCount} branches, default: ${defaultBranch ?? "unknown"}`);
     }
   } else {
-    log("  Branches up to date (synced < 1 hour ago)");
+    log("  Branches up to date (refs unchanged, synced < 1 hour ago)");
   }
 
   // 3b. Commits
