@@ -19,12 +19,25 @@ import {
 } from "./cli-agent/codex/hooks-bootstrap.js";
 import { startCliAgentHookServer, type HookServer } from "./cli-agent/hook-server.js";
 import { CodexLocalSessionLister, LocalSessionsReporter } from "./cli-agent/local-sessions.js";
-import { CliAgentRelayWebSocket } from "./cli-agent/relay-client.js";
+import {
+  CLI_AGENT_COLLABORATION_CAPABILITIES,
+  CliAgentRelayWebSocket,
+} from "./cli-agent/relay-client.js";
+import {
+  isCollaborationLifecycleEvent,
+  processCollaborationCommand,
+  removeQueuedCollaborationPrompts,
+} from "./cli-agent/collaboration-commands.js";
 import {
   createRelayNotices,
   createRelayStatusReporter,
   type RelayNotices,
 } from "./cli-agent/relay-console.js";
+import {
+  reliableEventsForRetry,
+  trimRelayEventQueue,
+  type InFlightReliableEventBatch,
+} from "./cli-agent/reliable-event-queue.js";
 import { loadInitializedGitOrWorkspaceProjectConfig } from "./project-initialization.js";
 import type {
   CliAgentRelayEvent,
@@ -44,6 +57,10 @@ interface CloudCodexOptions {
  * the panel converges to recent state after reconnect.
  */
 const MAX_EVENT_QUEUE = 10_000;
+
+function requiresReliableEventDelivery(event: CliAgentRelayEvent): boolean {
+  return isCollaborationLifecycleEvent(event);
+}
 
 function createRelayLoopWake() {
   let wakeCurrent: (() => void) | null = null;
@@ -165,6 +182,8 @@ async function processCommand(
     await provider.switchSession(sessionId);
     return;
   }
+
+  if (await processCollaborationCommand({ provider, providerName: "Codex", command })) return;
 
   if (command.type === "prompt") {
     const text = readString(command.payload.text);
@@ -399,15 +418,25 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
   const transcriptSync = new CodexTranscriptSync();
   const eventDeduper = new CodexRelayEventDeduper();
   const relayLoopWake = createRelayLoopWake();
+  let inFlightEventBatch: InFlightReliableEventBatch | null = null;
   let droppedQueuedEvents = 0;
   const enqueueEvent = (event: CliAgentRelayEvent): void => {
     const next = eventDeduper.filter(event);
     if (next) {
-      eventQueue.push(next);
+      eventQueue.push({
+        ...next,
+        ...(requiresReliableEventDelivery(next)
+          ? { eventId: next.eventId ?? randomUUID() }
+          : {}),
+      });
       if (eventQueue.length > MAX_EVENT_QUEUE) {
-        eventQueue.splice(0, eventQueue.length - MAX_EVENT_QUEUE);
-        droppedQueuedEvents += 1;
-        if (droppedQueuedEvents === 1 || droppedQueuedEvents % 1000 === 0) {
+        const dropped = trimRelayEventQueue({
+          queue: eventQueue,
+          maxSize: MAX_EVENT_QUEUE,
+          isReliable: requiresReliableEventDelivery,
+        });
+        droppedQueuedEvents += dropped;
+        if (dropped > 0 && (droppedQueuedEvents === 1 || droppedQueuedEvents % 1000 === 0)) {
           notices.line(
             `warning: relay event queue exceeded ${MAX_EVENT_QUEUE} while disconnected — dropped ${droppedQueuedEvents} oldest event(s) so far.`,
           );
@@ -445,6 +474,7 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
       bin: codexExecutable,
       args: withHooksEnabled(opts?.arg ?? []),
       cwd: config.projectRoot,
+      dataDir: config.dataDir,
       hookEndpoint: hookServer.endpoint,
       hookMarker: CODEX_CLOUD_HOOK_MARKER,
       onEvent: enqueueEvent,
@@ -461,6 +491,7 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
         projectId: config.projectId,
         projectName,
         panelName,
+        capabilities: [...CLI_AGENT_COLLABORATION_CAPABILITIES],
       },
       onHello: (info) => {
         relayStatus.helloOk({ ...info, owner: provider?.state.owner ?? "stopped" });
@@ -474,7 +505,21 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
         if (enqueued) relayLoopWake.wake();
       },
       onConnectionClosed: () => {
-        // Server archived our panel; reconnect will get a fresh one.
+        inFlightEventBatch = null;
+        removeQueuedCollaborationPrompts(commandQueue);
+        void provider?.abortCollaborationOnRelayDisconnect?.().catch((error) => {
+          relayStatus.relayError(error instanceof Error ? error : new Error(String(error)));
+        });
+      },
+      onEventsAck: (batchId) => {
+        if (inFlightEventBatch?.batchId !== batchId) return;
+        const acknowledged = new Set(inFlightEventBatch.eventIds);
+        for (let index = eventQueue.length - 1; index >= 0; index -= 1) {
+          const eventId = eventQueue[index]?.eventId;
+          if (eventId && acknowledged.has(eventId)) eventQueue.splice(index, 1);
+        }
+        inFlightEventBatch = null;
+        relayLoopWake.wake();
       },
       onError: (error) => {
         relayStatus.relayError(error);
@@ -568,9 +613,40 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
         if (ws.isOpen && ws.currentConnectionId) {
           const flushEvents = () => {
             if (eventQueue.length === 0) return;
-            const batch = eventQueue.splice(0, 50);
-            const sent = ws.sendEvents(batch);
-            if (!sent) eventQueue.unshift(...batch);
+            if (inFlightEventBatch) {
+              const retryBatch = reliableEventsForRetry({
+                queue: eventQueue,
+                batch: inFlightEventBatch,
+              });
+              if (
+                retryBatch.length === inFlightEventBatch.eventIds.length
+                && ws.sendEvents(retryBatch, inFlightEventBatch.batchId)
+              ) {
+                inFlightEventBatch.sentAt = Date.now();
+              }
+              return;
+            }
+            if (requiresReliableEventDelivery(eventQueue[0]!)) {
+              const reliableBatch: CliAgentRelayEvent[] = [];
+              for (const event of eventQueue.slice(0, 50)) {
+                if (!requiresReliableEventDelivery(event)) break;
+                reliableBatch.push(event);
+              }
+              const eventIds = reliableBatch.flatMap((event) => event.eventId ? [event.eventId] : []);
+              if (eventIds.length !== reliableBatch.length) return;
+              const batchId = randomUUID();
+              if (ws.sendEvents(reliableBatch, batchId)) {
+                inFlightEventBatch = { batchId, eventIds, sentAt: Date.now() };
+              }
+              return;
+            }
+            let batchSize = 0;
+            while (
+              batchSize < Math.min(50, eventQueue.length)
+              && !requiresReliableEventDelivery(eventQueue[batchSize]!)
+            ) batchSize += 1;
+            const batch = eventQueue.splice(0, batchSize);
+            if (!ws.sendEvents(batch)) eventQueue.unshift(...batch);
           };
           const processedCommands = await drainCommandQueue({
             provider,
@@ -597,7 +673,8 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
       const relayConnected = ws.isOpen && Boolean(ws.currentConnectionId);
       // Always yield while disconnected: commands cannot drain without a
       // connection, and a zero-await iteration would starve the event loop.
-      if (!relayConnected || (commandQueue.length === 0 && eventQueue.length === 0)) {
+      const hasDispatchableEvents = eventQueue.length > 0 && !inFlightEventBatch;
+      if (!relayConnected || (commandQueue.length === 0 && !hasDispatchableEvents)) {
         await relayLoopWake.wait(1500);
       }
     }

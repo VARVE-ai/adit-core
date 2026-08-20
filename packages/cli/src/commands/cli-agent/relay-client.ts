@@ -13,7 +13,15 @@ export interface CliAgentRegisterPayload {
   projectId: string;
   projectName: string;
   panelName?: string;
+  capabilities?: string[];
 }
+
+export const CLI_AGENT_COLLABORATION_CAPABILITIES = [
+  "collaboration-v1",
+  "collaboration-prepared-v1",
+  "append-session-context-v1",
+  "consultation-read-only-v1",
+] as const;
 
 export interface CliAgentRelayHello {
   connectionId: string;
@@ -31,6 +39,7 @@ export interface RelayWsClientOptions {
   onHello: (info: CliAgentRelayHello) => void;
   onCommand: (command: RelayCommand) => void;
   onConnectionClosed?: () => void;
+  onEventsAck?: (batchId: string) => void;
   onStatus?: (status: RelayWsStatus) => void;
   onError?: (error: Error) => void;
   onReconnectScheduled?: (attempt: number, delayMs: number) => void;
@@ -58,7 +67,9 @@ function asCommand(value: unknown): RelayCommand | null {
     type !== "new-session" &&
     type !== "switch-session" &&
     type !== "slash-command" &&
-    type !== "rewind"
+    type !== "rewind" &&
+    type !== "append-session-context" &&
+    type !== "collaboration-prompt"
   ) {
     return null;
   }
@@ -221,10 +232,11 @@ export class CliAgentRelayWebSocket {
     });
   }
 
-  sendEvents(events: CliAgentRelayEvent[]): boolean {
+  sendEvents(events: CliAgentRelayEvent[], batchId?: string): boolean {
     if (events.length === 0) return true;
     return this.send({
       type: "events",
+      ...(batchId ? { batchId } : {}),
       events,
     });
   }
@@ -312,6 +324,12 @@ export class CliAgentRelayWebSocket {
     if (message.type === "command") {
       const command = asCommand(message.command);
       if (command) this.opts.onCommand(command);
+      return;
+    }
+
+    if (message.type === "events.ack") {
+      const batchId = typeof message.batchId === "string" ? message.batchId : null;
+      if (batchId) this.opts.onEventsAck?.(batchId);
       return;
     }
 
