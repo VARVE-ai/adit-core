@@ -784,6 +784,7 @@ describe("CodexCliProvider takeover", () => {
       if (method === "thread/resume") {
         return {
           model: "gpt-5.5",
+          reasoningEffort: "high",
           thread: { id: threadId },
         };
       }
@@ -818,6 +819,25 @@ describe("CodexCliProvider takeover", () => {
       },
     ]);
     expect(provider.state.activeModelId).toBe("gpt-5.4");
+    expect(provider.state.reasoningEffort).toBe("high");
+
+    mocks.appServerOptions?.onNotification?.({
+      method: "thread/settings/updated",
+      params: {
+        threadId,
+        threadSettings: { model: "gpt-5.4", effort: "xhigh" },
+      },
+    });
+    expect(provider.state.reasoningEffort).toBe("xhigh");
+
+    mocks.appServerOptions?.onNotification?.({
+      method: "thread/settings/updated",
+      params: {
+        threadId,
+        threadSettings: { model: "gpt-5.4", effort: null },
+      },
+    });
+    expect(provider.state.reasoningEffort).toBeNull();
 
     mocks.appServerOptions?.onNotification?.({
       method: "item/completed",

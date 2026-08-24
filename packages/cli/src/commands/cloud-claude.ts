@@ -139,6 +139,17 @@ function readHookModel(body: Record<string, unknown>): string | null {
   );
 }
 
+function readHookReasoningEffort(body: Record<string, unknown>): string | null {
+  const effort = body.effort && typeof body.effort === "object" && !Array.isArray(body.effort)
+    ? body.effort as Record<string, unknown>
+    : null;
+  return (
+    readString(effort?.level) ??
+    readString(body.reasoningEffort) ??
+    readString(body.reasoning_effort)
+  );
+}
+
 export function isLocalIdleHook(eventType: string, body: Record<string, unknown>): boolean {
   // SubagentStop is deliberately NOT an idle signal: it fires mid-turn when a
   // Task subagent finishes while the main agent keeps working. Treating it as
@@ -585,6 +596,7 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
     hookServer.events.on("hook", (event) => {
       const body = event.body as Record<string, unknown>;
       const hookModel = readHookModel(body);
+      const hookReasoningEffort = readHookReasoningEffort(body);
       const rawSessionId = transcriptSync.noteHook({
         eventType: event.type,
         body,
@@ -597,6 +609,12 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
       if (event.type === "StatusLine" || event.type === "SessionStart") {
         transcriptSync.noteModel(rawSessionId, hookModel);
         provider?.noteModel(hookModel);
+      }
+      if (
+        !readString(body.agent_id) &&
+        (hookReasoningEffort || event.type === "StatusLine")
+      ) {
+        provider?.noteReasoningEffort(hookReasoningEffort);
       }
       if (event.type === "UserPromptSubmit") {
         if (isLocalOwner) {

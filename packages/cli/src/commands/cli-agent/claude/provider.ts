@@ -210,6 +210,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private remoteSdkSessionId: string | null = null;
   private remoteSdkSessionIdsByActiveSession = new Map<string, Set<string>>();
   private activeModelId: string | null = null;
+  private reasoningEffortValue: string | null = null;
   private currentBranch: string | null = null;
   private branchRefreshAt = 0;
   private branchRefreshPromise: Promise<void> | null = null;
@@ -289,6 +290,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       resumeSessionId: this.resumeSessionId,
       sdkSessionId: this.sdkSessionId,
       activeModelId: this.activeModelId,
+      reasoningEffort: this.reasoningEffortValue,
       currentBranch: this.currentBranch,
       contextUsage: this.contextUsage,
       lastTokenUsage: null,
@@ -301,6 +303,15 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
   noteModel(modelId: string | null | undefined): void {
     this.setActiveModel(modelId, { emit: true });
+  }
+
+  noteReasoningEffort(effort: string | null | undefined): void {
+    const normalized = typeof effort === "string" && effort.trim()
+      ? effort.trim()
+      : null;
+    if (normalized === this.reasoningEffortValue) return;
+    this.reasoningEffortValue = normalized;
+    this.emitState();
   }
 
   noteLocalSession(id: string): string | null {
@@ -2326,6 +2337,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       resumeSessionId: this.resumeSessionId,
       sdkSessionId: this.sdkSessionId,
       activeModelId: this.activeModelId,
+      reasoningEffort: this.reasoningEffortValue,
       currentBranch: this.currentBranch,
       contextUsage: this.contextUsage,
       lastTokenUsage: null,

@@ -130,6 +130,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private resumeSessionId: string | null = null;
   private sdkSessionId: string | null = null;
   private activeModelId: string | null = null;
+  private reasoningEffortValue: string | null = null;
   private currentBranch: string | null = null;
   private branchRefreshAt = 0;
   private branchRefreshPromise: Promise<void> | null = null;
@@ -140,6 +141,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private lastTokenUsageBySession = new Map<string, CliAgentTokenUsage>();
   private contextWindowBySession = new Map<string, number>();
   private threadModelBySession = new Map<string, string>();
+  private reasoningEffortBySession = new Map<string, string>();
   private promptQueue: PendingPrompt[] = [];
   private promptActive = false;
   private activeTurnId: string | null = null;
@@ -187,6 +189,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       resumeSessionId: this.resumeSessionId,
       sdkSessionId: this.sdkSessionId,
       activeModelId: this.activeModelId,
+      reasoningEffort: this.reasoningEffortValue,
       currentBranch: this.currentBranch,
       contextUsage: this.contextUsage,
       lastTokenUsage: this.lastTokenUsage,
@@ -219,6 +222,28 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.emitState();
   }
 
+  noteReasoningEffort(
+    effort: string | null | undefined,
+    sessionId?: string | null,
+  ): void {
+    if (effort === undefined) return;
+    const normalized = readString(effort);
+    if (sessionId) {
+      if (normalized) this.reasoningEffortBySession.set(sessionId, normalized);
+      else this.reasoningEffortBySession.delete(sessionId);
+    }
+    if (
+      sessionId &&
+      sessionId !== this.activeSessionId &&
+      sessionId !== this.resumeSessionId
+    ) {
+      return;
+    }
+    if (normalized === this.reasoningEffortValue) return;
+    this.reasoningEffortValue = normalized;
+    this.emitState();
+  }
+
   noteLocalSession(id: string): void {
     if (!id) return;
     const changed = this.activeSessionId !== id || this.resumeSessionId !== id;
@@ -226,6 +251,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.resumeSessionId = id;
     this.sdkSessionId = id;
     this.applyStoredUsageForSession(id);
+    this.reasoningEffortValue = this.reasoningEffortBySession.get(id) ?? null;
     if (!changed) return;
     this.emitState();
   }
@@ -1154,6 +1180,13 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
           this.noteModel(modelId);
         }
       }
+      if (
+        sessionId &&
+        settings &&
+        Object.prototype.hasOwnProperty.call(settings, "effort")
+      ) {
+        this.noteReasoningEffort(readString(settings.effort), sessionId);
+      }
       return;
     }
 
@@ -1342,6 +1375,14 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.sdkSessionId = threadId;
     this.loadedThreadIds.add(threadId);
     this.applyStoredUsageForSession(threadId);
+    if (result && Object.prototype.hasOwnProperty.call(result, "reasoningEffort")) {
+      const reasoningEffort = readString(result.reasoningEffort);
+      if (reasoningEffort) this.reasoningEffortBySession.set(threadId, reasoningEffort);
+      else this.reasoningEffortBySession.delete(threadId);
+      this.reasoningEffortValue = reasoningEffort;
+    } else {
+      this.reasoningEffortValue = this.reasoningEffortBySession.get(threadId) ?? null;
+    }
     const modelId = readString(result?.model);
     if (modelId) {
       this.threadModelBySession.set(threadId, modelId);
@@ -1639,6 +1680,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       resumeSessionId: this.resumeSessionId,
       sdkSessionId: this.sdkSessionId,
       activeModelId: this.activeModelId,
+      reasoningEffort: this.reasoningEffortValue,
       currentBranch: this.currentBranch,
       contextUsage: this.contextUsage,
       lastTokenUsage: this.lastTokenUsage,

@@ -415,7 +415,9 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
   const eventQueue: CliAgentRelayEvent[] = [];
   const commandQueue: RelayCommand[] = [];
   const seenCommandIds = new Set<string>();
-  const transcriptSync = new CodexTranscriptSync();
+  const transcriptSync = new CodexTranscriptSync((sessionId, effort) => {
+    provider?.noteReasoningEffort(effort, sessionId);
+  });
   const eventDeduper = new CodexRelayEventDeduper();
   const relayLoopWake = createRelayLoopWake();
   let inFlightEventBatch: InFlightReliableEventBatch | null = null;

@@ -30,6 +30,7 @@ export interface CliAgentState {
   resumeSessionId: string | null;
   sdkSessionId: string | null;
   activeModelId: string | null;
+  reasoningEffort?: string | null;
   currentBranch: string | null;
   contextUsage: CliAgentContextUsage | null;
   lastTokenUsage: CliAgentTokenUsage | null;
@@ -202,6 +203,7 @@ export interface CliAgentConnectionState {
   resumeSessionId: string | null;
   sdkSessionId: string | null;
   activeModelId: string | null;
+  reasoningEffort?: string | null;
   currentBranch: string | null;
   contextUsage: CliAgentContextUsage | null;
   lastTokenUsage: CliAgentTokenUsage | null;

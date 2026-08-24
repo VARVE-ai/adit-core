@@ -160,6 +160,29 @@ beforeEach(() => {
   });
 });
 
+describe("ClaudeCodeProvider reasoning effort", () => {
+  it("reports the actual effort supplied by Claude hooks", () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+
+    provider.noteReasoningEffort("xhigh");
+
+    expect(provider.state.reasoningEffort).toBe("xhigh");
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "state",
+      payload: expect.objectContaining({ reasoningEffort: "xhigh" }),
+    }));
+    provider.noteReasoningEffort(null);
+    expect(provider.state.reasoningEffort).toBeNull();
+    provider.stop();
+  });
+});
+
 describe("normalizeClaudeTodoWriteInput", () => {
   it("normalizes Claude TodoWrite input", () => {
     expect(
