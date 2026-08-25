@@ -3020,8 +3020,140 @@ describe("ClaudeCodeProvider stream errors", () => {
 });
 
 describe("ClaudeCodeProvider takeover notices", () => {
-  it("reprints the web-owns reminder once the killed local TUI exits", async () => {
+  it("waits for the local Claude process to exit before Web owns the terminal", async () => {
+    const child = mockChildProcess();
+    child.kill = vi.fn(() => {
+      child.killed = true;
+      return true;
+    });
+    mocks.spawn.mockReturnValueOnce(child);
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+    });
+
+    let settled = false;
+    const takeover = provider.takeover().then(() => {
+      settled = true;
+    });
+
+    await tick();
+    expect(settled).toBe(false);
+    expect(provider.state.owner).toBe("local");
+
+    child.emit("exit", 0, null);
+    await takeover;
+
+    expect(provider.state.owner).toBe("web");
+
+    provider.stop();
+  });
+
+  it("clears local activity reported while the old Claude process exits", async () => {
+    const child = mockChildProcess();
+    child.kill = vi.fn(() => {
+      child.killed = true;
+      return true;
+    });
+    mocks.spawn.mockReturnValueOnce(child);
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+    });
+
+    const takeover = provider.takeover();
+    provider.markLocalBusy();
+    expect(provider.state).toMatchObject({ owner: "local", busy: true, thinking: true });
+
+    child.emit("exit", 0, null);
+    await takeover;
+
+    expect(provider.state).toMatchObject({ owner: "web", busy: false, thinking: false });
+
+    provider.stop();
+  });
+
+  it("does not resume takeover after the provider stops while waiting for Claude to exit", async () => {
+    const child = mockChildProcess();
+    child.kill = vi.fn(() => {
+      child.killed = true;
+      return true;
+    });
+    mocks.spawn.mockReturnValueOnce(child);
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+    });
+
+    const takeover = provider.takeover();
+    provider.stop();
+    child.emit("exit", 0, null);
+
+    await expect(takeover).rejects.toMatchObject({
+      message: "Claude takeover was interrupted",
+      statusCode: 409,
+    });
+    expect(provider.state.owner).toBe("stopped");
+  });
+
+  it("rejects a concurrent Claude takeover while the first one is waiting", async () => {
+    const child = mockChildProcess();
+    child.kill = vi.fn(() => {
+      child.killed = true;
+      return true;
+    });
+    mocks.spawn.mockReturnValueOnce(child);
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+    });
+
+    const takeover = provider.takeover();
+    await expect(provider.takeover()).rejects.toMatchObject({
+      message: "Claude takeover is already in progress",
+      statusCode: 409,
+    });
+
+    child.emit("exit", 0, null);
+    await takeover;
+    expect(provider.state.owner).toBe("web");
+
+    provider.stop();
+  });
+
+  it("waits for Enter before reclaiming local Claude control", async () => {
+    const provider = new ClaudeCodeProvider({
+      bin: "claude",
+      args: [],
+      cwd: "/tmp/project",
+    });
+    await provider.takeover();
+    const releaseToLocal = vi.spyOn(provider, "releaseToLocal").mockResolvedValue();
+    const onReclaimInput = (provider as unknown as {
+      onReclaimInput: (chunk: string) => void;
+    }).onReclaimInput;
+
+    onReclaimInput("/local");
+    expect(releaseToLocal).not.toHaveBeenCalled();
+
+    onReclaimInput("\r");
+    expect(releaseToLocal).toHaveBeenCalledTimes(1);
+
+    provider.stop();
+  });
+
+  it("prints the takeover notice only after the killed local TUI exits", async () => {
     const output: string[] = [];
+    const child = mockChildProcess();
+    child.kill = vi.fn(() => {
+      child.killed = true;
+      return true;
+    });
+    mocks.spawn.mockReturnValueOnce(child);
     const notices = createRelayNotices("claude", {
       write: (text) => void output.push(text),
       isTTY: () => false,
@@ -3035,10 +3167,15 @@ describe("ClaudeCodeProvider takeover notices", () => {
       notices,
     });
 
-    await provider.takeover();
+    const takeover = provider.takeover();
+
+    await tick();
+    expect(output).not.toContainEqual(expect.stringContaining("Web has taken over this session"));
+
+    child.emit("exit", 0, null);
+    await takeover;
 
     expect(output).toContainEqual(expect.stringContaining("Web has taken over this session"));
-    expect(output).toContainEqual(expect.stringContaining("Web owns this session"));
     expect(provider.state.owner).toBe("web");
 
     provider.stop();

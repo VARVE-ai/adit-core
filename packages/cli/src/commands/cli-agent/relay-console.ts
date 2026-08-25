@@ -62,6 +62,32 @@ export function restoreTerminalForReclaim(): void {
   } catch {}
 }
 
+export function beginTerminalReclaimInput(): boolean {
+  restoreTerminalForReclaim();
+  try {
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+      process.stdin.setRawMode(true);
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+export function endTerminalReclaimInput(): void {
+  try {
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+      process.stdin.setRawMode(false);
+    }
+  } catch {}
+}
+
+export function writeTerminalReclaimEcho(text: string): void {
+  if (!text || !process.stderr.isTTY) return;
+  try {
+    process.stderr.write(text);
+  } catch {}
+}
+
 export function describeRelayError(error: unknown): string {
   if (error instanceof CloudAuthError) {
     return "authentication failed — run 'adit cloud login' again";

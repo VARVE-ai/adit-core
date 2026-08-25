@@ -34,7 +34,11 @@ import type {
   StartCollaborationConsultationInput,
   StartCollaborationConsultationResult,
 } from "../types.js";
-import { killCliProcessTree, spawnCliProcess } from "../cli-process.js";
+import {
+  killCliProcessTree,
+  spawnCliProcess,
+  stopCliProcessTreeAndWait,
+} from "../cli-process.js";
 import { spawnClaudeCliProcess } from "./cli-process.js";
 import {
   ASK_USER_QUESTION_TOOL,
@@ -89,10 +93,14 @@ import {
 } from "./transcripts.js";
 import type { ClaudeRewindCheckpoint } from "./transcripts.js";
 import { writeCliAgentErrorToTerminal } from "../terminal-error.js";
+import { applyReclaimInput } from "../reclaim-input.js";
 import {
   RECLAIM_COMMAND,
+  beginTerminalReclaimInput,
   createRelayNotices,
+  endTerminalReclaimInput,
   type RelayNotices,
+  writeTerminalReclaimEcho,
 } from "../relay-console.js";
 import {
   ClaudeProviderCollaboration,
@@ -264,6 +272,8 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private localSessionAliases = new Map<string, string>();
   private reclaimBuffer = "";
   private reclaimAttached = false;
+  private reclaimManualEcho = false;
+  private takeoverPending = false;
   private suppressNextLocalExit = false;
   private webOwnsNoticeOnLocalExit = false;
   private readonly notices: RelayNotices;
@@ -345,6 +355,11 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   }
 
   async takeover(): Promise<void> {
+    if (this.takeoverPending) {
+      throw Object.assign(new Error("Claude takeover is already in progress"), {
+        statusCode: 409,
+      });
+    }
     if (this.ownerValue === "web") {
       this.emitSlashCommands();
       void this.hydrateCapabilities({
@@ -364,35 +379,44 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       });
     }
 
-    this.suppressNextLocalExit = true;
-    const oldLocal = this.local;
-    // The dying TUI keeps repainting until it actually exits and can swallow
-    // the notices printed below; the exit handler reprints the reminder once
-    // the terminal is quiet.
-    this.webOwnsNoticeOnLocalExit = Boolean(oldLocal);
-    this.local = null;
-    // Ownership flips before the kill signal: the exit handler only reprints
-    // the reminder when web already owns the session, and the child may exit
-    // on any tick after the signal.
-    this.ownerValue = "web";
-    killCliProcessTree(oldLocal);
+    this.takeoverPending = true;
+    try {
+      const oldLocal = this.local;
+      this.suppressNextLocalExit = Boolean(oldLocal);
+      this.webOwnsNoticeOnLocalExit = Boolean(oldLocal);
+      this.local = null;
+      await stopCliProcessTreeAndWait(oldLocal);
 
-    this.reclaimingToLocal = false;
-    this.pendingLocalReclaimSessionId = null;
-    this.localSessionAliases.clear();
-    this.emitState();
-    this.notices.takenOverByWeb();
-    this.attachReclaimInput();
-    const generation = ++this.remoteLoopGeneration;
-    void this.runRemoteLoop(generation);
-    // Publish whatever we already know right away so the web slash-command
-    // popup is usable while the probe spawns; the probe result replaces it.
-    if (this.slashCommandsByName.size === 0) {
-      this.applyClaudeCapabilitySnapshot({ commands: [] });
-    } else {
-      this.emitSlashCommands();
+      if (this.ownerValue !== "local" || this.local !== null) {
+        throw Object.assign(new Error("Claude takeover was interrupted"), {
+          statusCode: 409,
+        });
+      }
+
+      this.reclaimingToLocal = false;
+      this.pendingLocalReclaimSessionId = null;
+      this.localSessionAliases.clear();
+      // Local hooks can arrive while the old TUI is exiting. That process is
+      // now gone, so none of its busy/thinking state may leak into Web mode.
+      this.busyValue = false;
+      this.thinkingValue = false;
+      this.ownerValue = "web";
+      this.emitState();
+      this.notices.takenOverByWeb();
+      this.attachReclaimInput();
+      const generation = ++this.remoteLoopGeneration;
+      void this.runRemoteLoop(generation);
+      // Publish whatever we already know right away so the web slash-command
+      // popup is usable while the probe spawns; the probe result replaces it.
+      if (this.slashCommandsByName.size === 0) {
+        this.applyClaudeCapabilitySnapshot({ commands: [] });
+      } else {
+        this.emitSlashCommands();
+      }
+      void this.hydrateCapabilities({ owner: "web", generation });
+    } finally {
+      this.takeoverPending = false;
     }
-    void this.hydrateCapabilities({ owner: "web", generation });
   }
 
   async releaseToLocal(): Promise<void> {
@@ -1016,7 +1040,13 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         this.suppressNextLocalExit = false;
         if (this.webOwnsNoticeOnLocalExit) {
           this.webOwnsNoticeOnLocalExit = false;
-          if (this.ownerValue === "web") this.notices.webOwnsReminder();
+          if (this.ownerValue === "web") {
+            // A child that outlives the bounded takeover wait may reset the
+            // console while exiting. Reapply reclaim input after it is quiet.
+            this.detachReclaimInput();
+            this.notices.webOwnsReminder();
+            this.attachReclaimInput();
+          }
         }
         return;
       }
@@ -2179,11 +2209,14 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.reclaimAttached = true;
     this.reclaimBuffer = "";
     try {
+      this.reclaimManualEcho = beginTerminalReclaimInput();
       process.stdin.setEncoding("utf8");
       process.stdin.resume();
       process.stdin.on("data", this.onReclaimInput);
     } catch {
       this.reclaimAttached = false;
+      this.reclaimManualEcho = false;
+      endTerminalReclaimInput();
     }
   }
 
@@ -2192,31 +2225,29 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.reclaimAttached = false;
     process.stdin.off("data", this.onReclaimInput);
     this.reclaimBuffer = "";
+    this.reclaimManualEcho = false;
     try {
       process.stdin.pause();
-      if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
-        process.stdin.setRawMode(false);
-      }
+      endTerminalReclaimInput();
     } catch {}
   }
 
   private onReclaimInput = (chunk: string | Buffer) => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    if (text.includes("\u0003")) {
+    const update = applyReclaimInput(this.reclaimBuffer, text);
+    if (this.reclaimManualEcho) writeTerminalReclaimEcho(update.echo);
+    this.reclaimBuffer = update.buffer.slice(-200);
+    if (update.interrupted) {
       this.stop();
       this.emit("exit", { code: null, signal: "SIGINT" });
       return;
     }
-    this.reclaimBuffer += text;
-    if (this.reclaimBuffer.length > 200) {
-      this.reclaimBuffer = this.reclaimBuffer.slice(-200);
-    }
-    if (this.reclaimBuffer.includes(RECLAIM_COMMAND)) {
+    if (update.submittedLines.some((line) => line.trim() === RECLAIM_COMMAND)) {
       this.reclaimBuffer = "";
       void this.releaseToLocal();
       return;
     }
-    if (text.includes("\n") || text.includes("\r")) {
+    if (update.submittedLines.length > 0) {
       this.notices.webOwnsReminder();
     }
   };
