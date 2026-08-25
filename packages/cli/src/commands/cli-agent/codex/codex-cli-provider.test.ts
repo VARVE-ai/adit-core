@@ -110,6 +110,10 @@ import {
   promptInputForCodexMode,
 } from "./provider.js";
 import { createRelayNotices } from "../relay-console.js";
+import {
+  LOCAL_CLI_EXIT_WAIT_MS,
+  LOCAL_CLI_FORCE_EXIT_WAIT_MS,
+} from "./terminal.js";
 
 function mockChildProcess() {
   const child = new EventEmitter() as EventEmitter & {
@@ -969,6 +973,44 @@ describe("CodexCliProvider takeover", () => {
   });
 
   it("waits for the local Codex process to exit before Web owns the terminal", async () => {
+    const threadId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    const child = mockChildProcess();
+    child.kill = vi.fn(() => {
+      child.killed = true;
+      return true;
+    });
+    mocks.spawn.mockReturnValueOnce(child);
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+    });
+    provider.noteLocalSession(threadId);
+
+    let settled = false;
+    const takeover = provider.takeover().then(() => {
+      settled = true;
+    });
+
+    await tick();
+    expect(settled).toBe(false);
+    expect(provider.state.owner).toBe("local");
+    expect(mocks.appRequest).not.toHaveBeenCalledWith("thread/resume", expect.anything());
+
+    child.emit("exit", 0, null);
+    await takeover;
+
+    expect(provider.state.owner).toBe("web");
+    expect(mocks.appRequest).toHaveBeenCalledWith(
+      "thread/resume",
+      expect.objectContaining({ threadId }),
+    );
+
+    provider.stop();
+  });
+
+  it("keeps local control when the Codex process does not exit", async () => {
+    vi.useFakeTimers();
     const child = mockChildProcess();
     child.kill = vi.fn(() => {
       child.killed = true;
@@ -981,21 +1023,24 @@ describe("CodexCliProvider takeover", () => {
       cwd: "/tmp/project",
     });
 
-    let settled = false;
-    const takeover = provider.takeover().then(() => {
-      settled = true;
-    });
+    try {
+      const takeover = expect(provider.takeover()).rejects.toMatchObject({
+        message: "local Codex did not exit during Web takeover",
+        statusCode: 409,
+      });
+      await vi.advanceTimersByTimeAsync(
+        LOCAL_CLI_EXIT_WAIT_MS + LOCAL_CLI_FORCE_EXIT_WAIT_MS,
+      );
+      await takeover;
 
-    await tick();
-    expect(settled).toBe(false);
-    expect(provider.state.owner).toBe("local");
-
-    child.emit("exit", 0, null);
-    await takeover;
-
-    expect(provider.state.owner).toBe("web");
-
-    provider.stop();
+      expect(provider.state.owner).toBe("local");
+      expect(mocks.spawn).toHaveBeenCalledTimes(1);
+      expect(mocks.startResumeWatcher).toHaveBeenCalledTimes(2);
+      expect(mocks.appRequest).not.toHaveBeenCalledWith("thread/start", expect.anything());
+    } finally {
+      provider.stop();
+      vi.useRealTimers();
+    }
   });
 
   it("emits SIGINT exit when reclaim input receives CSI-u Ctrl+C", async () => {
@@ -1909,6 +1954,8 @@ describe("CodexCliProvider takeover", () => {
   });
 
   it("resumes the active thread when Web takes over an existing session", async () => {
+    const child = mockChildProcess();
+    mocks.spawn.mockReturnValueOnce(child);
     const provider = new CodexCliProvider({
       bin: "codex",
       args: [],
@@ -1932,6 +1979,156 @@ describe("CodexCliProvider takeover", () => {
     );
     expect(provider.state.owner).toBe("web");
     expect(provider.state.activeSessionId).toBe("019e2110-d96f-7e40-882e-b524fa9148e4");
+    const resumeCallIndex = mocks.appRequest.mock.calls.findIndex(
+      ([method]) => method === "thread/resume",
+    );
+    expect(resumeCallIndex).toBeGreaterThan(-1);
+    expect(child.kill.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.appRequest.mock.invocationCallOrder[resumeCallIndex]!,
+    );
+
+    provider.stop();
+  });
+
+  it("resumes the session detected while takeover capabilities hydrate", async () => {
+    const initialThreadId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    const latestThreadId = "019e2110-d96f-7e40-882e-b524fa9148e5";
+    let resolveSkills: ((value: unknown) => void) | null = null;
+    const defaultRequest = mocks.appRequest.getMockImplementation();
+    mocks.appRequest.mockImplementation((method: string, params: unknown) => {
+      if (method === "skills/list") {
+        return new Promise((resolve) => {
+          resolveSkills = resolve;
+        });
+      }
+      return defaultRequest?.(method, params);
+    });
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+    });
+    provider.noteLocalSession(initialThreadId);
+
+    const takeover = provider.takeover();
+    await tick();
+    expect(resolveSkills).not.toBeNull();
+    mocks.resumeWatcherOptions?.onResume(latestThreadId);
+    resolveSkills?.({ data: [] });
+    await takeover;
+
+    expect(mocks.appRequest).toHaveBeenCalledWith(
+      "thread/resume",
+      expect.objectContaining({ threadId: latestThreadId }),
+    );
+    expect(mocks.appRequest).not.toHaveBeenCalledWith(
+      "thread/resume",
+      expect.objectContaining({ threadId: initialThreadId }),
+    );
+    expect(provider.state.activeSessionId).toBe(latestThreadId);
+
+    provider.stop();
+  });
+
+  it("keeps local control when Codex becomes busy during capability hydration", async () => {
+    let resolveSkills: ((value: unknown) => void) | null = null;
+    const defaultRequest = mocks.appRequest.getMockImplementation();
+    mocks.appRequest.mockImplementation((method: string, params: unknown) => {
+      if (method === "skills/list") {
+        return new Promise((resolve) => {
+          resolveSkills = resolve;
+        });
+      }
+      return defaultRequest?.(method, params);
+    });
+    const child = mockChildProcess();
+    mocks.spawn.mockReturnValueOnce(child);
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+    });
+
+    const takeover = expect(provider.takeover()).rejects.toMatchObject({
+      message: "local Codex is busy",
+      statusCode: 409,
+    });
+    await tick();
+    expect(resolveSkills).not.toBeNull();
+    provider.markLocalBusy();
+    resolveSkills?.({ data: [] });
+    await takeover;
+
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(provider.state.owner).toBe("local");
+    expect(mocks.appStop).toHaveBeenCalledTimes(1);
+
+    provider.stop();
+  });
+
+  it("restores the local session when takeover cannot resume the thread", async () => {
+    const threadId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    const localChild = mockChildProcess();
+    const restartedChild = mockChildProcess();
+    mocks.spawn.mockReturnValueOnce(localChild).mockReturnValueOnce(restartedChild);
+    const defaultRequest = mocks.appRequest.getMockImplementation();
+    mocks.appRequest.mockImplementation((method: string, params: unknown) => {
+      if (method === "thread/resume") {
+        return Promise.reject(new Error(`thread ${threadId} already has an active writer`));
+      }
+      return defaultRequest?.(method, params);
+    });
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+    });
+    provider.noteLocalSession(threadId);
+
+    await expect(provider.takeover()).rejects.toThrow("already has an active writer");
+
+    expect(localChild.kill).toHaveBeenCalled();
+    expect(mocks.appStop).toHaveBeenCalledTimes(1);
+    expect(mocks.spawn).toHaveBeenLastCalledWith(
+      "codex",
+      ["resume", threadId],
+      expect.objectContaining({ cwd: "/tmp/project" }),
+    );
+    expect(provider.state.owner).toBe("local");
+    expect(provider.state.activeSessionId).toBe(threadId);
+
+    provider.stop();
+  });
+
+  it("restores an empty local session when takeover cannot start a thread", async () => {
+    const localChild = mockChildProcess();
+    const restartedChild = mockChildProcess();
+    mocks.spawn.mockReturnValueOnce(localChild).mockReturnValueOnce(restartedChild);
+    const defaultRequest = mocks.appRequest.getMockImplementation();
+    mocks.appRequest.mockImplementation((method: string, params: unknown) => {
+      if (method === "thread/start") {
+        return Promise.reject(new Error("thread start failed"));
+      }
+      return defaultRequest?.(method, params);
+    });
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+    });
+
+    await expect(provider.takeover()).rejects.toThrow("thread start failed");
+
+    expect(localChild.kill).toHaveBeenCalled();
+    expect(mocks.appStop).toHaveBeenCalledTimes(1);
+    expect(mocks.spawn).toHaveBeenCalledTimes(2);
+    expect(mocks.spawn).toHaveBeenLastCalledWith(
+      "codex",
+      [],
+      expect.objectContaining({ cwd: "/tmp/project" }),
+    );
+    expect(provider.state.owner).toBe("local");
+    expect(provider.state.activeSessionId).toBeNull();
 
     provider.stop();
   });
@@ -2575,15 +2772,9 @@ describe("CodexCliProvider takeover notices", () => {
 
   it("reports a failed takeover and keeps local control when prep fails", async () => {
     const { output, notices } = makeNoticeSink();
-    mocks.appRequest.mockImplementation(async (method: string) => {
-      if (method === "adit/capabilities/discover") {
-        throw appServerMethodsError();
-      }
-      if (method === "thread/start") {
-        throw new Error("app-server exploded");
-      }
-      return {};
-    });
+    const child = mockChildProcess();
+    mocks.spawn.mockReturnValueOnce(child);
+    mocks.appStart.mockRejectedValueOnce(new Error("app-server exploded"));
     const provider = new CodexCliProvider({
       bin: "codex",
       args: [],
@@ -2598,6 +2789,9 @@ describe("CodexCliProvider takeover notices", () => {
     expect(output).toContainEqual(expect.stringContaining("Web takeover failed"));
     expect(output).not.toContainEqual(expect.stringContaining("Web has taken over this session"));
     expect(provider.state.owner).toBe("local");
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(mocks.spawn).toHaveBeenCalledTimes(1);
+    expect(mocks.appStop).toHaveBeenCalledTimes(1);
 
     provider.stop();
   });
