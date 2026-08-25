@@ -6,6 +6,8 @@ const WINDOWS_SHELL_EXTENSIONS = new Set([".bat", ".cmd"]);
 const WINDOWS_NATIVE_EXTENSIONS = new Set([".com", ".exe"]);
 const WINDOWS_IGNORED_SHIM_EXTENSIONS = new Set([".ps1"]);
 
+export const CLI_PROCESS_EXIT_WAIT_MS = 750;
+
 export function resolveExecutable(command: string): string | null {
   const trimmed = command.trim();
   if (!trimmed) return null;
@@ -108,6 +110,38 @@ export function killCliProcessTree(
   try {
     child.kill(signal);
   } catch {}
+}
+
+export async function stopCliProcessTreeAndWait(
+  child: ChildProcess | null | undefined,
+  timeoutMs = CLI_PROCESS_EXIT_WAIT_MS,
+): Promise<void> {
+  if (!child) return;
+  const exited = waitForCliProcessExit(child, timeoutMs);
+  killCliProcessTree(child);
+  await exited;
+}
+
+export function waitForCliProcessExit(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<void> {
+  if (child.exitCode != null || child.signalCode != null) return Promise.resolve();
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      child.off("exit", finish);
+      child.off("close", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    timer.unref?.();
+    child.once("exit", finish);
+    child.once("close", finish);
+  });
 }
 
 // With shell:true Node concatenates args into the cmd.exe command line without

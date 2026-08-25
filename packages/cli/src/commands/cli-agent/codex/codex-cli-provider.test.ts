@@ -994,6 +994,27 @@ describe("CodexCliProvider takeover", () => {
     expect(provider.state.owner).toBe("stopped");
   });
 
+  it("waits for Enter before reclaiming local Codex control", async () => {
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+    });
+    await provider.takeover();
+    const releaseToLocal = vi.spyOn(provider, "releaseToLocal").mockResolvedValue();
+    const onReclaimInput = (provider as unknown as {
+      onReclaimInput: (chunk: string) => void;
+    }).onReclaimInput;
+
+    onReclaimInput("/local");
+    expect(releaseToLocal).not.toHaveBeenCalled();
+
+    onReclaimInput("\r");
+    expect(releaseToLocal).toHaveBeenCalledTimes(1);
+
+    provider.stop();
+  });
+
   it("does not emit fixed slash commands on construction", () => {
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
     const provider = new CodexCliProvider({

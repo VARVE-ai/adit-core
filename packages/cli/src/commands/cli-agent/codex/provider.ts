@@ -55,16 +55,15 @@ import {
   buildApprovalResponse,
   buildQuestionResponse,
 } from "./requests.js";
-import {
-  applyReclaimText,
-  normalizeCodexReclaimInput,
-  stopLocalCodexProcess,
-} from "./terminal.js";
+import { stopLocalCodexProcess } from "./terminal.js";
+import { applyReclaimInput } from "../reclaim-input.js";
 import {
   RECLAIM_COMMAND,
+  beginTerminalReclaimInput,
   createRelayNotices,
-  restoreTerminalForReclaim,
+  endTerminalReclaimInput,
   type RelayNotices,
+  writeTerminalReclaimEcho,
 } from "../relay-console.js";
 import {
   buildCodexContextUsage,
@@ -77,7 +76,7 @@ import {
 import { emitCodexThreadItem } from "./thread-items.js";
 export { promptInputForCodexMode, codexThreadModeOverrides, codexTurnModeOverrides } from "./input-mode.js";
 export type { CodexPromptMode } from "./input-mode.js";
-export { normalizeCodexReclaimInput } from "./terminal.js";
+export { normalizeReclaimInput as normalizeCodexReclaimInput } from "../reclaim-input.js";
 import { killCliProcessTree, spawnCliProcess } from "../cli-process.js";
 import {
   isCodexThreadSavedForCwd,
@@ -154,6 +153,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private lastAssistantMessageBySession = new Map<string, string>();
   private reclaimAttached = false;
   private reclaimBuffer = "";
+  private reclaimManualEcho = false;
   private suppressNextLocalExit = false;
   private supportedAppServerMethods = new Set<string>();
   private slashCommandsByName = new Map<string, CliSlashCommandInfo>();
@@ -1949,12 +1949,14 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.reclaimAttached = true;
     this.reclaimBuffer = "";
     try {
-      restoreTerminalForReclaim();
+      this.reclaimManualEcho = beginTerminalReclaimInput();
       process.stdin.setEncoding("utf8");
       process.stdin.resume();
       process.stdin.on("data", this.onReclaimInput);
     } catch {
       this.reclaimAttached = false;
+      this.reclaimManualEcho = false;
+      endTerminalReclaimInput();
     }
   }
 
@@ -1963,32 +1965,29 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.reclaimAttached = false;
     process.stdin.off("data", this.onReclaimInput);
     this.reclaimBuffer = "";
+    this.reclaimManualEcho = false;
     try {
       process.stdin.pause();
-      if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
-        process.stdin.setRawMode(false);
-      }
+      endTerminalReclaimInput();
     } catch {}
   }
 
   private onReclaimInput = (chunk: string | Buffer) => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    const normalized = normalizeCodexReclaimInput(text);
-    if (text.includes("\u0003") || normalized.includes("\u0003")) {
+    const update = applyReclaimInput(this.reclaimBuffer, text);
+    if (this.reclaimManualEcho) writeTerminalReclaimEcho(update.echo);
+    this.reclaimBuffer = update.buffer.slice(-200);
+    if (update.interrupted) {
       this.stop();
       this.emit("exit", { code: null, signal: "SIGINT" });
       return;
     }
-    this.reclaimBuffer = applyReclaimText(this.reclaimBuffer, normalized);
-    if (this.reclaimBuffer.length > 200) {
-      this.reclaimBuffer = this.reclaimBuffer.slice(-200);
-    }
-    if (this.reclaimBuffer.includes(RECLAIM_COMMAND)) {
+    if (update.submittedLines.some((line) => line.trim() === RECLAIM_COMMAND)) {
       this.reclaimBuffer = "";
       void this.releaseToLocal();
       return;
     }
-    if (text.includes("\n") || text.includes("\r")) {
+    if (update.submittedLines.length > 0) {
       this.notices.webOwnsReminder();
     }
   };
