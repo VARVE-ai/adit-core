@@ -93,6 +93,10 @@ Shows intents (development plans) and tasks from the connected adit-cloud projec
 - \`/adit intent\` — list all intents
 - \`/adit intent --state execution\` — show active intents
 
+> **Before linking:** the project must be initialized — run \`adit init\` in the project root once. Link only connects an already initialized project; it never changes the project structure.
+>
+> **Multi-repo projects:** start your coding tools from the project root — work across all member repositories is recorded there. Sessions started inside a member repository are not recorded.
+>
 > **Tip:** Not logged in? Run \`adit cloud login\` in your terminal first.
 `,
 };

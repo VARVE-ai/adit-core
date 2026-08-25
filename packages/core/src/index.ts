@@ -106,24 +106,32 @@ export {
   projectNameFromRoot,
   redactSensitiveKeys,
   type AditConfig,
+  type ProjectInitializationState,
 } from "./config/index.js";
 
 export {
+  projectManifestRelativePath,
+  projectManifestPath,
   workspaceManifestRelativePath,
+  generateProjectId,
   computeRepoProjectId,
   computeLocalRepositoryId,
-  workspaceManifestPath,
-  hasWorkspaceManifest,
+  readProjectManifest,
+  validateProjectManifest,
+  writeProjectManifest,
+  withProjectInitLock,
+  findProjectManifestRoot,
+  resolveManifestRepositories,
+  hasLegacyProjectTraces,
   readWorkspaceManifest,
-  ensureWorkspaceManifest,
-  findWorkspaceRoot,
   discoverWorkspaceRepositories,
-  createRepoRepository,
   toRepositoryPayload,
+  ProjectManifestError,
+  ProjectInitLockError,
+  type ProjectManifest,
   type ProjectType,
   type WorkspaceManifest,
   type LocalRepository,
-  type LocalProjectDescriptor,
 } from "./config/project.js";
 
 // Performance logging

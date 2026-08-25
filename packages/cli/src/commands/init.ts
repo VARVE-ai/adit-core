@@ -1,24 +1,20 @@
 /**
  * `adit init` — Initialize ADIT in the current project.
  *
- * Creates the .adit/ data directory, initializes the database,
- * and installs hooks for detected (or specified) AI platforms via adapters.
+ * The only command allowed to decide the project shape and write
+ * `.adit/project.json`. Also creates the .adit/ data directory, initializes
+ * the database, and installs hooks for detected (or specified) AI platforms.
  */
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, basename } from "node:path";
-import { createInterface } from "node:readline/promises";
 import pc from "picocolors";
 import {
   loadConfig,
   openDatabase,
   closeDatabase,
-  findGitRoot,
-  discoverWorkspaceRepositories,
-  ensureWorkspaceManifest,
 } from "@varveai/adit-core";
 import type { Platform } from "@varveai/adit-core";
-import { isGitRepo } from "@varveai/adit-engine";
 import {
   getAdapter,
   listAdapters,
@@ -33,12 +29,15 @@ import {
   renderGenerateDocsPrompt,
   GENERATE_DOCS_PROMPT_PATH,
 } from "@varveai/adit-plans";
+import { analyzeProjectLayout, resolveInitRoot } from "./project-layout.js";
+import { prepareProjectManifest } from "./init-manifest.js";
 
 export async function initCommand(opts: {
   cwd?: string;
   platform?: string;
   force?: boolean;
-  workspace?: boolean;
+  singleRepo?: boolean;
+  multiRepo?: boolean;
 }): Promise<void> {
   const cwd = opts.cwd ?? process.cwd();
 
@@ -47,44 +46,33 @@ export async function initCommand(opts: {
   console.log("  =====================================");
   console.log();
 
-  const isRepo = await isGitRepo(cwd);
-  let projectRoot = findGitRoot(cwd) ?? cwd;
-  let discoveredWorkspaceRepoCount = 0;
-
-  if (!isRepo) {
-    const workspaceRepos = discoverWorkspaceRepositories(cwd);
-    if (workspaceRepos.length === 0) {
-      console.error("  [x] Not a git repository, and no Git repositories were found one level below.");
-      console.error("      Run 'git init' first, or run this from a workspace parent directory.");
-      process.exit(1);
-    }
-
-    console.log("  Workspace candidate detected.");
-    console.log("  This directory is not a Git repository, but it contains Git repositories:");
-    for (const repo of workspaceRepos) {
-      console.log(`    - ${repo.relativePath}`);
-    }
-    console.log();
-
-    if (!opts.workspace) {
-      if (!process.stdin.isTTY || !process.stdout.isTTY) {
-        console.error("  [x] Refusing to initialize a workspace without confirmation.");
-        console.error("      Re-run with --workspace to confirm this multi-project setup.");
-        process.exit(1);
-      }
-
-      const confirmed = await confirmWorkspaceInit();
-      if (!confirmed) {
-        console.log("  Workspace initialization cancelled.");
-        process.exit(1);
-      }
-    }
-
-    ensureWorkspaceManifest(cwd);
-    projectRoot = cwd;
-    discoveredWorkspaceRepoCount = workspaceRepos.length;
+  const { root: projectRoot, reason } = resolveInitRoot(cwd);
+  if (reason === "none") {
+    console.error("  [x] Not a git repository, and no Git repositories were found one level below.");
+    console.error("      Run 'git init' first, or run this from a directory that contains repositories.");
+    process.exit(1);
   }
 
+  const analysis = await analyzeProjectLayout(projectRoot);
+  const plan = await prepareProjectManifest(projectRoot, analysis, {
+    singleRepo: opts.singleRepo,
+    multiRepo: opts.multiRepo,
+  });
+
+  if (plan.status === "cancelled") {
+    console.log("  Initialization cancelled. Nothing was changed.");
+    process.exit(1);
+  }
+  if (plan.status === "failed") {
+    process.exit(1);
+  }
+  if (plan.status === "redirect-child") {
+    await initCommand({ ...opts, cwd: plan.childPath, singleRepo: true, multiRepo: false });
+    return;
+  }
+
+  const manifest = plan.manifest;
+  const migratedFrom = plan.status === "written" ? plan.migratedFrom : null;
   const config = loadConfig(projectRoot);
   const setupRoot = config.projectRoot;
 
@@ -117,10 +105,17 @@ export async function initCommand(opts: {
   closeDatabase(db);
   console.log(`  [+] Database: ${config.dbPath}`);
 
-  if (config.projectType === "workspace") {
-    const repoCount = discoveredWorkspaceRepoCount || config.repositories.length;
-    console.log(`  [+] Workspace: ${config.projectId}`);
-    console.log(`  [+] Repositories: ${repoCount}`);
+  const typeLabel = manifest.projectType === "workspace" ? "multi-repo project" : "single-repo project";
+  console.log(`  [+] ${typeLabel[0].toUpperCase()}${typeLabel.slice(1)}: ${basename(setupRoot)}`);
+  console.log(`  [+] Project ID: ${manifest.projectId}`);
+  if (manifest.projectType === "workspace") {
+    console.log(`  [+] Repositories: ${manifest.repositories.length}`);
+    for (const repo of manifest.repositories) {
+      console.log(`        - ${repo.relativePath}`);
+    }
+  }
+  if (migratedFrom) {
+    console.log(`  [+] Migrated existing project — identity preserved (from ${migratedFrom}).`);
   }
 
   // Add .adit/ to .gitignore if not already there
@@ -247,21 +242,11 @@ export async function initCommand(opts: {
   if (skipped.length > 0) {
     console.log(`  Skipped: ${skipped.join(", ")}`);
   }
-  console.log();
-}
-
-async function confirmWorkspaceInit(): Promise<boolean> {
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-
-  try {
-    const answer = await rl.question(
-      "  Initialize this parent directory as an ADIT workspace? Type 'yes' to continue: ",
-    );
-    return answer.trim().toLowerCase() === "yes";
-  } finally {
-    rl.close();
+  if (manifest.projectType === "workspace") {
+    console.log();
+    console.log(`  ${pc.cyan("Tip:")} start Claude Code / Codex from this directory — work across all ${manifest.repositories.length} repositories is recorded.`);
+    console.log("       Sessions started inside a member repository are not recorded.");
   }
+  console.log(`\n  ${pc.cyan("Next step:")} run ${pc.bold("adit cloud link")} to connect this project to the cloud.`);
+  console.log();
 }

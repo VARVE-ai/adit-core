@@ -14,6 +14,14 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@varveai/adit-core", () => ({
+  ProjectManifestError: class ProjectManifestError extends Error {
+    constructor(
+      message: string,
+      public readonly manifestPath: string,
+    ) {
+      super(message);
+    }
+  },
   loadConfig: mocks.loadConfig,
 }));
 
@@ -44,6 +52,8 @@ describe("project uninstall command", () => {
       projectRoot: "/repo",
       dataDir: "/repo/.adit",
       dbPath: "/repo/.adit/adit.sqlite",
+      initialization: "initialized",
+      repositories: [],
     });
     mocks.existsSync.mockImplementation((path: string) =>
       path === "/repo/.adit" ||

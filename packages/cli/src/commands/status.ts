@@ -9,6 +9,8 @@
 import { existsSync } from "node:fs";
 import pc from "picocolors";
 import {
+  ProjectManifestError,
+  discoverWorkspaceRepositories,
   loadConfig,
   openDatabase,
   closeDatabase,
@@ -17,6 +19,7 @@ import {
   queryEvents,
   getSyncState,
   findGitRoot,
+  type AditConfig,
 } from "@varveai/adit-core";
 import {
   hasUncommittedChanges,
@@ -38,25 +41,51 @@ const platformLabel: Record<string, string> = {
 };
 
 export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
-  const config = loadConfig();
+  let config: AditConfig;
+  try {
+    config = loadConfig();
+  } catch (err) {
+    if (err instanceof ProjectManifestError) {
+      if (opts?.json) {
+        console.log(JSON.stringify({ initialized: false, corrupt: true, reason: err.message }, null, 2));
+      } else {
+        console.log();
+        console.log(`${statusDot(false)} ${pc.bold("Project configuration damaged")}`);
+        console.log();
+        console.log(pc.dim(err.message));
+        console.log(pc.dim("Restore .adit/project.json from a backup, or run 'adit init' to rebuild it."));
+        console.log();
+      }
+      process.exitCode = 1;
+      return;
+    }
+    throw err;
+  }
   const gitRoot = findGitRoot() ?? config.projectRoot;
 
   // Gather status info
   const status: Record<string, unknown> = {};
 
-  // 1. Check if ADIT is initialized
-  const dataExists = existsSync(config.dataDir);
+  // 1. Initialization state — the manifest is the single authority.
   const dbExists = existsSync(config.dbPath);
-  status.initialized = dataExists && dbExists;
+  status.initialized = config.initialization === "initialized" && dbExists;
 
   if (!status.initialized) {
+    const legacy = config.initialization === "legacy";
     if (opts?.json) {
-      console.log(JSON.stringify({ initialized: false }, null, 2));
+      console.log(JSON.stringify({ initialized: false, migrationNeeded: legacy }, null, 2));
     } else {
       console.log();
-      console.log(`${statusDot(false)} ${pc.bold("Not initialized")}`);
+      console.log(`${statusDot(false)} ${pc.bold(legacy ? "Migration needed" : "Not initialized")}`);
       console.log();
-      console.log(pc.dim("Run 'adit init' to get started."));
+      if (legacy) {
+        console.log(pc.dim("ADIT has been upgraded. Run 'adit init' here to migrate —"));
+        console.log(pc.dim("your project identity and history are preserved. Recording is paused until then."));
+      } else if (config.initialization === "initialized") {
+        console.log(pc.dim("The local database is missing. Run 'adit init' to rebuild it."));
+      } else {
+        console.log(pc.dim("Run 'adit init' to get started."));
+      }
       console.log();
     }
     return;
@@ -175,9 +204,16 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
 
   // 4. Git info
   if (config.projectType === "workspace") {
+    const registered = config.repositories.map((repo) => repo.relativePath);
+    const discovered = discoverWorkspaceRepositories(config.projectRoot).map(
+      (repo) => repo.relativePath,
+    );
     status.git = {
       workspace: true,
       repositories: config.repositories.length,
+      registered,
+      unregistered: discovered.filter((path) => !registered.includes(path)),
+      missingRepositories: registered.filter((path) => !discovered.includes(path)),
     };
   } else {
     const [branch, headSha, dirty] = await Promise.all([
@@ -226,6 +262,9 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
     | {
         workspace: true;
         repositories: number;
+        registered: string[];
+        unregistered: string[];
+        missingRepositories: string[];
       }
     | {
         workspace?: false;
@@ -241,7 +280,7 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
     ? hooksStatus.installed.join(", ")
     : null;
   const branchLabel = git.workspace
-    ? pc.cyan("workspace")
+    ? pc.cyan("multi-repo")
     : git.branch ? pc.cyan(git.branch) : pc.yellow("detached");
 
   console.log(
@@ -285,9 +324,13 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
 
   if (git.workspace) {
     console.log(joinDim([
-      "workspace",
+      "multi-repo project",
       `${git.repositories} repositories`,
     ]));
+    for (const path of git.registered) {
+      const missing = git.missingRepositories.includes(path);
+      console.log(pc.dim(`  - ${path}`) + (missing ? pc.yellow("  (missing)") : ""));
+    }
   } else {
     const headShort = git.head ?? "unknown";
     const treeStatus = git.dirty
@@ -315,6 +358,16 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
   const warnings: string[] = [];
   if (missingPlatforms.length > 0) {
     warnings.push(`hooks incomplete: ${missingPlatforms.join(", ")}`);
+  }
+  if (git.workspace && git.unregistered.length > 0) {
+    warnings.push(
+      `unregistered repositories: ${git.unregistered.join(", ")} — run 'adit init' to add them`,
+    );
+  }
+  if (git.workspace && git.missingRepositories.length > 0) {
+    warnings.push(
+      `registered repositories missing: ${git.missingRepositories.join(", ")} — run 'adit init' to update the list`,
+    );
   }
   if (cloud?.syncDisabled) {
     warnings.push(

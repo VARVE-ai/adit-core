@@ -7,7 +7,8 @@ const mocks = vi.hoisted(() => ({
   queryEvents: vi.fn(),
   listSessions: vi.fn(),
   endSession: vi.fn(),
-  isGitRepo: vi.fn(),
+  discoverWorkspaceRepositories: vi.fn(() => [] as Array<{ relativePath: string }>),
+  getRemoteUrl: vi.fn(async () => "https://example.com/repo.git" as string | null),
   detectPlatform: vi.fn(),
   detectPlatforms: vi.fn(),
   getAdapter: vi.fn(),
@@ -25,10 +26,12 @@ vi.mock("@varveai/adit-core", () => ({
   queryEvents: mocks.queryEvents,
   listSessions: mocks.listSessions,
   endSession: mocks.endSession,
+  discoverWorkspaceRepositories: mocks.discoverWorkspaceRepositories,
+  projectManifestPath: (projectRoot: string) => `${projectRoot}/.adit/project.json`,
 }));
 
 vi.mock("@varveai/adit-engine", () => ({
-  isGitRepo: mocks.isGitRepo,
+  getRemoteUrl: mocks.getRemoteUrl,
 }));
 
 vi.mock("@varveai/adit-hooks/adapters", () => ({
@@ -60,13 +63,22 @@ describe("doctorCommand", () => {
       projectId: "project-1",
       projectType: "repo",
       clientId: "client-1",
+      repositories: [{
+        localRepositoryId: "project-1",
+        relativePath: ".",
+        displayName: "repo",
+        repositoryUrl: null,
+        canonicalRepoKey: null,
+        path: "/repo",
+      }],
     });
     mocks.openDatabase.mockReturnValue({
       pragma: vi.fn(() => [{ integrity_check: "ok" }]),
     });
     mocks.queryEvents.mockReturnValue([]);
     mocks.listSessions.mockReturnValue([]);
-    mocks.isGitRepo.mockResolvedValue(true);
+    mocks.getRemoteUrl.mockResolvedValue("https://example.com/repo.git");
+    mocks.discoverWorkspaceRepositories.mockReturnValue([]);
     mocks.detectPlatforms.mockReturnValue([]);
     mocks.resolveAditHookBinary.mockReturnValue("adit-hook");
     mocks.detectPlatform.mockReturnValue("other");
@@ -102,7 +114,7 @@ describe("doctorCommand", () => {
     expect(output).not.toContain("Unknown Platform support");
   });
 
-  it("skips the git repository check for workspace projects", async () => {
+  it("checks manifest repositories and reports drift for multi-repo projects", async () => {
     mocks.loadInitializedProjectConfig.mockReturnValue({
       projectRoot: "/workspace",
       dataDir: "/workspace/.adit",
@@ -110,8 +122,19 @@ describe("doctorCommand", () => {
       projectId: "workspace-1",
       projectType: "workspace",
       clientId: "client-1",
+      repositories: [{
+        localRepositoryId: "repo-api",
+        relativePath: "api",
+        displayName: "api",
+        repositoryUrl: null,
+        canonicalRepoKey: null,
+        path: "/workspace/api",
+      }],
     });
-    mocks.isGitRepo.mockResolvedValue(false);
+    mocks.discoverWorkspaceRepositories.mockReturnValue([
+      { relativePath: "api" },
+      { relativePath: "new-service" },
+    ]);
 
     await doctorCommand();
 
@@ -119,8 +142,11 @@ describe("doctorCommand", () => {
       .map((args) => args.join(" "))
       .join("\n");
 
-    expect(output).toContain("Git repository: Workspace project: /workspace (git check skipped)");
-    expect(mocks.isGitRepo).not.toHaveBeenCalled();
+    expect(output).toContain("Project manifest: multi-repo · 1 repositories");
+    // /workspace/api does not exist on disk — reported as drift, never auto-fixed
+    expect(output).toContain("missing: api — run 'adit init' to update the list");
+    expect(output).toContain("Unregistered repositories: new-service — run 'adit init' to add them");
+    expect(output).not.toContain("git check skipped");
   });
 
   it("only reports hook adapters detected in the current project root", async () => {

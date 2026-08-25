@@ -10,13 +10,23 @@ import { homedir } from "node:os";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import {
-  computeLocalRepositoryId,
-  computeRepoProjectId,
-  discoverWorkspaceRepositories,
-  readWorkspaceManifest,
+  findProjectManifestRoot,
+  hasLegacyProjectTraces,
+  readProjectManifest,
+  resolveManifestRepositories,
   type LocalRepository,
   type ProjectType,
 } from "./project.js";
+
+/**
+ * How this directory relates to an ADIT project.
+ *
+ * - `initialized`: a valid project manifest was found — identity comes from it.
+ * - `legacy`: no manifest, but traces of a pre-manifest project exist
+ *   (old workspace.json or a local database). Needs `adit init` migration.
+ * - `uninitialized`: no manifest and no traces — never initialized here.
+ */
+export type ProjectInitializationState = "initialized" | "legacy" | "uninitialized";
 
 export interface AditConfig {
   /** Project root directory. For workspace projects this is the workspace root. */
@@ -27,12 +37,14 @@ export interface AditConfig {
   dbPath: string;
   /** Unique client identifier for this machine */
   clientId: string;
-  /** Project identifier. For workspace projects this is the workspace ID. */
+  /** Project identifier from the manifest. Empty when not initialized. */
   projectId: string;
   /** Local project type */
   projectType: ProjectType;
-  /** Git repositories that belong to this local project */
+  /** Git repositories that belong to this local project (empty when not initialized) */
   repositories: LocalRepository[];
+  /** Whether a project manifest was found at the resolved root */
+  initialization: ProjectInitializationState;
   /** Git ref prefix for checkpoints */
   refPrefix: string;
   /** Whether to capture environment snapshots */
@@ -63,11 +75,6 @@ function getClientId(): string {
   }
 
   return id;
-}
-
-/** Compute project ID from git remote and project root */
-function computeProjectId(projectRoot: string, remoteUrl?: string): string {
-  return computeRepoProjectId(projectRoot, remoteUrl);
 }
 
 /** Extract the project directory name from a root path, regardless of platform separators. */
@@ -105,12 +112,36 @@ function loadSettingsFile(projectRoot: string): Record<string, unknown> {
   }
 }
 
-/** Load configuration from settings.json + environment overrides */
+/**
+ * Resolve the project root for the current location.
+ *
+ * The enclosing Git repository wins (a member repository never inherits the
+ * parent project's manifest — no pass-through). Only when the location is not
+ * inside any Git repository do we walk up looking for the nearest manifest,
+ * so plain folders inside a multi-repo container resolve to the container.
+ */
+function resolveProjectRoot(cwd?: string): string {
+  const envRoot = process.env.ADIT_PROJECT_ROOT;
+  if (envRoot) return envRoot;
+
+  const gitRoot = findGitRoot(cwd);
+  if (gitRoot) return gitRoot;
+
+  return findProjectManifestRoot(cwd) ?? resolve(cwd ?? process.cwd());
+}
+
+/**
+ * Load configuration from the project manifest + environment overrides.
+ *
+ * Identity (project ID, type, repository members) comes exclusively from
+ * `.adit/project.json`. Without a manifest the config carries an
+ * `initialization` state of `legacy` or `uninitialized` and an empty
+ * identity — callers must gate on it before using projectId/repositories.
+ *
+ * Throws ProjectManifestError when a manifest exists but is damaged.
+ */
 export function loadConfig(cwd?: string): AditConfig {
-  const projectRoot =
-    process.env.ADIT_PROJECT_ROOT ??
-    findGitRoot(cwd) ??
-    resolve(cwd ?? process.cwd());
+  const projectRoot = resolveProjectRoot(cwd);
 
   const dataDir =
     process.env.ADIT_DATA_DIR ?? join(projectRoot, ".adit");
@@ -121,27 +152,28 @@ export function loadConfig(cwd?: string): AditConfig {
   const clientId =
     process.env.ADIT_CLIENT_ID ?? getClientId();
 
-  const remoteUrl = process.env.ADIT_REMOTE_URL;
-  const workspaceManifest = readWorkspaceManifest(projectRoot);
-  const projectType: ProjectType = workspaceManifest ? "workspace" : "repo";
-  const projectId = workspaceManifest?.workspaceId ?? computeProjectId(projectRoot, remoteUrl);
-  const repositories: LocalRepository[] = workspaceManifest
-    ? discoverWorkspaceRepositories(projectRoot).map((repo) => ({
-        localRepositoryId: computeLocalRepositoryId(projectId, repo.relativePath),
-        relativePath: repo.relativePath,
-        displayName: repo.displayName,
-        repositoryUrl: null,
-        canonicalRepoKey: null,
-        path: repo.path,
-      }))
-    : [{
-        localRepositoryId: projectId,
-        relativePath: ".",
-        displayName: projectNameFromRoot(projectRoot),
-        repositoryUrl: remoteUrl ?? null,
-        canonicalRepoKey: null,
-        path: projectRoot,
-      }];
+  const manifest = readProjectManifest(projectRoot);
+
+  let initialization: ProjectInitializationState;
+  let projectType: ProjectType;
+  let projectId: string;
+  let repositories: LocalRepository[];
+
+  if (manifest) {
+    initialization = "initialized";
+    projectType = manifest.projectType;
+    projectId = manifest.projectId;
+    repositories = resolveManifestRepositories(projectRoot, manifest);
+    const remoteUrl = process.env.ADIT_REMOTE_URL;
+    if (remoteUrl && projectType === "repo" && repositories[0]) {
+      repositories[0] = { ...repositories[0], repositoryUrl: remoteUrl };
+    }
+  } else {
+    initialization = hasLegacyProjectTraces(projectRoot, dbPath) ? "legacy" : "uninitialized";
+    projectType = "repo";
+    projectId = "";
+    repositories = [];
+  }
 
   // Load file-based settings (lowest priority — env vars override)
   const fileSettings = loadSettingsFile(projectRoot);
@@ -154,6 +186,7 @@ export function loadConfig(cwd?: string): AditConfig {
     projectId,
     projectType,
     repositories,
+    initialization,
     refPrefix: "refs/adit/checkpoints",
     captureEnv: process.env.ADIT_CAPTURE_ENV !== undefined
       ? process.env.ADIT_CAPTURE_ENV !== "false"

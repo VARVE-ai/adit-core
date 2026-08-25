@@ -9,14 +9,17 @@
  */
 
 import { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
 import {
+  discoverWorkspaceRepositories,
   openDatabase,
   closeDatabase,
+  projectManifestPath,
   queryEvents,
   listSessions,
   endSession,
 } from "@varveai/adit-core";
-import { isGitRepo } from "@varveai/adit-engine";
+import { getRemoteUrl } from "@varveai/adit-engine";
 import {
   detectPlatform,
   detectPlatforms,
@@ -41,17 +44,59 @@ export async function doctorCommand(
   const config = loadInitializedProjectConfig("adit doctor");
   if (!config) return;
 
-  // 1. Git repo
-  const gitOk = config.projectType === "workspace"
-    ? true
-    : await isGitRepo(config.projectRoot);
+  // 1. Project manifest — the single authority on identity and members.
+  const typeLabel = config.projectType === "workspace" ? "multi-repo" : "single-repo";
   checks.push({
-    name: "Git repository",
-    ok: gitOk,
-    detail: config.projectType === "workspace"
-      ? `Workspace project: ${config.projectRoot} (git check skipped)`
-      : gitOk ? config.projectRoot : "Not a git repository",
+    name: "Project manifest",
+    ok: true,
+    detail: `${typeLabel} · ${config.repositories.length} repositories · ${projectManifestPath(config.projectRoot)}`,
   });
+
+  // 1b. Registered repositories exist and are Git repositories (soft check —
+  //     doctor reports drift, only `adit init` may change the list).
+  const missingRepos = config.repositories
+    .filter((repo) => !existsSync(join(repo.path, ".git")))
+    .map((repo) => repo.relativePath);
+  checks.push({
+    name: "Repositories",
+    ok: missingRepos.length === 0,
+    detail:
+      missingRepos.length === 0
+        ? `${config.repositories.length} registered, all present`
+        : `missing: ${missingRepos.join(", ")} — run 'adit init' to update the list`,
+  });
+
+  // 1c. Every present repository has a git remote 'origin'.
+  const reposWithoutOrigin: string[] = [];
+  for (const repo of config.repositories) {
+    if (missingRepos.includes(repo.relativePath)) continue;
+    const remoteUrl = await getRemoteUrl(repo.path).catch(() => null);
+    if (!remoteUrl) reposWithoutOrigin.push(repo.relativePath === "." ? repo.displayName : repo.relativePath);
+  }
+  checks.push({
+    name: "Git remotes",
+    ok: reposWithoutOrigin.length === 0,
+    detail:
+      reposWithoutOrigin.length === 0
+        ? "all repositories have an origin"
+        : `no origin: ${reposWithoutOrigin.join(", ")} — add one with 'git remote add origin <url>'`,
+  });
+
+  // 1d. Multi-repo drift: repositories on disk that are not registered.
+  if (config.projectType === "workspace") {
+    const registered = config.repositories.map((repo) => repo.relativePath);
+    const unregistered = discoverWorkspaceRepositories(config.projectRoot)
+      .map((repo) => repo.relativePath)
+      .filter((path) => !registered.includes(path));
+    checks.push({
+      name: "Unregistered repositories",
+      ok: unregistered.length === 0,
+      detail:
+        unregistered.length === 0
+          ? "none"
+          : `${unregistered.join(", ")} — run 'adit init' to add them`,
+    });
+  }
 
   // 2. Data directory
   const dataDirOk = existsSync(config.dataDir);

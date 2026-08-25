@@ -84,15 +84,20 @@ export function createProgram(): Command {
       "Force reinstall hooks (removes existing ADIT hooks first)",
     )
     .option(
-      "--workspace",
-      "Initialize a workspace root that contains Git repositories in child directories",
+      "--single-repo",
+      "Initialize this Git repository as a single-repo project",
+    )
+    .option(
+      "--multi-repo",
+      "Initialize this directory as a multi-repo project containing its child Git repositories",
     )
     .action(withUpdateWarning("init", (opts) =>
       initCommand({
         cwd: process.cwd(),
         platform: opts.platform,
         force: opts.force,
-        workspace: opts.workspace,
+        singleRepo: opts.singleRepo,
+        multiRepo: opts.multiRepo,
       }),
     ));
 

@@ -16,6 +16,7 @@ import {
   loadConfig,
   openDatabase,
   serialize,
+  writeProjectManifest,
 } from "@varveai/adit-core";
 import type Database from "better-sqlite3";
 
@@ -46,6 +47,15 @@ describe("initHookContext", () => {
     dir = tempDir();
     mkdirSync(join(dir, ".adit"), { recursive: true });
     dbPath = join(dir, ".adit", "adit.sqlite");
+    const now = new Date().toISOString();
+    writeProjectManifest(dir, {
+      schemaVersion: 1,
+      projectId: "11111111-2222-4333-8444-555555555555",
+      projectType: "repo",
+      repositories: [{ relativePath: "." }],
+      createdAt: now,
+      updatedAt: now,
+    });
     process.env.ADIT_PROJECT_ROOT = dir;
     process.env.ADIT_DATA_DIR = join(dir, ".adit");
     process.env.ADIT_DB_PATH = dbPath;
@@ -151,6 +161,15 @@ describe("initHookContext", () => {
     const childRepo = join(workspaceRoot, "adit-core");
     mkdirSync(join(childRepo, ".git"), { recursive: true });
     mkdirSync(join(workspaceRoot, ".adit"), { recursive: true });
+    const now = new Date().toISOString();
+    writeProjectManifest(workspaceRoot, {
+      schemaVersion: 1,
+      projectId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      projectType: "workspace",
+      repositories: [{ relativePath: "adit-core" }],
+      createdAt: now,
+      updatedAt: now,
+    });
     const workspaceDbPath = join(workspaceRoot, ".adit", "adit.sqlite");
     closeDatabase(openDatabase(workspaceDbPath));
 
