@@ -324,6 +324,8 @@ export interface LinkResult {
   repositoryResults?: WorkspaceRepositoryResult[];
   /** Per-repository failures for workspace projects. */
   repositoryFailures?: WorkspaceRepositoryFailure[];
+  /** Existing same-remote projects reported by negotiate when this link created a new project. */
+  similarProjects?: Array<{ name: string | null; lastActivityAt: string }>;
 }
 
 export interface WorkspaceRepositoryResult {

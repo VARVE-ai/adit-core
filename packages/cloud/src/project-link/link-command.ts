@@ -217,6 +217,21 @@ async function linkWorkspaceProject(
     totalDurationMs,
   );
 
+  // Per-repository links run silent, so surface the same-remote notice from
+  // negotiate here — it only ever appears on the negotiate that created the
+  // project, and the user must see it in multi-repo mode too.
+  const similarProjects = results.flatMap((repoResult) => repoResult.similarProjects ?? []);
+  if (similarProjects.length > 0) {
+    result.similarProjects = similarProjects;
+    log("");
+    log("Note: your cloud account already has projects pointing at the same git remote:");
+    for (const similar of similarProjects) {
+      const lastActive = similar.lastActivityAt ? ` (last active ${similar.lastActivityAt.slice(0, 10)})` : "";
+      log(`  - ${similar.name || "(unnamed project)"}${lastActive}`);
+    }
+    log("This link created a NEW project; nothing was merged. If those are leftovers from another machine, delete them on the cloud settings page.");
+  }
+
   logWorkspaceSummary(result, failures, log);
 
   if (failures.length > 0) {
@@ -823,6 +838,9 @@ async function linkRepositoryCommand(
     summaryPrompt,
     stepTimings,
     totalDurationMs,
+    ...(negotiate.similarProjects && negotiate.similarProjects.length > 0
+      ? { similarProjects: negotiate.similarProjects }
+      : {}),
   };
 }
 
