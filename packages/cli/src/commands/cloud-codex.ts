@@ -470,6 +470,7 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
       cwd: config.projectRoot,
       endpoint: hookServer.endpoint,
       marker: CODEX_CLOUD_HOOK_MARKER,
+      persistent: true,
     });
 
     provider = new CodexCliProvider({

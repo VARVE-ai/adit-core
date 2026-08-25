@@ -80,6 +80,7 @@ export { normalizeReclaimInput as normalizeCodexReclaimInput } from "../reclaim-
 import { killCliProcessTree, spawnCliProcess } from "../cli-process.js";
 import {
   isCodexThreadSavedForCwd,
+  readMaxCodexLogId,
   startCodexResumeLogWatcher,
   type CodexResumeLogWatcher,
 } from "./codex-resume-log-watcher.js";
@@ -117,6 +118,7 @@ interface CodexCliProviderOptions {
 }
 
 const BRANCH_REFRESH_INTERVAL_MS = 5_000;
+export const CODEX_LOCAL_WRITER_RELEASE_RETRY_DELAYS_MS = [100, 250, 500, 750] as const;
 
 export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   readonly provider = "codex" as const;
@@ -246,6 +248,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
 
   noteLocalSession(id: string): void {
     if (!id) return;
+    this.localResumeLogWatcher?.claimProcessForThread(id);
     const changed = this.activeSessionId !== id || this.resumeSessionId !== id;
     this.activeSessionId = id;
     this.resumeSessionId = id;
@@ -311,7 +314,6 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       detachedLocal = oldLocal;
       this.suppressNextLocalExit = Boolean(oldLocal);
       this.local = null;
-      this.stopLocalResumeLogWatcher();
       this.stopLocalModelConfigWatcher();
       const localExited = await stopLocalCodexProcess(oldLocal);
       this.suppressNextLocalExit = false;
@@ -320,10 +322,11 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
           statusCode: 409,
         });
       }
+      this.stopLocalResumeLogWatcher();
       localReleased = true;
 
       if (resumeId) {
-        await this.resumeThread(resumeId);
+        await this.resumeThreadAfterLocalExit(resumeId);
       } else {
         await this.startThread("build");
       }
@@ -338,7 +341,9 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       } else if (detachedLocal !== undefined) {
         this.local = detachedLocal;
         if (detachedLocal) {
-          this.startLocalResumeLogWatcher(detachedLocal);
+          if (!this.localResumeLogWatcher) {
+            this.startLocalResumeLogWatcher(detachedLocal);
+          }
           this.startLocalModelConfigWatcher(detachedLocal);
         }
       }
@@ -877,6 +882,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     // replayed to future viewers; the next takeover re-hydrates instead.
     this.appServer?.stop();
     this.appServer = null;
+    const resumeLogWatermark = readMaxCodexLogId();
     const child = spawnCliProcess(this.opts.bin, [...extraArgs, ...this.opts.args], {
       cwd: this.opts.cwd,
       env: this.buildEnv(),
@@ -887,7 +893,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     });
     this.local = child;
     this.ownerValue = "local";
-    this.startLocalResumeLogWatcher(child);
+    this.startLocalResumeLogWatcher(child, resumeLogWatermark);
     this.startLocalModelConfigWatcher(child);
     this.emitState();
 
@@ -925,9 +931,13 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     });
   }
 
-  private startLocalResumeLogWatcher(child: ChildProcess): void {
+  private startLocalResumeLogWatcher(
+    child: ChildProcess,
+    afterLogId = readMaxCodexLogId(),
+  ): void {
     this.localResumeLogWatcher = startCodexResumeLogWatcher({
       cwd: this.opts.cwd,
+      afterLogId,
       onResume: (threadId) => {
         if (this.ownerValue !== "local" || this.local !== child) return;
         this.noteLocalSession(threadId);
@@ -1150,6 +1160,27 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       preserveActiveModel: Boolean(preferredModelId),
     });
     await this.applyActiveModelToThread(resumedId, preferredModelId);
+  }
+
+  private async resumeThreadAfterLocalExit(threadId: string): Promise<void> {
+    for (
+      let attempt = 0;
+      attempt <= CODEX_LOCAL_WRITER_RELEASE_RETRY_DELAYS_MS.length;
+      attempt += 1
+    ) {
+      try {
+        await this.resumeThread(threadId);
+        return;
+      } catch (error) {
+        if (
+          !isCodexActiveWriterError(error) ||
+          attempt >= CODEX_LOCAL_WRITER_RELEASE_RETRY_DELAYS_MS.length
+        ) {
+          throw error;
+        }
+        await delay(CODEX_LOCAL_WRITER_RELEASE_RETRY_DELAYS_MS[attempt]);
+      }
+    }
   }
 
   /**
@@ -2069,4 +2100,9 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       this.notices.webOwnsReminder();
     }
   };
+}
+
+function isCodexActiveWriterError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /already has an active writer/i.test(message);
 }

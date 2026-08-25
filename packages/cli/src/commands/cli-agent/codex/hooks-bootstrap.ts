@@ -46,6 +46,7 @@ export function installCodexHooks(opts: {
   endpoint: string;
   marker: string;
   codexHome?: string;
+  persistent?: boolean;
 }): InstalledHooks {
   const codexDir = path.join(opts.cwd, ".codex");
   const hooksPath = path.join(codexDir, "hooks.json");
@@ -93,6 +94,7 @@ export function installCodexHooks(opts: {
   return {
     settingsPath: hooksPath,
     cleanup: () => {
+      if (opts.persistent) return;
       try {
         const current = parseObject(readFile(hooksPath));
         const currentHooks = current ? asObject(current.hooks) : null;
