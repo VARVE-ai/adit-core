@@ -138,13 +138,40 @@ adit tui
 adit cloud login --server <url>
 ```
 
+## Projects & Initialization
+
+`adit init` is the only command that decides what a project is. It writes
+`.adit/project.json` — the project identity, the project type, and the explicit
+repository member list. Every other command (status, doctor, link, sync, hooks)
+only reads this manifest and never changes the project structure.
+
+- **Single-repo project** — a normal Git repository. `adit init` sets it up
+  without questions.
+- **Multi-repo project** — a directory containing several Git repositories one
+  level below (with or without a top-level `.git`). `adit init` lists the
+  repositories and asks how to manage them. Non-interactive environments use
+  `adit init --multi-repo` / `adit init --single-repo` explicitly.
+- **Recording boundary** — for a multi-repo project, start your coding tools
+  from the project root: work across all member repositories is recorded there.
+  Sessions started inside a member repository are not recorded. To record a
+  member repository on its own, run `adit init` inside it — it becomes an
+  independent project and the parent project is not affected.
+- **Adding / removing repositories** — nothing changes automatically. Re-run
+  `adit init` in the project root and confirm the updated list; `adit status`
+  and `adit doctor` point out unregistered or missing repositories.
+- **Upgrading from an older adit** — projects initialized before the manifest
+  existed show a one-time migration prompt. Run `adit init` once in each
+  project: the project identity is carried over, so the cloud project, local
+  history, team links and sync progress all stay attached. Recording is paused
+  until the migration runs.
+
 ## CLI Commands
 
 ### Core
 
 | Command | Description |
 | --- | --- |
-| `adit init` | Initialize ADIT in the current project (`--platform`, `--force`) |
+| `adit init` | Initialize ADIT in the current project (`--platform`, `--force`, `--single-repo`, `--multi-repo`) |
 | `adit uninstall` | Remove ADIT from the current project (`--yes`, `--json`) |
 | `adit status` | Show session, Git, sync, and hook status (`--json`) |
 | `adit config` | Show resolved ADIT configuration (`--json`) |
@@ -216,6 +243,15 @@ Common timeline options include `--limit`, `--actor`, `--type`,
 `--skip-qualify`, `--dry-run`, and `--json`. The same project-link and intent
 flows are also exposed as `/adit link` and `/adit intent` in supported
 platform integrations.
+
+Link only connects an already initialized project: it reads the repository
+list from `.adit/project.json`, validates every repository and its `origin`
+remote locally **before** any authentication or network call, and never
+modifies the project structure. Structural problems (missing repositories,
+new unregistered repositories) are fixed by re-running `adit init`, not by
+link. When a link would create a brand-new cloud project while the account
+already has projects pointing at the same git remotes (typical after a fresh
+clone or on a new machine), link prints a notice — nothing is merged.
 
 ### Export, Docs, Debug, Maintenance
 

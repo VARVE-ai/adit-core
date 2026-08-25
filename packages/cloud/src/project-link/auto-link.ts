@@ -78,17 +78,19 @@ export async function triggerProjectLinkSync(
   // 3. Check staleness. If the cache is still fresh, do one cheap refs
   //    fingerprint check so new branches/commits can still trigger a git-only
   //    link without scanning docs.
-  const projectConfig = loadConfig(projectRoot);
-  const repositories = projectConfig.repositories.length > 0
-    ? projectConfig.repositories
-    : [{
-        localRepositoryId: projectId,
-        relativePath: ".",
-        displayName: "",
-        repositoryUrl: null,
-        canonicalRepoKey: null,
-        path: projectRoot,
-      }];
+  // Only a valid manifest project auto-links. No synthesized fallback
+  // repositories — a made-up ID never matches the real cache entries, which
+  // used to force a spawn on every session start.
+  let projectConfig: ReturnType<typeof loadConfig>;
+  try {
+    projectConfig = loadConfig(projectRoot);
+  } catch {
+    return;
+  }
+  if (projectConfig.initialization !== "initialized" || projectConfig.repositories.length === 0) {
+    return;
+  }
+  const repositories = projectConfig.repositories;
   let gitOnlySync = false;
   let shouldSync = false;
 

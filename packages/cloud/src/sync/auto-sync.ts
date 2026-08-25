@@ -59,7 +59,7 @@ import { repositoryPayloads, resolveCloudProjectContext } from "../project-conte
  */
 export async function triggerAutoSync(
   db: Database.Database,
-  projectId: string,
+  _projectId: string,
   options?: { force?: boolean; projectRoot?: string },
 ): Promise<void> {
   const cloudConfig = loadCloudConfig();
@@ -100,6 +100,18 @@ export async function triggerAutoSync(
   if (process.env.ADIT_CLOUD_AUTO_SYNC === "false") return;
   if (process.env.ADIT_CLOUD_ENABLED === "false") return;
 
+  // 3b. Resolve the project once — the SAME config drives both the trigger
+  //     decision and the actual upload, so the two can never disagree about
+  //     which project this is. A damaged or un-migrated project never syncs.
+  let projectConfig: ReturnType<typeof loadConfig>;
+  try {
+    projectConfig = options?.projectRoot ? loadConfig(options.projectRoot) : loadConfig();
+  } catch {
+    return;
+  }
+  if (projectConfig.initialization !== "initialized") return;
+  const projectId = projectConfig.projectId;
+
   // 4. Check sync triggers (skipped when force=true, e.g. session-end)
   if (!options?.force) {
     const syncState = getSyncState(db, serverUrl);
@@ -133,8 +145,6 @@ export async function triggerAutoSync(
   }
 
   try {
-    const projectRoot = options?.projectRoot ?? loadConfig().projectRoot;
-    const projectConfig = loadConfig(projectRoot);
     const projectContext = await resolveCloudProjectContext(projectConfig);
     // Tight budget: the hook process is hard-killed after 10s, so a dead
     // request must not eat the whole window in backoff loops.

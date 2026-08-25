@@ -1,9 +1,17 @@
+/**
+ * Initialization guards shared by every command except `adit init`.
+ *
+ * "Initialized" has exactly one authority: a valid `.adit/project.json` at
+ * the resolved project root. Legacy traces (old workspace.json or a local
+ * database without a manifest) mean "needs migration"; a manifest without a
+ * database means "needs repair". Both point the user at `adit init`.
+ */
+
 import { existsSync } from "node:fs";
-import { join, resolve, win32 } from "node:path";
+import { join } from "node:path";
 import {
-  findGitRoot,
+  ProjectManifestError,
   loadConfig,
-  readWorkspaceManifest,
   type AditConfig,
 } from "@varveai/adit-core";
 
@@ -11,6 +19,13 @@ export interface AditProjectInitializationPaths {
   dataDir: string;
   dbPath: string;
 }
+
+export type AditProjectGuardState =
+  | "initialized"
+  | "needs-repair"
+  | "legacy"
+  | "uninitialized"
+  | "corrupt";
 
 export interface AditProjectInitializationStatus extends AditProjectInitializationPaths {
   dataDirExists: boolean;
@@ -44,13 +59,6 @@ export function getAditProjectInitializationStatus(
   };
 }
 
-export function isAditProjectInitialized(
-  projectRoot: string,
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  return getAditProjectInitializationStatus(projectRoot, env).initialized;
-}
-
 export function formatAditProjectNotInitializedMessage(command: string): string {
   return [
     "ADIT is not initialized in this project.",
@@ -63,64 +71,98 @@ export function formatAditProjectNotInitializedMessage(command: string): string 
   ].join("\n");
 }
 
-export function resolveGitOrWorkspaceProjectRoot(cwd?: string): string | null {
-  const gitRoot = findGitRoot(cwd);
-  if (gitRoot) return gitRoot;
-
-  const projectRoot = resolveProjectRootPath(cwd);
-  return readWorkspaceManifest(projectRoot) ? projectRoot : null;
+export function formatAditProjectLegacyMessage(command: string): string {
+  return [
+    "ADIT has been upgraded and this project needs a one-time migration.",
+    "Recording is paused until the migration runs.",
+    "",
+    "Run:",
+    "  adit init",
+    "",
+    "Your project identity, cloud project and history are preserved.",
+    "",
+    "Then retry:",
+    `  ${command}`,
+  ].join("\n");
 }
 
-function resolveProjectRootPath(cwd?: string): string {
-  const candidate = cwd ?? process.cwd();
-  if (isWindowsAbsolutePath(candidate)) return win32.resolve(candidate);
-  return resolve(candidate);
+export function formatAditProjectNeedsRepairMessage(command: string): string {
+  return [
+    "This project's local database is missing.",
+    "",
+    "Run:",
+    "  adit init",
+    "",
+    "to rebuild it (the project identity is kept). Then retry:",
+    `  ${command}`,
+  ].join("\n");
 }
 
-function isWindowsAbsolutePath(path: string): boolean {
-  return /^[A-Za-z]:[\\/]/u.test(path) || /^\\\\[^\\]/u.test(path);
+export function formatAditProjectCorruptMessage(reason: string): string {
+  return [
+    `ADIT project configuration is damaged: ${reason}`,
+    "",
+    "Restore .adit/project.json from a backup, or run 'adit init' to rebuild it —",
+    "the project identity is recovered from local data when possible.",
+  ].join("\n");
 }
 
-export function formatGitOrWorkspaceProjectRequiredMessage(): string {
-  return "Not inside a git project or ADIT workspace. Run this from the project you want to connect.";
-}
-
-export function requireAditProjectInitialized(
-  projectRoot: string,
-  command: string,
-): boolean {
-  if (isAditProjectInitialized(projectRoot)) return true;
-  console.error(formatAditProjectNotInitializedMessage(command));
-  return false;
-}
-
-export function loadInitializedGitOrWorkspaceProjectConfig(
-  command: string,
-  cwd?: string,
-): AditConfig | null {
-  const projectRoot = resolveGitOrWorkspaceProjectRoot(cwd);
-  if (!projectRoot) {
-    console.error(formatGitOrWorkspaceProjectRequiredMessage());
-    process.exitCode = 1;
-    return null;
+export function classifyProjectGuardState(config: AditConfig): AditProjectGuardState {
+  if (config.initialization === "initialized") {
+    return existsSync(config.dbPath) ? "initialized" : "needs-repair";
   }
-
-  if (!requireAditProjectInitialized(projectRoot, command)) {
-    process.exitCode = 1;
-    return null;
-  }
-
-  return loadConfig(projectRoot);
+  return config.initialization;
 }
 
+/**
+ * Load the config for a command that requires an initialized project.
+ *
+ * Prints the appropriate guidance and sets a non-zero exit code when the
+ * project is uninitialized, awaiting migration, damaged, or missing its
+ * database. Returns null in those cases.
+ */
 export function loadInitializedProjectConfig(
   command: string,
   cwd?: string,
 ): AditConfig | null {
-  const config = loadConfig(cwd);
-  if (existsSync(config.dbPath)) return config;
+  let config: AditConfig;
+  try {
+    config = loadConfig(cwd);
+  } catch (err) {
+    if (err instanceof ProjectManifestError) {
+      console.error(formatAditProjectCorruptMessage(err.message));
+      process.exitCode = 1;
+      return null;
+    }
+    throw err;
+  }
 
-  console.error(formatAditProjectNotInitializedMessage(command));
+  switch (classifyProjectGuardState(config)) {
+    case "initialized":
+      return config;
+    case "needs-repair":
+      console.error(formatAditProjectNeedsRepairMessage(command));
+      break;
+    case "legacy":
+      console.error(formatAditProjectLegacyMessage(command));
+      break;
+    case "uninitialized":
+      console.error(formatAditProjectNotInitializedMessage(command));
+      break;
+    case "corrupt":
+      break; // unreachable — corruption throws from loadConfig
+  }
   process.exitCode = 1;
   return null;
+}
+
+/**
+ * Guard used by cloud agent commands. Same manifest-based rule as
+ * loadInitializedProjectConfig — kept as a named entry point for its callers.
+ */
+export function loadInitializedGitOrWorkspaceProjectConfig(
+  command: string,
+  cwd?: string,
+): AditConfig | null {
+  return loadInitializedProjectConfig(command, cwd);
 }

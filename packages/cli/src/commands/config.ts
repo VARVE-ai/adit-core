@@ -2,7 +2,7 @@
  * `adit config` — View and manage ADIT configuration.
  */
 
-import type { AditConfig } from "@varveai/adit-core";
+import { projectManifestPath, type AditConfig } from "@varveai/adit-core";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 /** `adit config` — show current config */
@@ -17,13 +17,18 @@ export async function configCommand(
     return;
   }
 
+  const typeLabel = config.projectType === "workspace" ? "multi-repo" : "single-repo";
   console.log("ADIT Configuration\n");
   console.log(`  Project root:    ${config.projectRoot}`);
+  console.log(`  Manifest:        ${projectManifestPath(config.projectRoot)}`);
   console.log(`  Data directory:  ${config.dataDir}`);
   console.log(`  Database:        ${config.dbPath}`);
   console.log(`  Project ID:      ${config.projectId}`);
-  console.log(`  Project type:    ${config.projectType}`);
+  console.log(`  Project type:    ${typeLabel}`);
   console.log(`  Repositories:    ${config.repositories.length}`);
+  for (const repo of config.repositories) {
+    console.log(`    - ${repo.relativePath === "." ? repo.displayName : repo.relativePath}`);
+  }
   console.log(`  Client ID:       ${config.clientId}`);
   console.log(`  Capture env:     ${config.captureEnv}`);
 }
@@ -31,6 +36,7 @@ export async function configCommand(
 function configToPlain(config: AditConfig): Record<string, unknown> {
   return {
     projectRoot: config.projectRoot,
+    manifestPath: projectManifestPath(config.projectRoot),
     dataDir: config.dataDir,
     dbPath: config.dbPath,
     projectId: config.projectId,

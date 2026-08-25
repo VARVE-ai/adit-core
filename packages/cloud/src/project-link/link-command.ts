@@ -386,6 +386,15 @@ async function linkRepositoryCommand(
 
   log(`  Project confirmed: ${negotiate.projectName} (${confirmedProjectId.slice(0, 12)}...)`);
 
+  if (negotiate.similarProjects && negotiate.similarProjects.length > 0) {
+    log("  Note: your cloud account already has projects pointing at the same git remote:");
+    for (const similar of negotiate.similarProjects) {
+      const lastActive = similar.lastActivityAt ? ` (last active ${similar.lastActivityAt.slice(0, 10)})` : "";
+      log(`    - ${similar.name || "(unnamed project)"}${lastActive}`);
+    }
+    log("  This link created a NEW project; nothing was merged. If those are leftovers from another machine, delete them on the cloud settings page.");
+  }
+
   // Initialize or update cache. The cache key remains the local project ID;
   // confirmedProjectId is only the latest server ID seen for this login.
   const now = new Date().toISOString();

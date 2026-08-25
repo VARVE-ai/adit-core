@@ -2,117 +2,135 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ensureWorkspaceManifest } from "@varveai/adit-core";
+import { writeProjectManifest, type ProjectManifest } from "@varveai/adit-core";
 import {
-  formatAditProjectNotInitializedMessage,
+  classifyProjectGuardState,
   getAditProjectInitializationStatus,
-  isAditProjectInitialized,
-  resolveGitOrWorkspaceProjectRoot,
+  loadInitializedGitOrWorkspaceProjectConfig,
+  loadInitializedProjectConfig,
 } from "./project-initialization.js";
-import * as core from "@varveai/adit-core";
 
-describe("ADIT project initialization checks", () => {
+const ENV_KEYS = ["ADIT_PROJECT_ROOT", "ADIT_DATA_DIR", "ADIT_DB_PATH"] as const;
+
+function manifestFor(overrides: Partial<ProjectManifest> = {}): ProjectManifest {
+  const now = new Date().toISOString();
+  return {
+    schemaVersion: 1,
+    projectId: "11111111-2222-4333-8444-555555555555",
+    projectType: "repo",
+    repositories: [{ relativePath: "." }],
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+describe("project initialization guard", () => {
   let projectRoot: string;
-  let originalAditDataDir: string | undefined;
-  let originalAditDbPath: string | undefined;
+  const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 
   beforeEach(() => {
-    projectRoot = mkdtempSync(join(tmpdir(), "adit-project-init-"));
-    originalAditDataDir = process.env.ADIT_DATA_DIR;
-    originalAditDbPath = process.env.ADIT_DB_PATH;
-    delete process.env.ADIT_DATA_DIR;
-    delete process.env.ADIT_DB_PATH;
+    projectRoot = mkdtempSync(join(tmpdir(), "adit-guard-"));
+    mkdirSync(join(projectRoot, ".git"), { recursive: true });
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+    process.exitCode = undefined;
+    vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(() => {
-    if (originalAditDataDir === undefined) {
-      delete process.env.ADIT_DATA_DIR;
-    } else {
-      process.env.ADIT_DATA_DIR = originalAditDataDir;
-    }
-    if (originalAditDbPath === undefined) {
-      delete process.env.ADIT_DB_PATH;
-    } else {
-      process.env.ADIT_DB_PATH = originalAditDbPath;
-    }
     rmSync(projectRoot, { recursive: true, force: true });
-  });
-
-  it("requires both the ADIT data directory and database", () => {
-    expect(isAditProjectInitialized(projectRoot)).toBe(false);
-
-    mkdirSync(join(projectRoot, ".adit"));
-    expect(isAditProjectInitialized(projectRoot)).toBe(false);
-
-    writeFileSync(join(projectRoot, ".adit", "adit.sqlite"), "");
-    expect(isAditProjectInitialized(projectRoot)).toBe(true);
-  });
-
-  it("honors explicit ADIT data and database paths without creating files", () => {
-    const dataDir = join(projectRoot, "custom-adit");
-    const dbPath = join(projectRoot, "custom.sqlite");
-    process.env.ADIT_DATA_DIR = dataDir;
-    process.env.ADIT_DB_PATH = dbPath;
-
-    const missing = getAditProjectInitializationStatus(projectRoot);
-    expect(missing).toMatchObject({
-      dataDir,
-      dbPath,
-      dataDirExists: false,
-      dbExists: false,
-      initialized: false,
-    });
-
-    mkdirSync(dataDir);
-    writeFileSync(dbPath, "");
-
-    expect(getAditProjectInitializationStatus(projectRoot)).toMatchObject({
-      dataDirExists: true,
-      dbExists: true,
-      initialized: true,
-    });
-  });
-
-  it("formats a no-side-effect recovery message", () => {
-    expect(formatAditProjectNotInitializedMessage("adit cloud claude")).toBe([
-      "ADIT is not initialized in this project.",
-      "",
-      "Run:",
-      "  adit init",
-      "",
-      "Then retry:",
-      "  adit cloud claude",
-    ].join("\n"));
-  });
-
-  it("resolves a workspace root even when it is not a Git repository", () => {
-    ensureWorkspaceManifest(projectRoot);
-
-    expect(resolveGitOrWorkspaceProjectRoot(projectRoot)).toBe(projectRoot);
-  });
-
-  it("does not inherit a parent workspace from a non-Git child directory", () => {
-    ensureWorkspaceManifest(projectRoot);
-    const child = join(projectRoot, "scratch");
-    mkdirSync(child);
-
-    expect(resolveGitOrWorkspaceProjectRoot(child)).toBeNull();
-  });
-
-  it("preserves Windows absolute workspace paths when checking workspace manifests", () => {
-    const windowsRoot = "C:\\Users\\edy\\item\\workspace";
-    const gitRootSpy = vi.spyOn(core, "findGitRoot").mockReturnValue(null);
-    const manifestSpy = vi.spyOn(core, "readWorkspaceManifest").mockReturnValue({
-      workspaceId: "workspace-id",
-      createdAt: "2026-07-06T00:00:00.000Z",
-    });
-
-    try {
-      expect(resolveGitOrWorkspaceProjectRoot(windowsRoot)).toBe(windowsRoot);
-      expect(manifestSpy).toHaveBeenCalledWith(windowsRoot);
-    } finally {
-      gitRootSpy.mockRestore();
-      manifestSpy.mockRestore();
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
     }
+    process.exitCode = undefined;
+    vi.restoreAllMocks();
+  });
+
+  it("returns the config for an initialized project", () => {
+    writeProjectManifest(projectRoot, manifestFor());
+    writeFileSync(join(projectRoot, ".adit", "adit.sqlite"), "", "utf-8");
+
+    const config = loadInitializedProjectConfig("adit status", projectRoot);
+    expect(config).not.toBeNull();
+    expect(config!.projectId).toBe(manifestFor().projectId);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it("stops with the not-initialized message for a fresh directory", () => {
+    const config = loadInitializedProjectConfig("adit status", projectRoot);
+    expect(config).toBeNull();
+    expect(process.exitCode).toBe(1);
+    expect(vi.mocked(console.error).mock.calls[0][0]).toContain("not initialized");
+  });
+
+  it("stops with the migration message for a legacy project", () => {
+    mkdirSync(join(projectRoot, ".adit"), { recursive: true });
+    writeFileSync(join(projectRoot, ".adit", "adit.sqlite"), "", "utf-8");
+
+    const config = loadInitializedProjectConfig("adit status", projectRoot);
+    expect(config).toBeNull();
+    expect(process.exitCode).toBe(1);
+    expect(vi.mocked(console.error).mock.calls[0][0]).toContain("migration");
+  });
+
+  it("stops with the repair message when the manifest exists but the database is missing", () => {
+    writeProjectManifest(projectRoot, manifestFor());
+
+    const config = loadInitializedProjectConfig("adit status", projectRoot);
+    expect(config).toBeNull();
+    expect(process.exitCode).toBe(1);
+    expect(vi.mocked(console.error).mock.calls[0][0]).toContain("database is missing");
+  });
+
+  it("stops with the corrupt message when the manifest is damaged", () => {
+    mkdirSync(join(projectRoot, ".adit"), { recursive: true });
+    writeFileSync(join(projectRoot, ".adit", "project.json"), "{bad", "utf-8");
+
+    const config = loadInitializedProjectConfig("adit status", projectRoot);
+    expect(config).toBeNull();
+    expect(process.exitCode).toBe(1);
+    expect(vi.mocked(console.error).mock.calls[0][0]).toContain("damaged");
+  });
+
+  it("does not pass through to a parent project from a member repository", () => {
+    // parent container with a manifest listing this repository
+    const parent = mkdtempSync(join(tmpdir(), "adit-parent-"));
+    try {
+      const child = join(parent, "api");
+      mkdirSync(join(child, ".git"), { recursive: true });
+      writeProjectManifest(
+        parent,
+        manifestFor({ projectType: "workspace", repositories: [{ relativePath: "api" }] }),
+      );
+
+      const config = loadInitializedProjectConfig("adit status", child);
+      expect(config).toBeNull();
+      expect(process.exitCode).toBe(1);
+      expect(vi.mocked(console.error).mock.calls[0][0]).toContain("not initialized");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("cloud agent guard follows the same manifest rule", () => {
+    writeProjectManifest(projectRoot, manifestFor());
+    writeFileSync(join(projectRoot, ".adit", "adit.sqlite"), "", "utf-8");
+
+    const config = loadInitializedGitOrWorkspaceProjectConfig("adit cloud claude", projectRoot);
+    expect(config).not.toBeNull();
+  });
+
+  it("classifies guard states from a loaded config", () => {
+    writeProjectManifest(projectRoot, manifestFor());
+    writeFileSync(join(projectRoot, ".adit", "adit.sqlite"), "", "utf-8");
+    const status = getAditProjectInitializationStatus(projectRoot);
+    expect(status.initialized).toBe(true);
+
+    const config = loadInitializedProjectConfig("adit status", projectRoot);
+    expect(classifyProjectGuardState(config!)).toBe("initialized");
   });
 });

@@ -85,6 +85,10 @@ Shows intents (development plans) and tasks from the connected adit-cloud projec
 - \`/adit intent\` — list all intents
 - \`/adit intent --state execution\` — show active intents
 
+> **Before linking:** the project must be initialized — run \`adit init\` in the project root once. Link only connects an already initialized project; it never changes the project structure.
+>
+> **Multi-repo projects:** start your coding tools from the project root — work across all member repositories is recorded there. Sessions started inside a member repository are not recorded.
+>
 > **Tip:** Not logged in? Run \`adit cloud login\` in your terminal first.
 `,
 };
@@ -348,6 +352,9 @@ const path = require("path");
 
 const ADIT_CMD = ${JSON.stringify(cmd)};
 const ADIT_BASE_ARGS = ${JSON.stringify(baseArgs)};
+// Fixed at install time — transcripts always land in the project's own
+// .adit directory, never in whatever directory the session started from.
+const ADIT_PROJECT_ROOT = ${projectRoot ? JSON.stringify(projectRoot) : "null"};
 
 function spawnAditHook(hookType, data) {
   try {
@@ -484,7 +491,7 @@ function fetchTranscript(cwd, sessionID) {
     }
 
     // Ensure transcript directory exists
-    var transcriptDir = path.join(cwd, ".adit", "transcripts");
+    var transcriptDir = path.join(ADIT_PROJECT_ROOT || cwd, ".adit", "transcripts");
     mkdirSync(transcriptDir, { recursive: true });
 
     var filePath = path.join(transcriptDir, "opencode-" + sessionID + ".jsonl");

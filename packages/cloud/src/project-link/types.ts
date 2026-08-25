@@ -82,6 +82,12 @@ export interface NegotiateResponse {
   canonicalRepoKey?: string | null;
   status: "confirmed" | "id_mismatch";
   message: string;
+  /**
+   * Present only when this negotiate created a brand-new cloud project and the
+   * user already has projects pointing at the same git remotes (fresh clone /
+   * new machine). Advisory — the server never merges.
+   */
+  similarProjects?: Array<{ name: string | null; lastActivityAt: string }>;
 }
 
 export interface LinkInitResponse {

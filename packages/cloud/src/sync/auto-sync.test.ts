@@ -48,6 +48,7 @@ vi.mock("@varveai/adit-core", () => ({
       dbPath: `${projectRoot}/.adit/adit.sqlite`,
       projectId: "proj-local-1",
       projectType: "repo",
+      initialization: "initialized",
       refPrefix: "refs/adit/checkpoints",
       captureEnv: true,
       repositories: [{
