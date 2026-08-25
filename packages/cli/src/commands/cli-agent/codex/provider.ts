@@ -260,29 +260,65 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     // thread resume) so the local terminal sees the takeover begin at the
     // same moment the web button starts waiting.
     this.notices.takeoverStarted();
+    let resumeId: string | null = null;
+    let localReleased = false;
+    let detachedLocal: ChildProcess | null | undefined;
     try {
       await this.ensureAppServer();
       await this.hydrateAppServerCapabilities();
-      const resumeId = this.activeSessionId ?? this.resumeSessionId;
+      if (this.ownerValue !== "local") {
+        throw Object.assign(new Error("local Codex owner is not available"), {
+          statusCode: 409,
+        });
+      }
+      if (this.busyValue || this.thinkingValue) {
+        throw Object.assign(new Error("local Codex is busy"), {
+          statusCode: 409,
+        });
+      }
+      resumeId = this.activeSessionId ?? this.resumeSessionId;
+
+      // Codex permits only one writer per persisted thread. Release the local
+      // TUI before app-server resumes that thread, otherwise sessions with
+      // history fail with "already has an active writer".
+      const oldLocal = this.local;
+      detachedLocal = oldLocal;
+      this.suppressNextLocalExit = Boolean(oldLocal);
+      this.local = null;
+      this.stopLocalResumeLogWatcher();
+      this.stopLocalModelConfigWatcher();
+      const localExited = await stopLocalCodexProcess(oldLocal);
+      this.suppressNextLocalExit = false;
+      if (!localExited) {
+        throw Object.assign(new Error("local Codex did not exit during Web takeover"), {
+          statusCode: 409,
+        });
+      }
+      localReleased = true;
+
       if (resumeId) {
         await this.resumeThread(resumeId);
       } else {
         await this.startThread("build");
       }
     } catch (error) {
-      // The local TUI is still running (it only stops after prep succeeds),
-      // so tell the terminal the takeover fizzled instead of leaving the
-      // "taking over" line dangling.
+      this.appServer?.stop();
+      this.appServer = null;
+      this.loadedThreadIds = new Set<string>();
+      this.emptyThreadIds = new Set<string>();
+      this.suppressNextLocalExit = false;
+      if (localReleased) {
+        this.startLocal(resumeId ? ["resume", resumeId] : []);
+      } else if (detachedLocal !== undefined) {
+        this.local = detachedLocal;
+        if (detachedLocal) {
+          this.startLocalResumeLogWatcher(detachedLocal);
+          this.startLocalModelConfigWatcher(detachedLocal);
+        }
+      }
       this.notices.takeoverFailed();
       throw error;
     }
-
-    const oldLocal = this.local;
-    this.suppressNextLocalExit = Boolean(oldLocal);
-    this.local = null;
-    this.stopLocalResumeLogWatcher();
-    this.stopLocalModelConfigWatcher();
-    await stopLocalCodexProcess(oldLocal);
 
     this.ownerValue = "web";
     this.emitState();
