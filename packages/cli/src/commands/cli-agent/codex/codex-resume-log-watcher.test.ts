@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import {
   isCodexThreadSavedForCwd,
   readCodexResumeLogEvents,
+  startCodexResumeLogWatcher,
 } from "./codex-resume-log-watcher.js";
 
 function tempDir(): string {
@@ -47,12 +48,17 @@ function insertThread(codexHome: string, id: string, cwd: string): void {
   db.close();
 }
 
-function insertLog(codexHome: string, threadId: string | null, body: string): number {
+function insertLog(
+  codexHome: string,
+  threadId: string | null,
+  body: string,
+  processUuid = "pid:100:default",
+): number {
   const db = new Database(join(codexHome, "logs_2.sqlite"));
   const result = db.prepare(`
-    INSERT INTO logs (feedback_log_body, thread_id)
-    VALUES (?, ?)
-  `).run(body, threadId);
+    INSERT INTO logs (feedback_log_body, thread_id, process_uuid)
+    VALUES (?, ?, ?)
+  `).run(body, threadId, processUuid);
   db.close();
   return Number(result.lastInsertRowid);
 }
@@ -98,6 +104,74 @@ describe("readCodexResumeLogEvents", () => {
 
       expect(result.threadIds).toEqual([]);
       expect(result.lastLogId).toBe(logId);
+    } finally {
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("filters same-project resume events by Codex process uuid", () => {
+    const codexHome = tempDir();
+    try {
+      setupCodexDatabases(codexHome);
+      insertThread(codexHome, "thread-a", "/tmp/project");
+      insertThread(codexHome, "thread-b", "/tmp/project");
+      insertLog(
+        codexHome,
+        "thread-a",
+        "app_server.request otel.name=\"thread/resume\" app_server.client_name=\"codex-tui\"",
+        "pid:101:process-a",
+      );
+      insertLog(
+        codexHome,
+        "thread-b",
+        "app_server.request otel.name=\"thread/resume\" app_server.client_name=\"codex-tui\"",
+        "pid:202:process-b",
+      );
+
+      const result = readCodexResumeLogEvents({
+        codexHome,
+        cwd: "/tmp/project",
+        afterLogId: 0,
+        processUuid: "pid:202:process-b",
+      });
+
+      expect(result.threadIds).toEqual(["thread-b"]);
+    } finally {
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("claims one process before watching same-project resumes", async () => {
+    const codexHome = tempDir();
+    const resumed: string[] = [];
+    try {
+      setupCodexDatabases(codexHome);
+      insertThread(codexHome, "thread-a", "/tmp/project");
+      insertThread(codexHome, "thread-b", "/tmp/project");
+      const watcher = startCodexResumeLogWatcher({
+        codexHome,
+        cwd: "/tmp/project",
+        pollIntervalMs: 5,
+        onResume: (threadId) => resumed.push(threadId),
+      });
+      insertLog(
+        codexHome,
+        "thread-a",
+        "app_server.request otel.name=\"thread/resume\" app_server.client_name=\"codex-tui\"",
+        "pid:101:process-a",
+      );
+      insertLog(
+        codexHome,
+        "thread-b",
+        "app_server.request otel.name=\"thread/resume\" app_server.client_name=\"codex-tui\"",
+        "pid:202:process-b",
+      );
+
+      watcher.claimProcessForThread("thread-b");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      watcher.stop();
+
+      expect(resumed).toEqual(["thread-b"]);
     } finally {
       rmSync(codexHome, { recursive: true, force: true });
     }

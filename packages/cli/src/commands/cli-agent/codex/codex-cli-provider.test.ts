@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
     cwd: string;
     onResume: (threadId: string) => void;
   },
+  resumeWatcherClaim: vi.fn(),
   resumeWatcherStop: vi.fn(),
   startResumeWatcher: vi.fn(),
   modelWatcherOptions: null as null | {
@@ -78,10 +79,12 @@ vi.mock("./codex-app-server-client.js", () => ({
 
 vi.mock("./codex-resume-log-watcher.js", () => ({
   isCodexThreadSavedForCwd: (options: unknown) => mocks.isSavedThread(options),
+  readMaxCodexLogId: () => 0,
   startCodexResumeLogWatcher: (options: unknown) => {
     mocks.resumeWatcherOptions = options as typeof mocks.resumeWatcherOptions;
     mocks.startResumeWatcher(options);
     return {
+      claimProcessForThread: mocks.resumeWatcherClaim,
       stop: mocks.resumeWatcherStop,
     };
   },
@@ -103,6 +106,7 @@ vi.mock("@varveai/adit-engine", () => ({
 }));
 
 import {
+  CODEX_LOCAL_WRITER_RELEASE_RETRY_DELAYS_MS,
   CodexCliProvider,
   codexThreadModeOverrides,
   codexTurnModeOverrides,
@@ -919,12 +923,15 @@ describe("CodexCliProvider takeover", () => {
     });
 
     expect(mocks.startResumeWatcher).toHaveBeenCalledWith(
-      expect.objectContaining({ cwd: "/tmp/project" }),
+      expect.objectContaining({ cwd: "/tmp/project", afterLogId: 0 }),
     );
     expect(provider.state.activeSessionId).toBeNull();
 
     mocks.resumeWatcherOptions?.onResume("019e2110-d96f-7e40-882e-b524fa9148e4");
 
+    expect(mocks.resumeWatcherClaim).toHaveBeenCalledWith(
+      "019e2110-d96f-7e40-882e-b524fa9148e4",
+    );
     expect(provider.state.activeSessionId).toBe("019e2110-d96f-7e40-882e-b524fa9148e4");
     expect(provider.state.resumeSessionId).toBe("019e2110-d96f-7e40-882e-b524fa9148e4");
     expect(provider.state.sdkSessionId).toBe("019e2110-d96f-7e40-882e-b524fa9148e4");
@@ -1015,7 +1022,8 @@ describe("CodexCliProvider takeover", () => {
 
       expect(provider.state.owner).toBe("local");
       expect(mocks.spawn).toHaveBeenCalledTimes(1);
-      expect(mocks.startResumeWatcher).toHaveBeenCalledTimes(2);
+      expect(mocks.startResumeWatcher).toHaveBeenCalledTimes(1);
+      expect(mocks.resumeWatcherStop).not.toHaveBeenCalled();
       expect(mocks.appRequest).not.toHaveBeenCalledWith("thread/start", expect.anything());
     } finally {
       provider.stop();
@@ -1970,6 +1978,37 @@ describe("CodexCliProvider takeover", () => {
     provider.stop();
   });
 
+  it("retries takeover while the stopped local writer is still releasing", async () => {
+    const threadId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    const child = mockChildProcess();
+    mocks.spawn.mockReturnValueOnce(child);
+    const defaultRequest = mocks.appRequest.getMockImplementation();
+    let resumeAttempts = 0;
+    mocks.appRequest.mockImplementation((method: string, params: unknown) => {
+      if (method === "thread/resume") {
+        resumeAttempts += 1;
+        if (resumeAttempts === 1) {
+          return Promise.reject(new Error(`thread ${threadId} already has an active writer`));
+        }
+      }
+      return defaultRequest?.(method, params);
+    });
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+    });
+    provider.noteLocalSession(threadId);
+
+    await provider.takeover();
+
+    expect(resumeAttempts).toBe(2);
+    expect(mocks.spawn).toHaveBeenCalledTimes(1);
+    expect(provider.state.owner).toBe("web");
+
+    provider.stop();
+  });
+
   it("resumes the session detected while takeover capabilities hydrate", async () => {
     const initialThreadId = "019e2110-d96f-7e40-882e-b524fa9148e4";
     const latestThreadId = "019e2110-d96f-7e40-882e-b524fa9148e5";
@@ -2047,6 +2086,7 @@ describe("CodexCliProvider takeover", () => {
   });
 
   it("restores the local session when takeover cannot resume the thread", async () => {
+    vi.useFakeTimers();
     const threadId = "019e2110-d96f-7e40-882e-b524fa9148e4";
     const localChild = mockChildProcess();
     const restartedChild = mockChildProcess();
@@ -2065,19 +2105,29 @@ describe("CodexCliProvider takeover", () => {
     });
     provider.noteLocalSession(threadId);
 
-    await expect(provider.takeover()).rejects.toThrow("already has an active writer");
+    try {
+      const takeover = expect(provider.takeover()).rejects.toThrow("already has an active writer");
+      await vi.advanceTimersByTimeAsync(
+        CODEX_LOCAL_WRITER_RELEASE_RETRY_DELAYS_MS.reduce(
+          (sum, delayMs) => sum + delayMs,
+          0,
+        ),
+      );
+      await takeover;
 
-    expect(localChild.kill).toHaveBeenCalled();
-    expect(mocks.appStop).toHaveBeenCalledTimes(1);
-    expect(mocks.spawn).toHaveBeenLastCalledWith(
-      "codex",
-      ["resume", threadId],
-      expect.objectContaining({ cwd: "/tmp/project" }),
-    );
-    expect(provider.state.owner).toBe("local");
-    expect(provider.state.activeSessionId).toBe(threadId);
-
-    provider.stop();
+      expect(localChild.kill).toHaveBeenCalled();
+      expect(mocks.appStop).toHaveBeenCalledTimes(1);
+      expect(mocks.spawn).toHaveBeenLastCalledWith(
+        "codex",
+        ["resume", threadId],
+        expect.objectContaining({ cwd: "/tmp/project" }),
+      );
+      expect(provider.state.owner).toBe("local");
+      expect(provider.state.activeSessionId).toBe(threadId);
+    } finally {
+      provider.stop();
+      vi.useRealTimers();
+    }
   });
 
   it("restores an empty local session when takeover cannot start a thread", async () => {
