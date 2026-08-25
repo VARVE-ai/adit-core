@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Command } from "commander";
-import { createProgram, normalizeLegacyIntentCompleteArgs } from "./index.js";
+import { createProgram, normalizeLegacyIntentCompleteArgs } from "./main.js";
 
 function findCommand(program: Command, ...path: string[]): Command {
   let current = program;

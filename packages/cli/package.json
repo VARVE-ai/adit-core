@@ -3,8 +3,11 @@
   "version": "0.0.0",
   "description": "AI Development Intent Tracker — Transparent Time Machine for your codebase",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/main.js",
+  "types": "./dist/main.d.ts",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "files": [
     "dist"
   ],
@@ -13,8 +16,8 @@
   },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/main.d.ts",
+      "import": "./dist/main.js"
     }
   },
   "publishConfig": {
