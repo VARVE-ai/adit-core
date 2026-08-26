@@ -567,6 +567,25 @@ describe("Codex CLI Hook Chaining", () => {
     });
   });
 
+  describe("hasProjectHooks", () => {
+    it("ignores user-level trust residue after the project's .codex is deleted", async () => {
+      // The real-world pollution case: install writes project hooks AND a
+      // user-level trust block; wiping the project directory leaves the
+      // trust residue behind. hasHooks stays true (uninstall must clean the
+      // residue) but hasProjectHooks must not report the project connected.
+      await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+      rmSync(join(projectRoot, ".codex"), { recursive: true, force: true });
+
+      expect(await codexAdapter.hasHooks?.(projectRoot)).toBe(true);
+      expect(await codexAdapter.hasProjectHooks?.(projectRoot)).toBe(false);
+    });
+
+    it("reports true when the project hooks file carries ADIT entries", async () => {
+      await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+      expect(await codexAdapter.hasProjectHooks?.(projectRoot)).toBe(true);
+    });
+  });
+
   describe("validateInstallation", () => {
     it("detects valid installation with all hooks", async () => {
       // Install hooks

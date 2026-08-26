@@ -33,6 +33,7 @@ const HOOK_MAPPINGS: HookMapping[] = [
 export const geminiAdapter: PlatformAdapter = {
   platform: "gemini" as Platform,
   displayName: "Gemini CLI",
+  cliBinary: "gemini",
   hookMappings: HOOK_MAPPINGS,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {
@@ -114,6 +115,8 @@ export const geminiAdapter: PlatformAdapter = {
     const missingHooks: string[] = [];
     const staleHooks: string[] = [];
     const stalePinnedRoots = new Set<string>();
+    const brokenHooks: string[] = [];
+    const brokenScriptPaths = new Set<string>();
 
     if (existsSync(settingsPath)) {
       try {
@@ -127,21 +130,29 @@ export const geminiAdapter: PlatformAdapter = {
               missingHooks.push(hookName);
               continue;
             }
-            const { status, stalePinnedRoots: roots } = classifyAditHookEntries(entries, projectRoot);
+            const { status, stalePinnedRoots: roots, brokenScriptPaths: missingScripts } =
+              classifyAditHookEntries(entries, projectRoot);
             if (status === "absent") missingHooks.push(hookName);
             if (status === "stale") {
               staleHooks.push(hookName);
               roots.forEach((root) => stalePinnedRoots.add(root));
             }
+            if (status === "broken") {
+              brokenHooks.push(hookName);
+              missingScripts.forEach((scriptPath) => brokenScriptPaths.add(scriptPath));
+            }
           }
 
-          hooksFound = missingHooks.length === 0 && staleHooks.length === 0;
+          hooksFound = missingHooks.length === 0 && staleHooks.length === 0 &&
+            brokenHooks.length === 0;
           hooksDetail = describeHookValidation({
             configPath: settingsPath,
             projectRoot,
             missingHooks,
             staleHooks,
             stalePinnedRoots: Array.from(stalePinnedRoots),
+            brokenHooks,
+            brokenScriptPaths: Array.from(brokenScriptPaths),
           }).detail;
         }
       } catch {

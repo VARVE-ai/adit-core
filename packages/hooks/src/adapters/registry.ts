@@ -7,7 +7,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { Platform } from "@varveai/adit-core";
 import type { PlatformAdapter } from "./types.js";
 import { claudeCodeAdapter } from "./claude-code.js";
@@ -59,6 +59,41 @@ export function listAdapters(): PlatformAdapter[] {
 /** Register a new adapter (for extensibility) */
 export function registerAdapter(adapter: PlatformAdapter): void {
   adapters.set(adapter.platform, adapter);
+}
+
+/**
+ * Detect which supported AI CLIs are installed on this machine by looking
+ * for each adapter's `cliBinary` on PATH. No process is executed — this is
+ * a pure filesystem lookup, so it is fast and safe to call from init/doctor.
+ *
+ * Platforms without a `cliBinary` (IDE extensions, manual-only Cursor) are
+ * never returned; they are bundled or installed explicitly by the caller.
+ */
+export function detectInstalledPlatforms(opts?: {
+  env?: Record<string, string | undefined>;
+  fileExists?: (path: string) => boolean;
+  osPlatform?: NodeJS.Platform;
+}): Platform[] {
+  const env = opts?.env ?? process.env;
+  const fileExists = opts?.fileExists ?? existsSync;
+  const osPlatform = opts?.osPlatform ?? process.platform;
+
+  const pathValue = env.PATH ?? env.Path ?? "";
+  const dirs = pathValue.split(delimiter).filter(Boolean);
+  const extensions = osPlatform === "win32"
+    ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
+    : [""];
+
+  const found: Platform[] = [];
+  for (const adapter of listAdapters()) {
+    const binary = adapter.cliBinary;
+    if (!binary || adapter.hookMappings.length === 0) continue;
+    const onPath = dirs.some((dir) =>
+      extensions.some((ext) => fileExists(join(dir, binary + ext))),
+    );
+    if (onPath) found.push(adapter.platform);
+  }
+  return found;
 }
 
 /**

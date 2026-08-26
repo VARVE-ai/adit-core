@@ -8,6 +8,7 @@ import {
   classifyAditHookEntries,
   describeHookValidation,
   encodeProjectRoot,
+  extractHookScriptPath,
   extractPinnedProjectRoot,
   isAditHookCommand,
   isFixedProjectRootHookCommand,
@@ -91,6 +92,23 @@ describe("Hook Command Helpers", () => {
     expect(extractPinnedProjectRoot(command)).toBe("/repo");
     expect(extractPinnedProjectRoot("/tmp/adit-hook --platform claude stop")).toBeNull();
   });
+
+  it("extracts the script path from node-form commands", () => {
+    expect(extractHookScriptPath('node "/opt/adit/hooks/dist/index.js" --platform claude stop'))
+      .toBe("/opt/adit/hooks/dist/index.js");
+    expect(extractHookScriptPath("node '/opt/adit hooks/dist/index.js' stop"))
+      .toBe("/opt/adit hooks/dist/index.js");
+    expect(extractHookScriptPath("node /opt/adit/hooks/dist/index.js stop"))
+      .toBe("/opt/adit/hooks/dist/index.js");
+    expect(extractHookScriptPath('node "C:\\tools\\hooks\\dist\\index.js" stop'))
+      .toBe("C:\\tools\\hooks\\dist\\index.js");
+  });
+
+  it("returns no script path for PATH-based commands", () => {
+    expect(extractHookScriptPath("adit-hook --platform claude stop")).toBeNull();
+    expect(extractHookScriptPath("npx adit-hook --platform claude stop")).toBeNull();
+    expect(extractHookScriptPath("/tmp/adit-hook --platform claude stop")).toBeNull();
+  });
 });
 
 describe("classifyAditHookEntries", () => {
@@ -125,6 +143,60 @@ describe("classifyAditHookEntries", () => {
       root,
     );
     expect(result.status).toBe("absent");
+  });
+
+  const deadScript = "/gone/adit/hooks/dist/index.js";
+  const liveScript = "/opt/adit/hooks/dist/index.js";
+  const pinnedDead = buildAditHookCommand(`node "${deadScript}"`, "claude", "stop", root);
+  const pinnedLive = buildAditHookCommand(`node "${liveScript}"`, "claude", "stop", root);
+  const scriptExists = (scriptPath: string) => scriptPath === liveScript;
+
+  it("returns broken when the pinned command's script no longer exists", () => {
+    const result = classifyAditHookEntries(
+      [{ hooks: [{ command: pinnedDead }] }],
+      root,
+      { scriptExists },
+    );
+    expect(result.status).toBe("broken");
+    expect(result.brokenScriptPaths).toEqual([deadScript]);
+  });
+
+  it("returns ok when the pinned command's script exists", () => {
+    const result = classifyAditHookEntries(
+      [{ hooks: [{ command: pinnedLive }] }],
+      root,
+      { scriptExists },
+    );
+    expect(result.status).toBe("ok");
+    expect(result.brokenScriptPaths).toEqual([]);
+  });
+
+  it("prefers a healthy entry over a broken one", () => {
+    const result = classifyAditHookEntries(
+      [{ hooks: [{ command: pinnedDead }] }, { hooks: [{ command: pinnedLive }] }],
+      root,
+      { scriptExists },
+    );
+    expect(result.status).toBe("ok");
+  });
+
+  it("reports broken over stale when both are present", () => {
+    const result = classifyAditHookEntries(
+      [{ command: otherRoot }, { hooks: [{ command: pinnedDead }] }],
+      root,
+      { scriptExists },
+    );
+    expect(result.status).toBe("broken");
+    expect(result.brokenScriptPaths).toEqual([deadScript]);
+  });
+
+  it("leaves PATH-based commands unchecked", () => {
+    const result = classifyAditHookEntries(
+      [{ hooks: [{ command: pinned }] }],
+      root,
+      { scriptExists: () => false },
+    );
+    expect(result.status).toBe("ok");
   });
 });
 
@@ -168,5 +240,20 @@ describe("describeHookValidation", () => {
     expect(result.detail).toContain("project moved?");
     expect(result.detail).toContain("/old/location");
     expect(result.detail).toContain("Missing hooks: SessionEnd");
+  });
+
+  it("points at the missing script for broken hooks", () => {
+    const result = describeHookValidation({
+      ...base,
+      missingHooks: [],
+      staleHooks: [],
+      stalePinnedRoots: [],
+      brokenHooks: ["Stop", "UserPromptSubmit"],
+      brokenScriptPaths: ["/gone/adit/hooks/dist/index.js"],
+    });
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("Broken ADIT hooks: Stop, UserPromptSubmit");
+    expect(result.detail).toContain("/gone/adit/hooks/dist/index.js");
+    expect(result.detail).toContain("re-run `adit init`");
   });
 });

@@ -414,4 +414,20 @@ describe("Claude Code Hook Chaining", () => {
     expect(hookCheck?.detail).toContain("project moved?");
     expect(hookCheck?.detail).toContain(movedRoot);
   });
+
+  it("validateInstallation reports broken hooks when the script file is gone", async () => {
+    // The exact uninstalled-global-CLI scenario: commands are pinned to this
+    // project but reference a hook script that no longer exists on disk.
+    await claudeCodeAdapter.installHooks(projectRoot, 'node "/gone/adit/hooks/dist/index.js"');
+
+    const result = await claudeCodeAdapter.validateInstallation(projectRoot);
+
+    expect(result.valid).toBe(false);
+    const hookCheck = result.checks.find((c) => c.name === "Hook configuration");
+    expect(hookCheck?.ok).toBe(false);
+    expect(hookCheck?.detail).toContain("Broken ADIT hooks");
+    expect(hookCheck?.detail).toContain("/gone/adit/hooks/dist/index.js");
+    expect(hookCheck?.detail).toContain("re-run `adit init`");
+    expect(hookCheck?.detail).not.toContain("Missing hooks");
+  });
 });

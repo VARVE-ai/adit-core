@@ -18,6 +18,13 @@ export interface PlatformAdapter {
   /** Human-readable platform name */
   readonly displayName: string;
 
+  /**
+   * Name of the platform's CLI executable on PATH (e.g. "claude").
+   * Undefined for platforms that are not standalone CLIs (IDE extensions)
+   * or that must be installed manually (Cursor).
+   */
+  readonly cliBinary?: string;
+
   /** Hook event mappings: platform event name → ADIT handler */
   readonly hookMappings: HookMapping[];
 
@@ -33,9 +40,18 @@ export interface PlatformAdapter {
   /**
    * Detect whether this platform has any ADIT-managed hook configuration
    * or companion files to remove. This is intentionally looser than
-   * validateInstallation() so uninstall can clean partial/broken installs.
+   * validateInstallation() so uninstall can clean partial/broken installs
+   * — it may count user-level residue (e.g. Codex trust config).
    */
   hasHooks?(projectRoot: string): Promise<boolean>;
+
+  /**
+   * Like hasHooks, but counts project-local evidence only — never
+   * user-level residue. The connected-platforms backfill uses this to
+   * decide what counts as connected; falls back to hasHooks when absent
+   * (correct for adapters whose hasHooks is already project-local).
+   */
+  hasProjectHooks?(projectRoot: string): Promise<boolean>;
 
   /** Install/register hooks for this platform */
   installHooks(projectRoot: string, aditBinaryPath: string): Promise<void>;

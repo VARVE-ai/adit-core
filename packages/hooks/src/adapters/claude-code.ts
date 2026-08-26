@@ -104,6 +104,7 @@ Shows intents (development plans) and tasks from the connected adit-cloud projec
 export const claudeCodeAdapter: PlatformAdapter = {
   platform: "claude-code" as Platform,
   displayName: "Claude Code",
+  cliBinary: "claude",
   hookMappings: HOOK_MAPPINGS,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {
@@ -205,6 +206,8 @@ export const claudeCodeAdapter: PlatformAdapter = {
     const missingHooks: string[] = [];
     const staleHooks: string[] = [];
     const stalePinnedRoots = new Set<string>();
+    const brokenHooks: string[] = [];
+    const brokenScriptPaths = new Set<string>();
 
     for (const settingsPath of settingsFiles) {
       if (!existsSync(settingsPath)) continue;
@@ -218,11 +221,16 @@ export const claudeCodeAdapter: PlatformAdapter = {
             missingHooks.push(hookName);
             continue;
           }
-          const { status, stalePinnedRoots: roots } = classifyAditHookEntries(entries, projectRoot);
+          const { status, stalePinnedRoots: roots, brokenScriptPaths: missingScripts } =
+            classifyAditHookEntries(entries, projectRoot);
           if (status === "absent") missingHooks.push(hookName);
           if (status === "stale") {
             staleHooks.push(hookName);
             roots.forEach((root) => stalePinnedRoots.add(root));
+          }
+          if (status === "broken") {
+            brokenHooks.push(hookName);
+            missingScripts.forEach((scriptPath) => brokenScriptPaths.add(scriptPath));
           }
         }
 
@@ -232,6 +240,8 @@ export const claudeCodeAdapter: PlatformAdapter = {
           missingHooks,
           staleHooks,
           stalePinnedRoots: Array.from(stalePinnedRoots),
+          brokenHooks,
+          brokenScriptPaths: Array.from(brokenScriptPaths),
         });
         hooksFound = summary.ok;
         hooksDetail = summary.detail;

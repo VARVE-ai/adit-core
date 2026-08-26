@@ -752,6 +752,7 @@ exports.AditPlugin = async (ctx) => {
 export const opencodeAdapter: PlatformAdapter = {
   platform: "opencode" as Platform,
   displayName: "OpenCode",
+  cliBinary: "opencode",
   hookMappings: HOOK_MAPPINGS,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {

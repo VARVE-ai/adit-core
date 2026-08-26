@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { describe, it, expect } from "vitest";
-import { getAdapter, listAdapters, detectPlatform, registerAdapter } from "./registry.js";
+import { getAdapter, listAdapters, detectPlatform, detectInstalledPlatforms, registerAdapter } from "./registry.js";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { claudeVscodeAdapter } from "./claude-vscode.js";
 import { opencodeAdapter } from "./opencode.js";
@@ -97,6 +97,46 @@ describe("Adapter Registry", () => {
     registerAdapter(mockAdapter);
     const adapter = getAdapter("other");
     expect(adapter.displayName).toBe("Test Platform");
+  });
+});
+
+describe("detectInstalledPlatforms", () => {
+  it("finds platforms whose CLI binary is on PATH", () => {
+    const onDisk = new Set(["/usr/local/bin/claude", "/opt/tools/codex"]);
+    const result = detectInstalledPlatforms({
+      env: { PATH: "/usr/local/bin:/opt/tools" },
+      fileExists: (path) => onDisk.has(path),
+      osPlatform: "darwin",
+    });
+    expect(result).toContain("claude-code");
+    expect(result).toContain("codex");
+    expect(result).not.toContain("gemini");
+    expect(result).not.toContain("opencode");
+  });
+
+  it("never returns platforms without a CLI binary (cursor, claude-vscode)", () => {
+    const result = detectInstalledPlatforms({
+      env: { PATH: "/bin" },
+      fileExists: () => true,
+      osPlatform: "darwin",
+    });
+    expect(result).not.toContain("cursor");
+    expect(result).not.toContain("claude-vscode");
+  });
+
+  it("returns nothing when PATH is empty or unset", () => {
+    expect(detectInstalledPlatforms({ env: {}, fileExists: () => true, osPlatform: "darwin" }))
+      .toEqual([]);
+  });
+
+  it("resolves Windows executables via PATHEXT", () => {
+    const expected = join("tools", "claude.CMD");
+    const result = detectInstalledPlatforms({
+      env: { PATH: "tools", PATHEXT: ".COM;.EXE;.BAT;.CMD" },
+      fileExists: (path) => path === expected,
+      osPlatform: "win32",
+    });
+    expect(result).toEqual(["claude-code"]);
   });
 });
 
