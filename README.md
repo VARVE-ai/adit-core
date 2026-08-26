@@ -282,15 +282,16 @@ search, `f` filter, `s` cycle sort, `Esc`/`b` back, and `q` quit.
 ## Cloud Sync
 
 Cloud sync is optional. After `adit cloud login`, ADIT automatically pushes
-local events, sessions, diffs, environment snapshots, sync cursors,
-transcripts, Git metadata, and project documents to adit-cloud — being logged
-in is the opt-in. The login command prints exactly what is uploaded and how to
-disable each channel; `adit status` surfaces sync health warnings.
+local events, sessions, diffs, sync cursors, transcripts, Git metadata, and
+project documents to adit-cloud — being logged in is the opt-in. Environment
+snapshots remain local and are not included in Cloud sync payloads. The login
+command prints exactly what is uploaded and how to disable each channel;
+`adit status` surfaces sync health warnings.
 
 - Auto-sync runs after stable hook events when credentials are available.
 - `prompt-submit` is skipped so cloud does not receive a half-finished turn.
 - Each project tracks its own cursor with legacy global-cursor fallback.
-- Count-based auto-sync defaults to 20 unsynced records.
+- Count-based auto-sync defaults to 10 unsynced events.
 - Time-based auto-sync defaults to 2 hours since the last successful sync.
 - Transcript upload supports polling, concurrency limits, retry limits, and
   incremental byte thresholds.

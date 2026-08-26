@@ -343,9 +343,9 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     detectAndRecordCommits(ctx, timeline),
   );
 
-  // Environment snapshots stay captured for the env_snapshots table (TUI env
-  // screen and cloud sync consume them); the per-turn env_drift comparison
-  // event was retired — nothing in the cloud read it.
+  // Environment snapshots stay local for the TUI env screen and snapshot
+  // commands. They are intentionally excluded from cloud sync; the per-turn
+  // env_drift comparison event was also retired because nothing consumed it.
   if (ctx.config.captureEnv) {
     try {
       // Pass per-turn mutation paths when available. Workspace stop hooks must

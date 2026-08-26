@@ -125,6 +125,7 @@ export interface SyncDiff {
 export interface SyncBatch {
   sessions: SyncSession[];
   events: SyncEvent[];
+  /** Kept in the wire shape for server compatibility; local snapshots are never uploaded. */
   envSnapshots: SyncEnvSnapshot[];
   plans: SyncPlan[];
   diffs: SyncDiff[];
@@ -143,14 +144,14 @@ export interface BuildSyncBatchResult {
 /**
  * Build a sync batch of records after the given cursor.
  *
- * For append-only records (events, env_snapshots, diffs), only selects
- * new records with id > cursor.
+ * For append-only records (events, diffs), only selects new records with
+ * id > cursor. Environment snapshots remain local and are never serialized.
  *
  * For mutable records (sessions, plans), also includes records modified
  * since lastSyncedAt so updates are captured.
  *
- * Priority ordering: sessions first (parents), then events, env_snapshots,
- * plans, diffs — maintaining referential integrity on the server.
+ * Priority ordering: sessions first (parents), then events, plans, diffs —
+ * maintaining referential integrity on the server.
  */
 export function buildSyncBatch(
   db: Database.Database,
@@ -195,19 +196,7 @@ export function buildSyncBatch(
     remaining -= batch.events.length;
   }
 
-  // 3. Env snapshots — append-only, filtered by project
-  if (remaining > 0) {
-    batch.envSnapshots = queryEnvSnapshots(
-      db,
-      afterEventId,
-      projectId,
-      cloudClientId,
-      remaining,
-    );
-    remaining -= batch.envSnapshots.length;
-  }
-
-  // 4. Plans — mutable, include modified
+  // 3. Plans — mutable, include modified
   if (remaining > 0) {
     batch.plans = queryPlans(
       db,
@@ -220,7 +209,7 @@ export function buildSyncBatch(
     remaining -= batch.plans.length;
   }
 
-  // 5. Diffs — keyed by event_id, only for events in this batch.
+  // 4. Diffs — keyed by event_id, only for events in this batch.
   //    Diffs are exempt from the record-count budget: an event whose diffs
   //    were dropped never retries them (the cursor moves past the event),
   //    so every shipped event must carry ALL of its diffs. Payload size is
@@ -320,8 +309,8 @@ function applyDiffByteCap(
  * Count unsynced events for a project.
  *
  * Used by auto-sync's count-based trigger: only events count toward the
- * threshold — session records (and diffs, snapshots, plans) ride along
- * in the batch once a sync is triggered.
+ * threshold — session records, diffs, and plans ride along in the batch once
+ * a sync is triggered. Environment snapshots always remain local.
  */
 export function countUnsyncedEvents(
   db: Database.Database,
@@ -493,60 +482,6 @@ function queryEvents(
     error_json: (r.error_json as string) ?? null,
     labels_json: (r.labels_json as string) ?? null,
     plan_task_id: (r.plan_task_id as string) ?? null,
-    vclock_json: (r.vclock_json as string) ?? null,
-    deleted_at: (r.deleted_at as string) ?? null,
-  }));
-}
-
-function queryEnvSnapshots(
-  db: Database.Database,
-  afterId: string | null,
-  projectId: string,
-  cloudClientId: string,
-  limit: number,
-): SyncEnvSnapshot[] {
-  let sql: string;
-  const params: unknown[] = [];
-
-  // Join on sessions to filter by project_id (prevents cross-project leaks)
-  if (afterId) {
-    const conditions = ["es.id > ?", "s.project_id = ?"];
-    params.push(afterId, projectId);
-    sql = `SELECT es.* FROM env_snapshots es
-           JOIN sessions s ON es.session_id = s.id
-           WHERE ${conditions.join(" AND ")}
-           ORDER BY es.id ASC LIMIT ?`;
-  } else {
-    const conditions = ["s.project_id = ?"];
-    params.push(projectId);
-    sql = `SELECT es.* FROM env_snapshots es
-           JOIN sessions s ON es.session_id = s.id
-           WHERE ${conditions.join(" AND ")}
-           ORDER BY es.id ASC LIMIT ?`;
-  }
-  params.push(limit);
-
-  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
-
-  return rows.map((r) => ({
-    id: r.id as string,
-    session_id: r.session_id as string,
-    client_id: cloudClientId,
-    git_branch: (r.git_branch as string) ?? null,
-    git_head_sha: (r.git_head_sha as string) ?? null,
-    modified_files: (r.modified_files as string) ?? null,
-    lockfile_hash: (r.dep_lock_hash as string) ?? null,
-    lockfile_path: (r.dep_lock_path as string) ?? null,
-    env_vars: (r.env_vars_json as string) ?? null,
-    node_version: (r.node_version as string) ?? null,
-    python_version: (r.python_version as string) ?? null,
-    os_info: (r.os_info as string) ?? null,
-    container_info: (r.container_info as string) ?? null,
-    runtime_versions: (r.runtime_versions_json as string) ?? null,
-    shell_info: (r.shell_info as string) ?? null,
-    system_resources: (r.system_resources_json as string) ?? null,
-    package_manager: (r.package_manager_json as string) ?? null,
-    captured_at: r.captured_at as string,
     vclock_json: (r.vclock_json as string) ?? null,
     deleted_at: (r.deleted_at as string) ?? null,
   }));

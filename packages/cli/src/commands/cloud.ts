@@ -579,7 +579,6 @@ function printUploadDisclosure(): void {
   console.log("  - Session transcripts        disable: adit cloud transcript disable");
   console.log("  - Project docs & git metadata on session start");
   console.log("                               disable: ADIT_PROJECT_LINK_AUTO_SYNC=false");
-  console.log("  - Environment snapshots      disable: ADIT_CAPTURE_ENV=false");
   console.log();
   console.log("Disable all auto-sync with ADIT_CLOUD_AUTO_SYNC=false, or run 'adit cloud logout'.");
 }

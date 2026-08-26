@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import {
   closeDatabase,
   insertDiff,
+  insertEnvSnapshot,
   insertEvent,
   insertSession,
   openDatabase,
@@ -222,6 +223,31 @@ describe("sync serializer", () => {
     expect(countUnsyncedEvents(db, "01H000000000000000000000010", PROJECT_ID)).toBe(1);
     // countUnsyncedRecords additionally counts the new session row
     expect(countUnsyncedRecords(db, null, null, PROJECT_ID)).toBe(3);
+  });
+
+  it("keeps environment snapshots local and excludes them from sync batches", () => {
+    const sessionId = "01H000000000000000000000001";
+    insertTestSession(db, sessionId);
+    insertEnvSnapshot(db, {
+      id: "01H000000000000000000000010",
+      sessionId,
+      gitBranch: "develop",
+      gitHeadSha: "abc123",
+      envVarsJson: JSON.stringify({ HOME: "/Users/test", PATH: "/usr/bin" }),
+      nodeVersion: "v22.0.0",
+      pythonVersion: "Python 3.14.0",
+      osInfo: "darwin 25.5.0",
+      vclockJson: "{}",
+    });
+
+    const { batch } = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
+    const localSnapshotCount = db
+      .prepare("SELECT COUNT(*) AS count FROM env_snapshots")
+      .get() as { count: number };
+
+    expect(localSnapshotCount.count).toBe(1);
+    expect(batch.envSnapshots).toEqual([]);
+    expect(JSON.stringify(batch)).not.toContain("/Users/test");
   });
 
   it("treats multiple prompts as closed once the session has a following assistant response", () => {
