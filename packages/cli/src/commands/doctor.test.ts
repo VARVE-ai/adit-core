@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -111,9 +112,11 @@ describe("doctorCommand", () => {
   it("does not report fallback unknown platform as a fixable doctor issue", async () => {
     await doctorCommand();
 
-    const output = (console.log as unknown as ReturnType<typeof vi.fn>).mock.calls
-      .map((args) => args.join(" "))
-      .join("\n");
+    const output = stripVTControlCharacters(
+      (console.log as unknown as ReturnType<typeof vi.fn>).mock.calls
+        .map((args) => args.join(" "))
+        .join("\n"),
+    );
 
     expect(output).toContain("Hooks config: No platforms connected — run 'adit init'");
     expect(output).not.toContain("Unknown Platform settings");
@@ -144,9 +147,11 @@ describe("doctorCommand", () => {
 
     await doctorCommand();
 
-    const output = (console.log as unknown as ReturnType<typeof vi.fn>).mock.calls
-      .map((args) => args.join(" "))
-      .join("\n");
+    const output = stripVTControlCharacters(
+      (console.log as unknown as ReturnType<typeof vi.fn>).mock.calls
+        .map((args) => args.join(" "))
+        .join("\n"),
+    );
 
     expect(output).toContain("Project manifest: multi-repo · 1 repositories");
     // /workspace/api does not exist on disk — reported as drift, never auto-fixed
@@ -183,9 +188,11 @@ describe("doctorCommand", () => {
 
     await doctorCommand();
 
-    const output = (console.log as unknown as ReturnType<typeof vi.fn>).mock.calls
-      .map((args) => args.join(" "))
-      .join("\n");
+    const output = stripVTControlCharacters(
+      (console.log as unknown as ReturnType<typeof vi.fn>).mock.calls
+        .map((args) => args.join(" "))
+        .join("\n"),
+    );
 
     expect(output).toContain("Hooks config: Claude Code: OK");
     expect(output).not.toContain("Codex:");
