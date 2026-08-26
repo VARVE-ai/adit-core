@@ -104,12 +104,10 @@ describe("Git Collector (with temp repo)", () => {
       stdio: "pipe",
     });
 
-    const rawBranches = execSync(
-      "git branch -a --format='%(refname)|%(refname:short)|%(objectname:short)'",
-      { cwd: repoDir, encoding: "utf-8" },
-    );
-    expect(rawBranches).toContain("refs/remotes/origin/HEAD|origin|");
-
+    // No assertion on the raw `git branch -a` listing here: whether the
+    // origin/HEAD symref shows up in it depends on the git version
+    // (2.50 prints it, 2.39 does not). Either way collectBranches must
+    // not surface it as a branch.
     const branches = await collectBranches(repoDir);
     expect(branches.some((branch) => branch.name === "origin")).toBe(false);
     expect(branches.filter((branch) => branch.name === "main")).toHaveLength(1);
