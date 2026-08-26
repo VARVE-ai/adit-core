@@ -79,6 +79,52 @@ describe("project manifest", () => {
     expect(repos[0].path).toBe(join(root, "api"));
   });
 
+  it("uses the stored repositoryId instead of re-deriving it from the path", () => {
+    const manifest = manifestFor({
+      projectType: "workspace",
+      repositories: [
+        { relativePath: "renamed-api", repositoryId: "persisted-id-1", repositoryUrl: "https://example.com/api.git" },
+      ],
+    });
+    writeProjectManifest(root, manifest);
+
+    const repos = resolveManifestRepositories(root, readProjectManifest(root)!);
+    expect(repos[0].localRepositoryId).toBe("persisted-id-1");
+    expect(repos[0].localRepositoryId).not.toBe(
+      computeLocalRepositoryId(manifest.projectId, "renamed-api"),
+    );
+  });
+
+  it("round-trips repository identity and recorded remote hints", () => {
+    const manifest = manifestFor({
+      projectType: "workspace",
+      repositories: [
+        { relativePath: "api", repositoryId: "id-a", repositoryUrl: "https://example.com/a.git" },
+        { relativePath: "web", repositoryId: "id-b" },
+      ],
+    });
+    writeProjectManifest(root, manifest);
+    expect(readProjectManifest(root)).toEqual(manifest);
+  });
+
+  it("rejects duplicate repositoryIds", () => {
+    mkdirSync(join(root, ".adit"), { recursive: true });
+    writeFileSync(
+      projectManifestPath(root),
+      JSON.stringify(
+        manifestFor({
+          projectType: "workspace",
+          repositories: [
+            { relativePath: "api", repositoryId: "same" },
+            { relativePath: "web", repositoryId: "same" },
+          ],
+        }),
+      ),
+      "utf-8",
+    );
+    expect(() => readProjectManifest(root)).toThrow(/repositoryId/u);
+  });
+
   it("returns null when no manifest exists", () => {
     expect(readProjectManifest(root)).toBeNull();
   });

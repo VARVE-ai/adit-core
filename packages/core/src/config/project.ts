@@ -26,11 +26,30 @@ import { basename, join, relative, resolve, sep } from "node:path";
 
 export type ProjectType = "repo" | "workspace";
 
+export interface ProjectManifestRepository {
+  relativePath: string;
+  /**
+   * Persisted member-repository identity (workspace projects). Minted once
+   * when the repository is registered and carried across directory renames —
+   * never re-derived from the path at runtime. Absent on single-repo entries
+   * (their identity is the project ID) and on manifests written before this
+   * field existed; resolution falls back to the legacy derivation formula,
+   * which produces the identical value, and the next init persists it.
+   */
+  repositoryId?: string;
+  /**
+   * Recorded remote URL — a non-authoritative hint used only by init to
+   * recognize directory renames (old path gone, same remote, unique match).
+   * Refreshed on every init write; link/sync always read the live git config.
+   */
+  repositoryUrl?: string | null;
+}
+
 export interface ProjectManifest {
   schemaVersion: 1;
   projectId: string;
   projectType: ProjectType;
-  repositories: Array<{ relativePath: string }>;
+  repositories: ProjectManifestRepository[];
   createdAt: string;
   updatedAt: string;
 }
@@ -205,10 +224,13 @@ export function resolveManifestRepositories(
     const path = relativePath === "." ? resolve(projectRoot) : resolve(projectRoot, relativePath);
     assertInsideProjectRoot(projectRoot, path, relativePath, manifestPath);
     return {
+      // Persistence first: a stored repositoryId survives directory renames.
+      // The derivation formula is only the fallback for entries written
+      // before the field existed (it yields the identical value).
       localRepositoryId:
         manifest.projectType === "repo"
           ? manifest.projectId
-          : computeLocalRepositoryId(manifest.projectId, relativePath),
+          : entry.repositoryId ?? computeLocalRepositoryId(manifest.projectId, relativePath),
       relativePath,
       displayName: relativePath === "." ? basename(resolve(projectRoot)) : basename(relativePath),
       repositoryUrl: null,
@@ -320,11 +342,11 @@ function validateManifest(parsed: unknown, manifestPath: string): ProjectManifes
   }
 
   const seen = new Set<string>();
+  const seenRepositoryIds = new Set<string>();
   const repositories = manifest.repositories.map((entry) => {
-    const relativePath =
-      typeof entry === "object" && entry !== null && typeof (entry as Record<string, unknown>).relativePath === "string"
-        ? ((entry as Record<string, unknown>).relativePath as string)
-        : "";
+    const record =
+      typeof entry === "object" && entry !== null ? (entry as Record<string, unknown>) : {};
+    const relativePath = typeof record.relativePath === "string" ? record.relativePath : "";
     assertSafeRelativePath(relativePath, manifestPath);
     if (seen.has(relativePath)) {
       throw new ProjectManifestError(
@@ -333,7 +355,30 @@ function validateManifest(parsed: unknown, manifestPath: string): ProjectManifes
       );
     }
     seen.add(relativePath);
-    return { relativePath };
+
+    const repositoryId =
+      typeof record.repositoryId === "string" && record.repositoryId.trim()
+        ? record.repositoryId.trim()
+        : undefined;
+    if (repositoryId) {
+      if (seenRepositoryIds.has(repositoryId)) {
+        throw new ProjectManifestError(
+          `Project manifest lists repositoryId '${repositoryId}' more than once.`,
+          manifestPath,
+        );
+      }
+      seenRepositoryIds.add(repositoryId);
+    }
+    const repositoryUrl =
+      typeof record.repositoryUrl === "string" && record.repositoryUrl.trim()
+        ? record.repositoryUrl.trim()
+        : null;
+
+    return {
+      relativePath,
+      ...(repositoryId ? { repositoryId } : {}),
+      ...(repositoryUrl ? { repositoryUrl } : {}),
+    };
   });
 
   if (projectType === "repo" && (repositories.length !== 1 || repositories[0].relativePath !== ".")) {

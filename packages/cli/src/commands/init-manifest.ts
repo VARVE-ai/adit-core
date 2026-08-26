@@ -12,6 +12,7 @@ import { basename, dirname, join, relative } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
   ProjectManifestError,
+  computeLocalRepositoryId,
   computeRepoProjectId,
   findProjectManifestRoot,
   generateProjectId,
@@ -23,6 +24,7 @@ import {
   workspaceManifestRelativePath,
   writeProjectManifest,
   type ProjectManifest,
+  type ProjectManifestRepository,
   type ProjectType,
 } from "@varveai/adit-core";
 import type { ProjectLayoutAnalysis } from "./project-layout.js";
@@ -87,19 +89,29 @@ async function reinitExistingManifest(
     return { status: "unchanged", manifest: existing };
   }
 
-  const registered = existing.repositories.map((repo) => repo.relativePath);
-  const discovered = analysis.childRepositories.map((repo) => repo.relativePath);
-  const added = discovered.filter((path) => !registered.includes(path));
-  const removed = registered.filter((path) => !discovered.includes(path));
+  const plan = planWorkspaceRepositories(existing, analysis);
 
-  if (added.length === 0 && removed.length === 0) {
-    console.log(`  [=] Repository list unchanged (${registered.length} repositories).`);
+  if (!plan.hasStructuralChanges) {
+    if (plan.needsRewrite) {
+      const manifest: ProjectManifest = {
+        ...existing,
+        repositories: plan.target,
+        updatedAt: new Date().toISOString(),
+      };
+      await withProjectInitLock(root, async () => writeProjectManifest(root, manifest));
+      console.log("  [+] Recorded repository identities in the manifest.");
+      return { status: "written", manifest, migratedFrom: null };
+    }
+    console.log(`  [=] Repository list unchanged (${existing.repositories.length} repositories).`);
     return { status: "unchanged", manifest: existing };
   }
 
   console.log("  Repository changes detected:");
-  for (const path of added) console.log(`    + ${path}`);
-  for (const path of removed) console.log(`    - ${path} (no longer a Git repository here)`);
+  for (const rename of plan.renames) {
+    console.log(`    ~ ${rename.fromPath} → ${rename.toPath} (renamed, same remote — identity preserved)`);
+  }
+  for (const path of plan.addedPaths) console.log(`    + ${path}`);
+  for (const path of plan.removedPaths) console.log(`    - ${path} (no longer a Git repository here)`);
   console.log();
 
   const apply = flags.multiRepo
@@ -115,19 +127,102 @@ async function reinitExistingManifest(
     console.log("  [=] Keeping the current repository list.");
     return { status: "unchanged", manifest: existing };
   }
-  if (discovered.length === 0) {
+  if (plan.target.length === 0) {
     console.error("  [x] No child Git repositories left — a multi-repo project needs at least one.");
     return { status: "failed" };
   }
 
   const manifest: ProjectManifest = {
     ...existing,
-    repositories: discovered.map((relativePath) => ({ relativePath })),
+    repositories: plan.target,
     updatedAt: new Date().toISOString(),
   };
   await withProjectInitLock(root, async () => writeProjectManifest(root, manifest));
   console.log("  [+] Updated project manifest.");
   return { status: "written", manifest, migratedFrom: null };
+}
+
+interface WorkspaceRepositoryPlan {
+  target: ProjectManifestRepository[];
+  renames: Array<{ fromPath: string; toPath: string }>;
+  addedPaths: string[];
+  removedPaths: string[];
+  hasStructuralChanges: boolean;
+  /** No structural change, but stored identities/remote hints need (re)writing. */
+  needsRewrite: boolean;
+}
+
+/**
+ * Plan the workspace member list for a re-init.
+ *
+ * Identity rules: a path already registered keeps its stored repositoryId; a
+ * new path whose remote uniquely matches exactly one disappeared entry (in
+ * both directions) is treated as a directory rename and inherits that entry's
+ * identity; anything ambiguous gets a fresh identity — never guess.
+ */
+function planWorkspaceRepositories(
+  existing: ProjectManifest,
+  analysis: ProjectLayoutAnalysis,
+): WorkspaceRepositoryPlan {
+  const registeredByPath = new Map(
+    existing.repositories.map((entry) => [entry.relativePath, entry]),
+  );
+  const discovered = analysis.childRepositories;
+  const discoveredPaths = new Set(discovered.map((child) => child.relativePath));
+
+  const removedEntries = existing.repositories.filter(
+    (entry) => !discoveredPaths.has(entry.relativePath),
+  );
+  const addedChildren = discovered.filter((child) => !registeredByPath.has(child.relativePath));
+
+  const renamePairs = new Map<string, ProjectManifestRepository>();
+  for (const child of addedChildren) {
+    if (!child.originUrl) continue;
+    const fromMatches = removedEntries.filter(
+      (entry) => entry.repositoryUrl && entry.repositoryUrl === child.originUrl,
+    );
+    if (fromMatches.length !== 1) continue;
+    const toMatches = addedChildren.filter((candidate) => candidate.originUrl === child.originUrl);
+    if (toMatches.length !== 1) continue;
+    renamePairs.set(child.relativePath, fromMatches[0]);
+  }
+
+  const target: ProjectManifestRepository[] = discovered.map((child) => {
+    const existingEntry = registeredByPath.get(child.relativePath);
+    const renamedFrom = renamePairs.get(child.relativePath);
+    const repositoryId =
+      existingEntry?.repositoryId ??
+      renamedFrom?.repositoryId ??
+      computeLocalRepositoryId(
+        existing.projectId,
+        renamedFrom ? renamedFrom.relativePath : child.relativePath,
+      );
+    return {
+      relativePath: child.relativePath,
+      repositoryId,
+      ...(child.originUrl ? { repositoryUrl: child.originUrl } : {}),
+    };
+  });
+
+  const renames = [...renamePairs.entries()].map(([toPath, from]) => ({
+    fromPath: from.relativePath,
+    toPath,
+  }));
+  const renamedFromPaths = new Set(renames.map((rename) => rename.fromPath));
+  const addedPaths = addedChildren
+    .map((child) => child.relativePath)
+    .filter((path) => !renamePairs.has(path));
+  const removedPaths = removedEntries
+    .map((entry) => entry.relativePath)
+    .filter((path) => !renamedFromPaths.has(path));
+
+  const hasStructuralChanges =
+    renames.length > 0 || addedPaths.length > 0 || removedPaths.length > 0;
+  const needsRewrite =
+    !hasStructuralChanges &&
+    JSON.stringify(target) !== JSON.stringify(existing.repositories);
+
+  return { target, renames, addedPaths, removedPaths, hasStructuralChanges, needsRewrite };
 }
 
 async function convertManifestType(
@@ -157,7 +252,11 @@ async function convertManifestType(
     repositories:
       targetType === "repo"
         ? [{ relativePath: "." }]
-        : analysis.childRepositories.map((repo) => ({ relativePath: repo.relativePath })),
+        : analysis.childRepositories.map((repo) => ({
+            relativePath: repo.relativePath,
+            repositoryId: computeLocalRepositoryId(existing.projectId, repo.relativePath),
+            ...(repo.originUrl ? { repositoryUrl: repo.originUrl } : {}),
+          })),
     updatedAt: new Date().toISOString(),
   };
   await withProjectInitLock(root, async () => writeProjectManifest(root, manifest));
@@ -181,15 +280,20 @@ async function initFreshManifest(
   }
 
   const recovered = recoverLegacyProjectId(root);
+  const projectId = recovered?.projectId ?? generateProjectId();
   const now = new Date().toISOString();
   const manifest: ProjectManifest = {
     schemaVersion: 1,
-    projectId: recovered?.projectId ?? generateProjectId(),
+    projectId,
     projectType: mode.projectType,
     repositories:
       mode.projectType === "repo"
         ? [{ relativePath: "." }]
-        : analysis.childRepositories.map((repo) => ({ relativePath: repo.relativePath })),
+        : analysis.childRepositories.map((repo) => ({
+            relativePath: repo.relativePath,
+            repositoryId: computeLocalRepositoryId(projectId, repo.relativePath),
+            ...(repo.originUrl ? { repositoryUrl: repo.originUrl } : {}),
+          })),
     createdAt: now,
     updatedAt: now,
   };

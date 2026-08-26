@@ -129,6 +129,7 @@ export {
   ProjectManifestError,
   ProjectInitLockError,
   type ProjectManifest,
+  type ProjectManifestRepository,
   type ProjectType,
   type WorkspaceManifest,
   type LocalRepository,
