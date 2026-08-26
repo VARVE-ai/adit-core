@@ -267,6 +267,14 @@ export interface LinkOptions {
   skipQualify?: boolean;
   dryRun?: boolean;
   json?: boolean;
+  /**
+   * Suppress the built-in progress output; the caller renders progress and
+   * results itself (used when link runs embedded in `adit init`). Step
+   * failures are wrapped in LinkStepError so the failing step is named.
+   */
+  silent?: boolean;
+  /** Invoked as each link step completes (per repository in workspaces). */
+  onStepComplete?: (step: StepTiming) => void;
 }
 
 export interface IntentOptions {

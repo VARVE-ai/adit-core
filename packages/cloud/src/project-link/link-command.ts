@@ -162,7 +162,7 @@ async function linkWorkspaceProject(
   const repositorySet = repositoryPayloads(repositories);
   const commitDedupeState: WorkspaceCommitDedupeState = new Set();
   const totalStart = performance.now();
-  const log = options.json ? (() => {}) : console.log.bind(console);
+  const log = options.json || options.silent ? (() => {}) : console.log.bind(console);
 
   log("");
   log("Workspace project link");
@@ -309,9 +309,11 @@ async function linkRepositoryCommand(
   workspaceCommitDedupeState?: WorkspaceCommitDedupeState,
   internalOptions: LinkRepositoryInternalOptions = {},
 ): Promise<LinkResult> {
-  // In JSON mode, suppress progress output
-  const log = options.json || internalOptions.silent ? (() => {}) : console.log.bind(console);
-  const shouldWrapStepErrors = internalOptions.silent === true;
+  // In JSON or silent mode, suppress progress output
+  const log = options.json || options.silent || internalOptions.silent
+    ? (() => {})
+    : console.log.bind(console);
+  const shouldWrapStepErrors = internalOptions.silent === true || options.silent === true;
   const runStep = <T>(step: string, operation: () => Promise<T>): Promise<T> =>
     runLinkStep(step, operation, shouldWrapStepErrors);
   const runStepSync = <T>(step: string, operation: () => T): T =>
@@ -333,7 +335,9 @@ async function linkRepositoryCommand(
   }
 
   function endStep(stepName: string, stepStart: number): void {
-    stepTimings.push({ step: stepName, durationMs: Math.round(performance.now() - stepStart) });
+    const entry = { step: stepName, durationMs: Math.round(performance.now() - stepStart) };
+    stepTimings.push(entry);
+    options.onStepComplete?.(entry);
   }
 
   // Handle --force: clear local cache and server data

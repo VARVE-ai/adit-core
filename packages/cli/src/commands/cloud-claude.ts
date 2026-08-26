@@ -8,6 +8,7 @@ import {
   loadCredentials,
 } from "@varveai/adit-cloud";
 import { ClaudeCodeProvider } from "./cli-agent/claude/provider.js";
+import { ensureConnectedPlatformsRecorded } from "./connected-platforms.js";
 import { resolveExecutable } from "./cli-agent/cli-process.js";
 import { ClaudeTranscriptSync } from "./cli-agent/claude/claude-transcript-sync.js";
 import {
@@ -504,11 +505,16 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
 
   try {
     try {
-      const installedPersistentHooks = await ensurePersistentClaudeHooksInstalled({
-        cwd: config.projectRoot,
-      });
-      if (installedPersistentHooks) {
-        notices.line("Installed ADIT Claude Code hooks for local timeline tracking.");
+      // Self-heal only repairs platforms the user connected; a project where
+      // Claude Code was never connected is left untouched.
+      const connectedPlatforms = await ensureConnectedPlatformsRecorded(config.projectRoot);
+      if (connectedPlatforms.includes("claude-code")) {
+        const installedPersistentHooks = await ensurePersistentClaudeHooksInstalled({
+          cwd: config.projectRoot,
+        });
+        if (installedPersistentHooks) {
+          notices.line("Reinstalled ADIT Claude Code hooks for local timeline tracking.");
+        }
       }
     } catch (error) {
       notices.line(

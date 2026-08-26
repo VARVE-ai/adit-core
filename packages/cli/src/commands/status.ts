@@ -26,7 +26,8 @@ import {
   getCurrentBranch,
   getHeadSha,
 } from "@varveai/adit-engine";
-import { detectPlatform, getAdapter, listAdapters } from "@varveai/adit-hooks/adapters";
+import { getAdapter } from "@varveai/adit-hooks/adapters";
+import { ensureConnectedPlatformsRecorded } from "./connected-platforms.js";
 import { statusDot, joinDim, sectionHeader, horizontalRule, timeAgo } from "../utils/format.js";
 import { truncate } from "../utils/summary.js";
 
@@ -91,27 +92,21 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
     return;
   }
 
-  // 2. Check hook configuration via platform adapters
-  //    Validate all implemented adapters (skip stubs with no hook mappings)
-  const implementedAdapters = listAdapters().filter((a) => a.hookMappings.length > 0);
+  // 2. Check hook configuration for the platforms the user connected.
+  //    An unconnected platform's leftover config is the user's choice, not
+  //    an incomplete install — only connected platforms are validated.
+  const connectedPlatforms = await ensureConnectedPlatformsRecorded(config.projectRoot);
+  const connectedAdapters = connectedPlatforms
+    .map((platform) => getAdapter(platform))
+    .filter((a) => a.hookMappings.length > 0);
   const installedPlatforms: string[] = [];
   const missingPlatforms: string[] = [];
 
-  for (const adapter of implementedAdapters) {
+  for (const adapter of connectedAdapters) {
     const result = await adapter.validateInstallation(gitRoot);
     if (result.valid) {
       installedPlatforms.push(adapter.displayName);
-    } else if (result.checks.some((c) => c.ok)) {
-      // Partially installed — platform directory exists but hooks incomplete
-      missingPlatforms.push(adapter.displayName);
-    }
-  }
-
-  // Fall back to env-detected platform if nothing found
-  if (installedPlatforms.length === 0 && missingPlatforms.length === 0) {
-    const platform = detectPlatform();
-    const adapter = getAdapter(platform);
-    if (adapter.hookMappings.length > 0) {
+    } else {
       missingPlatforms.push(adapter.displayName);
     }
   }

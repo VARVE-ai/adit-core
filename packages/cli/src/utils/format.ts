@@ -50,13 +50,13 @@ export function horizontalRule(width = 50): string {
   return pc.dim("\u2500".repeat(width));
 }
 
-/** Render a dimmed section header with trailing rule fill */
+/** Render a section header \u2014 cyan bold title inside a dimmed rule */
 export function sectionHeader(label: string, width = 50): string {
   const prefix = "\u2500\u2500 ";
   const suffix = " ";
   const remaining = width - prefix.length - label.length - suffix.length;
   const fill = remaining > 0 ? "\u2500".repeat(remaining) : "";
-  return pc.dim(`${prefix}${label}${suffix}${fill}`);
+  return pc.dim(prefix) + pc.bold(pc.cyan(label)) + pc.dim(`${suffix}${fill}`);
 }
 
 /** Render a styled status dot: green filled when active, red outline when inactive */

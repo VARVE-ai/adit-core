@@ -22,11 +22,13 @@ import {
 import { getRemoteUrl } from "@varveai/adit-engine";
 import {
   detectPlatform,
-  detectPlatforms,
   getAdapter,
   resolveAditHookBinary,
   type PlatformAdapter,
 } from "@varveai/adit-hooks/adapters";
+import pc from "picocolors";
+import { marks, sectionTitle } from "./cli-style.js";
+import { ensureConnectedPlatformsRecorded } from "./connected-platforms.js";
 import { checkAditHookBinary } from "./doctor-hooks.js";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
 
@@ -147,19 +149,29 @@ export async function doctorCommand(
     detail: binaryCheck.detail,
   });
 
-  // 6. Hooks — validate adapters detected in the current project root.
-  const detectedPlatforms = detectPlatforms(config.projectRoot);
-  const implementedAdapters = detectedPlatforms
+  // 6. Hooks — validate the platforms the user connected to this project.
+  //    Legacy projects are backfilled from existing hook configuration; a
+  //    platform the user never connected is never validated or auto-installed.
+  const connectedPlatforms = await ensureConnectedPlatformsRecorded(config.projectRoot);
+  const implementedAdapters = connectedPlatforms
     .map((platform) => getAdapter(platform))
     .filter((a) => a.hookMappings.length > 0);
-  let hooksOk = false;
+
+  checks.push({
+    name: "Connected platforms",
+    ok: true,
+    detail: implementedAdapters.length > 0
+      ? implementedAdapters.map((a) => a.displayName).join(", ")
+      : "none — run 'adit init' to connect your AI tools",
+  });
+
+  let hooksOk = implementedAdapters.length > 0;
   const hooksDetails: string[] = [];
   const adaptersNeedingFix: typeof implementedAdapters = [];
 
   for (const adapter of implementedAdapters) {
     const result = await adapter.validateInstallation(config.projectRoot);
     if (result.valid) {
-      hooksOk = true;
       // Advisory checks don't fail validation (reinstall can't fix them),
       // but the user still needs to see them.
       const warnings = result.checks
@@ -168,24 +180,15 @@ export async function doctorCommand(
       hooksDetails.push(
         `${adapter.displayName}: OK${warnings.length > 0 ? ` — warning: ${warnings.join("; ")}` : ""}`,
       );
-    } else if (result.checks.some((c) => !c.advisory && c.ok)) {
-      // Platform directory exists but hooks incomplete
+    } else {
+      hooksOk = false;
       hooksDetails.push(`${adapter.displayName}: ${result.checks.filter((c) => !c.ok).map((c) => c.detail).join("; ")}`);
       adaptersNeedingFix.push(adapter);
     }
   }
 
-  if (hooksDetails.length === 0) {
-    const detected = detectPlatform();
-    const detectedAdapter = getAdapter(detected);
-    hooksDetails.push(
-      detected === "other"
-        ? "No platform hooks found"
-        : `No platform hooks found (detected: ${detectedAdapter.displayName})`,
-    );
-    if (isImplementedAdapter(detectedAdapter)) {
-      adaptersNeedingFix.push(detectedAdapter);
-    }
+  if (implementedAdapters.length === 0) {
+    hooksDetails.push("No platforms connected — run 'adit init' to connect your AI tools");
   }
 
   checks.push({
@@ -196,10 +199,12 @@ export async function doctorCommand(
   });
 
   // 7. Platform hook completeness — detailed per-adapter validation
-  //    (check #6 above gives a summary; this gives per-check detail)
+  //    (check #6 above gives a summary; this gives per-check detail).
+  //    Only shown for a connected platform: an unconnected tool's missing
+  //    hooks are the user's explicit choice, not a health problem.
   const detectedPlatform = detectPlatform();
   const platformAdapter = getAdapter(detectedPlatform);
-  if (isImplementedAdapter(platformAdapter)) {
+  if (isImplementedAdapter(platformAdapter) && connectedPlatforms.includes(detectedPlatform)) {
     const platformResult = await platformAdapter.validateInstallation(config.projectRoot);
 
     checks.push({
@@ -280,9 +285,9 @@ export async function doctorCommand(
     }
 
     if (fixes.length > 0 && !opts.json) {
-      console.log("\nFixes applied:");
+      console.log(`\n${pc.green("Fixes applied:")}`);
       for (const fix of fixes) {
-        console.log(`  [*] ${fix}`);
+        console.log(`  ${pc.green("[*]")} ${fix}`);
       }
     }
   }
@@ -298,19 +303,21 @@ export async function doctorCommand(
     return;
   }
 
-  console.log("ADIT Health Check\n");
+  console.log(sectionTitle("ADIT Health Check") + "\n");
   let allOk = true;
   for (const check of checks) {
-    const symbol = check.ok ? "+" : "x";
-    const fixTag = !check.ok && check.fixable ? " (--fix)" : "";
-    console.log(`  [${symbol}] ${check.name}: ${check.detail}${fixTag}`);
+    const mark = check.ok ? marks.ok : marks.fail;
+    const fixTag = !check.ok && check.fixable ? pc.cyan(" (--fix)") : "";
+    // Passing details are secondary; a failing check's detail is the payload.
+    const detail = check.ok ? pc.dim(check.detail) : check.detail;
+    console.log(`  ${mark} ${check.name}: ${detail}${fixTag}`);
     if (!check.ok) allOk = false;
   }
 
   console.log(
     allOk
-      ? "\nAll checks passed."
-      : "\nSome checks failed. Run 'adit doctor --fix' to attempt repairs.",
+      ? `\n${pc.bold(pc.green("All checks passed."))}`
+      : `\n${pc.red("Some checks failed.")} Run ${pc.bold("'adit doctor --fix'")} to attempt repairs.`,
   );
 }
 

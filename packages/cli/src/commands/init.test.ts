@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   getHeadSha: vi.fn(async () => null as string | null),
   getRemoteUrl: vi.fn(async () => null as string | null),
   detectPlatforms: vi.fn(() => []),
+  detectInstalledPlatforms: vi.fn(() => []),
   listAdapters: vi.fn(() => []),
   resolveAditHookBinary: vi.fn(() => "adit-hook"),
   getAdapter: vi.fn(),
@@ -20,9 +21,14 @@ vi.mock("@varveai/adit-engine", () => ({
 
 vi.mock("@varveai/adit-hooks/adapters", () => ({
   detectPlatforms: mocks.detectPlatforms,
+  detectInstalledPlatforms: mocks.detectInstalledPlatforms,
   listAdapters: mocks.listAdapters,
   resolveAditHookBinary: mocks.resolveAditHookBinary,
   getAdapter: mocks.getAdapter,
+}));
+
+vi.mock("./init-cloud-setup.js", () => ({
+  runCloudSetupSection: vi.fn(async () => ({ linked: false })),
 }));
 
 import { initCommand } from "./init.js";
@@ -218,5 +224,94 @@ describe("initCommand", () => {
       expect(existsSync(file)).toBe(true);
       expect(readFileSync(file, "utf-8")).toBe("old skill");
     }
+  });
+
+  describe("hook installation via CLI detection", () => {
+    function fakeAdapter(platform: string, displayName: string, cliBinary?: string) {
+      return {
+        platform,
+        displayName,
+        cliBinary,
+        hookMappings: [{ platformEvent: "Stop", aditHandler: "stop" }],
+        installHooks: vi.fn(async () => {}),
+        uninstallHooks: vi.fn(async () => {}),
+        hasHooks: vi.fn(async () => false),
+        validateInstallation: vi.fn(async () => ({ valid: true, checks: [] })),
+      };
+    }
+
+    function registerFakes() {
+      const claude = fakeAdapter("claude-code", "Claude Code", "claude");
+      const vscode = fakeAdapter("claude-vscode", "Claude Code (VS Code)");
+      const codex = fakeAdapter("codex", "Codex", "codex");
+      const all = [claude, vscode, codex];
+      mocks.listAdapters.mockReturnValue(all as never);
+      mocks.getAdapter.mockImplementation(
+        (platform: string) => {
+          const adapter = all.find((entry) => entry.platform === platform);
+          if (!adapter) throw new Error(`no adapter: ${platform}`);
+          return adapter;
+        },
+      );
+      return { claude, vscode, codex };
+    }
+
+    function readRecord(): string[] {
+      return JSON.parse(readFileSync(join(root, ".adit", "platforms.json"), "utf-8")).connected;
+    }
+
+    it("connects all detected CLIs non-interactively and records them", async () => {
+      mkdirSync(join(root, ".git"), { recursive: true });
+      const { claude, vscode, codex } = registerFakes();
+      mocks.detectInstalledPlatforms.mockReturnValue(["claude-code", "codex"] as never);
+
+      await initCommand({ cwd: root });
+
+      expect(claude.installHooks).toHaveBeenCalled();
+      expect(vscode.installHooks).toHaveBeenCalled();
+      expect(codex.installHooks).toHaveBeenCalled();
+      expect(readRecord().sort()).toEqual(["claude-code", "claude-vscode", "codex"]);
+    });
+
+    it("re-init refreshes connected platforms and only adds new ones", async () => {
+      mkdirSync(join(root, ".git"), { recursive: true });
+      const { claude, vscode, codex } = registerFakes();
+      mkdirSync(join(root, ".adit"), { recursive: true });
+      writeFileSync(
+        join(root, ".adit", "platforms.json"),
+        JSON.stringify({ schemaVersion: 1, connected: ["claude-code", "claude-vscode"] }),
+      );
+      mocks.detectInstalledPlatforms.mockReturnValue(["claude-code", "codex"] as never);
+
+      await initCommand({ cwd: root });
+
+      // codex is new (installed); claude was connected (refreshed, not re-asked)
+      expect(codex.installHooks).toHaveBeenCalledTimes(1);
+      expect(claude.installHooks).toHaveBeenCalledTimes(1);
+      expect(vscode.installHooks).toHaveBeenCalledTimes(1);
+      expect(readRecord().sort()).toEqual(["claude-code", "claude-vscode", "codex"]);
+    });
+
+    it("records the platform on explicit --platform install", async () => {
+      mkdirSync(join(root, ".git"), { recursive: true });
+      const { codex } = registerFakes();
+
+      await initCommand({ cwd: root, platform: "codex" });
+
+      expect(codex.installHooks).toHaveBeenCalledTimes(1);
+      expect(readRecord()).toEqual(["codex"]);
+    });
+
+    it("installs nothing and records nothing when no CLIs are detected", async () => {
+      mkdirSync(join(root, ".git"), { recursive: true });
+      const { claude, codex } = registerFakes();
+      mocks.detectInstalledPlatforms.mockReturnValue([] as never);
+
+      await initCommand({ cwd: root });
+
+      expect(claude.installHooks).not.toHaveBeenCalled();
+      expect(codex.installHooks).not.toHaveBeenCalled();
+      expect(readRecord()).toEqual([]);
+    });
   });
 });

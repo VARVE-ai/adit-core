@@ -7,7 +7,7 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join, basename, relative } from "node:path";
 import pc from "picocolors";
 import {
   loadConfig,
@@ -18,9 +18,25 @@ import type { Platform } from "@varveai/adit-core";
 import {
   getAdapter,
   listAdapters,
-  detectPlatforms,
+  detectInstalledPlatforms,
   resolveAditHookBinary,
 } from "@varveai/adit-hooks/adapters";
+import {
+  addConnectedPlatforms,
+  ensureConnectedPlatformsRecorded,
+  readConnectedPlatforms,
+  writeConnectedPlatforms,
+} from "./connected-platforms.js";
+import { marks, sectionTitle } from "./cli-style.js";
+import { runCloudSetupSection } from "./init-cloud-setup.js";
+import {
+  buildPlatformChoices,
+  diffSelection,
+  printChoiceList,
+  promptPlatformSelectionFallback,
+  type PlatformChoice,
+} from "./init-platform-select.js";
+import { canUseInkSelect, runInkPlatformSelect } from "./init-select-ink.js";
 import {
   renderProjectOverviewTemplate,
   renderArchitectureTemplate,
@@ -95,27 +111,27 @@ export async function initCommand(opts: {
   }
 
   // --- Step 2: Data directory & database ---
-  console.log("  Setup");
-  console.log("  -----");
+  console.log(sectionTitle("  Setup"));
 
+  const ok = marks.ok;
   mkdirSync(config.dataDir, { recursive: true });
-  console.log(`  [+] Data directory: ${config.dataDir}`);
+  console.log(`  ${ok} Data directory: ${relative(setupRoot, config.dataDir) || "."}`);
 
   const db = openDatabase(config.dbPath);
   closeDatabase(db);
-  console.log(`  [+] Database: ${config.dbPath}`);
+  console.log(`  ${ok} Database: ${relative(setupRoot, config.dbPath)}`);
 
   const typeLabel = manifest.projectType === "workspace" ? "multi-repo project" : "single-repo project";
-  console.log(`  [+] ${typeLabel[0].toUpperCase()}${typeLabel.slice(1)}: ${basename(setupRoot)}`);
-  console.log(`  [+] Project ID: ${manifest.projectId}`);
+  console.log(`  ${ok} ${typeLabel[0].toUpperCase()}${typeLabel.slice(1)}: ${pc.bold(basename(setupRoot))}`);
+  console.log(`  ${ok} Project ID: ${manifest.projectId}`);
   if (manifest.projectType === "workspace") {
-    console.log(`  [+] Repositories: ${manifest.repositories.length}`);
+    console.log(`  ${ok} Repositories: ${manifest.repositories.length}`);
     for (const repo of manifest.repositories) {
-      console.log(`        - ${repo.relativePath}`);
+      console.log(pc.dim(`        - ${repo.relativePath}`));
     }
   }
   if (migratedFrom) {
-    console.log(`  [+] Migrated existing project — identity preserved (from ${migratedFrom}).`);
+    console.log(`  ${ok} Migrated existing project — identity preserved (from ${migratedFrom}).`);
   }
 
   // Add .adit/ to .gitignore if not already there
@@ -124,68 +140,112 @@ export async function initCommand(opts: {
     const content = readFileSync(gitignorePath, "utf-8");
     if (!content.includes(".adit/")) {
       writeFileSync(gitignorePath, content.trimEnd() + "\n.adit/\n");
-      console.log("  [+] Added .adit/ to .gitignore");
+      console.log(`  ${ok} Added .adit/ to .gitignore`);
     } else {
-      console.log("  [+] .gitignore already includes .adit/");
+      console.log(pc.dim("  [=] .gitignore already includes .adit/"));
     }
   } else {
     writeFileSync(gitignorePath, ".adit/\n");
-    console.log("  [+] Created .gitignore with .adit/");
+    console.log(`  ${ok} Created .gitignore with .adit/`);
   }
 
   // --- Step 3: Platform detection & hook installation ---
   console.log();
-  console.log("  Platforms");
-  console.log("  ---------");
+  console.log(sectionTitle("  Platforms"));
 
   const aditBinaryPath = resolveAditHookBinary();
   const installed: string[] = [];
   const skipped: string[] = [];
+  const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
   if (opts.platform) {
-    // Explicit platform specified
+    // Explicit platform specified — install exactly that one and record it.
     const platform = opts.platform as Platform;
     try {
       const adapter = getAdapter(platform);
       await adapter.installHooks(setupRoot, aditBinaryPath);
+      await addConnectedPlatforms(setupRoot, [platform]);
       installed.push(adapter.displayName);
-      console.log(`  [+] ${adapter.displayName} — ${adapter.hookMappings.length} hook events installed`);
+      console.log(`  ${marks.ok} ${adapter.displayName} ${pc.dim(`— ${adapter.hookMappings.length} hook events installed`)}`);
     } catch (err) {
       skipped.push(platform);
-      console.log(`  [x] ${platform} — install failed: ${(err as Error).message}`);
+      console.log(`  ${marks.fail} ${platform} — install failed: ${(err as Error).message}`);
     }
   } else {
-    // Auto-detect: install hooks for all detected platforms
-    const platforms = detectPlatforms(setupRoot);
-    if (platforms.length === 0) {
-      console.log("  [ ] No AI platforms detected in this project.");
-      console.log("      Supported: Claude Code (.claude/), OpenCode (.opencode/)");
-      console.log("      Run 'adit hook install <platform>' to add one manually.");
+    // Full-list selection: every supported platform is shown; connected ones
+    // are pre-checked from the record, detection is annotation (and the
+    // default only on a first run with no record).
+    const recorded = readConnectedPlatforms(setupRoot);
+    const connected = recorded ?? (await ensureConnectedPlatformsRecorded(setupRoot));
+    const hasRecord = recorded !== null || connected.length > 0;
+    const detected = detectInstalledPlatforms();
+    const choices = buildPlatformChoices({ connected, detected, hasRecord });
+
+    console.log("  Select the AI tools to record in this project:");
+    let finalChecked: Set<Platform>;
+    if (!interactive) {
+      // Non-interactive runs never disconnect anything: keep the current
+      // connections and add newly detected CLIs, same as before.
+      finalChecked = new Set([
+        ...choices.filter((choice) => choice.connected).map((choice) => choice.platform),
+        ...choices
+          .filter((choice) => choice.detected && !choice.manual)
+          .map((choice) => choice.platform),
+      ]);
+      printChoiceList(choices);
+      console.log("  Non-interactive run: keeping current connections and connecting newly detected tools.");
     } else {
-      for (const platform of platforms) {
-        try {
-          const adapter = getAdapter(platform);
-          // Skip stub adapters (no hook mappings)
-          if (adapter.hookMappings.length === 0) {
-            skipped.push(adapter.displayName);
-            console.log(`  [-] ${adapter.displayName} — detected but not yet supported`);
-            continue;
-          }
-          await adapter.installHooks(setupRoot, aditBinaryPath);
-          installed.push(adapter.displayName);
-          console.log(`  [+] ${adapter.displayName} — ${adapter.hookMappings.length} hook events installed`);
-        } catch (err) {
-          skipped.push(platform);
-          console.log(`  [x] ${platform} — install failed: ${(err as Error).message}`);
-        }
+      // Both widgets confirm disconnects themselves before returning.
+      finalChecked = await selectPlatforms(choices);
+    }
+
+    const plan = diffSelection(choices, finalChecked);
+    for (const platform of plan.toConnect) {
+      try {
+        const adapter = getAdapter(platform);
+        await adapter.installHooks(setupRoot, aditBinaryPath);
+        installed.push(adapter.displayName);
+        console.log(`  ${marks.ok} ${adapter.displayName} ${pc.dim(`— ${adapter.hookMappings.length} hook events installed`)}`);
+      } catch (err) {
+        skipped.push(platform);
+        console.log(`  ${marks.fail} ${platform} — install failed: ${(err as Error).message}`);
       }
     }
+    for (const platform of plan.toDisconnect) {
+      try {
+        const adapter = getAdapter(platform);
+        await adapter.uninstallHooks(setupRoot);
+        console.log(`  ${marks.change} ${adapter.displayName} ${pc.dim("— hooks removed")}`);
+      } catch (err) {
+        console.log(`  ${marks.fail} ${platform} — uninstall failed: ${(err as Error).message}`);
+      }
+    }
+    // Refreshing still-connected platforms unconditionally keeps re-running
+    // init as the repair path when a hook points at a removed adit install.
+    for (const platform of plan.toRefresh) {
+      try {
+        const adapter = getAdapter(platform);
+        if (adapter.hookMappings.length === 0) continue;
+        await adapter.installHooks(setupRoot, aditBinaryPath);
+        console.log(pc.dim(`  [=] ${adapter.displayName} — connected, hooks refreshed`));
+      } catch (err) {
+        console.log(`  ${marks.fail} ${platform} — refresh failed: ${(err as Error).message}`);
+      }
+    }
+    writeConnectedPlatforms(setupRoot, plan.finalRecord);
+    console.log(pc.dim("  Tip: run 'adit init' any time to change these."));
   }
+
+  // --- Cloud: optional login + link (skippable, never fails init) ---
+  const cloudResult = await runCloudSetupSection({
+    interactive,
+    projectId: manifest.projectId,
+    dbPath: config.dbPath,
+  });
 
   // --- Step 4: Generate document templates ---
   console.log();
-  console.log("  Project Documents");
-  console.log("  -----------------");
+  console.log(sectionTitle("  Project Documents"));
 
   const docsDir = join(config.dataDir, "docs");
   const projectName = basename(setupRoot);
@@ -203,12 +263,10 @@ export async function initCommand(opts: {
     const filePath = join(docsDir, file);
     if (existsSync(filePath)) {
       docsExisting++;
-      console.log(`  [=] ${file} already exists`);
     } else {
       if (docsCreated === 0) mkdirSync(docsDir, { recursive: true });
       writeFileSync(filePath, renderer(projectName), "utf-8");
       docsCreated++;
-      console.log(`  [+] Created ${file}`);
     }
   }
 
@@ -218,35 +276,61 @@ export async function initCommand(opts: {
   const promptsDir = join(config.dataDir, "prompts");
   mkdirSync(promptsDir, { recursive: true });
   const promptPath = join(promptsDir, "generate-docs.md");
-  const promptExisted = existsSync(promptPath);
   writeFileSync(promptPath, renderGenerateDocsPrompt(), "utf-8");
-  console.log(`  [${promptExisted ? "=" : "+"}] ${promptExisted ? "Refreshed" : "Created"} ${GENERATE_DOCS_PROMPT_PATH}`);
 
-  if (docsCreated > 0 || docsExisting > 0) {
-    console.log(`\n  ${pc.cyan("Next step:")} Ask your AI agent to read ${pc.bold(GENERATE_DOCS_PROMPT_PATH)} and follow it to fill the documents.`);
+  if (docsCreated > 0) {
+    const existingNote = docsExisting > 0 ? ` · ${docsExisting} already exist` : "";
+    console.log(`  ${marks.ok} Created ${docsCreated} doc templates${pc.dim(existingNote)} + ${GENERATE_DOCS_PROMPT_PATH}`);
+  } else {
+    console.log(pc.dim(`  [=] ${docsExisting} doc templates exist · generate-docs prompt refreshed`));
   }
 
   // --- Summary ---
   console.log();
-  if (installed.length > 0) {
-    console.log("  Done! ADIT is ready.");
+  const finalConnected = readConnectedPlatforms(setupRoot) ?? [];
+  if (finalConnected.length > 0 || installed.length > 0) {
+    console.log(pc.bold(pc.green("  Done! ADIT is ready.")));
     console.log();
-    console.log(`  Installed for: ${installed.join(", ")}`);
-    console.log("  Run 'adit timeline' to view the timeline after your first prompt.");
+    if (finalConnected.length > 0) {
+      const names = finalConnected.map((platform) => getAdapter(platform).displayName);
+      console.log(`  Connected platforms: ${names.join(", ")}`);
+    } else {
+      console.log(`  Installed for: ${installed.join(", ")}`);
+    }
   } else {
-    console.log("  Done! ADIT data directory is ready.");
+    console.log(pc.bold(pc.green("  Done! ADIT data directory is ready (not recording yet).")));
     console.log();
-    console.log("  No platform hooks were installed.");
-    console.log("  Run 'adit hook install <platform>' when you're ready to add one.");
+    console.log("  No AI tools connected. Re-run 'adit init' after installing one,");
+    console.log("  or run 'adit hook install <platform>' to connect one manually.");
   }
   if (skipped.length > 0) {
-    console.log(`  Skipped: ${skipped.join(", ")}`);
+    console.log(`  ${pc.yellow("Skipped:")} ${skipped.join(", ")}`);
   }
   if (manifest.projectType === "workspace") {
-    console.log();
-    console.log(`  ${pc.cyan("Tip:")} start Claude Code / Codex from this directory — work across all ${manifest.repositories.length} repositories is recorded.`);
-    console.log("       Sessions started inside a member repository are not recorded.");
+    console.log(pc.dim(`  Tip: start Claude Code / Codex from this directory — work across all ${manifest.repositories.length} repositories is recorded;`));
+    console.log(pc.dim("       sessions started inside a member repository are not."));
   }
-  console.log(`\n  ${pc.cyan("Next step:")} run ${pc.bold("adit cloud link")} to connect this project to the cloud.`);
+  if (!cloudResult.linked) {
+    console.log(`\n  ${pc.cyan("Next step:")} run ${pc.bold("adit cloud link")} to connect this project to the cloud.`);
+  }
+  console.log(`\n  ${pc.cyan("Next step:")} ask your AI agent to follow ${pc.bold(GENERATE_DOCS_PROMPT_PATH)}`);
+  console.log(pc.dim("             (fills the project docs, also unlocks cloud qualification),"));
+  console.log(`             then run ${pc.bold("'adit timeline'")} after your first prompt.`);
   console.log();
 }
+
+/**
+ * Run the checkbox selection: the ink widget where the terminal supports it,
+ * the plain readline prompt otherwise (or when ADIT_PLAIN_PROMPTS is set).
+ */
+async function selectPlatforms(choices: PlatformChoice[]): Promise<Set<Platform>> {
+  if (canUseInkSelect()) {
+    try {
+      return await runInkPlatformSelect(choices);
+    } catch {
+      // Terminal rejected raw mode — fall through to the plain prompt.
+    }
+  }
+  return promptPlatformSelectionFallback(choices);
+}
+

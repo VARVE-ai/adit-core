@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   detectPlatforms: vi.fn(),
   getAdapter: vi.fn(),
   resolveAditHookBinary: vi.fn(),
+  ensureConnectedPlatformsRecorded: vi.fn(async () => [] as string[]),
 }));
 
 vi.mock("node:child_process", () => ({
@@ -43,6 +44,10 @@ vi.mock("@varveai/adit-hooks/adapters", () => ({
 
 vi.mock("./project-initialization.js", () => ({
   loadInitializedProjectConfig: mocks.loadInitializedProjectConfig,
+}));
+
+vi.mock("./connected-platforms.js", () => ({
+  ensureConnectedPlatformsRecorded: mocks.ensureConnectedPlatformsRecorded,
 }));
 
 import { doctorCommand } from "./doctor.js";
@@ -80,6 +85,7 @@ describe("doctorCommand", () => {
     mocks.getRemoteUrl.mockResolvedValue("https://example.com/repo.git");
     mocks.discoverWorkspaceRepositories.mockReturnValue([]);
     mocks.detectPlatforms.mockReturnValue([]);
+    mocks.ensureConnectedPlatformsRecorded.mockResolvedValue([]);
     mocks.resolveAditHookBinary.mockReturnValue("adit-hook");
     mocks.detectPlatform.mockReturnValue("other");
     mocks.getAdapter.mockReturnValue({
@@ -109,7 +115,7 @@ describe("doctorCommand", () => {
       .map((args) => args.join(" "))
       .join("\n");
 
-    expect(output).toContain("Hooks config: No platform hooks found");
+    expect(output).toContain("Hooks config: No platforms connected — run 'adit init'");
     expect(output).not.toContain("Unknown Platform settings");
     expect(output).not.toContain("Unknown Platform support");
   });
@@ -149,7 +155,7 @@ describe("doctorCommand", () => {
     expect(output).not.toContain("git check skipped");
   });
 
-  it("only reports hook adapters detected in the current project root", async () => {
+  it("only reports hook adapters connected to the project", async () => {
     const claudeAdapter = {
       platform: "claude-code",
       displayName: "Claude Code",
@@ -160,7 +166,7 @@ describe("doctorCommand", () => {
       })),
       installHooks: vi.fn(),
     };
-    mocks.detectPlatforms.mockReturnValue(["claude-code"]);
+    mocks.ensureConnectedPlatformsRecorded.mockResolvedValue(["claude-code"]);
     mocks.getAdapter.mockImplementation((platform: string) => {
       if (platform === "claude-code") return claudeAdapter;
       return {

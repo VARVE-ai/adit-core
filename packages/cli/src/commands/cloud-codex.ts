@@ -17,6 +17,7 @@ import {
   installCodexHooks,
   type InstalledHooks,
 } from "./cli-agent/codex/hooks-bootstrap.js";
+import { ensureConnectedPlatformsRecorded } from "./connected-platforms.js";
 import { startCliAgentHookServer, type HookServer } from "./cli-agent/hook-server.js";
 import { CodexLocalSessionLister, LocalSessionsReporter } from "./cli-agent/local-sessions.js";
 import {
@@ -452,11 +453,16 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
   };
 
   try {
-    const installedPersistentHooks = await ensurePersistentCodexHooksInstalled({
-      cwd: config.projectRoot,
-    });
-    if (installedPersistentHooks) {
-      notices.line("Installed ADIT Codex hooks for local timeline tracking.");
+    // Self-heal only repairs platforms the user connected; a project where
+    // Codex was never connected is left untouched.
+    const connectedPlatforms = await ensureConnectedPlatformsRecorded(config.projectRoot);
+    if (connectedPlatforms.includes("codex")) {
+      const installedPersistentHooks = await ensurePersistentCodexHooksInstalled({
+        cwd: config.projectRoot,
+      });
+      if (installedPersistentHooks) {
+        notices.line("Reinstalled ADIT Codex hooks for local timeline tracking.");
+      }
     }
   } catch (error) {
     notices.line(

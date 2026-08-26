@@ -342,16 +342,16 @@ export function createProgram(): Command {
     .option("--skip-qualify", "Skip document quality check")
     .option("--dry-run", "Preview without uploading")
     .option("--json", "Output result as JSON")
-    .action(withUpdateWarning("cloud.link", (opts) =>
-      projectLinkCliHandler({
+    .action(withUpdateWarning("cloud.link", async (opts) => {
+      await projectLinkCliHandler({
         force: opts.force,
         skipDocs: opts.skipDocs,
         skipCommits: opts.skipCommits,
         skipQualify: opts.skipQualify,
         dryRun: opts.dryRun,
         json: opts.json,
-      }),
-    ));
+      });
+    }));
 
   // cloud intent — list/view intents, with complete subcommand
   const intentCmd = cloudCmd
