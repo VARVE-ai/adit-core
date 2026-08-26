@@ -44,8 +44,8 @@ die()   { err "$*"; exit 1; }
 debug() { [[ "${ADIT_DEBUG:-}" == "1" ]] && printf "[debug] %s\n" "$*" >&2 || true; }
 
 # ── Constants ───────────────────────────────────────────────────────
-REQUIRED_NODE_MAJOR=20
-REQUIRED_PNPM_MAJOR=9
+REQUIRED_NODE_MAJOR=22
+REQUIRED_PNPM_MAJOR=11
 ADIT_REPO="https://github.com/VARVE-ai/adit-core.git"
 ADIT_INSTALL_DIR="${ADIT_INSTALL_DIR:-$HOME/.adit-core}"
 INSTALL_MODE="fresh"  # fresh | upgrade | up_to_date

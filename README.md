@@ -88,9 +88,8 @@ adit hook list
 
 ### npm
 
-ADIT installs without native build tools on Node.js 22, 24, 25, and 26.
-Node.js 20 and 23 require a local native build toolchain; switching to one of
-the prebuilt-supported versions is recommended for the simplest installation.
+ADIT requires Node.js 22 or newer and installs without native build tools:
+prebuilt SQLite binaries for all supported platforms ship inside the package.
 
 ```bash
 npm install -g @varveai/adit-cli
@@ -400,13 +399,13 @@ pnpm test -- packages/core/src/db/events.test.ts
 
 ## Requirements
 
-- Node.js >= 20.0.0
-- pnpm >= 9.0.0
+- Node.js >= 22.0.0
+- pnpm >= 11.0.0
 - Git
 
-`@varveai/adit-core` depends on `better-sqlite3`. The package includes a native
-preflight check so unsupported Node/platform combinations fail with guidance
-instead of silently falling through to a long `node-gyp` build.
+`@varveai/adit-core` depends on `better-sqlite3` v13, which bundles prebuilt
+binaries for all supported platforms inside the npm package, so no native
+build toolchain or install-time binary download is needed.
 
 ## License
 

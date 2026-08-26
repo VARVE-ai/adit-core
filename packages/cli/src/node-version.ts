@@ -9,7 +9,7 @@
  * and REQUIRED_NODE_MAJOR in install.sh.
  */
 
-export const REQUIRED_NODE_MAJOR = 20;
+export const REQUIRED_NODE_MAJOR = 22;
 
 export function isSupportedNodeVersion(version: string): boolean {
   const major = Number(version.split(".")[0]);

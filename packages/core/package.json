@@ -4,11 +4,10 @@
   "description": "Core types, database, and sync primitives for ADIT",
   "type": "module",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "files": [
-    "dist",
-    "scripts"
+    "dist"
   ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -19,12 +18,11 @@
     }
   },
   "scripts": {
-    "preinstall": "node ./scripts/check-native-install.js",
     "build": "tsc",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "better-sqlite3": "12.10.0",
+    "better-sqlite3": "13.0.3",
     "ulid": "^2.3.0"
   },
   "devDependencies": {

@@ -4,7 +4,7 @@
   "description": "Hook handlers for AI coding platforms",
   "type": "module",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "files": [
     "dist"

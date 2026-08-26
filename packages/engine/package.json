@@ -4,7 +4,7 @@
   "description": "Git operations, snapshots, detection, and timeline engine for ADIT",
   "type": "module",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "files": [
     "dist"
