@@ -113,17 +113,6 @@ export async function dispatchHook(
       }
     });
 
-    // Trigger transcript upload (fail-open).
-    // Every hook event carries transcript_path, so we check on each event.
-    // Awaited so db stays open until the query finishes.
-    if (input.transcriptPath) {
-      await withPerf(dataDir, "hook", "transcript-upload", () =>
-        triggerTranscriptUploadIfEnabled(ctx, input),
-      ).catch(() => {
-        /* fail-open */
-      });
-    }
-
     // Auto-sync to cloud on stable hook boundaries (fail-open).
     // Uses dynamic import so @varveai/adit-cloud is not a build-time dependency.
     // The module name is constructed to prevent TypeScript from resolving it.
@@ -644,37 +633,4 @@ async function handleSubagentStop(ctx: HookContext, input: NormalizedHookInput):
       ? JSON.stringify({ lastAssistantMessage: input.lastAssistantMessage })
       : null,
   });
-}
-
-/**
- * Trigger transcript upload if cloud is configured.
- *
- * Uses dynamic import so @varveai/adit-cloud is not a build-time dependency.
- * Fully fail-open: errors are silently swallowed.
- *
- * Reuses the existing HookContext to avoid opening a second DB connection.
- */
-async function triggerTranscriptUploadIfEnabled(
-  ctx: HookContext,
-  input: NormalizedHookInput,
-): Promise<void> {
-  if (!input.transcriptPath) return;
-
-  try {
-    const cloudModuleName = ["@varveai", "adit-cloud"].join("/");
-    const cloudModule = (await import(cloudModuleName)) as {
-      triggerTranscriptUpload: (
-        db: unknown,
-        sessionId: string,
-        transcriptPath: string,
-      ) => Promise<void>;
-    };
-    await cloudModule.triggerTranscriptUpload(
-      ctx.db,
-      ctx.session.id,
-      input.transcriptPath,
-    );
-  } catch {
-    // @varveai/adit-cloud not installed or other error — silently skip
-  }
 }

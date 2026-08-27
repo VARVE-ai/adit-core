@@ -133,13 +133,7 @@ function setupDefaults() {
     batchSize: 500,
     syncThreshold: 20,
     syncTimeoutHours: 2,
-    transcriptUpload: {
-      enabled: false,
-      pollIntervalSec: 30,
-      maxConcurrent: 2,
-      maxRetries: 3,
-      minIncrementBytes: 1024,
-    },
+    projectLink: { autoSync: true, staleHours: 2 },
   });
 
   mockLoadCredentials.mockReturnValue({
@@ -276,13 +270,7 @@ describe("triggerAutoSync", () => {
       batchSize: 500,
       syncThreshold: 20,
       syncTimeoutHours: 1, // 1 hour
-      transcriptUpload: {
-        enabled: false,
-        pollIntervalSec: 30,
-        maxConcurrent: 2,
-        maxRetries: 3,
-        minIncrementBytes: 1024,
-      },
+      projectLink: { autoSync: true, staleHours: 2 },
     });
 
     // Last sync was 2 hours ago (>1h timeout)
@@ -319,13 +307,7 @@ describe("triggerAutoSync", () => {
       batchSize: 500,
       syncThreshold: 20,
       syncTimeoutHours: 2,
-      transcriptUpload: {
-        enabled: false,
-        pollIntervalSec: 30,
-        maxConcurrent: 2,
-        maxRetries: 3,
-        minIncrementBytes: 1024,
-      },
+      projectLink: { autoSync: true, staleHours: 2 },
     });
     mockCountUnsyncedEvents.mockReturnValue(25);
 

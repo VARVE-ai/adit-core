@@ -19,8 +19,6 @@ export interface CloudConfig {
   syncThreshold: number;
   /** Hours since last successful sync before auto-sync triggers regardless of count (default: 2) */
   syncTimeoutHours: number;
-  /** Transcript upload configuration */
-  transcriptUpload: TranscriptUploadConfig;
   /** Project-link auto-sync configuration */
   projectLink: ProjectLinkConfig;
 }
@@ -30,19 +28,6 @@ export interface ProjectLinkConfig {
   autoSync: boolean;
   /** Hours before cached project-link data is considered stale (default: 2) */
   staleHours: number;
-}
-
-export interface TranscriptUploadConfig {
-  /** Whether transcript upload is enabled (default: true) */
-  enabled: boolean;
-  /** Interval in seconds between upload checks (default: 30) */
-  pollIntervalSec: number;
-  /** Max concurrent uploads (default: 2) */
-  maxConcurrent: number;
-  /** Max consecutive failures per file before giving up (default: 3) */
-  maxRetries: number;
-  /** Minimum bytes of new data before uploading an increment (default: 1024) */
-  minIncrementBytes: number;
 }
 
 /** Default cloud server URL */
@@ -75,30 +60,7 @@ export function loadCloudConfig(): CloudConfig {
     syncTimeoutHours: parseSyncTimeoutHours(
       process.env.ADIT_CLOUD_SYNC_TIMEOUT_HOURS,
     ),
-    transcriptUpload: loadTranscriptUploadConfig(),
     projectLink: loadProjectLinkConfig(),
-  };
-}
-
-function loadTranscriptUploadConfig(): TranscriptUploadConfig {
-  return {
-    enabled: process.env.ADIT_TRANSCRIPT_UPLOAD !== "false",
-    pollIntervalSec: parsePositiveInt(
-      process.env.ADIT_TRANSCRIPT_POLL_INTERVAL,
-      30,
-    ),
-    maxConcurrent: parsePositiveInt(
-      process.env.ADIT_TRANSCRIPT_MAX_CONCURRENT,
-      2,
-    ),
-    maxRetries: parsePositiveInt(
-      process.env.ADIT_TRANSCRIPT_MAX_RETRIES,
-      3,
-    ),
-    minIncrementBytes: parsePositiveInt(
-      process.env.ADIT_TRANSCRIPT_MIN_INCREMENT,
-      1024,
-    ),
   };
 }
 
@@ -133,11 +95,4 @@ function parseSyncThreshold(raw: string | undefined): number {
   const parsed = parseInt(raw, 10);
   if (Number.isNaN(parsed)) return DEFAULT;
   return Math.max(parsed, 1);
-}
-
-function parsePositiveInt(raw: string | undefined, defaultVal: number): number {
-  if (raw === undefined) return defaultVal;
-  const parsed = parseInt(raw, 10);
-  if (Number.isNaN(parsed) || parsed < 1) return defaultVal;
-  return parsed;
 }

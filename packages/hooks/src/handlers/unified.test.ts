@@ -41,7 +41,6 @@ vi.mock("@varveai/adit-engine", () => ({
 }));
 
 vi.mock("@varveai/adit-cloud", () => ({
-  triggerTranscriptUpload: vi.fn().mockResolvedValue(undefined),
   triggerAutoSync: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -63,7 +62,7 @@ vi.mock("../common/context.js", () => ({
 import { dispatchHook } from "./unified.js";
 import { endSession, mergeSessionMetadata } from "@varveai/adit-core";
 import { getCurrentBranch, getHeadSha } from "@varveai/adit-engine";
-import { triggerAutoSync, triggerTranscriptUpload } from "@varveai/adit-cloud";
+import { triggerAutoSync } from "@varveai/adit-cloud";
 import type { NormalizedHookInput } from "../adapters/types.js";
 
 const mockEndSession = vi.mocked(endSession);
@@ -71,7 +70,6 @@ const mockMergeSessionMetadata = vi.mocked(mergeSessionMetadata);
 const mockGetCurrentBranch = vi.mocked(getCurrentBranch);
 const mockGetHeadSha = vi.mocked(getHeadSha);
 const mockTriggerAutoSync = vi.mocked(triggerAutoSync);
-const mockTriggerTranscriptUpload = vi.mocked(triggerTranscriptUpload);
 
 describe("dispatchHook", () => {
   beforeEach(() => {
@@ -197,7 +195,6 @@ describe("dispatchHook", () => {
     expect(updateRun).toHaveBeenCalled();
     expect(mockRecordEvent).not.toHaveBeenCalled();
     expect(mockTriggerAutoSync).not.toHaveBeenCalled();
-    expect(mockTriggerTranscriptUpload).not.toHaveBeenCalled();
   });
 
   it("skips prompt-submit events from official subagents", async () => {
@@ -589,23 +586,6 @@ describe("dispatchHook", () => {
       expect.anything(),
       "proj-001",
       { projectRoot: "/test" },
-    );
-  });
-
-  it("triggers transcript upload through the cloud package when a transcript path exists", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "prompt-submit",
-      prompt: "Fix the bug in auth.ts",
-      transcriptPath: "/tmp/transcript.jsonl",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockTriggerTranscriptUpload).toHaveBeenCalledWith(
-      expect.anything(),
-      "sess-001",
-      "/tmp/transcript.jsonl",
     );
   });
 

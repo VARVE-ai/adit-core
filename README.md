@@ -33,8 +33,8 @@ the adit-cloud Coding panel.
   context, Docker signals, shell details, CPU/memory, and package managers.
 - **Environment drift detection** — Compares snapshots across sessions.
 - **Cloud sync** — Supports device-code login, static token auth, cursor-based
-  incremental push, per-project cursors, transcript upload, auto-sync, and a
-  rolling-window circuit breaker.
+  incremental push, per-project cursors, auto-sync, and a rolling-window
+  circuit breaker.
 - **Auto project link** — Syncs Git metadata and project documents to
   adit-cloud on session start with staleness-based caching.
 - **Platform session tracking** — Correlates ADIT records with platform-native
@@ -54,7 +54,7 @@ ADIT is a TypeScript pnpm monorepo with six packages:
 | `@varveai/adit-engine` | Git runner, working tree detection, timeline management, and environment capture/diff |
 | `@varveai/adit-hooks` | Hook dispatcher, fail-open handlers, platform adapter registry, and hook install/validate/uninstall logic |
 | `@varveai/adit-cli` | Commander.js CLI, cloud coding entry points, debug commands, docs commands, and React/Ink TUI |
-| `@varveai/adit-cloud` | Cloud config, device/token auth, HTTP client, incremental sync, transcript upload, project-link sync, and intent commands |
+| `@varveai/adit-cloud` | Cloud config, device/token auth, HTTP client, incremental sync, project-link sync, and intent commands |
 | `@varveai/adit-plans` | Project document template generator and validator |
 
 Package boundaries are intentionally small: `core` owns storage and shared
@@ -217,12 +217,6 @@ Common timeline options include `--limit`, `--actor`, `--type`,
 | `adit cloud sync` | Push unsynced local records to adit-cloud |
 | `adit cloud status` | Show cloud sync status and server reachability |
 | `adit cloud auth reset` | Clear credentials and sync state |
-| `adit cloud transcript enable` | Enable automatic transcript upload |
-| `adit cloud transcript disable` | Disable automatic transcript upload |
-| `adit cloud transcript status` | Show transcript upload status |
-| `adit cloud transcript upload` | Manually upload pending transcripts |
-| `adit cloud transcript reset <id>` | Reset a failed transcript upload |
-
 ### Cloud Coding
 
 | Command | Description |
@@ -282,19 +276,17 @@ search, `f` filter, `s` cycle sort, `Esc`/`b` back, and `q` quit.
 ## Cloud Sync
 
 Cloud sync is optional. After `adit cloud login`, ADIT automatically pushes
-local events, sessions, diffs, sync cursors, transcripts, Git metadata, and
-project documents to adit-cloud — being logged in is the opt-in. Environment
-snapshots remain local and are not included in Cloud sync payloads. The login
-command prints exactly what is uploaded and how to disable each channel;
-`adit status` surfaces sync health warnings.
+local events, sessions, diffs, sync cursors, Git metadata, and project documents
+to adit-cloud — being logged in is the opt-in. Raw platform transcript files
+remain local. Environment snapshots are also not included in Cloud sync
+payloads. The login command prints exactly what is uploaded and how to disable
+each channel; `adit status` surfaces sync health warnings.
 
 - Auto-sync runs after stable hook events when credentials are available.
 - `prompt-submit` is skipped so cloud does not receive a half-finished turn.
 - Each project tracks its own cursor with legacy global-cursor fallback.
 - Count-based auto-sync defaults to 10 unsynced events.
 - Time-based auto-sync defaults to 2 hours since the last successful sync.
-- Transcript upload supports polling, concurrency limits, retry limits, and
-  incremental byte thresholds.
 - Repeated failures trip a rolling-window circuit breaker and recover later.
 - Network and auth errors are fail-open and retried on later triggers.
 
@@ -304,7 +296,7 @@ By default, ADIT stores project-local data in `.adit/`:
 
 | Path | Purpose |
 | --- | --- |
-| `.adit/adit.sqlite` | Events, sessions, diffs, environment snapshots, transcript uploads, and sync state |
+| `.adit/adit.sqlite` | Events, sessions, diffs, environment snapshots, and sync state |
 
 Machine-level data is stored under `~/.adit/`:
 
@@ -361,11 +353,6 @@ Files larger than 500 KB are skipped with a warning.
 | `ADIT_CLOUD_SYNC_THRESHOLD` | Unsynced event count that triggers auto-sync | `10` |
 | `ADIT_CLOUD_SYNC_TIMEOUT_HOURS` | Hours after last sync that trigger auto-sync | `2` |
 | `ADIT_AUTH_TOKEN` | Static JWT token for CI/CD or non-interactive auth | unset |
-| `ADIT_TRANSCRIPT_UPLOAD` | Set to `false` to disable transcript upload | `true` |
-| `ADIT_TRANSCRIPT_POLL_INTERVAL` | Transcript upload poll interval in seconds | `30` |
-| `ADIT_TRANSCRIPT_MAX_CONCURRENT` | Max concurrent transcript uploads | `2` |
-| `ADIT_TRANSCRIPT_MAX_RETRIES` | Max consecutive transcript upload failures | `3` |
-| `ADIT_TRANSCRIPT_MIN_INCREMENT` | Minimum new transcript bytes before incremental upload | `1024` |
 | `ADIT_PROJECT_LINK_AUTO_SYNC` | Set to `false` to disable project-link auto-sync | `true` |
 | `ADIT_PROJECT_LINK_STALE_HOURS` | Project-link cache staleness threshold | `2` |
 | `ADIT_DEBUG` | Enable debug output and the hook debug log (`$TMPDIR/adit-hook-debug.jsonl`, size-capped) | unset |

@@ -25,9 +25,6 @@ export const UPDATE_CHECK_COMMANDS = new Set([
   "cloud.link",
   "cloud.intent",
   "cloud.intent.complete",
-  "cloud.transcript.status",
-  "cloud.transcript.upload",
-  "cloud.transcript.reset",
   "cloud.claude",
   "cloud.codex",
 ]);

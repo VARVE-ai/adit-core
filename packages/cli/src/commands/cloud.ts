@@ -576,7 +576,6 @@ function printUploadDisclosure(): void {
   console.log();
   console.log("While logged in, ADIT automatically uploads to this server:");
   console.log("  - Timeline events (prompts, responses, tool activity — as-is, unredacted)");
-  console.log("  - Session transcripts        disable: adit cloud transcript disable");
   console.log("  - Project docs & git metadata on session start");
   console.log("                               disable: ADIT_PROJECT_LINK_AUTO_SYNC=false");
   console.log();

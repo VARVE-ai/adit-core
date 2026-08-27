@@ -9,9 +9,9 @@
  * hook functions. The generated plugin listens for OpenCode events and
  * spawns `adit-hook` via child process to keep ADIT fail-open.
  *
- * OpenCode stores session data in SQLite (not a single transcript JSONL
- * like Claude Code), so transcript upload is not applicable here.
- * All hook events are synced to the ADIT server directly.
+ * OpenCode stores session data in SQLite rather than a transcript JSONL.
+ * The generated plugin exports a local JSONL snapshot so ADIT can recover
+ * assistant response text for the local timeline.
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
@@ -390,9 +390,8 @@ function spawnAditHookSync(hookType, data) {
 }
 
 // ---------------------------------------------------------------------------
-// Transcript collection — fetch messages from OpenCode's local HTTP API
-// and write them as JSONL so the existing transcript upload pipeline can
-// handle them identically to Claude Code transcripts.
+// Transcript collection — export messages to a local JSONL file so the
+// unified hook handler can recover assistant response text.
 // ---------------------------------------------------------------------------
 
 /**
@@ -408,7 +407,7 @@ function spawnAditHookSync(hookType, data) {
  */
 /**
  * Export session messages via "opencode export <sessionID>" CLI command
- * and write them as JSONL for the transcript upload pipeline.
+ * and write them as JSONL for local timeline recovery.
  *
  * OpenCode TUI does not expose an HTTP API — the SDK client's baseUrl
  * defaults to localhost:4096 which is only used by "opencode serve".
@@ -659,7 +658,7 @@ exports.AditPlugin = async (ctx) => {
             // use a different internal format.
             var idleSessionId = activeSessionId || props.sessionID;
 
-            // Export transcript via "opencode export" CLI and write JSONL.
+            // Export transcript locally so the stop hook can recover the reply.
             var transcriptPath = null;
             if (idleSessionId) {
               try {
@@ -764,7 +763,7 @@ export const opencodeAdapter: PlatformAdapter = {
       hookType: aditHookType,
       platformCli: "opencode",
       platformSessionId: raw.session_id as string | undefined,
-      // Transcript (JSONL written by plugin from OpenCode API)
+      // Local transcript used to recover the assistant reply
       transcriptPath: raw.transcript_path as string | undefined,
       // Prompt
       prompt: raw.prompt as string | undefined,

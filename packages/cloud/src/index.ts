@@ -60,25 +60,6 @@ export {
 } from "./sync/serializer.js";
 export { triggerAutoSync } from "./sync/auto-sync.js";
 
-// Transcript / file upload
-export {
-  triggerTranscriptUpload,
-  registerTranscript,
-  processTranscriptUploads,
-  uploadChunk,
-  uploadFull,
-  checkUploadStatus,
-  lookupUploadByPath,
-  type TranscriptManagerOptions,
-  type TranscriptProcessResult,
-  type SyncUploadType,
-  type SyncUploadResponse,
-  type SyncUploadStatus,
-  type UploadChunkParams,
-} from "./transcript/index.js";
-
-export { type TranscriptUploadConfig } from "./config.js";
-
 // Project Link
 export {
   linkCommand,

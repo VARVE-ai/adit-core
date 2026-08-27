@@ -61,14 +61,6 @@ export {
   upsertSyncState,
   applyAuthoritativeSyncState,
   clearSyncState,
-  upsertTranscriptUpload,
-  getTranscriptUpload,
-  getTranscriptUploadById,
-  listPendingTranscriptUploads,
-  markTranscriptUploaded,
-  markTranscriptUploadFailed,
-  resetTranscriptUpload,
-  countActiveTranscriptUploads,
   getSessionRepoHeads,
   upsertSessionRepoHead,
 } from "./db/index.js";
@@ -80,9 +72,6 @@ export type {
   DiffRecord,
   CreateEnvSnapshotInput,
   SyncState,
-  TranscriptUpload,
-  TranscriptUploadStatus,
-  UpsertTranscriptUploadInput,
   SessionRepoHead,
 } from "./db/index.js";
 

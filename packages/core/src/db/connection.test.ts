@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unlinkSync, existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import Database from "better-sqlite3";
 import { openDatabase, closeDatabase } from "./connection.js";
 
 function tempDbPath(): string {
@@ -41,6 +42,7 @@ describe("Database", () => {
     expect(tables).toContain("events");
     expect(tables).toContain("env_snapshots");
     expect(tables).not.toContain("plans");
+    expect(tables).not.toContain("transcript_uploads");
     expect(tables).toContain("diffs");
     expect(tables).toContain("_migrations");
 
@@ -67,6 +69,32 @@ describe("Database", () => {
       .get() as { count: number };
     expect(migrationCount.count).toBeGreaterThan(0);
     closeDatabase(db2);
+  });
+
+  it("drops the retired transcript upload table from existing databases", () => {
+    const path = tempDbPath();
+    paths.push(path);
+
+    const legacyDb = new Database(path);
+    legacyDb.exec(`
+      CREATE TABLE _migrations (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO _migrations (id, name)
+      VALUES (8, 'create_transcript_uploads');
+      CREATE TABLE transcript_uploads (id TEXT PRIMARY KEY);
+    `);
+    legacyDb.close();
+
+    const db = openDatabase(path);
+    const table = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get("transcript_uploads");
+
+    expect(table).toBeUndefined();
+    closeDatabase(db);
   });
 
   it("uses WAL mode", () => {

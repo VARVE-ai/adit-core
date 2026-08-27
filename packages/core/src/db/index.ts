@@ -58,17 +58,3 @@ export {
   upsertSessionRepoHead,
   type SessionRepoHead,
 } from "./session-repo-heads.js";
-
-export {
-  upsertTranscriptUpload,
-  getTranscriptUpload,
-  getTranscriptUploadById,
-  listPendingTranscriptUploads,
-  markTranscriptUploaded,
-  markTranscriptUploadFailed,
-  resetTranscriptUpload,
-  countActiveTranscriptUploads,
-  type TranscriptUpload,
-  type TranscriptUploadStatus,
-  type UpsertTranscriptUploadInput,
-} from "./transcript-uploads.js";
