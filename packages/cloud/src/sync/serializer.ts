@@ -70,7 +70,6 @@ export interface SyncEvent {
   ended_at: string | null;
   error_json: string | null;
   labels_json: string | null;
-  plan_task_id: string | null;
   vclock_json: string | null;
   deleted_at: string | null;
 }
@@ -98,21 +97,6 @@ export interface SyncEnvSnapshot {
   deleted_at: string | null;
 }
 
-export interface SyncPlan {
-  id: string;
-  project_id: string;
-  client_id: string;
-  plan_type: string;
-  parent_plan_id: string | null;
-  title: string;
-  content_md: string;
-  status: string;
-  created_at: string;
-  updated_at: string | null;
-  vclock_json: string | null;
-  deleted_at: string | null;
-}
-
 export interface SyncDiff {
   id: string;
   event_id: string;
@@ -127,7 +111,6 @@ export interface SyncBatch {
   events: SyncEvent[];
   /** Kept in the wire shape for server compatibility; local snapshots are never uploaded. */
   envSnapshots: SyncEnvSnapshot[];
-  plans: SyncPlan[];
   diffs: SyncDiff[];
 }
 
@@ -147,10 +130,10 @@ export interface BuildSyncBatchResult {
  * For append-only records (events, diffs), only selects new records with
  * id > cursor. Environment snapshots remain local and are never serialized.
  *
- * For mutable records (sessions, plans), also includes records modified
- * since lastSyncedAt so updates are captured.
+ * Mutable session records also include rows modified since lastSyncedAt so
+ * completion updates are captured.
  *
- * Priority ordering: sessions first (parents), then events, plans, diffs —
+ * Priority ordering: sessions first (parents), then events and their diffs,
  * maintaining referential integrity on the server.
  */
 export function buildSyncBatch(
@@ -165,7 +148,6 @@ export function buildSyncBatch(
     sessions: [],
     events: [],
     envSnapshots: [],
-    plans: [],
     diffs: [],
   };
 
@@ -196,20 +178,7 @@ export function buildSyncBatch(
     remaining -= batch.events.length;
   }
 
-  // 3. Plans — mutable, include modified
-  if (remaining > 0) {
-    batch.plans = queryPlans(
-      db,
-      afterEventId,
-      lastSyncedAt,
-      projectId,
-      cloudClientId,
-      remaining,
-    );
-    remaining -= batch.plans.length;
-  }
-
-  // 4. Diffs — keyed by event_id, only for events in this batch.
+  // 3. Diffs — keyed by event_id, only for events in this batch.
   //    Diffs are exempt from the record-count budget: an event whose diffs
   //    were dropped never retries them (the cursor moves past the event),
   //    so every shipped event must carry ALL of its diffs. Payload size is
@@ -309,8 +278,8 @@ function applyDiffByteCap(
  * Count unsynced events for a project.
  *
  * Used by auto-sync's count-based trigger: only events count toward the
- * threshold — session records, diffs, and plans ride along in the batch once
- * a sync is triggered. Environment snapshots always remain local.
+ * threshold — session records and diffs ride along in the batch once a sync
+ * is triggered. Environment snapshots always remain local.
  */
 export function countUnsyncedEvents(
   db: Database.Database,
@@ -376,7 +345,6 @@ export function batchRecordCount(batch: SyncBatch): number {
     batch.sessions.length +
     batch.events.length +
     batch.envSnapshots.length +
-    batch.plans.length +
     batch.diffs.length
   );
 }
@@ -481,52 +449,6 @@ function queryEvents(
     ended_at: (r.ended_at as string) ?? null,
     error_json: (r.error_json as string) ?? null,
     labels_json: (r.labels_json as string) ?? null,
-    plan_task_id: (r.plan_task_id as string) ?? null,
-    vclock_json: (r.vclock_json as string) ?? null,
-    deleted_at: (r.deleted_at as string) ?? null,
-  }));
-}
-
-function queryPlans(
-  db: Database.Database,
-  afterId: string | null,
-  lastSyncedAt: string | null,
-  projectId: string,
-  cloudClientId: string,
-  limit: number,
-): SyncPlan[] {
-  let sql: string;
-  const params: unknown[] = [];
-
-  if (afterId) {
-    const conditions = ["project_id = ?", "(id > ?"];
-    params.push(projectId, afterId);
-    if (lastSyncedAt) {
-      conditions[1] += " OR julianday(updated_at) > julianday(?)";
-      params.push(lastSyncedAt);
-    }
-    conditions[1] += ")";
-    sql = `SELECT * FROM plans WHERE ${conditions.join(" AND ")} ORDER BY id ASC LIMIT ?`;
-  } else {
-    const conditions = ["project_id = ?"];
-    params.push(projectId);
-    sql = `SELECT * FROM plans WHERE ${conditions.join(" AND ")} ORDER BY id ASC LIMIT ?`;
-  }
-  params.push(limit);
-
-  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
-
-  return rows.map((r) => ({
-    id: r.id as string,
-    project_id: r.project_id as string,
-    client_id: cloudClientId,
-    plan_type: r.plan_type as string,
-    parent_plan_id: (r.parent_plan_id as string) ?? null,
-    title: r.title as string,
-    content_md: r.content_md as string,
-    status: r.status as string,
-    created_at: r.created_at as string,
-    updated_at: (r.updated_at as string) ?? null,
     vclock_json: (r.vclock_json as string) ?? null,
     deleted_at: (r.deleted_at as string) ?? null,
   }));

@@ -1,16 +1,7 @@
 /**
- * @varveai/adit-plans — SpecFlow-inspired plan artifact generator.
+ * @varveai/adit-plans — Project document templates and validation.
  */
 
-export { renderIntentTemplate } from "./templates/intent.js";
-export { renderRoadmapTemplate } from "./templates/roadmap.js";
-export { renderTaskTemplate } from "./templates/task.js";
-export {
-  createPlanManager,
-  type PlanManager,
-} from "./generator/plan-manager.js";
-
-// Document spec and templates
 export {
   DOC_TYPES,
   DOC_TYPE_IDS,

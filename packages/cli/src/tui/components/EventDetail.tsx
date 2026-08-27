@@ -142,12 +142,6 @@ export function EventDetail({
         </Field>
       )}
 
-      {event.planTaskId && (
-        <Field label={`Plan Task:${" "}`}>
-          <Text>{event.planTaskId}</Text>
-        </Field>
-      )}
-
       {event.toolName && (
         <Field label={`Tool:${"      "}`}>
           <Text color="yellow">{event.toolName}</Text>

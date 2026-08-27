@@ -69,7 +69,6 @@ export const migrations: Migration[] = [
         status          TEXT NOT NULL DEFAULT 'running',
         error_json      TEXT,
         labels_json     TEXT,
-        plan_task_id    TEXT,
 
         vclock_json     TEXT NOT NULL,
         deleted_at      TEXT
@@ -110,30 +109,9 @@ export const migrations: Migration[] = [
         ON env_snapshots(session_id);
     `,
   },
-  {
-    id: 4,
-    name: "create_plans",
-    sql: `
-      CREATE TABLE IF NOT EXISTS plans (
-        id              TEXT PRIMARY KEY,
-        project_id      TEXT NOT NULL,
-        plan_type       TEXT NOT NULL,
-        parent_plan_id  TEXT REFERENCES plans(id),
-        title           TEXT NOT NULL,
-        content_md      TEXT NOT NULL,
-        status          TEXT NOT NULL DEFAULT 'draft',
-        created_at      TEXT NOT NULL,
-        updated_at      TEXT,
-        vclock_json     TEXT NOT NULL,
-        deleted_at      TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_plans_project
-        ON plans(project_id);
-      CREATE INDEX IF NOT EXISTS idx_plans_type
-        ON plans(plan_type) WHERE deleted_at IS NULL;
-    `,
-  },
+  // Migration 4 belonged to the retired local Plan model. Its ID remains
+  // reserved so databases created by older releases keep their migration
+  // history; their unused table is intentionally left intact for recovery.
   {
     id: 5,
     name: "create_diffs",

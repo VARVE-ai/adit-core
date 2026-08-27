@@ -31,7 +31,6 @@ function makeEvent(overrides: Partial<AditEvent>): AditEvent {
     status: "success",
     errorJson: null,
     labelsJson: null,
-    planTaskId: null,
     vclockJson: '{"node1":1}',
     deletedAt: null,
     ...overrides,

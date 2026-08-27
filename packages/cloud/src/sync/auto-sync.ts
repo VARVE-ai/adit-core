@@ -8,7 +8,7 @@
  * - `options.force` is true (used on session-end to flush all data), OR
  * - The number of unsynced events meets the configured threshold
  *   (ADIT_CLOUD_SYNC_THRESHOLD, default 10). Only events count toward
- *   the threshold; session records, diffs and plans ride along in the batch
+ *   the threshold; session records and diffs ride along in the batch
  *   once a sync is triggered. Environment snapshots remain local. OR
  * - More than syncTimeoutHours (default 2h) have elapsed since
  *   the last successful sync (ADIT_CLOUD_SYNC_TIMEOUT_HOURS).

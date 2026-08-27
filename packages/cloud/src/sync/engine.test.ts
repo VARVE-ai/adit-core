@@ -188,7 +188,7 @@ describe("SyncEngine", () => {
     mockBuildSyncBatch.mockImplementation((_db, afterId, _lastSyncedAt, _projectId, _clientId, limit) => {
       if (afterId) {
         return {
-          batch: { events: [], sessions: [], envSnapshots: [], plans: [], diffs: [] },
+          batch: { events: [], sessions: [], envSnapshots: [], diffs: [] },
           diffByteCapApplied: false,
         } as never;
       }
@@ -200,7 +200,6 @@ describe("SyncEngine", () => {
           })),
           sessions: [],
           envSnapshots: [],
-          plans: [],
           diffs: [],
         },
         diffByteCapApplied: false,

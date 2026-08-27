@@ -24,12 +24,6 @@ export type {
   AditSession,
 } from "./types/index.js";
 
-export type {
-  PlanType,
-  PlanStatus,
-  AditPlan,
-} from "./types/index.js";
-
 export type { EnvSnapshot, EnvDiff, EnvChange } from "./types/index.js";
 
 // Database
@@ -59,12 +53,6 @@ export {
   insertDiff,
   getDiffByEventId,
   getDiffText,
-  insertPlan,
-  getPlanById,
-  listPlans,
-  getChildPlans,
-  updatePlanStatus,
-  updatePlanContent,
   insertEnvSnapshot,
   getEnvSnapshotById,
   getLatestEnvSnapshot,
@@ -90,7 +78,6 @@ export type {
   InsertEventInput,
   EventQueryOptions,
   DiffRecord,
-  CreatePlanInput,
   CreateEnvSnapshotInput,
   SyncState,
   TranscriptUpload,

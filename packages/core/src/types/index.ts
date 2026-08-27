@@ -17,10 +17,4 @@ export type {
   AditSession,
 } from "./session.js";
 
-export type {
-  PlanType,
-  PlanStatus,
-  AditPlan,
-} from "./plan.js";
-
 export type { EnvSnapshot, EnvDiff, EnvChange } from "./environment.js";

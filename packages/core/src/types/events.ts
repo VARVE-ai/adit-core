@@ -19,7 +19,6 @@ export type EventType =
   | "git_commit" // Commit attributed to this session (gitHeadSha holds the commit sha itself)
   | "env_snapshot" // Environment captured
   | "env_drift" // DEPRECATED 2026-07: no longer collected; kept for historical rows
-  | "plan_update" // SpecFlow plan modified
   | "task_completed" // DEPRECATED 2026-07: no longer collected; kept for historical rows
   | "notification" // DEPRECATED 2026-07: no longer collected; kept for historical rows
   | "subagent_start" // Subagent spawned by the AI
@@ -115,9 +114,6 @@ export interface AditEvent {
   errorJson: string | null;
   /** User-assigned labels */
   labelsJson: string | null;
-  /** FK to plans table for SpecFlow task linking */
-  planTaskId: string | null;
-
   // -- Sync --
   /** Client that created this event (for multi-client provenance) */
   clientId: string | null;

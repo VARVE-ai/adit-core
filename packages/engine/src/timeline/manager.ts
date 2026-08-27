@@ -55,7 +55,6 @@ export interface RecordEventParams {
   toolInputJson?: string | null;
   toolOutputJson?: string | null;
   errorJson?: string | null;
-  planTaskId?: string | null;
   diffStatJson?: string | null;
   gitBranch?: string | null;
   gitHeadSha?: string | null;
@@ -106,7 +105,6 @@ export function createTimelineManager(
         status: "success",
         endedAt: now,
         errorJson: params.errorJson ?? null,
-        planTaskId: params.planTaskId ?? null,
         diffStatJson: params.diffStatJson ?? null,
         clientId: config.clientId,
         vclockJson: vclock,

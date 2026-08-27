@@ -55,12 +55,12 @@ ADIT is a TypeScript pnpm monorepo with six packages:
 | `@varveai/adit-hooks` | Hook dispatcher, fail-open handlers, platform adapter registry, and hook install/validate/uninstall logic |
 | `@varveai/adit-cli` | Commander.js CLI, cloud coding entry points, debug commands, docs commands, and React/Ink TUI |
 | `@varveai/adit-cloud` | Cloud config, device/token auth, HTTP client, incremental sync, transcript upload, project-link sync, and intent commands |
-| `@varveai/adit-plans` | SpecFlow-inspired plan manager and project document template generator/validator |
+| `@varveai/adit-plans` | Project document template generator and validator |
 
 Package boundaries are intentionally small: `core` owns storage and shared
 types, `engine` owns Git/timeline mechanics, `hooks` normalizes platform events,
-`cli` owns user commands, `cloud` owns remote sync, and `plans` owns planning
-artifacts.
+`cli` owns user commands, `cloud` owns remote sync, and `plans` owns project
+document templates and validation.
 
 ## Platform Support
 
@@ -304,8 +304,7 @@ By default, ADIT stores project-local data in `.adit/`:
 
 | Path | Purpose |
 | --- | --- |
-| `.adit/adit.sqlite` | Events, sessions, diffs, environment snapshots, plans, transcript uploads, and sync state |
-| `.adit/plans/` | Generated SpecFlow-style planning artifacts |
+| `.adit/adit.sqlite` | Events, sessions, diffs, environment snapshots, transcript uploads, and sync state |
 
 Machine-level data is stored under `~/.adit/`:
 

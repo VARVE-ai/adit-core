@@ -40,9 +40,15 @@ describe("Database", () => {
     expect(tables).toContain("sessions");
     expect(tables).toContain("events");
     expect(tables).toContain("env_snapshots");
-    expect(tables).toContain("plans");
+    expect(tables).not.toContain("plans");
     expect(tables).toContain("diffs");
     expect(tables).toContain("_migrations");
+
+    const eventColumns = db
+      .prepare("PRAGMA table_info(events)")
+      .all()
+      .map((r) => (r as { name: string }).name);
+    expect(eventColumns).not.toContain("plan_task_id");
 
     closeDatabase(db);
   });

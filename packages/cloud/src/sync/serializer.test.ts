@@ -121,6 +121,8 @@ describe("sync serializer", () => {
       "01H000000000000000000000030",
     ]);
     expect(batch.events.some((e) => e.event_type === "prompt_submit")).toBe(true);
+    expect(batch).not.toHaveProperty("plans");
+    expect(batch.events[0]).not.toHaveProperty("plan_task_id");
   });
 
   it("includes a prompt once the same session has a following assistant response", () => {
@@ -159,7 +161,7 @@ describe("sync serializer", () => {
     ]);
   });
 
-  it("compares mutable record timestamps across SQLite and ISO timezone formats", () => {
+  it("compares session timestamps across SQLite and ISO timezone formats", () => {
     const olderSessionId = "01H000000000000000000000001";
     const newerSessionId = "01H000000000000000000000002";
     const cursor = "01H000000000000000000000099";
@@ -171,18 +173,6 @@ describe("sync serializer", () => {
       .run("2026-07-13T16:00:00+08:00", olderSessionId);
     db.prepare("UPDATE sessions SET ended_at = ?, status = 'completed' WHERE id = ?")
       .run("2026-07-13T17:00:00+08:00", newerSessionId);
-    db.prepare(
-      `INSERT INTO plans (
-        id, project_id, plan_type, title, content_md, status,
-        created_at, updated_at, vclock_json
-      ) VALUES (?, ?, 'task', 'Mixed timestamp plan', '# Plan', 'active', ?, ?, '{}')`,
-    ).run(
-      "01H000000000000000000000003",
-      PROJECT_ID,
-      "2026-07-13 08:00:00",
-      "2026-07-13 09:00:00",
-    );
-
     const { batch } = buildSyncBatch(
       db,
       cursor,
@@ -193,9 +183,6 @@ describe("sync serializer", () => {
     );
 
     expect(batch.sessions.map((session) => session.id)).toEqual([newerSessionId]);
-    expect(batch.plans.map((plan) => plan.id)).toEqual([
-      "01H000000000000000000000003",
-    ]);
     expect(countUnsyncedRecords(db, cursor, lastSyncedAt, PROJECT_ID)).toBe(1);
     expect(countUnsyncedEvents(db, cursor, PROJECT_ID)).toBe(0);
   });
