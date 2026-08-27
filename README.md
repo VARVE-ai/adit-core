@@ -11,8 +11,8 @@ the adit-cloud Coding panel.
 ## What ADIT Does
 
 1. **Trace every AI-assisted change** — ADIT stores normalized timeline events
-   for user prompts, assistant turns, tools, subagents, notifications, session
-   lifecycle events, diffs, and related metadata.
+   for user prompts, assistant turns, tools, subagents, notifications, diffs,
+   and related metadata.
 2. **Capture per-turn file diffs** — ADIT extracts file mutations from platform
    transcripts on each turn and stores bounded diff text for inspection.
 3. **Bridge local CLIs to adit-cloud** — `adit cloud claude|codex` connects a
@@ -35,8 +35,10 @@ the adit-cloud Coding panel.
 - **Cloud sync** — Supports device-code login, static token auth, cursor-based
   incremental push, per-project cursors, auto-sync, and a rolling-window
   circuit breaker.
-- **Auto project link** — Syncs Git metadata and project documents to
-  adit-cloud on session start with staleness-based caching.
+- **Coordinated cloud sync** — A conversation batch uploads its Events,
+  Sessions, and Diffs first, then incrementally refreshes Git metadata for
+  projects that have already been linked. Project documents remain an explicit
+  `adit cloud link` operation.
 - **Platform session tracking** — Correlates ADIT records with platform-native
   session IDs.
 - **Interactive TUI** — React/Ink terminal UI with timeline, detail, search,
@@ -214,7 +216,7 @@ Common timeline options include `--limit`, `--actor`, `--type`,
 | --- | --- |
 | `adit cloud login` | Authenticate with device-code flow or `--token` |
 | `adit cloud logout` | Clear stored cloud credentials |
-| `adit cloud sync` | Push unsynced local records to adit-cloud |
+| `adit cloud sync` | Push unsynced conversation records, then linked Git metadata |
 | `adit cloud status` | Show cloud sync status and server reachability |
 | `adit cloud auth reset` | Clear credentials and sync state |
 ### Cloud Coding
@@ -276,17 +278,19 @@ search, `f` filter, `s` cycle sort, `Esc`/`b` back, and `q` quit.
 ## Cloud Sync
 
 Cloud sync is optional. After `adit cloud login`, ADIT automatically pushes
-local events, sessions, diffs, sync cursors, Git metadata, and project documents
-to adit-cloud — being logged in is the opt-in. Raw platform transcript files
-remain local. Environment snapshots are also not included in Cloud sync
-payloads. The login command prints exactly what is uploaded and how to disable
-each channel; `adit status` surfaces sync health warnings.
+local events with their related sessions and diffs. After a conversation batch
+succeeds, it incrementally refreshes Git metadata for repositories previously
+connected by `adit cloud link`. Project documents upload only when that command
+is run manually. Raw platform transcript files and environment snapshots remain
+local. The login command prints exactly what is uploaded and how to disable
+automatic sync; `adit status` surfaces sync health warnings.
 
 - Auto-sync runs after stable hook events when credentials are available.
 - `prompt-submit` is skipped so cloud does not receive a half-finished turn.
 - Each project tracks its own cursor with legacy global-cursor fallback.
 - Count-based auto-sync defaults to 10 unsynced events.
 - Time-based auto-sync defaults to 2 hours since the last successful sync.
+- Session start initializes local attribution state but does not upload anything.
 - Repeated failures trip a rolling-window circuit breaker and recover later.
 - Network and auth errors are fail-open and retried on later triggers.
 
@@ -353,8 +357,6 @@ Files larger than 500 KB are skipped with a warning.
 | `ADIT_CLOUD_SYNC_THRESHOLD` | Unsynced event count that triggers auto-sync | `10` |
 | `ADIT_CLOUD_SYNC_TIMEOUT_HOURS` | Hours after last sync that trigger auto-sync | `2` |
 | `ADIT_AUTH_TOKEN` | Static JWT token for CI/CD or non-interactive auth | unset |
-| `ADIT_PROJECT_LINK_AUTO_SYNC` | Set to `false` to disable project-link auto-sync | `true` |
-| `ADIT_PROJECT_LINK_STALE_HOURS` | Project-link cache staleness threshold | `2` |
 | `ADIT_DEBUG` | Enable debug output and the hook debug log (`$TMPDIR/adit-hook-debug.jsonl`, size-capped) | unset |
 | `ADIT_CODEX_BIN` | Override Codex binary used by cloud coding commands | unset |
 | `ADIT_INSTALL_DIR` | Override the upgrade install directory | unset |

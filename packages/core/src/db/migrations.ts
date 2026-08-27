@@ -255,4 +255,14 @@ export const migrations: Migration[] = [
       ALTER TABLE sessions DROP COLUMN status;
     `,
   },
+  {
+    id: 16,
+    name: "add_project_link_git_state",
+    sql: `
+      ALTER TABLE project_link_cache
+        ADD COLUMN git_ref_heads_json TEXT NOT NULL DEFAULT '{}';
+      ALTER TABLE project_link_cache
+        ADD COLUMN git_refs_fingerprint TEXT;
+    `,
+  },
 ];

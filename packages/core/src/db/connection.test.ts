@@ -59,6 +59,13 @@ describe("Database", () => {
     expect(sessionColumns).not.toContain("ended_at");
     expect(sessionColumns).not.toContain("status");
 
+    const projectLinkColumns = db
+      .prepare("PRAGMA table_info(project_link_cache)")
+      .all()
+      .map((r) => (r as { name: string }).name);
+    expect(projectLinkColumns).toContain("git_ref_heads_json");
+    expect(projectLinkColumns).toContain("git_refs_fingerprint");
+
     closeDatabase(db);
   });
 

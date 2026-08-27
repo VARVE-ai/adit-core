@@ -258,7 +258,7 @@ export function createProgram(): Command {
 
   cloudCmd
     .command("sync")
-    .description("Push unsynced records to cloud")
+    .description("Push conversation records, then linked Git metadata")
     .option("--json", "Output as JSON")
     .action(withUpdateWarning("cloud.sync", (opts) =>
       cloudSyncCommand({ json: opts.json }),

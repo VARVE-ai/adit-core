@@ -9,9 +9,6 @@
 export { linkCommand, WorkspaceLinkPartialFailureError } from "./link-command.js";
 export { intentCommand, formatIntentList, formatIntentDetail } from "./intent-command.js";
 
-// Auto-sync
-export { triggerProjectLinkSync } from "./auto-link.js";
-
 // Quality check
 export { checkQuality, formatQualityFeedback } from "./qualify.js";
 
@@ -25,7 +22,10 @@ export {
   collectCurrentBranch,
   collectGitIdentity,
   collectBranches,
+  branchHeadMap,
+  collectGitRefsFingerprint,
   collectCommitLogs,
+  collectCommitsBetweenRefSnapshots,
   collectCommitCount,
   resolveCommitBranches,
   projectNameFromRemoteUrl,
@@ -40,9 +40,12 @@ export {
   upsertProjectLinkCache,
   clearProjectLinkCache,
   updateCachedCommitSha,
+  updateCachedGitState,
   updateCachedDocHashes,
   updateCachedQualified,
 } from "./cache.js";
+
+export { syncLinkedGitMetadata, type GitSyncResult, type GitSyncFailure } from "./git-sync.js";
 
 // Types
 export type {

@@ -14,6 +14,7 @@ import {
   upsertProjectLinkCache,
   clearProjectLinkCache,
   updateCachedCommitSha,
+  updateCachedGitState,
   updateCachedDocHashes,
   updateCachedQualified,
 } from "./cache.js";
@@ -30,6 +31,8 @@ function makeCache(overrides: Partial<ProjectLinkCache> = {}): ProjectLinkCache 
     serverUrl: "https://cloud.example.com",
     confirmedProjectId: null,
     lastCommitSha: null,
+    gitRefHeads: {},
+    gitRefsFingerprint: null,
     lastBranchSyncAt: null,
     lastDocSyncAt: null,
     docHashes: {},
@@ -125,6 +128,23 @@ describe("Project Link Cache", () => {
     const result = getProjectLinkCache(db, cache.projectId, cache.serverUrl);
     expect(result!.docHashes).toEqual(newHashes);
     expect(result!.lastDocSyncAt).not.toBeNull();
+  });
+
+  it("updates the git cursor atomically", () => {
+    const cache = makeCache();
+    upsertProjectLinkCache(db, cache);
+
+    updateCachedGitState(db, cache.projectId, cache.serverUrl, {
+      refHeads: { main: "sha-main", feature: "sha-feature" },
+      refsFingerprint: "fingerprint-1",
+      lastCommitSha: "sha-feature",
+    });
+
+    const result = getProjectLinkCache(db, cache.projectId, cache.serverUrl);
+    expect(result!.gitRefHeads).toEqual({ main: "sha-main", feature: "sha-feature" });
+    expect(result!.gitRefsFingerprint).toBe("fingerprint-1");
+    expect(result!.lastCommitSha).toBe("sha-feature");
+    expect(result!.lastBranchSyncAt).not.toBeNull();
   });
 
   it("updates qualified status", () => {

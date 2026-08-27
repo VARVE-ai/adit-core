@@ -3,10 +3,11 @@
  *
  * Collects remote URL, branches, commit logs, and default branch
  * using the existing @varveai/adit-engine git runner. All functions are
- * fail-safe — they throw on critical errors (no git repo, no remote)
- * but return empty arrays for non-critical failures.
+ * fail-safe — they throw on critical errors (no git repo, no remote), while
+ * optional enrichments such as file stats may return empty results.
  */
 
+import { createHash } from "node:crypto";
 import { runGit, getRemoteUrl } from "@varveai/adit-engine";
 import type { GitBranch, GitCommit, GitCommitFileStat, GitIdentity } from "./types.js";
 
@@ -121,6 +122,28 @@ export async function collectBranches(cwd: string): Promise<GitBranch[]> {
   return Array.from(seen.values());
 }
 
+/** Build the branch-head snapshot used as the incremental git cursor. */
+export function branchHeadMap(branches: GitBranch[]): Record<string, string> {
+  return Object.fromEntries(branches.map((branch) => [branch.name, branch.headSha]));
+}
+
+/** Hash all known local and remote-tracking refs without walking commit history. */
+export async function collectGitRefsFingerprint(cwd: string): Promise<string | null> {
+  const result = await runGit(
+    [
+      "for-each-ref",
+      "refs/heads",
+      "refs/remotes",
+      "--sort=refname",
+      "--format=%(refname)%00%(objectname)",
+    ],
+    { cwd, timeout: 5_000 },
+  );
+
+  if (result.exitCode !== 0) return null;
+  return createHash("sha256").update(result.stdout).digest("hex");
+}
+
 function normalizeBranchRef(fullRef: string, shortRef: string): string | null {
   const trimmedFullRef = fullRef.trim();
   const trimmedShortRef = shortRef.trim();
@@ -220,11 +243,48 @@ export async function collectCommitLogs(
   const result = await runGit(args, { cwd, timeout: 30_000 });
   if (result.exitCode !== 0) return [];
 
+  return parseCommitLog(result.stdout, branch);
+}
+
+/**
+ * Collect commits newly reachable from the current branch heads.
+ *
+ * Every previous head is excluded, so branch creation, merge, force-push and
+ * deletion are handled from the complete ref snapshot rather than one global
+ * last SHA. Missing old objects are ignored and the remaining refs still sync.
+ */
+export async function collectCommitsBetweenRefSnapshots(
+  cwd: string,
+  currentHeads: Record<string, string>,
+  previousHeads: Record<string, string>,
+): Promise<GitCommit[]> {
+  const include = Array.from(new Set(Object.values(currentHeads).filter(Boolean)));
+  if (include.length === 0) return [];
+
+  const exclude: string[] = [];
+  for (const sha of new Set(Object.values(previousHeads).filter(Boolean))) {
+    const exists = await runGit(["cat-file", "-e", `${sha}^{commit}`], { cwd });
+    if (exists.exitCode === 0) exclude.push(`^${sha}`);
+  }
+
+  const args = [
+    "log",
+    "--format=%H%x01%P%x01%an%x01%ae%x01%aI%x01%B%x00",
+    ...include,
+    ...exclude,
+  ];
+  const result = await runGit(args, { cwd, timeout: 30_000 });
+  if (result.exitCode !== 0) {
+    throw new Error(`Unable to collect incremental git history: ${result.stderr.trim() || "git log failed"}`);
+  }
+
+  return parseCommitLog(result.stdout);
+}
+
+function parseCommitLog(stdout: string, branch?: string | null): GitCommit[] {
   const commits: GitCommit[] = [];
 
-  // Split on NUL to get individual commit records.
-  // %B includes a trailing newline; we trim each record to strip it.
-  for (const record of result.stdout.split("\0")) {
+  for (const record of stdout.split("\0")) {
     const trimmed = record.trim();
     if (!trimmed) continue;
 
@@ -232,15 +292,12 @@ export async function collectCommitLogs(
     if (fields.length < 6) continue;
 
     const parentSha = fields[1]?.trim().split(/\s+/).filter(Boolean)[0] ?? null;
-
     commits.push({
       sha: fields[0],
       parentSha,
       authorName: fields[2],
       authorEmail: fields[3],
       date: fields[4],
-      // %B may contain SOH-free multi-line text; everything after the 5th
-      // SOH is the message (rejoin in case of unexpected extra SOH chars).
       message: fields.slice(5).join("\x01").trim(),
       branch: branch ?? undefined,
     });

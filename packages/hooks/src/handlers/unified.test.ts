@@ -538,7 +538,7 @@ describe("dispatchHook", () => {
     expect(mockMergeSessionMetadata).not.toHaveBeenCalled();
   });
 
-  it("triggers cloud auto-sync once on session-start", async () => {
+  it("does not trigger cloud auto-sync on session-start", async () => {
     const input: NormalizedHookInput = {
       cwd: "/test",
       hookType: "session-start",
@@ -547,12 +547,7 @@ describe("dispatchHook", () => {
 
     await dispatchHook(input);
 
-    expect(mockTriggerAutoSync).toHaveBeenCalledTimes(1);
-    expect(mockTriggerAutoSync).toHaveBeenCalledWith(
-      expect.anything(),
-      "proj-001",
-      { projectRoot: "/test" },
-    );
+    expect(mockTriggerAutoSync).not.toHaveBeenCalled();
   });
 
   it("silently ignores a stale session-end command without syncing", async () => {

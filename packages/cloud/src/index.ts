@@ -6,7 +6,7 @@
  */
 
 // Config
-export { loadCloudConfig, DEFAULT_SERVER_URL, type CloudConfig, type ProjectLinkConfig } from "./config.js";
+export { loadCloudConfig, DEFAULT_SERVER_URL, type CloudConfig } from "./config.js";
 export {
   resolveCloudProjectContext,
   repositoryPayloads,
@@ -52,6 +52,7 @@ export {
   type SyncResult,
   type SyncConflict,
 } from "./sync/engine.js";
+export { runSyncCycle, type SyncCycleResult } from "./sync/sync-cycle.js";
 export {
   buildSyncBatch,
   countUnsyncedEvents,
@@ -67,12 +68,14 @@ export {
   intentCommand,
   formatIntentList,
   formatIntentDetail,
-  triggerProjectLinkSync,
   checkQuality,
   formatQualityFeedback,
   collectRemoteUrl,
   collectBranches,
+  branchHeadMap,
+  collectGitRefsFingerprint,
   collectCommitLogs,
+  collectCommitsBetweenRefSnapshots,
   collectCommitCount,
   collectDefaultBranch,
   collectCurrentBranch,
@@ -83,6 +86,8 @@ export {
   getProjectLinkCache,
   upsertProjectLinkCache,
   clearProjectLinkCache,
+  updateCachedGitState,
+  syncLinkedGitMetadata,
   type LinkResult,
   type WorkspaceRepositoryResult,
   type WorkspaceRepositoryFailure,
@@ -97,6 +102,8 @@ export {
   type GitCommit,
   type DiscoveredDocument,
   type ProjectLinkCache,
+  type GitSyncResult,
+  type GitSyncFailure,
   type QualifyResponse,
 } from "./project-link/index.js";
 

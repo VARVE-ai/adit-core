@@ -44,7 +44,6 @@ vi.mock("./cache.js", () => ({
   clearProjectLinkCache: vi.fn(),
   updateCachedCommitSha: vi.fn(),
   updateCachedDocHashes: vi.fn(),
-  updateCachedMetadata: vi.fn(),
   updateCachedQualified: vi.fn(),
 }));
 
@@ -56,12 +55,10 @@ vi.mock("./git-collector.js", () => ({
   collectCommitCount: (...args: unknown[]) => mockCollectCommitCount(...args),
   collectCommitFileStats: (...args: unknown[]) => mockCollectCommitFileStats(...args),
   resolveCommitBranches: (...args: unknown[]) => mockResolveCommitBranches(...args),
-  projectNameFromRemoteUrl: vi.fn(() => "repo-name"),
-}));
-
-vi.mock("./auto-link.js", () => ({
   collectGitRefsFingerprint: (...args: unknown[]) => mockCollectGitRefsFingerprint(...args),
-  REFS_FINGERPRINT_CACHE_KEY: "__refs_fingerprint",
+  branchHeadMap: (branches: Array<{ name: string; headSha: string }>) =>
+    Object.fromEntries(branches.map((branch) => [branch.name, branch.headSha])),
+  projectNameFromRemoteUrl: vi.fn(() => "repo-name"),
 }));
 
 vi.mock("./doc-discovery.js", () => ({
@@ -344,9 +341,11 @@ describe("linkCommand workspace repository requests", () => {
       serverUrl: "https://cloud.example.com",
       confirmedProjectId: "server-project",
       lastCommitSha: null,
+      gitRefHeads: { main: "abc" },
+      gitRefsFingerprint: "fingerprint-old",
       lastBranchSyncAt: new Date().toISOString(),
       lastDocSyncAt: null,
-      docHashes: { __refs_fingerprint: "fingerprint-old" },
+      docHashes: {},
       qualified: true,
       initializedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),

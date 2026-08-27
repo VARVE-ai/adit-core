@@ -206,7 +206,6 @@ function parseSessionMetadata(metadataJson: string | null): IgnoredSessionMetada
 
 function shouldTriggerCloudAutoSync(hookType: NormalizedHookInput["hookType"]): boolean {
   return hookType === "stop"
-    || hookType === "session-start"
     || hookType === "subagent-start"
     || hookType === "subagent-stop";
 }
@@ -524,19 +523,6 @@ async function handleSessionStart(ctx: HookContext, input: NormalizedHookInput):
     }
   }
 
-  // Trigger project-link auto-sync (fire-and-forget, fail-open).
-  // Spawns a detached background process to sync branches, commits,
-  // and documents — won't be killed by the 10s hook timeout.
-  try {
-    const cloudModuleName = ["@varveai", "adit-cloud"].join("/");
-    const { triggerProjectLinkSync } = await import(cloudModuleName) as {
-      triggerProjectLinkSync: (db: unknown, projectId: string, projectRoot: string) => Promise<void>;
-    };
-    triggerProjectLinkSync(ctx.db, ctx.config.projectId, ctx.config.projectRoot)
-      .catch(() => {});
-  } catch {
-    // Fail-open — cloud package may not be available
-  }
 }
 
 /** Handle subagent start — record when a subagent is spawned */

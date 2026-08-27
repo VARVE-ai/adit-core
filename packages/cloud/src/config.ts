@@ -19,15 +19,6 @@ export interface CloudConfig {
   syncThreshold: number;
   /** Hours since last successful sync before auto-sync triggers regardless of count (default: 2) */
   syncTimeoutHours: number;
-  /** Project-link auto-sync configuration */
-  projectLink: ProjectLinkConfig;
-}
-
-export interface ProjectLinkConfig {
-  /** Whether project-link auto-sync is enabled on session-start (default: true) */
-  autoSync: boolean;
-  /** Hours before cached project-link data is considered stale (default: 2) */
-  staleHours: number;
 }
 
 /** Default cloud server URL */
@@ -60,25 +51,7 @@ export function loadCloudConfig(): CloudConfig {
     syncTimeoutHours: parseSyncTimeoutHours(
       process.env.ADIT_CLOUD_SYNC_TIMEOUT_HOURS,
     ),
-    projectLink: loadProjectLinkConfig(),
   };
-}
-
-function loadProjectLinkConfig(): ProjectLinkConfig {
-  return {
-    autoSync: process.env.ADIT_PROJECT_LINK_AUTO_SYNC !== "false",
-    staleHours: parsePositiveFloat(
-      process.env.ADIT_PROJECT_LINK_STALE_HOURS,
-      2,
-    ),
-  };
-}
-
-function parsePositiveFloat(raw: string | undefined, defaultVal: number): number {
-  if (raw === undefined) return defaultVal;
-  const parsed = parseFloat(raw);
-  if (Number.isNaN(parsed) || parsed <= 0) return defaultVal;
-  return parsed;
 }
 
 function parseSyncTimeoutHours(raw: string | undefined): number {

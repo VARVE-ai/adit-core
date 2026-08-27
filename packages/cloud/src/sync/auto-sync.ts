@@ -1,5 +1,5 @@
 /**
- * Auto-sync trigger — fire-and-forget sync after hook events.
+ * Auto-sync trigger — coordinated sync after stable hook events.
  *
  * Called from the hooks system via dynamic import. Fully fail-open:
  * any error is swallowed so it never blocks the AI agent.
@@ -16,8 +16,9 @@
  * sync_state row (single PK lookup), skipping the events COUNT query
  * when the timeout has elapsed.
  *
- * Failed syncs are not retried immediately — they will be picked up
- * on the next trigger when conditions are still met.
+ * Once a conversation batch succeeds, linked repositories get an incremental
+ * Git metadata refresh. Project documents are never uploaded here.
+ * Failed syncs are picked up on a later trigger.
  */
 
 import type Database from "better-sqlite3";
@@ -35,16 +36,16 @@ import {
 } from "../auth/credentials.js";
 import { CloudClient } from "../http/client.js";
 import { CloudNetworkError, CloudAuthError } from "../http/errors.js";
-import { SyncEngine } from "./engine.js";
+import { runSyncCycle } from "./sync-cycle.js";
 import { countUnsyncedEvents } from "./serializer.js";
-import { repositoryPayloads, resolveCloudProjectContext } from "../project-context.js";
+import { resolveCloudProjectContext } from "../project-context.js";
 
 /**
- * Trigger a background sync if credentials exist and the unsynced record
+ * Trigger a sync cycle if credentials exist and the unsynced Event
  * count meets the threshold (or the time trigger fires).
  *
- * This function is designed to be called as fire-and-forget:
- *   triggerAutoSync(db, projectId).catch(() => {})
+ * The hook awaits this function so the database stays open for the complete
+ * Event → Session/Diff → Git cycle.
  *
  * Precondition checks (in order):
  * 1. Valid credentials present (client is authenticated)
@@ -149,19 +150,22 @@ export async function triggerAutoSync(
       timeoutMs: 5_000,
       maxRetries: 1,
     });
-    const engine = new SyncEngine(db, client, {
-      projectId: projectContext.localProjectId,
-      projectName: projectContext.projectName,
-      projectType: projectContext.projectType,
-      repositories: repositoryPayloads(projectContext.repositories),
-      remoteUrl: projectContext.remoteUrl,
-      canonicalRepoKey: projectContext.canonicalRepoKey,
+    const result = await runSyncCycle({
+      db,
+      client,
+      projectContext,
       batchSize: cloudConfig.batchSize,
       serverUrl,
       cloudClientId: credentials.clientId,
+      dataDir: projectConfig.dataDir,
     });
-
-    await engine.sync();
+    if (process.env.ADIT_DEBUG && result.git?.failures.length) {
+      for (const failure of result.git.failures) {
+        process.stderr.write(
+          `[adit-cloud] git sync failed for ${failure.relativePath}: ${failure.message}\n`,
+        );
+      }
+    }
     clearSyncErrors();
   } catch (error) {
     // Track consecutive failures — disable sync after threshold

@@ -14,6 +14,9 @@ import { execSync } from "node:child_process";
 import {
   projectNameFromRemoteUrl,
   collectBranches,
+  branchHeadMap,
+  collectGitRefsFingerprint,
+  collectCommitsBetweenRefSnapshots,
   collectCurrentBranch,
   collectCommitLogs,
   collectCommitCount,
@@ -94,6 +97,31 @@ describe("Git Collector (with temp repo)", () => {
     const main = branches.find((b) => b.name === "main");
     expect(main).toBeDefined();
     expect(main!.headSha).toBeTruthy();
+    expect(branchHeadMap(branches).main).toBe(main!.headSha);
+  });
+
+  it("fingerprints refs and collects only commits added after the previous heads", async () => {
+    const beforeBranches = await collectBranches(repoDir);
+    const beforeHeads = branchHeadMap(beforeBranches);
+    const beforeFingerprint = await collectGitRefsFingerprint(repoDir);
+
+    writeFileSync(join(repoDir, "incremental.txt"), "one\n");
+    execSync("git add . && git commit -m 'Incremental one'", { cwd: repoDir, stdio: "pipe" });
+    execSync("git checkout -b feature/incremental", { cwd: repoDir, stdio: "pipe" });
+    writeFileSync(join(repoDir, "feature.txt"), "feature\n");
+    execSync("git add . && git commit -m 'Incremental feature'", { cwd: repoDir, stdio: "pipe" });
+
+    const afterBranches = await collectBranches(repoDir);
+    const afterHeads = branchHeadMap(afterBranches);
+    const afterFingerprint = await collectGitRefsFingerprint(repoDir);
+    const commits = await collectCommitsBetweenRefSnapshots(repoDir, afterHeads, beforeHeads);
+
+    expect(afterFingerprint).not.toBe(beforeFingerprint);
+    expect(commits.map((commit) => commit.message)).toEqual([
+      "Incremental feature",
+      "Incremental one",
+    ]);
+    expect(commits.some((commit) => commit.message === "Initial commit")).toBe(false);
   });
 
   it("collectBranches skips remote HEAD aliases", async () => {
