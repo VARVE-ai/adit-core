@@ -663,6 +663,11 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
       if (resourcesCleaned) return;
       resourcesCleaned = true;
       try {
+        // Deliberate shutdown: tell the relay now so the final offline feed
+        // record is written immediately instead of after the grace delay.
+        if (provider) ws.sendHeartbeat(provider.state, "offline");
+      } catch {}
+      try {
         provider?.stop();
       } catch {}
       try {

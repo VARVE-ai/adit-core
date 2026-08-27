@@ -106,6 +106,86 @@ describe("CliAgentRelayWebSocket", () => {
     }
   });
 
+  it("delivers a shutdown heartbeat with offline status before closing", async () => {
+    const server = new WebSocketServer({ port: 0 });
+    const port = await waitForListening(server);
+    const serverSockets: WebSocket[] = [];
+    const heartbeats: Array<Record<string, unknown>> = [];
+    let closed = false;
+    let closedAfterHeartbeat = false;
+
+    server.on("connection", (socket) => {
+      serverSockets.push(socket);
+      socket.on("message", (data) => {
+        const message = JSON.parse(data.toString("utf8")) as Record<string, unknown>;
+        if (message.type === "hello") {
+          socket.send(
+            JSON.stringify({
+              type: "hello.ok",
+              connection: { id: "connection-1" },
+              panel: { id: "panel-1", name: "test-coding2" },
+            }),
+          );
+          return;
+        }
+        if (message.type === "heartbeat") heartbeats.push(message);
+      });
+      socket.once("close", () => {
+        closed = true;
+        closedAfterHeartbeat = heartbeats.length > 0;
+      });
+    });
+
+    process.env.ADIT_CLI_AGENT_WS_URL = `ws://127.0.0.1:${port}/ws/coding/cli-agent`;
+    const relay = new CliAgentRelayWebSocket({
+      serverUrl: "http://cloud.test",
+      accessToken: async () => "access-token",
+      register: {
+        provider: "codex",
+        terminalId: "terminal-1",
+        projectRoot: "/tmp/test-coding2",
+        projectId: "project-1",
+        projectName: "test-coding2",
+      },
+      onHello: () => {},
+      onCommand: () => {},
+    });
+
+    try {
+      relay.connect();
+      await waitFor(() => relay.currentConnectionId === "connection-1");
+
+      const sent = relay.sendHeartbeat({
+        owner: "local",
+        busy: false,
+        thinking: false,
+        activeSessionId: "session-1",
+        resumeSessionId: null,
+        sdkSessionId: null,
+        activeModelId: null,
+        currentBranch: null,
+        contextUsage: null,
+        lastTokenUsage: null,
+      }, "offline");
+      expect(sent).toBe(true);
+      relay.close();
+
+      await waitFor(() => closed);
+      expect(closedAfterHeartbeat).toBe(true);
+      expect(heartbeats).toHaveLength(1);
+      expect(heartbeats[0]).toMatchObject({
+        type: "heartbeat",
+        status: "offline",
+        owner: "local",
+        activeSessionId: "session-1",
+      });
+    } finally {
+      relay.close();
+      for (const socket of serverSockets) socket.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("keeps the active connection when a stale socket closes late", async () => {
     const server = new WebSocketServer({ port: 0 });
     const port = await waitForListening(server);
