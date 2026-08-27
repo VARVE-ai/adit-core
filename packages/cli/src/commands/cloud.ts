@@ -25,7 +25,7 @@ import {
   pollForToken,
   CloudClient,
   SyncEngine,
-  countUnsyncedRecords,
+  countUnsyncedEvents,
   CloudAuthError,
   CloudNetworkError,
   CloudApiError,
@@ -345,10 +345,9 @@ export async function cloudStatusCommand(opts?: {
           }
         : null;
 
-      const unsyncedCount = countUnsyncedRecords(
+      const unsyncedCount = countUnsyncedEvents(
         db,
         syncState?.lastSyncedEventId ?? null,
-        syncState?.lastSyncedAt ?? null,
         config.projectId,
       );
       status.unsyncedRecords = unsyncedCount;

@@ -14,7 +14,7 @@ import {
   loadConfig,
   openDatabase,
   closeDatabase,
-  getActiveSession,
+  getLatestSession,
   countEvents,
   queryEvents,
   getSyncState,
@@ -122,14 +122,13 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
   let latestPromptText: string | null = null;
 
   try {
-    // Active session
-    const session = getActiveSession(db, config.projectId, config.clientId);
+    // Most recently active session, derived from its events.
+    const session = getLatestSession(db, config.projectId, config.clientId);
     status.session = session
       ? {
           id: session.id,
           platform: session.platform,
           startedAt: session.startedAt,
-          status: session.status,
         }
       : null;
 
@@ -297,7 +296,7 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
     ]);
     console.log(pc.dim(statsLine));
   } else {
-    console.log(pc.dim("No active session"));
+    console.log(pc.dim("No sessions"));
   }
 
   // ── Git ──────────────────────────────────────

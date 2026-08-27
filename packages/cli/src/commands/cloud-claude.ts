@@ -157,8 +157,7 @@ export function isLocalIdleHook(eventType: string, body: Record<string, unknown>
   // idle let the web panel take over (killing the CLI) in the middle of a turn.
   if (
     eventType === "Stop" ||
-    eventType === "StopFailure" ||
-    eventType === "SessionEnd"
+    eventType === "StopFailure"
   ) {
     return true;
   }

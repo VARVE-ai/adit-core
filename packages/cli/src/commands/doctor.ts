@@ -2,7 +2,7 @@
  * `adit doctor` — Validate ADIT installation health.
  *
  * Checks: git repo, data dir, database, hooks, adit-hook binary,
- * SQLite integrity, stale sessions, and disk usage.
+ * SQLite integrity and disk usage.
  *
  * `adit doctor --fix` attempts automatic fixes.
  * `adit doctor --json` outputs results as JSON.
@@ -16,8 +16,6 @@ import {
   closeDatabase,
   projectManifestPath,
   queryEvents,
-  listSessions,
-  endSession,
 } from "@varveai/adit-core";
 import { getRemoteUrl } from "@varveai/adit-engine";
 import {
@@ -215,27 +213,7 @@ export async function doctorCommand(
     });
   }
 
-  // 8. Stale sessions
-  let staleCount = 0;
-  const staleSessions: string[] = [];
-  if (db && dbOk) {
-    const sessions = listSessions(db, config.projectId);
-    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    for (const s of sessions) {
-      if (s.status === "active" && s.startedAt < dayAgo) {
-        staleCount++;
-        staleSessions.push(s.id);
-      }
-    }
-  }
-  checks.push({
-    name: "Stale sessions",
-    ok: staleCount === 0,
-    detail: staleCount > 0 ? `${staleCount} sessions active >24h` : "No stale sessions",
-    fixable: staleCount > 0,
-  });
-
-  // 9. Disk space
+  // 8. Disk space
   let diskOk = true;
   let diskDetail = "OK";
   try {
@@ -259,18 +237,6 @@ export async function doctorCommand(
   // Attempt fixes if --fix
   if (opts?.fix) {
     const fixes: string[] = [];
-
-    // Fix stale sessions
-    if (staleCount > 0 && db) {
-      for (const sid of staleSessions) {
-        try {
-          endSession(db, sid, "completed");
-          fixes.push(`Closed stale session: ${sid.substring(0, 10)}`);
-        } catch {
-          // ignore
-        }
-      }
-    }
 
     // Fix missing platform hooks.
     if (!hooksOk) {

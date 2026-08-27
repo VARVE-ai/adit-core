@@ -58,7 +58,7 @@ describe("Claude Code Hook Chaining", () => {
     // StopFailure routes API-error turn ends through the stop handler
     expect(hooks.StopFailure).toBeDefined();
     expect(hooks.SessionStart).toBeDefined();
-    expect(hooks.SessionEnd).toBeDefined();
+    expect(hooks.SessionEnd).toBeUndefined();
     // notification / task-completed collection was retired
     expect(hooks.TaskCompleted).toBeUndefined();
     expect(hooks.Notification).toBeUndefined();
@@ -70,6 +70,23 @@ describe("Claude Code Hook Chaining", () => {
     expect(stopEntries).toHaveLength(1);
     expect(stopEntries[0].hooks[0].command).toContain("adit-hook");
     expect(stopEntries[0].hooks[0].command).toContain("--project-root-b64");
+  });
+
+  it("removes legacy ADIT SessionEnd hooks while preserving other tools", async () => {
+    writeSettings(projectRoot, {
+      hooks: {
+        SessionEnd: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook session-end" }] },
+          { hooks: [{ type: "command", command: "other-tool session-end" }] },
+        ],
+      },
+    });
+
+    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    const hooks = readSettings(projectRoot).hooks as Record<string, unknown[]>;
+    expect(JSON.stringify(hooks.SessionEnd)).not.toContain("adit-hook session-end");
+    expect(JSON.stringify(hooks.SessionEnd)).toContain("other-tool session-end");
   });
 
   it("preserves other tools' hooks when installing ADIT hooks", async () => {

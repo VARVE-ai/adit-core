@@ -2,7 +2,7 @@
  * Turn-boundary commit attribution.
  *
  * On session-start we record the current HEAD of every project repository
- * as a per-session baseline. On stop/session-end we compare the current
+ * as a per-session baseline. On stop we compare the current
  * HEAD against that baseline: any new commits in between happened during
  * this session's turn and are recorded as git_commit events attributed to
  * the session, then the baseline advances.

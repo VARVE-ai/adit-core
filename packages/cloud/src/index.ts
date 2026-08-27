@@ -54,7 +54,7 @@ export {
 } from "./sync/engine.js";
 export {
   buildSyncBatch,
-  countUnsyncedRecords,
+  countUnsyncedEvents,
   batchRecordCount,
   type SyncBatch,
 } from "./sync/serializer.js";

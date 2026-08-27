@@ -274,14 +274,8 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "chat.message", aditHandler: "prompt-submit" },
   // OpenCode has no "stop" hook key; session.idle fires when the assistant
   // finishes a response turn and is the correct trigger for checkpoints.
-  // session.idle also triggers a forced cloud sync so data is flushed before
-  // the user exits (since /exit does not reliably fire a session-end event).
   { platformEvent: "session.idle", aditHandler: "stop" },
   { platformEvent: "session.created", aditHandler: "session-start" },
-  { platformEvent: "session.deleted", aditHandler: "session-end" },
-  // /exit does not fire session.deleted; command.executed is intercepted
-  // synchronously in the plugin to flush cloud sync before process exit.
-  { platformEvent: "command.executed", aditHandler: "session-end" },
 ];
 
 /** Map OpenCode hook/event types to ADIT hook types */
@@ -289,10 +283,7 @@ const EVENT_TO_ADIT: Record<string, AditHookType> = {
   "chat.message": "prompt-submit",
   "session.idle": "stop",
   "session-start": "session-start",
-  "session-end": "session-end",
   "session.created": "session-start",
-  "session.deleted": "session-end",
-  "session.error": "session-end",
 };
 
 /** Check if a file is an ADIT-generated plugin */
@@ -309,10 +300,8 @@ function isAditPlugin(content: string): boolean {
  *
  * Hooked events:
  * - chat.message (user)       → prompt-submit (prompt from parts[].text)
- * - session.idle              → stop (checkpoint + forced cloud sync; AI finished)
- * - session.created/deleted   → session-start/session-end
- * - session.error             → session-end
- * - command.executed          → session-end (exit/quit/q only, synchronous)
+ * - session.idle              → stop (AI finished)
+ * - session.created           → session-start
  *
  * Note: OpenCode's Plugin API has no "stop" hook key. The equivalent is the
  * "session.idle" event, which fires when the assistant finishes a response.
@@ -320,15 +309,8 @@ function isAditPlugin(content: string): boolean {
  * (TextPart items with type === "text"). Session has no model field — model
  * info comes from the chat.message input arg instead.
  *
- * Note: /exit (/quit, /q) does NOT fire session.deleted — OpenCode just
- * terminates the process. We use two layers of defense:
- * 1. command.executed: fires for slash commands, uses spawnSync to block until
- *    the session-end hook (and cloud sync) completes before the process exits.
- * 2. process.on('exit'): safety net that fires session-end synchronously if
- *    command.executed never fired (e.g. OpenCode calls process.exit() directly).
- *    Also handles SIGINT (Ctrl+C) and SIGTERM by flushing then re-raising.
- * The active session ID is tracked via session.created/deleted, and a
- * sessionEndFired flag prevents duplicate session-end calls.
+ * The active session ID is tracked via session.created/deleted so session.idle
+ * can use the same stable identity as session-start.
  */
 function generatePluginContent(aditBinaryPath: string, projectRoot?: string): string {
   // Split the binary path into command + args for spawning.
@@ -368,22 +350,6 @@ function spawnAditHook(hookType, data) {
     child.stdin.end();
     child.unref();
     child.on("error", () => {});
-  } catch (e) {
-    // fail-open
-  }
-}
-
-// Synchronous variant used on /exit — we must block until ADIT finishes
-// because the process is about to terminate and a detached child would be
-// orphaned before it completes the cloud sync.
-function spawnAditHookSync(hookType, data) {
-  try {
-    spawnSync(ADIT_CMD, [...ADIT_BASE_ARGS, hookType], {
-      input: JSON.stringify(data),
-      stdio: ["pipe", "ignore", "ignore"],
-      env: { ...process.env, OPENCODE: "1" },
-      timeout: 10000,
-    });
   } catch (e) {
     // fail-open
   }
@@ -580,38 +546,9 @@ exports.AditPlugin = async (ctx) => {
   const cwd = ctx.directory || ctx.worktree || process.cwd();
   const client = ctx.client;
 
-  // Track the active session ID so we can fire session-end on /exit.
-  // OpenCode does not fire session.deleted when the user types /exit —
-  // it just terminates the process. We intercept command.executed to
-  // detect exit commands and block until the sync finishes.
+  // Track the active session ID so session.idle uses the exact identity
+  // captured at session creation.
   let activeSessionId = undefined;
-  let sessionEndFired = false;
-
-  // Safety net: fire session-end synchronously on process exit.
-  // OpenCode may not emit command.executed for /exit — it might call
-  // process.exit() directly. Node's 'exit' event fires synchronously
-  // and spawnSync works inside it, ensuring cloud sync completes
-  // before the process terminates.
-  function flushOnExit() {
-    if (sessionEndFired || !activeSessionId) return;
-    sessionEndFired = true;
-    spawnAditHookSync("session-end", {
-      cwd,
-      session_id: activeSessionId,
-      reason: "exit",
-    });
-    activeSessionId = undefined;
-  }
-  process.on("exit", flushOnExit);
-  // SIGINT (Ctrl+C) and SIGTERM need to re-raise after flushing so the
-  // process actually terminates with the expected exit code / signal.
-  function handleSignal(signal) {
-    flushOnExit();
-    process.removeListener(signal, handleSignal);
-    process.kill(process.pid, signal);
-  }
-  process.on("SIGINT", handleSignal.bind(null, "SIGINT"));
-  process.on("SIGTERM", handleSignal.bind(null, "SIGTERM"));
 
   const hooks = {
     // Capture user prompts.
@@ -679,7 +616,6 @@ exports.AditPlugin = async (ctx) => {
           case "session.created": {
             const info = props.info || {};
             activeSessionId = info.id;
-            sessionEndFired = false;
             spawnAditHook("session-start", {
               cwd,
               session_id: info.id,
@@ -691,49 +627,7 @@ exports.AditPlugin = async (ctx) => {
             const info = props.info || {};
             if (activeSessionId === info.id) {
               activeSessionId = undefined;
-              sessionEndFired = true;
             }
-            spawnAditHook("session-end", {
-              cwd,
-              session_id: info.id,
-              reason: "deleted",
-            });
-            break;
-          }
-          case "session.error": {
-            // sessionID is optional in session.error — fall back to activeSessionId
-            const errorSessionId = props.sessionID || activeSessionId;
-            if (activeSessionId && activeSessionId === errorSessionId) {
-              activeSessionId = undefined;
-              sessionEndFired = true;
-            }
-            if (!errorSessionId) break;
-            spawnAditHook("session-end", {
-              cwd,
-              session_id: errorSessionId,
-              reason: "error",
-              error: props.error,
-            });
-            break;
-          }
-
-          // --- /exit, /quit, /q interception ---
-          // session.deleted does NOT fire on /exit — OpenCode just terminates.
-          // command.executed fires for ALL slash commands with { name, sessionID }.
-          // We must use spawnSync here so the cloud sync finishes before exit.
-          case "command.executed": {
-            const cmdName = (props.name || "").toLowerCase();
-            const isExit = cmdName === "exit" || cmdName === "quit" || cmdName === "q";
-            if (!isExit) break;
-            const exitSessionId = props.sessionID || activeSessionId;
-            if (!exitSessionId) break;
-            activeSessionId = undefined;
-            sessionEndFired = true;
-            spawnAditHookSync("session-end", {
-              cwd,
-              session_id: exitSessionId,
-              reason: "exit",
-            });
             break;
           }
         }
@@ -770,9 +664,8 @@ export const opencodeAdapter: PlatformAdapter = {
       // Stop
       stopReason: raw.stop_reason as string | undefined,
       lastAssistantMessage: raw.last_assistant_message as string | undefined,
-      // Session lifecycle
+      // Session start metadata
       sessionSource: raw.source as string | undefined,
-      sessionEndReason: raw.reason as string | undefined,
       model: raw.model as string | undefined,
       // Notification (tool_result, tool_error, session_diff)
       notificationMessage: raw.message as string | undefined,

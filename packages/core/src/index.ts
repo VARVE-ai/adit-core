@@ -17,7 +17,6 @@ export type {
 export { parseLabels, parseDiffStats, parseError } from "./types/index.js";
 
 export type {
-  SessionStatus,
   Platform,
   SessionType,
   SessionMetadata,
@@ -32,12 +31,9 @@ export {
   closeDatabase,
   insertSession,
   getSessionById,
-  getActiveSession,
+  getLatestSession,
   getSessionByPlatformSessionId,
-  reviveSession,
   mergeSessionMetadata,
-  endSession,
-  endStaleSessions,
   listSessions,
   insertEvent,
   insertEventAutoSeq,

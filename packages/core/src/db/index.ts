@@ -4,12 +4,9 @@ export { migrations } from "./migrations.js";
 export {
   insertSession,
   getSessionById,
-  getActiveSession,
+  getLatestSession,
   getSessionByPlatformSessionId,
-  reviveSession,
   mergeSessionMetadata,
-  endSession,
-  endStaleSessions,
   listSessions,
   type CreateSessionInput,
 } from "./sessions.js";

@@ -77,9 +77,8 @@ export const codexAdapter: PlatformAdapter = {
       toolName: raw.tool_name as string | undefined,
       toolInput: raw.tool_input as Record<string, unknown> | undefined,
       toolOutput: raw.tool_response as Record<string, unknown> | undefined,
-      // Session lifecycle
+      // Session start metadata
       sessionSource: raw.source as string | undefined,
-      sessionEndReason: raw.reason as string | undefined,
       // Common metadata (present in all events)
       permissionMode: raw.permission_mode as string | undefined,
       model: raw.model as string | undefined,

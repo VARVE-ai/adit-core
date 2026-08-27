@@ -52,6 +52,13 @@ describe("Database", () => {
       .map((r) => (r as { name: string }).name);
     expect(eventColumns).not.toContain("plan_task_id");
 
+    const sessionColumns = db
+      .prepare("PRAGMA table_info(sessions)")
+      .all()
+      .map((r) => (r as { name: string }).name);
+    expect(sessionColumns).not.toContain("ended_at");
+    expect(sessionColumns).not.toContain("status");
+
     closeDatabase(db);
   });
 

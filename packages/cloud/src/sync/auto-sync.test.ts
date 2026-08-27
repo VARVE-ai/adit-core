@@ -316,17 +316,6 @@ describe("triggerAutoSync", () => {
     expect(syncFn).toHaveBeenCalled();
   });
 
-  it("force-syncs on session-end even when below threshold and recently synced", async () => {
-    mockCountUnsyncedEvents.mockReturnValue(1); // well below threshold
-
-    await triggerAutoSync(fakeDb, PROJECT_ID, { force: true });
-
-    // Should skip threshold checks entirely
-    expect(mockCountUnsyncedEvents).not.toHaveBeenCalled();
-    expect(mockGetSyncState).not.toHaveBeenCalled();
-    expect(syncFn).toHaveBeenCalled();
-  });
-
   it("does not sync when credentials are missing", async () => {
     mockLoadCredentials.mockReturnValue(null);
 

@@ -246,4 +246,13 @@ export const migrations: Migration[] = [
     name: "drop_transcript_uploads",
     sql: "DROP TABLE IF EXISTS transcript_uploads;",
   },
+  {
+    id: 15,
+    name: "drop_session_lifecycle",
+    sql: `
+      DROP INDEX IF EXISTS idx_sessions_status;
+      ALTER TABLE sessions DROP COLUMN ended_at;
+      ALTER TABLE sessions DROP COLUMN status;
+    `,
+  },
 ];

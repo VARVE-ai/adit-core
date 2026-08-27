@@ -5,7 +5,7 @@ describe("isLocalIdleHook", () => {
   it("treats Claude completion hooks as local idle", () => {
     expect(isLocalIdleHook("Stop", {})).toBe(true);
     expect(isLocalIdleHook("StopFailure", {})).toBe(true);
-    expect(isLocalIdleHook("SessionEnd", {})).toBe(true);
+    expect(isLocalIdleHook("SessionEnd", {})).toBe(false);
   });
 
   it("does not treat SubagentStop as idle — subagents finish mid-turn", () => {

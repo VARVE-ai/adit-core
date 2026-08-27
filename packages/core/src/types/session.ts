@@ -5,13 +5,6 @@
  * Multiple sessions can exist for the same project (multi-client support).
  */
 
-/** Session lifecycle status */
-export type SessionStatus =
-  | "active"
-  | "completed"
-  | "error"
-  | "cancelled";
-
 /** Which AI platform is driving this session */
 export type Platform =
   | "claude-code"
@@ -53,8 +46,6 @@ export interface AditSession {
   sessionType: SessionType;
   platform: Platform;
   startedAt: string;
-  endedAt: string | null;
-  status: SessionStatus;
   /** Serialized SessionMetadata */
   metadataJson: string | null;
   /** Vector clock for sync */

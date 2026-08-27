@@ -441,7 +441,6 @@ describe("Codex CLI Hook Chaining", () => {
         permissionMode: undefined,
         model: "gpt-4",
         sessionSource: undefined,
-        sessionEndReason: undefined,
         rawPlatformData: raw
       });
     });
@@ -482,7 +481,6 @@ describe("Codex CLI Hook Chaining", () => {
         permissionMode: undefined,
         model: "gpt-4",
         sessionSource: undefined,
-        sessionEndReason: undefined,
         rawPlatformData: raw
       });
     });
@@ -508,7 +506,6 @@ describe("Codex CLI Hook Chaining", () => {
         permissionMode: undefined,
         model: "gpt-4",
         sessionSource: undefined,
-        sessionEndReason: undefined,
         rawPlatformData: raw
       });
     });
@@ -536,7 +533,6 @@ describe("Codex CLI Hook Chaining", () => {
         permissionMode: undefined,
         model: "gpt-4",
         sessionSource: undefined,
-        sessionEndReason: undefined,
         rawPlatformData: raw
       });
     });

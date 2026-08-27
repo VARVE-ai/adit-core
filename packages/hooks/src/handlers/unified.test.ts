@@ -3,7 +3,7 @@
  *
  * Mocks all external dependencies (DB, engine, cloud) to verify
  * that dispatchHook correctly routes each hook type, handles
- * cloud auto-sync with threshold-based and force flags, and maintains fail-open behavior.
+ * cloud auto-sync thresholds, and maintains fail-open behavior.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -24,7 +24,6 @@ const mockList = vi.fn().mockResolvedValue([]);
 
 vi.mock("@varveai/adit-core", () => ({
   getLatestEnvSnapshot: vi.fn(() => null),
-  endSession: vi.fn(),
   mergeSessionMetadata: vi.fn(),
   withPerf: vi.fn((_dir: string, _cat: string, _op: string, fn: () => unknown) => fn()),
 }));
@@ -60,12 +59,11 @@ vi.mock("../common/context.js", () => ({
 }));
 
 import { dispatchHook } from "./unified.js";
-import { endSession, mergeSessionMetadata } from "@varveai/adit-core";
+import { mergeSessionMetadata } from "@varveai/adit-core";
 import { getCurrentBranch, getHeadSha } from "@varveai/adit-engine";
 import { triggerAutoSync } from "@varveai/adit-cloud";
 import type { NormalizedHookInput } from "../adapters/types.js";
 
-const mockEndSession = vi.mocked(endSession);
 const mockMergeSessionMetadata = vi.mocked(mergeSessionMetadata);
 const mockGetCurrentBranch = vi.mocked(getCurrentBranch);
 const mockGetHeadSha = vi.mocked(getHeadSha);
@@ -510,22 +508,6 @@ describe("dispatchHook", () => {
     );
   });
 
-  it("routes session-end and calls endSession", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "session-end",
-      sessionEndReason: "exit",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockEndSession).toHaveBeenCalledWith(
-      expect.anything(),
-      "sess-001",
-      "completed",
-    );
-  });
-
   it("persists session-start launch metadata on the session instead of a checkpoint event", async () => {
     const input: NormalizedHookInput = {
       cwd: "/test",
@@ -573,36 +555,19 @@ describe("dispatchHook", () => {
     );
   });
 
-  it("applies normal auto-sync thresholds on session-end", async () => {
-    const input: NormalizedHookInput = {
+  it("silently ignores a stale session-end command without syncing", async () => {
+    const { initHookContext } = await import("../common/context.js");
+    const input = {
       cwd: "/test",
       hookType: "session-end",
-      sessionEndReason: "exit",
-    };
+    } as unknown as NormalizedHookInput;
 
     await dispatchHook(input);
 
-    expect(mockTriggerAutoSync).toHaveBeenCalledWith(
-      expect.anything(),
-      "proj-001",
-      { projectRoot: "/test" },
-    );
-  });
-
-  it("routes session-end with error reason", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "session-end",
-      sessionEndReason: "error",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockEndSession).toHaveBeenCalledWith(
-      expect.anything(),
-      "sess-001",
-      "error",
-    );
+    expect(initHookContext).not.toHaveBeenCalled();
+    expect(mockRecordEvent).not.toHaveBeenCalled();
+    expect(mockMergeSessionMetadata).not.toHaveBeenCalled();
+    expect(mockTriggerAutoSync).not.toHaveBeenCalled();
   });
 
   // notification and task-completed hooks were retired: stale hook entries

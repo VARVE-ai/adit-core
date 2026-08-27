@@ -9,7 +9,7 @@ import {
   closeDatabase,
   getEnvSnapshotById,
   getLatestEnvSnapshot,
-  getActiveSession,
+  getLatestSession,
   listEnvSnapshots,
   type EnvSnapshot,
 } from "@varveai/adit-core";
@@ -140,9 +140,9 @@ export async function envLatestCommand(opts?: { json?: boolean }): Promise<void>
   const db = openDatabase(config.dbPath);
 
   try {
-    const session = getActiveSession(db, config.projectId, config.clientId);
+    const session = getLatestSession(db, config.projectId, config.clientId);
     if (!session) {
-      console.error("No active session. Run 'adit init' first.");
+      console.error("No sessions found. Run an agent session first.");
       process.exit(1);
     }
 
@@ -218,9 +218,9 @@ export async function envHistoryCommand(
   const db = openDatabase(config.dbPath);
 
   try {
-    const session = getActiveSession(db, config.projectId, config.clientId);
+    const session = getLatestSession(db, config.projectId, config.clientId);
     if (!session) {
-      console.error("No active session. Run 'adit init' first.");
+      console.error("No sessions found. Run an agent session first.");
       process.exit(1);
     }
 

@@ -10,7 +10,6 @@ export type {
 export { parseLabels, parseDiffStats, parseError } from "./events.js";
 
 export type {
-  SessionStatus,
   Platform,
   SessionType,
   SessionMetadata,

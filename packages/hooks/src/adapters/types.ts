@@ -106,8 +106,6 @@ export interface NormalizedHookInput {
   model?: string;
   /** Session source: startup, resume, clear, compact (from SessionStart) */
   sessionSource?: string;
-  /** Why the session ended: clear, logout, exit, etc. (from SessionEnd) */
-  sessionEndReason?: string;
   rawPlatformData?: Record<string, unknown>;
 }
 
@@ -143,7 +141,6 @@ export type AditHookType =
   | "prompt-submit"
   | "stop"
   | "session-start"
-  | "session-end"
   | "task-completed"
   | "notification"
   | "subagent-start"

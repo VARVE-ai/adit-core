@@ -10,8 +10,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   closeDatabase,
   createClock,
-  endSession,
-  getSessionById,
   insertSession,
   loadConfig,
   openDatabase,
@@ -102,7 +100,7 @@ describe("initHookContext", () => {
     closeDatabase(ctx!.db);
   });
 
-  it("reattaches to a closed session on resume and revives it instead of duplicating", async () => {
+  it("reattaches to the same platform session id without duplicating", async () => {
     insertSession(db, {
       id: "resumed-session",
       projectId,
@@ -113,8 +111,6 @@ describe("initHookContext", () => {
       vclockJson: serialize(createClock(clientId)),
       platformSessionId: "claude-platform-resume",
     });
-    endSession(db, "resumed-session", "completed");
-
     const { initHookContext } = await loadContextModule();
     const ctx = await initHookContext(
       dir,
@@ -124,16 +120,13 @@ describe("initHookContext", () => {
     );
 
     expect(ctx?.session.id).toBe("resumed-session");
-    expect(ctx?.session.status).toBe("active");
-    expect(ctx?.session.endedAt).toBeNull();
-    const persisted = getSessionById(ctx!.db, "resumed-session");
-    expect(persisted?.status).toBe("active");
-    expect(persisted?.endedAt).toBeNull();
+    const row = ctx!.db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
+    expect(row.count).toBe(1);
 
     closeDatabase(ctx!.db);
   });
 
-  it("reuses active session only when no platform session id is available", async () => {
+  it("ignores hooks without a platform session id instead of guessing a session", async () => {
     insertSession(db, {
       id: "legacy-session",
       projectId,
@@ -147,9 +140,9 @@ describe("initHookContext", () => {
     const { initHookContext } = await loadContextModule();
     const ctx = await initHookContext(dir, "claude-code", undefined, { projectRoot: dir });
 
-    expect(ctx?.session.id).toBe("legacy-session");
-
-    closeDatabase(ctx!.db);
+    expect(ctx).toBeNull();
+    const row = db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
+    expect(row.count).toBe(1);
   });
 
   it("uses fixed project root for config and DB while preserving runtime cwd metadata", async () => {

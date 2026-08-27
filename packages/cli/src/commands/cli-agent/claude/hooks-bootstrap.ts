@@ -15,7 +15,6 @@ const EVENTS = [
   "StopFailure",
   "Notification",
   "SubagentStop",
-  "SessionEnd",
 ] as const;
 
 const STATUSLINE_POST_SCRIPT = [

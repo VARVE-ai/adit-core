@@ -6,8 +6,6 @@
  */
 
 import {
-  endSession,
-  endStaleSessions,
   mergeSessionMetadata,
   withPerf,
   insertDiff,
@@ -61,6 +59,11 @@ export async function dispatchHook(
   input: NormalizedHookInput,
   options: DispatchHookOptions = {},
 ): Promise<void> {
+  // Older installs can still invoke retired hook commands. Reject them before
+  // context initialization so a stale SessionEnd command cannot create an
+  // otherwise empty local session.
+  if (!isHandledHookType(input.hookType)) return;
+
   const ctx = await initHookContext(
     input.cwd,
     input.platformCli ?? "other",
@@ -72,12 +75,7 @@ export async function dispatchHook(
   const dataDir = ctx.config.dataDir;
 
   try {
-    if (isIgnoredSystemSession(ctx)) {
-      if (input.hookType === "session-end") {
-        endSession(ctx.db, ctx.session.id, "completed");
-      }
-      return;
-    }
+    if (isIgnoredSystemSession(ctx)) return;
 
     const classification =
       input.hookType === "prompt-submit"
@@ -101,9 +99,6 @@ export async function dispatchHook(
         case "session-start":
           await handleSessionStart(ctx, input);
           break;
-        case "session-end":
-          await handleSessionEnd(ctx, input);
-          break;
         case "subagent-start":
           await handleSubagentStart(ctx, input);
           break;
@@ -116,9 +111,7 @@ export async function dispatchHook(
     // Auto-sync to cloud on stable hook boundaries (fail-open).
     // Uses dynamic import so @varveai/adit-cloud is not a build-time dependency.
     // The module name is constructed to prevent TypeScript from resolving it.
-    // All stable hook boundaries, including session-end, use the count/time
-    // thresholds in triggerAutoSync. Session-end force sync is temporarily disabled
-    // because some SDK-driven Claude queries emit SessionEnd after each turn.
+    // Stable hook boundaries use the count/time thresholds in triggerAutoSync.
     // prompt-submit is deliberately skipped so cloud does not receive half a turn
     // containing a user prompt without its assistant response.
     if (shouldTriggerCloudAutoSync(input.hookType)) {
@@ -129,14 +122,11 @@ export async function dispatchHook(
             triggerAutoSync: (
               db: unknown,
               projectId: string,
-              options?: { force?: boolean; projectRoot?: string },
+              options?: { projectRoot?: string },
             ) => Promise<void>;
           };
           // Awaited so db stays open until triggerAutoSync finishes querying and pushing.
-          // Temporarily disabled: SessionEnd must not bypass the normal sync threshold.
-          // const force = input.hookType === "session-end";
           await cloudModule.triggerAutoSync(ctx.db, ctx.config.projectId, {
-            // ...(force ? { force: true } : {}),
             projectRoot: ctx.config.projectRoot,
           });
         });
@@ -147,6 +137,14 @@ export async function dispatchHook(
   } finally {
     ctx.db.close();
   }
+}
+
+function isHandledHookType(hookType: string): boolean {
+  return hookType === "prompt-submit"
+    || hookType === "stop"
+    || hookType === "session-start"
+    || hookType === "subagent-start"
+    || hookType === "subagent-stop";
 }
 
 interface IgnoredSessionMetadata {
@@ -207,7 +205,10 @@ function parseSessionMetadata(metadataJson: string | null): IgnoredSessionMetada
 }
 
 function shouldTriggerCloudAutoSync(hookType: NormalizedHookInput["hookType"]): boolean {
-  return hookType !== "prompt-submit";
+  return hookType === "stop"
+    || hookType === "session-start"
+    || hookType === "subagent-start"
+    || hookType === "subagent-stop";
 }
 
 /** Handle prompt submission (kept lightweight — no git operations) */
@@ -493,47 +494,13 @@ async function recoverAssistantMessageFromTranscript(transcriptPath?: string): P
   return undefined;
 }
 
-/** How long a session may sit with no events before the lazy sweep closes it */
-const STALE_SESSION_MAX_IDLE_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Codex has no SessionEnd hook at all, so every codex session stays active
- * until the next codex SessionStart sweeps it. With the default 24h window,
- * "completed" codex sessions were measured lingering for 30+ days locally.
- * A 2h idle window closes them promptly while still surviving long breaks
- * within a real working session.
- */
-const CODEX_STALE_SESSION_MAX_IDLE_MS = 2 * 60 * 60 * 1000;
-
-function staleSessionIdleMsFor(platform: string): number {
-  return platform === "codex" ? CODEX_STALE_SESSION_MAX_IDLE_MS : STALE_SESSION_MAX_IDLE_MS;
-}
-
 /** Handle session start — capture initial env snapshot and record metadata */
 async function handleSessionStart(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  // Lazily close zombie sessions for this platform. Codex has no SessionEnd
-  // hook event, so its sessions would otherwise stay active forever and
-  // become targets for the sessionless getActiveSession fallback.
-  if (input.platformCli) {
-    try {
-      endStaleSessions(ctx.db, {
-        projectId: ctx.config.projectId,
-        platform: input.platformCli,
-        cutoffIso: new Date(Date.now() - staleSessionIdleMsFor(input.platformCli)).toISOString(),
-        excludeSessionId: ctx.session.id,
-      });
-    } catch {
-      // Fail-open
-    }
-  }
-
   // Seed per-repo HEAD baselines so first-turn commits are attributable.
   await initializeSessionRepoBaselines(ctx);
 
   // Persist launch context (model, source, permission mode) on the session
-  // record. Replaces the legacy "checkpoint" marker event. Metadata-only
-  // updates on revived sessions reach the cloud when the session next ends
-  // (sync detects modified sessions via ended_at).
+  // record. Replaces the legacy "checkpoint" marker event.
   const metadata: Record<string, unknown> = {};
   if (input.model) metadata.model = input.model;
   if (input.sessionSource) metadata.source = input.sessionSource;
@@ -570,29 +537,6 @@ async function handleSessionStart(ctx: HookContext, input: NormalizedHookInput):
   } catch {
     // Fail-open — cloud package may not be available
   }
-}
-
-/** Handle session end — capture final env snapshot and close session */
-async function handleSessionEnd(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  if (ctx.config.captureEnv) {
-    try {
-      await withPerf(ctx.config.dataDir, "snapshot", "captureEnvironment", () =>
-        captureEnvironment(ctx.db, ctx.config, ctx.session.id),
-      );
-    } catch {
-      // Fail-open
-    }
-  }
-
-  // Sweep commits from the final turn before the session closes.
-  const timeline = createTimelineManager(ctx.db, ctx.config);
-  await withPerf(ctx.config.dataDir, "git", "commitAttribution", () =>
-    detectAndRecordCommits(ctx, timeline),
-  );
-
-  // Mark session as completed with end reason
-  const status = input.sessionEndReason === "error" ? "error" : "completed";
-  endSession(ctx.db, ctx.session.id, status);
 }
 
 /** Handle subagent start — record when a subagent is spawned */

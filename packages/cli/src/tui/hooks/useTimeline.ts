@@ -11,7 +11,7 @@ import {
   openDatabase,
   closeDatabase,
   queryEvents,
-  getActiveSession,
+  getLatestSession,
   getEventById,
   searchEvents,
   getDiffText,
@@ -83,7 +83,7 @@ export function useTimeline(): UseTimelineResult {
       const db = getDb();
       const config = configRef.current!;
 
-      const session = getActiveSession(db, config.projectId, config.clientId);
+      const session = getLatestSession(db, config.projectId, config.clientId);
 
       let events: AditEvent[];
       if (filters.searchQuery) {
