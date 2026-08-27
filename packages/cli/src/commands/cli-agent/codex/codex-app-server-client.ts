@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
+import { stripVTControlCharacters } from "node:util";
 import { killCliProcessTree, spawnCliProcess } from "../cli-process.js";
 
 export interface CodexJsonRpcMessage {
@@ -29,6 +30,17 @@ interface CodexAppServerClientOptions {
   onError?: (error: Error) => void;
 }
 
+export class CodexAppServerExitError extends Error {
+  constructor(
+    readonly code: number | null,
+    readonly signal: NodeJS.Signals | null,
+    readonly diagnostics: readonly string[],
+  ) {
+    super(`Codex app-server exited (${signal ?? code ?? "unknown"})`);
+    this.name = "CodexAppServerExitError";
+  }
+}
+
 const REQUEST_TIMEOUT_MS = 60_000;
 export const CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_FEATURE = "default_mode_request_user_input";
 const CODEX_APP_SERVER_ARGS = [
@@ -46,24 +58,33 @@ const CODEX_RECOVERABLE_TOOL_ERROR_RE =
  * Structured tracing lines (timestamp + level + module path) are codex-internal
  * diagnostics — MCP transport retries, OAuth refreshes and the like. Users read
  * them as adit failures, so they stay off the terminal and go to a tail buffer
- * that is dumped only when the app-server dies unexpectedly (ADIT_DEBUG prints
- * everything live instead).
+ * attached to an unexpected-exit error for debug diagnostics. ADIT_DEBUG prints
+ * everything live instead.
  */
 const CODEX_TRACING_LOG_LINE_RE =
   /^\s*\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?\s+(?:ERROR|WARN|INFO|DEBUG|TRACE)\b/;
 const SUPPRESSED_STDERR_TAIL_LIMIT = 50;
-const SUPPRESSED_STDERR_DUMP_LIMIT = 10;
+const EXIT_DIAGNOSTIC_TAIL_LIMIT = 10;
+
+export function normalizeCodexStderrLine(line: string): string {
+  const stripped = stripVTControlCharacters(line).replace(/\r+$/u, "");
+  const visible = stripped.slice(stripped.lastIndexOf("\r") + 1);
+  return visible.replace(
+    /^[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ufeff]+/u,
+    "",
+  );
+}
 
 export function isTransientCodexSystemSkillsError(line: string): boolean {
-  return CODEX_SYSTEM_SKILLS_TRANSIENT_ERROR_RE.test(line);
+  return CODEX_SYSTEM_SKILLS_TRANSIENT_ERROR_RE.test(normalizeCodexStderrLine(line));
 }
 
 export function isRecoverableCodexAppServerToolError(line: string): boolean {
-  return CODEX_RECOVERABLE_TOOL_ERROR_RE.test(line);
+  return CODEX_RECOVERABLE_TOOL_ERROR_RE.test(normalizeCodexStderrLine(line));
 }
 
 export function isCodexTracingLogLine(line: string): boolean {
-  return CODEX_TRACING_LOG_LINE_RE.test(line);
+  return CODEX_TRACING_LOG_LINE_RE.test(normalizeCodexStderrLine(line));
 }
 
 export class CodexAppServerClient extends EventEmitter {
@@ -75,6 +96,7 @@ export class CodexAppServerClient extends EventEmitter {
   private nextId = 1;
   private readonly pending = new Map<string | number, PendingRequest>();
   private stopped = false;
+  private failureReported = false;
 
   constructor(private readonly opts: CodexAppServerClientOptions) {
     super();
@@ -87,6 +109,7 @@ export class CodexAppServerClient extends EventEmitter {
   async start(): Promise<void> {
     if (this.child) return;
     this.stopped = false;
+    this.failureReported = false;
     const child = spawnCliProcess(this.opts.bin, CODEX_APP_SERVER_ARGS, {
       cwd: this.opts.cwd,
       env: this.opts.env,
@@ -99,15 +122,13 @@ export class CodexAppServerClient extends EventEmitter {
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk: string) => this.handleStderr(chunk));
     child.on("error", (error) => {
-      this.opts.onError?.(error);
       this.rejectAll(error);
     });
     child.on("exit", (code, signal) => {
       this.flushStderrBuffer();
-      this.flushDeferredSystemSkillsStderr();
-      if (!this.stopped) this.dumpSuppressedStderrTail(code, signal);
+      const diagnostics = this.takeSuppressedDiagnostics();
       this.child = null;
-      this.rejectAll(new Error(`Codex app-server exited (${signal ?? code ?? "unknown"})`));
+      this.rejectAll(new CodexAppServerExitError(code, signal, diagnostics));
       this.emit("exit", { code, signal });
     });
 
@@ -202,18 +223,19 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   private handleStderrLine(line: string): void {
-    if (!line.trim()) return;
-    if (isTransientCodexSystemSkillsError(line)) {
-      this.deferredSystemSkillsStderr.push(line);
-      return;
-    }
+    const normalized = normalizeCodexStderrLine(line);
+    if (!normalized.trim()) return;
     if (isAditDebugEnabled()) {
-      this.writeStderrLine(line);
+      this.writeStderrLine(normalized);
       return;
     }
-    if (isRecoverableCodexAppServerToolError(line)) return;
-    if (isCodexTracingLogLine(line)) {
-      this.suppressedStderrTail.push(line);
+    if (isTransientCodexSystemSkillsError(normalized)) {
+      this.deferredSystemSkillsStderr.push(normalized);
+      return;
+    }
+    if (isRecoverableCodexAppServerToolError(normalized)) return;
+    if (isCodexTracingLogLine(normalized)) {
+      this.suppressedStderrTail.push(normalized);
       if (this.suppressedStderrTail.length > SUPPRESSED_STDERR_TAIL_LIMIT) {
         this.suppressedStderrTail.splice(
           0,
@@ -222,17 +244,17 @@ export class CodexAppServerClient extends EventEmitter {
       }
       return;
     }
-    this.writeStderrLine(line);
+    this.writeStderrLine(normalized);
   }
 
-  /** Unexpected-exit escape hatch for the suppressed tracing tail: without it
-   * a takeover that dies on app-server startup would fail with no clue. */
-  private dumpSuppressedStderrTail(code: number | null, signal: NodeJS.Signals | null): void {
-    const tail = this.suppressedStderrTail.slice(-SUPPRESSED_STDERR_DUMP_LIMIT);
+  private takeSuppressedDiagnostics(): string[] {
+    const tail = [
+      ...this.deferredSystemSkillsStderr,
+      ...this.suppressedStderrTail,
+    ].slice(-EXIT_DIAGNOSTIC_TAIL_LIMIT);
+    this.deferredSystemSkillsStderr = [];
     this.suppressedStderrTail = [];
-    if (tail.length === 0) return;
-    this.writeStderrLine(`exited unexpectedly (${signal ?? code ?? "unknown"}) — last diagnostics:`);
-    for (const line of tail) this.writeStderrLine(line);
+    return tail;
   }
 
   private writeStderrLine(line: string): void {
@@ -292,7 +314,10 @@ export class CodexAppServerClient extends EventEmitter {
       pending.reject(error);
       this.pending.delete(id);
     }
-    if (!this.stopped) this.opts.onError?.(error);
+    if (!this.stopped && !this.failureReported) {
+      this.failureReported = true;
+      this.opts.onError?.(error);
+    }
   }
 }
 
