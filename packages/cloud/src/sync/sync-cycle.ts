@@ -1,6 +1,7 @@
 /** Conversation data sync followed by Git metadata sync for the same trigger. */
 
 import type Database from "better-sqlite3";
+import { normalizeServerUrl } from "@varveai/adit-core";
 import type { CloudClient } from "../http/client.js";
 import type { CloudProjectContext } from "../project-context.js";
 import { repositoryPayloads } from "../project-context.js";
@@ -8,7 +9,7 @@ import { syncLinkedGitMetadata, type GitSyncResult } from "../project-link/git-s
 import { SyncEngine, type SyncResult } from "./engine.js";
 
 export interface SyncCycleResult extends SyncResult {
-  /** Null when no Event batch was uploaded, so Git was intentionally not checked. */
+  /** Null when the caller chose not to inspect Git without a new Event batch. */
   git: GitSyncResult | null;
 }
 
@@ -20,7 +21,10 @@ export async function runSyncCycle(options: {
   serverUrl: string;
   cloudClientId: string;
   dataDir?: string;
+  /** Manual syncs inspect Git even when conversation data is already current. */
+  syncGitWhenNoBatches?: boolean;
 }): Promise<SyncCycleResult> {
+  const serverUrl = normalizeServerUrl(options.serverUrl);
   const engine = new SyncEngine(options.db, options.client, {
     projectId: options.projectContext.localProjectId,
     projectName: options.projectContext.projectName,
@@ -29,19 +33,21 @@ export async function runSyncCycle(options: {
     remoteUrl: options.projectContext.remoteUrl,
     canonicalRepoKey: options.projectContext.canonicalRepoKey,
     batchSize: options.batchSize,
-    serverUrl: options.serverUrl,
+    serverUrl,
     cloudClientId: options.cloudClientId,
     dataDir: options.dataDir,
   });
 
   const sync = await engine.sync();
-  if (sync.batches === 0) return { ...sync, git: null };
+  if (sync.batches === 0 && !options.syncGitWhenNoBatches) {
+    return { ...sync, git: null };
+  }
 
   const git = await syncLinkedGitMetadata(
     options.db,
     options.client,
     options.projectContext,
-    options.serverUrl,
+    serverUrl,
   );
   return { ...sync, git };
 }

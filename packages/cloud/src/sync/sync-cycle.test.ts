@@ -57,6 +57,49 @@ describe("runSyncCycle", () => {
     expect(gitSync).not.toHaveBeenCalled();
   });
 
+  it("checks Git during a manual sync even when conversation data is current", async () => {
+    engineSync.mockResolvedValue({
+      accepted: 0,
+      duplicates: 0,
+      conflicts: [],
+      newSyncCursor: null,
+      batches: 0,
+      totalRecords: 0,
+    });
+    gitSync.mockResolvedValue({
+      repositoriesChecked: 1,
+      repositoriesUpdated: 0,
+      repositoriesSkipped: 1,
+      branchesUploaded: 0,
+      commitsUploaded: 0,
+      skips: [{
+        repositoryId: "repo-1",
+        relativePath: ".",
+        reason: "unchanged",
+        message: "Local Git refs have not changed",
+      }],
+      failures: [],
+    });
+
+    const result = await runSyncCycle({
+      db: {} as never,
+      client: {} as never,
+      projectContext,
+      batchSize: 500,
+      serverUrl: "https://cloud.example.com/",
+      cloudClientId: "client-1",
+      syncGitWhenNoBatches: true,
+    });
+
+    expect(gitSync).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      projectContext,
+      "https://cloud.example.com",
+    );
+    expect(result.git?.repositoriesSkipped).toBe(1);
+  });
+
   it("checks Git after the Event batch succeeds", async () => {
     engineSync.mockResolvedValue({
       accepted: 3,
@@ -72,6 +115,7 @@ describe("runSyncCycle", () => {
       repositoriesSkipped: 0,
       branchesUploaded: 1,
       commitsUploaded: 1,
+      skips: [],
       failures: [],
     });
 

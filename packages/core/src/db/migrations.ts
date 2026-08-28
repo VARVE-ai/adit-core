@@ -267,7 +267,7 @@ export const migrations: Migration[] = [
   },
   {
     id: 17,
-    name: "replace_commit_observation_with_git_operations",
+    name: "replace_commit_observation_with_recorded_commits",
     sql: `
       DROP TABLE IF EXISTS session_repo_heads;
 
@@ -277,7 +277,7 @@ export const migrations: Migration[] = [
 
       ALTER TABLE project_link_cache DROP COLUMN last_commit_sha;
 
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_events_git_operation_identity
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_events_git_commit_identity
         ON events(
           session_id,
           event_type,
@@ -285,7 +285,157 @@ export const migrations: Migration[] = [
           json_extract(tool_input_json, '$.toolCallId'),
           json_extract(tool_input_json, '$.operationIndex')
         )
-        WHERE event_type = 'git_operation' AND deleted_at IS NULL;
+        WHERE event_type = 'git_commit'
+          AND tool_name = 'commit'
+          AND deleted_at IS NULL;
+    `,
+  },
+  {
+    id: 18,
+    name: "normalize_cloud_server_urls",
+    sql: `
+      ALTER TABLE sync_state RENAME TO sync_state_legacy_urls;
+
+      CREATE TABLE sync_state (
+        server_url            TEXT PRIMARY KEY,
+        client_id             TEXT NOT NULL,
+        last_synced_event_id  TEXT,
+        last_synced_at        TEXT,
+        sync_version          INTEGER NOT NULL DEFAULT 0
+      );
+
+      INSERT INTO sync_state (
+        server_url, client_id, last_synced_event_id, last_synced_at, sync_version
+      )
+      WITH normalized AS (
+        SELECT
+          RTRIM(TRIM(server_url), '/') AS server_url,
+          client_id,
+          last_synced_event_id,
+          last_synced_at,
+          sync_version
+        FROM sync_state_legacy_urls
+      ), ranked AS (
+        SELECT
+          server_url,
+          client_id,
+          MAX(last_synced_event_id) OVER (PARTITION BY server_url) AS last_synced_event_id,
+          MAX(last_synced_at) OVER (PARTITION BY server_url) AS last_synced_at,
+          MAX(sync_version) OVER (PARTITION BY server_url) AS sync_version,
+          ROW_NUMBER() OVER (
+            PARTITION BY server_url
+            ORDER BY COALESCE(last_synced_at, '') DESC, sync_version DESC
+          ) AS row_number
+        FROM normalized
+      )
+      SELECT server_url, client_id, last_synced_event_id, last_synced_at, sync_version
+      FROM ranked
+      WHERE row_number = 1;
+
+      DROP TABLE sync_state_legacy_urls;
+
+      ALTER TABLE project_link_cache RENAME TO project_link_cache_legacy_urls;
+
+      CREATE TABLE project_link_cache (
+        project_id TEXT NOT NULL,
+        repository_id TEXT NOT NULL,
+        server_url TEXT NOT NULL,
+        confirmed_project_id TEXT,
+        last_branch_sync_at TEXT,
+        last_doc_sync_at TEXT,
+        doc_hashes_json TEXT DEFAULT '{}',
+        qualified INTEGER DEFAULT 0,
+        initialized_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        git_ref_heads_json TEXT NOT NULL DEFAULT '{}',
+        git_refs_fingerprint TEXT,
+        PRIMARY KEY (project_id, repository_id, server_url)
+      );
+
+      INSERT INTO project_link_cache (
+        project_id, repository_id, server_url, confirmed_project_id,
+        last_branch_sync_at, last_doc_sync_at, doc_hashes_json, qualified,
+        initialized_at, updated_at, git_ref_heads_json, git_refs_fingerprint
+      )
+      WITH normalized AS (
+        SELECT
+          project_id,
+          repository_id,
+          RTRIM(TRIM(server_url), '/') AS server_url,
+          confirmed_project_id,
+          last_branch_sync_at,
+          last_doc_sync_at,
+          doc_hashes_json,
+          qualified,
+          initialized_at,
+          updated_at,
+          git_ref_heads_json,
+          git_refs_fingerprint
+        FROM project_link_cache_legacy_urls
+      ), merged AS (
+        SELECT DISTINCT
+          project_id,
+          repository_id,
+          server_url,
+          FIRST_VALUE(confirmed_project_id) OVER confirmed_state AS confirmed_project_id,
+          FIRST_VALUE(last_branch_sync_at) OVER branch_state AS last_branch_sync_at,
+          FIRST_VALUE(last_doc_sync_at) OVER document_state AS last_doc_sync_at,
+          FIRST_VALUE(doc_hashes_json) OVER document_state AS doc_hashes_json,
+          MAX(qualified) OVER cache_key AS qualified,
+          MIN(initialized_at) OVER cache_key AS initialized_at,
+          MAX(updated_at) OVER cache_key AS updated_at,
+          FIRST_VALUE(git_ref_heads_json) OVER branch_state AS git_ref_heads_json,
+          FIRST_VALUE(git_refs_fingerprint) OVER branch_state AS git_refs_fingerprint
+        FROM normalized
+        WINDOW
+          cache_key AS (
+            PARTITION BY project_id, repository_id, server_url
+          ),
+          confirmed_state AS (
+            PARTITION BY project_id, repository_id, server_url
+            ORDER BY (confirmed_project_id IS NULL), updated_at DESC
+          ),
+          branch_state AS (
+            PARTITION BY project_id, repository_id, server_url
+            ORDER BY
+              (git_refs_fingerprint IS NULL AND git_ref_heads_json = '{}'),
+              COALESCE(last_branch_sync_at, '') DESC,
+              updated_at DESC
+          ),
+          document_state AS (
+            PARTITION BY project_id, repository_id, server_url
+            ORDER BY
+              (last_doc_sync_at IS NULL AND doc_hashes_json = '{}'),
+              COALESCE(last_doc_sync_at, '') DESC,
+              updated_at DESC
+          )
+      )
+      SELECT
+        project_id, repository_id, server_url, confirmed_project_id,
+        last_branch_sync_at, last_doc_sync_at, doc_hashes_json, qualified,
+        initialized_at, updated_at, git_ref_heads_json, git_refs_fingerprint
+      FROM merged;
+
+      DROP TABLE project_link_cache_legacy_urls;
+    `,
+  },
+  {
+    id: 19,
+    name: "replace_git_operation_identity_with_commit_identity",
+    sql: `
+      DROP INDEX IF EXISTS idx_events_git_operation_identity;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_events_git_commit_identity
+        ON events(
+          session_id,
+          event_type,
+          json_extract(tool_input_json, '$.provider'),
+          json_extract(tool_input_json, '$.toolCallId'),
+          json_extract(tool_input_json, '$.operationIndex')
+        )
+        WHERE event_type = 'git_commit'
+          AND tool_name = 'commit'
+          AND deleted_at IS NULL;
     `,
   },
 ];

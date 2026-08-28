@@ -14,7 +14,11 @@
 
 import { createInterface } from "node:readline/promises";
 import pc from "picocolors";
-import { closeDatabase, openDatabase } from "@varveai/adit-core";
+import {
+  closeDatabase,
+  normalizeServerUrl,
+  openDatabase,
+} from "@varveai/adit-core";
 import {
   DEFAULT_SERVER_URL,
   loadCloudConfig,
@@ -169,18 +173,16 @@ function defaultIsProjectLinked(
       const rows = db
         .prepare("SELECT server_url FROM project_link_cache WHERE project_id = ?")
         .all(projectId) as Array<{ server_url: string }>;
-      const wanted = normalizeServerUrl(serverUrl);
-      return rows.some((row) => normalizeServerUrl(row.server_url) === wanted);
+      const wanted = normalizeServerUrl(serverUrl).toLowerCase();
+      return rows.some(
+        (row) => normalizeServerUrl(row.server_url).toLowerCase() === wanted,
+      );
     } finally {
       closeDatabase(db);
     }
   } catch {
     return false;
   }
-}
-
-function normalizeServerUrl(url: string): string {
-  return url.replace(/\/+$/u, "").toLowerCase();
 }
 
 function formatDuration(durationMs: number): string {

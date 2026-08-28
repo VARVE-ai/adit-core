@@ -13,6 +13,7 @@ import {
   loadConfig,
   openDatabase,
   closeDatabase,
+  normalizeServerUrl,
 } from "@varveai/adit-core";
 import { existsSync } from "node:fs";
 import {
@@ -46,7 +47,9 @@ import { loadInitializedProjectConfig } from "./project-initialization.js";
 export async function cloudLoginCommand(opts?: {
   server?: string;
 }): Promise<void> {
-  const serverUrl = opts?.server ?? process.env.ADIT_CLOUD_URL ?? DEFAULT_SERVER_URL;
+  const serverUrl = normalizeServerUrl(
+    opts?.server ?? process.env.ADIT_CLOUD_URL ?? DEFAULT_SERVER_URL,
+  );
   const config = loadConfig();
 
   // Single-server binding: reject login if already bound to a different server
@@ -219,24 +222,40 @@ export async function cloudSyncCommand(opts?: {
       serverUrl,
       cloudClientId: credentials.clientId,
       dataDir: config.dataDir,
+      syncGitWhenNoBatches: true,
     });
 
     if (opts?.json) {
       console.log(JSON.stringify(result, null, 2));
     } else {
       if (result.batches === 0) {
-        console.log("Already up to date. No records to sync.");
+        console.log("Conversation sync: already up to date.");
       } else {
         console.log(
           `Sync complete: ${result.accepted} accepted, ${result.duplicates} duplicates, ${result.conflicts.length} conflicts (${result.batches} batch${result.batches !== 1 ? "es" : ""})`,
         );
-        if (result.git) {
-          console.log(
-            `Git sync: ${result.git.commitsUploaded} commits, ${result.git.branchesUploaded} branches across ${result.git.repositoriesUpdated} repositories.`,
-          );
-          for (const failure of result.git.failures) {
-            console.error(`Git sync failed for ${failure.relativePath}: ${failure.message}`);
+      }
+      if (result.git) {
+        const unchanged = result.git.skips.filter(
+          (skip) => skip.reason === "unchanged",
+        ).length;
+        const notLinked = result.git.skips.filter(
+          (skip) => skip.reason === "not-linked",
+        ).length;
+        console.log(
+          `Git sync: ${result.git.commitsUploaded} commits, ${result.git.branchesUploaded} branches; ${result.git.repositoriesUpdated} updated, ${unchanged} unchanged, ${notLinked} not linked.`,
+        );
+        for (const skip of result.git.skips) {
+          if (skip.reason === "not-linked") {
+            console.error(
+              `Git sync skipped for ${skip.relativePath}: ${skip.message}`,
+            );
           }
+        }
+        for (const failure of result.git.failures) {
+          console.error(
+            `Git sync failed for ${failure.relativePath}: ${failure.message}`,
+          );
         }
       }
     }

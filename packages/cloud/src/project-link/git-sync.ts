@@ -26,12 +26,22 @@ export interface GitSyncFailure {
   message: string;
 }
 
+export type GitSyncSkipReason = "not-linked" | "unchanged";
+
+export interface GitSyncSkip {
+  repositoryId: string;
+  relativePath: string;
+  reason: GitSyncSkipReason;
+  message: string;
+}
+
 export interface GitSyncResult {
   repositoriesChecked: number;
   repositoriesUpdated: number;
   repositoriesSkipped: number;
   branchesUploaded: number;
   commitsUploaded: number;
+  skips: GitSyncSkip[];
   failures: GitSyncFailure[];
 }
 
@@ -40,7 +50,7 @@ export interface GitSyncResult {
  *
  * Ref heads are the cursor. The cursor is advanced only after both the branch
  * snapshot and every commit batch succeed, so a failed upload is retried by a
- * later conversation sync or a manual `adit cloud link`.
+ * later sync or a manual `adit cloud link`.
  */
 export async function syncLinkedGitMetadata(
   db: Database.Database,
@@ -54,6 +64,7 @@ export async function syncLinkedGitMetadata(
     repositoriesSkipped: 0,
     branchesUploaded: 0,
     commitsUploaded: 0,
+    skips: [],
     failures: [],
   };
 
@@ -66,6 +77,12 @@ export async function syncLinkedGitMetadata(
     );
     if (!cache?.confirmedProjectId) {
       result.repositoriesSkipped++;
+      result.skips.push({
+        repositoryId: repository.localRepositoryId,
+        relativePath: repository.relativePath,
+        reason: "not-linked",
+        message: `No confirmed project link for ${serverUrl}`,
+      });
       continue;
     }
 
@@ -95,6 +112,12 @@ export async function syncLinkedGitMetadata(
           );
         }
         result.repositoriesSkipped++;
+        result.skips.push({
+          repositoryId: repository.localRepositoryId,
+          relativePath: repository.relativePath,
+          reason: "unchanged",
+          message: "Local Git refs have not changed",
+        });
         continue;
       }
 

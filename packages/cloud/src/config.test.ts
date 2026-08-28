@@ -53,7 +53,7 @@ describe("loadCloudConfig", () => {
   });
 
   it("enables cloud when server URL is set", () => {
-    process.env.ADIT_CLOUD_URL = "https://cloud.example.com";
+    process.env.ADIT_CLOUD_URL = " https://cloud.example.com/// ";
     const config = loadCloudConfig();
     expect(config.serverUrl).toBe("https://cloud.example.com");
     expect(config.enabled).toBe(true);

@@ -47,6 +47,79 @@ describe("extractGitOperations", () => {
     ]);
   });
 
+  it("extracts Codex desktop exec custom tool calls and pairs their output", () => {
+    const path = transcript([
+      { type: "session_meta", payload: { session_id: "codex-desktop-1" } },
+      { type: "response_item", payload: { type: "message", role: "user", content: "commit it" } },
+      {
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          status: "completed",
+          call_id: "call-commit",
+          name: "exec",
+          input: 'const r = await tools.exec_command({cmd:"git commit -m \\"fix: save work\\"",workdir:"/repo",yield_time_ms:30000,max_output_tokens:6000}); text(r.output);',
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: "call-commit",
+          output: [
+            { type: "input_text", text: "Script completed\nWall time 0.3 seconds\nOutput:\n" },
+            { type: "input_text", text: "[main abc1234] fix: save work\n" },
+          ],
+        },
+      },
+    ]);
+
+    expect(extractGitOperations({
+      platform: "codex",
+      transcriptPath: path,
+      expectedSessionId: "codex-desktop-1",
+      defaultCwd: "/fallback",
+    })).toEqual([
+      expect.objectContaining({
+        toolCallId: "call-commit",
+        operation: "commit",
+        status: "success",
+        cwd: "/repo",
+        output: "[main abc1234] fix: save work",
+      }),
+    ]);
+  });
+
+  it("ignores ambiguous Codex desktop programs with multiple shell calls", () => {
+    const path = transcript([
+      { payload: { type: "message", role: "user", content: "inspect" } },
+      {
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          status: "completed",
+          call_id: "call-many",
+          name: "exec",
+          input: 'const r = await Promise.all([tools.exec_command({cmd:"git status",workdir:"/repo"}),tools.exec_command({cmd:"git log -1",workdir:"/repo"})]);',
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: "call-many",
+          output: [{ type: "input_text", text: "Script completed\nWall time 0.2 seconds\nOutput:\nclean" }],
+        },
+      },
+    ]);
+
+    expect(extractGitOperations({
+      platform: "codex",
+      transcriptPath: path,
+      defaultCwd: "/fallback",
+    })).toEqual([]);
+  });
+
   it("uses Claude Bash tool results for operation status and output", () => {
     const path = transcript([
       { type: "user", sessionId: "claude-1", message: { content: "commit it" } },

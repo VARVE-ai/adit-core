@@ -34,7 +34,7 @@ vi.mock("@varveai/adit-engine", () => ({
 }));
 
 vi.mock("../git-operations/index.js", () => ({
-  recordGitOperations: vi.fn().mockResolvedValue(undefined),
+  recordGitCommits: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@varveai/adit-cloud", () => ({

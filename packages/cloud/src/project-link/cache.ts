@@ -7,6 +7,7 @@
  */
 
 import type Database from "better-sqlite3";
+import { normalizeServerUrl } from "@varveai/adit-core";
 import type { ProjectLinkCache } from "./types.js";
 
 /** Row shape from the project_link_cache table */
@@ -38,7 +39,11 @@ export function getProjectLinkCache(
     .prepare(
       "SELECT * FROM project_link_cache WHERE project_id = ? AND repository_id = ? AND server_url = ?",
     )
-    .get(projectId, repositoryId, serverUrl) as CacheRow | undefined;
+    .get(
+      projectId,
+      repositoryId,
+      normalizeServerUrl(serverUrl),
+    ) as CacheRow | undefined;
 
   if (!row) return null;
 
@@ -101,7 +106,7 @@ export function upsertProjectLinkCache(
   `).run(
     cache.projectId,
     cache.repositoryId,
-    cache.serverUrl,
+    normalizeServerUrl(cache.serverUrl),
     cache.confirmedProjectId,
     JSON.stringify(cache.gitRefHeads),
     cache.gitRefsFingerprint,
@@ -138,7 +143,7 @@ export function updateCachedGitState(
     now,
     projectId,
     repositoryId,
-    serverUrl,
+    normalizeServerUrl(serverUrl),
   );
 }
 
@@ -152,12 +157,12 @@ export function clearProjectLinkCache(
   if (repositoryId) {
     db.prepare(
       "DELETE FROM project_link_cache WHERE project_id = ? AND repository_id = ? AND server_url = ?",
-    ).run(projectId, repositoryId, serverUrl);
+    ).run(projectId, repositoryId, normalizeServerUrl(serverUrl));
     return;
   }
 
   db.prepare("DELETE FROM project_link_cache WHERE project_id = ? AND server_url = ?")
-    .run(projectId, serverUrl);
+    .run(projectId, normalizeServerUrl(serverUrl));
 }
 
 /** Update cached document hashes after upload */
@@ -178,7 +183,7 @@ export function updateCachedDocHashes(
     new Date().toISOString(),
     projectId,
     repositoryId,
-    serverUrl,
+    normalizeServerUrl(serverUrl),
   );
 }
 
@@ -194,5 +199,11 @@ export function updateCachedQualified(
     UPDATE project_link_cache
     SET qualified = ?, updated_at = ?
     WHERE project_id = ? AND repository_id = ? AND server_url = ?
-  `).run(qualified ? 1 : 0, new Date().toISOString(), projectId, repositoryId, serverUrl);
+  `).run(
+    qualified ? 1 : 0,
+    new Date().toISOString(),
+    projectId,
+    repositoryId,
+    normalizeServerUrl(serverUrl),
+  );
 }

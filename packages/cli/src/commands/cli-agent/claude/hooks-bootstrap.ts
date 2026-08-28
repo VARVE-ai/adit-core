@@ -9,7 +9,6 @@ import {
 import { buildCloudHookCommand, quoteHookCommandArg } from "../hook-post-script.js";
 
 const EVENTS = [
-  "SessionStart",
   "UserPromptSubmit",
   "Stop",
   "StopFailure",
@@ -166,6 +165,7 @@ export function installClaudeHooks(opts: {
   });
 
   const hooks = (existing.hooks ??= {}) as Record<string, unknown>;
+  removeClaudeCloudHookEvent(hooks, "SessionStart");
   for (const eventName of EVENTS) {
     const arr = Array.isArray(hooks[eventName])
       ? hooks[eventName] as Array<Record<string, unknown>>
@@ -258,6 +258,27 @@ export function installClaudeHooks(opts: {
       }
     },
   };
+}
+
+function removeClaudeCloudHookEvent(
+  hooks: Record<string, unknown>,
+  eventName: string,
+): void {
+  const entries = Array.isArray(hooks[eventName])
+    ? hooks[eventName] as Array<Record<string, unknown>>
+    : [];
+  const filtered = entries.filter((entry) => {
+    const inner = entry.hooks;
+    return !(
+      Array.isArray(inner) &&
+      inner.some((hook: HookCommand) =>
+        typeof hook?.command === "string" &&
+        hook.command.includes(CLAUDE_CLOUD_HOOK_PREFIX)
+      )
+    );
+  });
+  if (filtered.length === 0) delete hooks[eventName];
+  else hooks[eventName] = filtered;
 }
 
 async function shouldRemoveClaudeCloudSettings(opts: {

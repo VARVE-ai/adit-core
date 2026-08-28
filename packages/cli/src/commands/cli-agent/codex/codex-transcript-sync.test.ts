@@ -20,10 +20,6 @@ describe("CodexTranscriptSync", () => {
       const sessionId = "019e0d36-9fd9-7c40-add5-01d6d8bc49d3";
 
       sync.noteHook({
-        eventType: "SessionStart",
-        body: { session_id: sessionId, transcript_path: transcriptPath },
-      });
-      sync.noteHook({
         eventType: "UserPromptSubmit",
         body: { session_id: sessionId, transcript_path: transcriptPath, prompt: "check files" },
       });
@@ -118,10 +114,6 @@ describe("CodexTranscriptSync", () => {
       });
 
       sync.noteHook({
-        eventType: "SessionStart",
-        body: { session_id: sessionId, transcript_path: transcriptPath },
-      });
-      sync.noteHook({
         eventType: "UserPromptSubmit",
         body: { session_id: sessionId, transcript_path: transcriptPath, prompt: "date" },
       });
@@ -195,8 +187,8 @@ describe("CodexTranscriptSync", () => {
       })}\n`);
 
       expect(sync.noteHook({
-        eventType: "SessionStart",
-        body: { session_id: sessionId, transcript_path: transcriptPath },
+        eventType: "UserPromptSubmit",
+        body: { session_id: sessionId, transcript_path: transcriptPath, prompt: "continue" },
       })).toBe(sessionId);
 
       appendFileSync(transcriptPath, `${JSON.stringify({
@@ -251,10 +243,6 @@ describe("CodexTranscriptSync", () => {
       const sync = new CodexTranscriptSync();
       const sessionId = "019e0d36-9fd9-7c40-add5-01d6d8bc49d3";
 
-      sync.noteHook({
-        eventType: "SessionStart",
-        body: { session_id: sessionId, transcript_path: transcriptPath },
-      });
       sync.noteHook({
         eventType: "UserPromptSubmit",
         body: { session_id: sessionId, transcript_path: transcriptPath, prompt: "make a plan" },
@@ -342,7 +330,7 @@ describe("CodexTranscriptSync", () => {
     })).toEqual([]);
   });
 
-  it("starts replaying from the transcript position captured at SessionStart", () => {
+  it("starts replaying from the transcript position captured at the first user prompt", () => {
     const dir = tempDir();
     try {
       const transcriptPath = join(dir, "019e0d64-cd63-7a40-8305-10c38d9b48d6.jsonl");
@@ -361,8 +349,8 @@ describe("CodexTranscriptSync", () => {
       })}\n`);
 
       sync.noteHook({
-        eventType: "SessionStart",
-        body: { session_id: sessionId, transcript_path: transcriptPath },
+        eventType: "UserPromptSubmit",
+        body: { session_id: sessionId, transcript_path: transcriptPath, prompt: "continue" },
       });
 
       appendFileSync(transcriptPath, `${JSON.stringify({
@@ -384,6 +372,57 @@ describe("CodexTranscriptSync", () => {
         text: "Fresh answer",
       });
       expect(sync.drainSession(sessionId)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps reading new transcript entries after later user prompts", () => {
+    const dir = tempDir();
+    try {
+      const transcriptPath = join(dir, "019e0d64-cd63-7a40-8305-10c38d9b48d6.jsonl");
+      const sync = new CodexTranscriptSync();
+      const sessionId = "019e0d64-cd63-7a40-8305-10c38d9b48d6";
+      const timestamp = new Date().toISOString();
+      writeFileSync(transcriptPath, "");
+
+      sync.noteHook({
+        eventType: "UserPromptSubmit",
+        body: { session_id: sessionId, transcript_path: transcriptPath, prompt: "first" },
+      });
+      appendFileSync(transcriptPath, `${JSON.stringify({
+        timestamp,
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "First answer" }],
+        },
+      })}\n`);
+      expect(sync.drainSession(sessionId)).toHaveLength(1);
+
+      appendFileSync(transcriptPath, `${JSON.stringify({
+        timestamp,
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Late answer" }],
+        },
+      })}\n`);
+      sync.noteHook({
+        eventType: "UserPromptSubmit",
+        body: { session_id: sessionId, transcript_path: transcriptPath, prompt: "second" },
+      });
+
+      expect(sync.drainSession(sessionId)).toContainEqual({
+        type: "message",
+        payload: expect.objectContaining({
+          role: "assistant",
+          sessionId,
+          text: "Late answer",
+        }),
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

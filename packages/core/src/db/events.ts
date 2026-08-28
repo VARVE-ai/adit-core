@@ -339,8 +339,8 @@ export function countEvents(
   return row.cnt;
 }
 
-/** Whether an extracted tool call has already produced this Git operation event. */
-export function hasGitOperationEvent(
+/** Whether an extracted tool call has already produced this Git commit event. */
+export function hasGitCommitEvent(
   db: Database.Database,
   sessionId: string,
   provider: string,
@@ -350,7 +350,7 @@ export function hasGitOperationEvent(
   const row = db
     .prepare(
       `SELECT 1 FROM events
-       WHERE session_id = ? AND event_type = 'git_operation'
+       WHERE session_id = ? AND event_type = 'git_commit' AND tool_name = 'commit'
          AND json_extract(tool_input_json, '$.provider') = ?
          AND json_extract(tool_input_json, '$.toolCallId') = ?
          AND json_extract(tool_input_json, '$.operationIndex') = ?

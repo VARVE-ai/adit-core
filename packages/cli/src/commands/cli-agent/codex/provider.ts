@@ -1836,7 +1836,11 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
 
   private pushEvent(type: string, payload: Record<string, unknown>): void {
     if (type === "error" && this.ownerValue === "web") {
-      writeCliAgentErrorToTerminal("adit codex", payload);
+      writeCliAgentErrorToTerminal(
+        "adit codex",
+        payload,
+        (message) => this.notices.debug(message),
+      );
     }
     this.opts.onEvent?.({ type, payload });
   }

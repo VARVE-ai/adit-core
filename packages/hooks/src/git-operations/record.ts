@@ -1,6 +1,6 @@
 import { isAbsolute, relative, resolve } from "node:path";
 import {
-  hasGitOperationEvent,
+  hasGitCommitEvent,
   type LocalRepository,
 } from "@varveai/adit-core";
 import { runGit, type TimelineManager } from "@varveai/adit-engine";
@@ -17,8 +17,8 @@ interface GitOperationDetails {
   commitMessage: string | null;
 }
 
-/** Record Git commands the agent actually executed in the completed turn. */
-export async function recordGitOperations(
+/** Record successful git commit commands the agent actually executed in the completed turn. */
+export async function recordGitCommits(
   ctx: HookContext,
   input: NormalizedHookInput,
   timeline: TimelineManager,
@@ -39,8 +39,10 @@ export async function recordGitOperations(
   }
 
   for (const operation of operations) {
+    if (operation.operation !== "commit" || operation.status !== "success") continue;
+
     try {
-      if (hasGitOperationEvent(
+      if (hasGitCommitEvent(
         ctx.db,
         ctx.session.id,
         operation.provider,
@@ -62,10 +64,10 @@ export async function recordGitOperations(
 
       await timeline.recordEvent({
         sessionId: ctx.session.id,
-        eventType: "git_operation",
+        eventType: "git_commit",
         actor: "assistant",
-        responseText: commitSubject(details.commitMessage) ?? `Git ${operation.operation}`,
-        toolName: operation.operation,
+        responseText: commitSubject(details.commitMessage) ?? "Git commit",
+        toolName: "commit",
         toolInputJson,
         gitBranch: details.branch,
         gitHeadSha: details.sha,
@@ -88,17 +90,17 @@ async function resolveOperationDetails(
   operation: AgentGitOperation,
 ): Promise<GitOperationDetails> {
   const repository = findRepository(ctx.config.repositories, operation.cwd);
-  if (!repository || !operation.output) {
+  if (!operation.output) {
     return { repository, branch: null, sha: null, commitMessage: null };
   }
 
   const candidate = explicitShaCandidate(operation.operation, operation.output);
-  const sha = candidate
+  const sha = repository && candidate
     ? await validateCommitSha(repository.path, candidate)
     : null;
-  const commitMessage = sha && createsCommit(operation.operation)
+  const commitMessage = repository && sha
     ? await readCommitMessage(repository.path, sha)
-    : null;
+    : explicitCommitSubject(operation.operation, operation.output);
 
   return {
     repository,
@@ -108,12 +110,14 @@ async function resolveOperationDetails(
   };
 }
 
-function createsCommit(operation: string): boolean {
-  return ["commit", "cherry-pick", "revert"].includes(operation);
-}
-
 function commitSubject(message: string | null): string | null {
   return message?.split(/\r?\n/u, 1)[0]?.trim() || null;
+}
+
+function explicitCommitSubject(operation: string, output: string): string | null {
+  if (operation !== "commit") return null;
+  const match = output.match(/^\[[^\]\r\n]+\]\s+([^\r\n]+)$/mu);
+  return match?.[1]?.trim() || null;
 }
 
 function findRepository(repositories: LocalRepository[], cwd: string): LocalRepository | null {
@@ -138,14 +142,9 @@ function explicitShaCandidate(operation: string, output: string): string | null 
   const trimmed = output.trim();
   if (/^[0-9a-f]{7,64}$/iu.test(trimmed)) return trimmed;
 
-  if (["commit", "cherry-pick", "revert"].includes(operation)) {
+  if (operation === "commit") {
     const bracket = output.match(/^\[[^\]\n]+\s([0-9a-f]{7,64})\](?:\s|$)/imu);
     if (bracket?.[1]) return bracket[1];
-  }
-
-  if (["checkout", "reset", "switch"].includes(operation)) {
-    const headMoved = output.match(/\bHEAD is now at ([0-9a-f]{7,64})\b/iu);
-    if (headMoved?.[1]) return headMoved[1];
   }
 
   return null;

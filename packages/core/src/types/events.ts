@@ -16,8 +16,7 @@ export type EventType =
   | "mcp_call" // MCP server tool call
   | "checkpoint" // DEPRECATED 2026-07: no longer collected (was session-start marker; metadata now lives on the session); kept for historical rows
   | "revert" // User reverted to checkpoint
-  | "git_commit" // DEPRECATED 2026-08: legacy HEAD/reflog observation; kept for historical rows
-  | "git_operation" // Git command actually executed by the agent in this turn
+  | "git_commit" // Successful git commit actually executed by the agent (gitHeadSha holds the commit sha)
   | "env_snapshot" // Environment captured
   | "env_drift" // DEPRECATED 2026-07: no longer collected; kept for historical rows
   | "task_completed" // DEPRECATED 2026-07: no longer collected; kept for historical rows

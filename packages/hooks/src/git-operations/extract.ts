@@ -1,5 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { Platform } from "@varveai/adit-core";
+import {
+  codexShellCalls,
+  type TranscriptShellCall,
+} from "./codex-shell-calls.js";
 import { parseGitCommands } from "./command-parser.js";
 import type { AgentGitOperation, ExtractGitOperationsInput } from "./types.js";
 
@@ -20,13 +24,7 @@ interface RawEntry {
   toolUseResult?: Record<string, unknown> | null;
 }
 
-interface ShellCall {
-  id: string;
-  command: string;
-  cwd?: string;
-  output?: string | null;
-  success: boolean;
-}
+type ShellCall = TranscriptShellCall;
 
 export function extractGitOperations(input: ExtractGitOperationsInput): AgentGitOperation[] {
   if (!input.transcriptPath || !existsSync(input.transcriptPath)) return [];
@@ -95,24 +93,6 @@ function shellCallsForLatestTurn(entries: RawEntry[], platform: Platform): Shell
   if (platform === "cursor") return cursorShellCalls(turn, bounds.start);
   if (platform === "opencode") return openCodeShellCalls(turn, bounds.start);
   return claudeShellCalls(turn, bounds.start);
-}
-
-function codexShellCalls(entries: RawEntry[], entryOffset: number): ShellCall[] {
-  const calls: ShellCall[] = [];
-  entries.forEach((entry, entryIndex) => {
-    const payload = asRecord(entry.payload);
-    if (payload?.type !== "exec_command_end") return;
-    const command = commandText(payload.command);
-    if (!command) return;
-    calls.push({
-      id: stringValue(payload.call_id) ?? `codex-shell-${entryOffset + entryIndex}`,
-      command,
-      cwd: stringValue(payload.cwd) ?? undefined,
-      output: joinedOutput(payload),
-      success: payload.status === "completed" || payload.exit_code === 0,
-    });
-  });
-  return calls;
 }
 
 function claudeShellCalls(entries: RawEntry[], entryOffset: number): ShellCall[] {
@@ -274,13 +254,6 @@ function hasText(value: unknown): boolean {
     const record = asRecord(item);
     return typeof record?.text === "string" && record.text.trim().length > 0;
   });
-}
-
-function commandText(value: unknown): string | null {
-  if (typeof value === "string") return value;
-  if (!Array.isArray(value)) return null;
-  const strings = value.filter((item): item is string => typeof item === "string");
-  return strings.at(-1) ?? null;
 }
 
 function joinedOutput(value: Record<string, unknown> | null | undefined): string | null {

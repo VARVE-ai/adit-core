@@ -102,6 +102,26 @@ describe("syncLinkedGitMetadata", () => {
     );
 
     expect(result.repositoriesSkipped).toBe(1);
+    expect(result.skips).toEqual([
+      expect.objectContaining({ reason: "not-linked", relativePath: "." }),
+    ]);
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it("reports unchanged repositories separately from unlinked repositories", async () => {
+    collectFingerprint.mockResolvedValue("old-fingerprint");
+    const client = { post: vi.fn() };
+
+    const result = await syncLinkedGitMetadata(
+      {} as never,
+      client as never,
+      context,
+      "https://cloud.example.com",
+    );
+
+    expect(result.skips).toEqual([
+      expect.objectContaining({ reason: "unchanged", relativePath: "." }),
+    ]);
     expect(client.post).not.toHaveBeenCalled();
   });
 

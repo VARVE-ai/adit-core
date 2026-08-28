@@ -17,6 +17,7 @@ interface CodexSessionState {
   id: string;
   transcriptPath?: string;
   transcriptOffset: number;
+  transcriptBaselineCaptured: boolean;
   pendingTranscriptLine: string;
   seenKeys: Set<string>;
   lastAssistantMessageId?: string;
@@ -52,12 +53,14 @@ export class CodexTranscriptSync {
       session.transcriptPath = transcriptPath;
       if (isNewTranscript) {
         session.transcriptOffset = 0;
+        session.transcriptBaselineCaptured = false;
         session.pendingTranscriptLine = "";
       }
     }
 
-    if (input.eventType === "SessionStart") {
+    if (input.eventType === "UserPromptSubmit" && !session.transcriptBaselineCaptured) {
       this.primeTranscript(session);
+      session.transcriptBaselineCaptured = true;
     }
 
     return sessionId;
@@ -155,6 +158,7 @@ export class CodexTranscriptSync {
       session = {
         id,
         transcriptOffset: 0,
+        transcriptBaselineCaptured: false,
         pendingTranscriptLine: "",
         seenKeys: new Set<string>(),
         seenAssistantStops: new Set<string>(),
@@ -225,6 +229,7 @@ export class CodexTranscriptSync {
     let fd: number | null = null;
     try {
       const stat = fs.statSync(session.transcriptPath);
+      session.transcriptBaselineCaptured = true;
       if (stat.size < session.transcriptOffset) {
         session.transcriptOffset = 0;
         session.pendingTranscriptLine = "";

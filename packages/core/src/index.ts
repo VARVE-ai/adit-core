@@ -16,6 +16,9 @@ export type {
 } from "./types/index.js";
 export { parseLabels, parseDiffStats, parseError } from "./types/index.js";
 
+// Cloud server identity
+export { normalizeServerUrl } from "./server-url.js";
+
 export type {
   Platform,
   SessionType,
@@ -44,7 +47,7 @@ export {
   searchEvents,
   clearEvents,
   countEvents,
-  hasGitOperationEvent,
+  hasGitCommitEvent,
   insertDiff,
   getDiffByEventId,
   getDiffText,

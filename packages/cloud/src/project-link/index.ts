@@ -44,7 +44,13 @@ export {
   updateCachedQualified,
 } from "./cache.js";
 
-export { syncLinkedGitMetadata, type GitSyncResult, type GitSyncFailure } from "./git-sync.js";
+export {
+  syncLinkedGitMetadata,
+  type GitSyncResult,
+  type GitSyncFailure,
+  type GitSyncSkip,
+  type GitSyncSkipReason,
+} from "./git-sync.js";
 
 // Types
 export type {

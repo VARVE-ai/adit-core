@@ -87,4 +87,19 @@ describe("sync state", () => {
       syncVersion: 2168,
     });
   });
+
+  it("treats trailing slashes as the same server", () => {
+    upsertSyncState(db, {
+      serverUrl: "http://localhost:3000/",
+      clientId: "client-1",
+      lastSyncedEventId: "01H000000000000000000000100",
+      lastSyncedAt: "2026-05-18T06:00:00.000Z",
+      syncVersion: 10,
+    });
+
+    expect(getSyncState(db, "http://localhost:3000")).toMatchObject({
+      serverUrl: "http://localhost:3000",
+      clientId: "client-1",
+    });
+  });
 });

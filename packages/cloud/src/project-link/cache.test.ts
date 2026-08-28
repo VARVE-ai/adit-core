@@ -77,6 +77,17 @@ describe("Project Link Cache", () => {
     expect(result!.qualified).toBe(false);
   });
 
+  it("uses one cache key with or without trailing slashes", () => {
+    upsertProjectLinkCache(db, makeCache({
+      serverUrl: "https://cloud.example.com/",
+      confirmedProjectId: "confirmed-123",
+    }));
+
+    const result = getProjectLinkCache(db, "proj-abc123", "https://cloud.example.com");
+    expect(result?.confirmedProjectId).toBe("confirmed-123");
+    expect(result?.serverUrl).toBe("https://cloud.example.com");
+  });
+
   it("upserts an existing cache entry", () => {
     const cache = makeCache();
     upsertProjectLinkCache(db, cache);

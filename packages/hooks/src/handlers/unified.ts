@@ -20,7 +20,7 @@ import {
   assistantTextFromTranscriptEntry,
   type TranscriptEntryLike,
 } from "../common/transcript-entry.js";
-import { recordGitOperations } from "../git-operations/index.js";
+import { recordGitCommits } from "../git-operations/index.js";
 import { debugLog } from "../common/debug-log.js";
 import {
   classifyPromptSubmit,
@@ -304,9 +304,9 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     }
   }
 
-  // Record only Git commands that the agent actually executed in this turn.
-  await withPerf(ctx.config.dataDir, "git", "gitOperations", () =>
-    recordGitOperations(ctx, input, timeline),
+  // Record only successful git commit commands actually executed in this turn.
+  await withPerf(ctx.config.dataDir, "git", "gitCommits", () =>
+    recordGitCommits(ctx, input, timeline),
   );
 
   // Environment snapshots stay local for the TUI env screen and snapshot

@@ -64,6 +64,7 @@ describe("installCodexHooks", () => {
       expect(existsSync(join(dir, ".codex", "config.toml"))).toBe(false);
       expect(readFileSync(installed.settingsPath, "utf8")).toContain("UserPromptSubmit");
       const hooksConfig = JSON.parse(readFileSync(installed.settingsPath, "utf8"));
+      expect(hooksConfig.hooks.SessionStart).toBeUndefined();
       const command = hooksConfig.hooks.UserPromptSubmit[0].hooks[0].command as string;
       expect(command).toMatch(/^node -e /u);
       expect(command).toContain("from=adit-cloud-codex-test");
@@ -169,6 +170,106 @@ describe("installCodexHooks", () => {
 
       installed.cleanup();
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("removes only ADIT cloud SessionStart hooks", () => {
+    const dir = tempDir();
+    const codexHome = join(dir, "codex-home");
+    try {
+      const codexDir = join(dir, ".codex");
+      const hooksPath = join(codexDir, "hooks.json");
+      mkdirSync(codexDir, { recursive: true });
+      writeFileSync(
+        hooksPath,
+        JSON.stringify({
+          hooks: {
+            SessionStart: [
+              {
+                hooks: [{
+                  type: "command",
+                  command: "node relay from=adit-cloud-codex-test",
+                  timeout: 30,
+                }],
+              },
+              {
+                hooks: [{ type: "command", command: "other-tool session-start", timeout: 30 }],
+              },
+            ],
+          },
+        }, null, 2) + "\n",
+      );
+
+      const installed = installCodexHooks({
+        cwd: dir,
+        codexHome,
+        endpoint: "http://127.0.0.1:1234/hook",
+        marker: "from=adit-cloud-codex-test",
+      });
+
+      const hooksConfig = JSON.parse(readFileSync(hooksPath, "utf8"));
+      expect(hooksConfig.hooks.SessionStart).toHaveLength(1);
+      expect(hooksConfig.hooks.SessionStart[0].hooks[0].command).toBe(
+        "other-tool session-start",
+      );
+
+      installed.cleanup();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps hook order and trust stable when cloud hooks are reinstalled", async () => {
+    const dir = tempDir();
+    const codexHome = join(dir, "codex-home");
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+
+    try {
+      installCodexHooks({
+        cwd: dir,
+        codexHome,
+        endpoint: "http://127.0.0.1:1234/hook",
+        marker: "from=adit-cloud-codex-test",
+        persistent: true,
+      });
+      await ensurePersistentCodexHooksInstalled({
+        cwd: dir,
+        aditHookBinary: "node /tmp/adit-hook",
+      });
+
+      installCodexHooks({
+        cwd: dir,
+        codexHome,
+        endpoint: "http://127.0.0.1:5678/hook",
+        marker: "from=adit-cloud-codex-test",
+        persistent: true,
+      });
+
+      const hooksPath = join(dir, ".codex", "hooks.json");
+      const hooksConfig = JSON.parse(readFileSync(hooksPath, "utf8"));
+      const promptHooks = hooksConfig.hooks.UserPromptSubmit;
+      expect(promptHooks).toHaveLength(2);
+      expect(promptHooks[0].hooks[0].command).toContain("from=adit-cloud-codex-test");
+      expect(promptHooks[1].hooks[0].command).toContain("node /tmp/adit-hook");
+      expect(hooksConfig.hooks.SessionStart).toBeUndefined();
+
+      const userConfig = readFileSync(join(codexHome, "config.toml"), "utf8");
+      expect(userConfig).toContain("# >>> adit-cloud-codex from=adit-cloud-codex-test");
+      expect(userConfig).toContain("# >>> adit-codex-hooks project=");
+      expect(userConfig).toContain(".codex/hooks.json:user_prompt_submit:0:0");
+      expect(userConfig).toContain(".codex/hooks.json:user_prompt_submit:1:0");
+      expect(await ensurePersistentCodexHooksInstalled({
+        cwd: dir,
+        aditHookBinary: "node /tmp/adit-hook",
+      })).toBe(false);
+    } finally {
+      if (previousCodexHome === undefined) {
+        delete process.env.CODEX_HOME;
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
       rmSync(dir, { recursive: true, force: true });
     }
   });

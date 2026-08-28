@@ -7,6 +7,7 @@
 
 // Config
 export { loadCloudConfig, DEFAULT_SERVER_URL, type CloudConfig } from "./config.js";
+export { normalizeServerUrl } from "@varveai/adit-core";
 export {
   resolveCloudProjectContext,
   repositoryPayloads,
@@ -104,6 +105,8 @@ export {
   type ProjectLinkCache,
   type GitSyncResult,
   type GitSyncFailure,
+  type GitSyncSkip,
+  type GitSyncSkipReason,
   type QualifyResponse,
 } from "./project-link/index.js";
 

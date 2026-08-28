@@ -611,7 +611,7 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
       const sessionId = rawSessionId && isLocalOwner
         ? provider?.noteLocalSession(rawSessionId) ?? rawSessionId
         : rawSessionId;
-      if (event.type === "StatusLine" || event.type === "SessionStart") {
+      if (event.type === "StatusLine") {
         transcriptSync.noteModel(rawSessionId, hookModel);
         provider?.noteModel(hookModel);
       }

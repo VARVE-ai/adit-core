@@ -6,6 +6,8 @@
  * all cloud features are disabled.
  */
 
+import { normalizeServerUrl } from "@varveai/adit-core";
+
 export interface CloudConfig {
   /** Cloud server URL (e.g., "https://adit-cloud.varve.ai") */
   serverUrl: string | null;
@@ -26,7 +28,10 @@ export const DEFAULT_SERVER_URL = "https://adit-cloud.varve.ai";
 
 /** Load cloud configuration from environment variables */
 export function loadCloudConfig(): CloudConfig {
-  const serverUrl = process.env.ADIT_CLOUD_URL ?? null;
+  const configuredServerUrl = process.env.ADIT_CLOUD_URL;
+  const serverUrl = configuredServerUrl
+    ? normalizeServerUrl(configuredServerUrl)
+    : null;
 
   // Cloud is enabled unless explicitly disabled via env var.
   // When ADIT_CLOUD_ENABLED is not set, enabled is true — actual

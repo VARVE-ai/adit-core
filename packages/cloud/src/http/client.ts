@@ -6,6 +6,7 @@
  */
 
 import type { CloudCredentials } from "../auth/credentials.js";
+import { normalizeServerUrl } from "@varveai/adit-core";
 import {
   clearAuthFailure,
   isTokenExpired,
@@ -70,7 +71,7 @@ export class CloudClient {
     credentials: CloudCredentials,
     options?: CloudClientOptions,
   ) {
-    this.serverUrl = serverUrl.replace(/\/$/, "");
+    this.serverUrl = normalizeServerUrl(serverUrl);
     this.credentials = credentials;
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
@@ -429,7 +430,7 @@ export class CloudClient {
   }
 
   private sameServer(serverUrl: string): boolean {
-    return serverUrl.replace(/\/$/, "") === this.serverUrl;
+    return normalizeServerUrl(serverUrl) === this.serverUrl;
   }
 
   private recordRequestAuthFailure(status: number, statusText: string, code?: string): void {

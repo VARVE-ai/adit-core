@@ -2384,7 +2384,11 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
   private pushEvent(type: string, payload: Record<string, unknown>): void {
     if (type === "error" && this.ownerValue === "web") {
-      writeCliAgentErrorToTerminal("adit claude", payload);
+      writeCliAgentErrorToTerminal(
+        "adit claude",
+        payload,
+        (message) => this.notices.debug(message),
+      );
     }
     this.opts.onEvent?.({ type, payload });
   }
