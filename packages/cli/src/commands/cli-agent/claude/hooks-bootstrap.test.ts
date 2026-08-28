@@ -271,7 +271,6 @@ describe("ensurePersistentClaudeHooksInstalled", () => {
       for (const hookType of [
         "prompt-submit",
         "stop",
-        "session-start",
         "subagent-start",
         "subagent-stop",
       ]) {
@@ -303,9 +302,9 @@ describe("ensurePersistentClaudeHooksInstalled", () => {
 
       const settings = readFileSync(join(dir, ".claude", "settings.local.json"), "utf8");
       expect(installedAgain).toBe(false);
-      // 6 hook mappings: prompt-submit, stop (Stop + StopFailure),
-      // session-start, subagent-start, subagent-stop
-      expect((settings.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(6);
+      // 5 hook mappings: prompt-submit, stop (Stop + StopFailure),
+      // subagent-start, subagent-stop
+      expect((settings.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(5);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

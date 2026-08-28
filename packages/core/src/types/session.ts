@@ -19,7 +19,7 @@ export type Platform =
 /** Session type */
 export type SessionType = "interactive" | "headless";
 
-/** Session metadata captured at start */
+/** Session metadata captured when its first handled hook arrives. */
 export interface SessionMetadata {
   gitBranch: string;
   gitRemoteUrl?: string;
@@ -27,12 +27,6 @@ export interface SessionMetadata {
   nodeVersion?: string;
   pythonVersion?: string;
   osInfo?: string;
-  /** AI model reported by the CLI at session start */
-  model?: string;
-  /** How the session started, e.g. "startup" | "resume" (platform-reported) */
-  source?: string;
-  /** Permission mode reported by the CLI at session start */
-  permissionMode?: string;
 }
 
 /** The session record */

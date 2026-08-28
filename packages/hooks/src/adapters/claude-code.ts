@@ -30,7 +30,6 @@ const HOOK_MAPPINGS: HookMapping[] = [
   // Route it through the stop handler so edits made before the failure are
   // still extracted from the transcript.
   { platformEvent: "StopFailure", aditHandler: "stop" },
-  { platformEvent: "SessionStart", aditHandler: "session-start" },
   { platformEvent: "SubagentStart", aditHandler: "subagent-start" },
   { platformEvent: "SubagentStop", aditHandler: "subagent-stop" },
 ];
@@ -142,11 +141,6 @@ export const claudeCodeAdapter: PlatformAdapter = {
       agentId: raw.agent_id as string | undefined,
       agentType: raw.agent_type as string | undefined,
       agentTranscriptPath: raw.agent_transcript_path as string | undefined,
-      // Common metadata (present in all events)
-      permissionMode: raw.permission_mode as string | undefined,
-      model: raw.model as string | undefined,
-      // Session start metadata
-      sessionSource: raw.source as string | undefined,
       rawPlatformData: raw,
     };
   },
@@ -171,7 +165,6 @@ export const claudeCodeAdapter: PlatformAdapter = {
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
           StopFailure: makeHookEntry("stop"),
-          SessionStart: makeHookEntry("session-start"),
           SubagentStart: makeHookEntry("subagent-start"),
           SubagentStop: makeHookEntry("subagent-stop"),
         },
@@ -324,6 +317,8 @@ export const claudeCodeAdapter: PlatformAdapter = {
 
     settings.hooks = mergedHooks;
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+    removeAditHookEventFromConfig(settingsPath, "SessionStart");
+    removeAditHookEventFromConfig(join(claudeDir, "settings.json"), "SessionStart");
     removeAditHookEventFromConfig(settingsPath, "SessionEnd");
     removeAditHookEventFromConfig(join(claudeDir, "settings.json"), "SessionEnd");
 

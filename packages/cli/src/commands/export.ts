@@ -185,7 +185,6 @@ function buildEventBundle(
       status: event.status,
       gitBranch: event.gitBranch,
       gitHeadSha: event.gitHeadSha,
-      checkpointSha: event.checkpointSha,
       labels: parseLabels(event.labelsJson),
       fileStats: parseDiffStats(event.diffStatJson),
     },
@@ -236,8 +235,7 @@ function generateMarkdownReport(
   for (const event of events) {
     const time = event.startedAt.substring(5, 19).replace("T", " ");
     const actor = event.actor[0].toUpperCase();
-    const checkpoint = event.checkpointSha ? " [checkpoint]" : "";
-    lines.push(`### ${time} [${actor}] ${event.eventType}${checkpoint}`);
+    lines.push(`### ${time} [${actor}] ${event.eventType}`);
     lines.push("");
 
     if (event.promptText) {

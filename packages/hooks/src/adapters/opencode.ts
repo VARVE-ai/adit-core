@@ -275,15 +275,12 @@ const HOOK_MAPPINGS: HookMapping[] = [
   // OpenCode has no "stop" hook key; session.idle fires when the assistant
   // finishes a response turn and is the correct trigger for checkpoints.
   { platformEvent: "session.idle", aditHandler: "stop" },
-  { platformEvent: "session.created", aditHandler: "session-start" },
 ];
 
 /** Map OpenCode hook/event types to ADIT hook types */
 const EVENT_TO_ADIT: Record<string, AditHookType> = {
   "chat.message": "prompt-submit",
   "session.idle": "stop",
-  "session-start": "session-start",
-  "session.created": "session-start",
 };
 
 /** Check if a file is an ADIT-generated plugin */
@@ -301,7 +298,6 @@ function isAditPlugin(content: string): boolean {
  * Hooked events:
  * - chat.message (user)       → prompt-submit (prompt from parts[].text)
  * - session.idle              → stop (AI finished)
- * - session.created           → session-start
  *
  * Note: OpenCode's Plugin API has no "stop" hook key. The equivalent is the
  * "session.idle" event, which fires when the assistant finishes a response.
@@ -310,7 +306,7 @@ function isAditPlugin(content: string): boolean {
  * info comes from the chat.message input arg instead.
  *
  * The active session ID is tracked via session.created/deleted so session.idle
- * can use the same stable identity as session-start.
+ * can use the same stable identity on every prompt and stop.
  */
 function generatePluginContent(aditBinaryPath: string, projectRoot?: string): string {
   // Split the binary path into command + args for spawning.
@@ -616,11 +612,6 @@ exports.AditPlugin = async (ctx) => {
           case "session.created": {
             const info = props.info || {};
             activeSessionId = info.id;
-            spawnAditHook("session-start", {
-              cwd,
-              session_id: info.id,
-              source: "startup",
-            });
             break;
           }
           case "session.deleted": {
@@ -664,9 +655,6 @@ export const opencodeAdapter: PlatformAdapter = {
       // Stop
       stopReason: raw.stop_reason as string | undefined,
       lastAssistantMessage: raw.last_assistant_message as string | undefined,
-      // Session start metadata
-      sessionSource: raw.source as string | undefined,
-      model: raw.model as string | undefined,
       // Notification (tool_result, tool_error, session_diff)
       notificationMessage: raw.message as string | undefined,
       notificationTitle: raw.title as string | undefined,

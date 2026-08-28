@@ -265,4 +265,27 @@ export const migrations: Migration[] = [
         ADD COLUMN git_refs_fingerprint TEXT;
     `,
   },
+  {
+    id: 17,
+    name: "replace_commit_observation_with_git_operations",
+    sql: `
+      DROP TABLE IF EXISTS session_repo_heads;
+
+      DROP INDEX IF EXISTS idx_events_checkpoint;
+      ALTER TABLE events DROP COLUMN checkpoint_sha;
+      ALTER TABLE events DROP COLUMN checkpoint_ref;
+
+      ALTER TABLE project_link_cache DROP COLUMN last_commit_sha;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_events_git_operation_identity
+        ON events(
+          session_id,
+          event_type,
+          json_extract(tool_input_json, '$.provider'),
+          json_extract(tool_input_json, '$.toolCallId'),
+          json_extract(tool_input_json, '$.operationIndex')
+        )
+        WHERE event_type = 'git_operation' AND deleted_at IS NULL;
+    `,
+  },
 ];

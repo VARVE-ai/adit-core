@@ -58,8 +58,6 @@ export interface SyncEvent {
   tool_name: string | null;
   tool_input_json: string | null;
   tool_output_json: string | null;
-  checkpoint_sha: string | null;
-  checkpoint_ref: string | null;
   diff_stat_json: string | null;
   git_branch: string | null;
   git_head_sha: string | null;
@@ -384,8 +382,6 @@ function queryEvents(
     tool_name: (r.tool_name as string) ?? null,
     tool_input_json: (r.tool_input_json as string) ?? null,
     tool_output_json: (r.tool_output_json as string) ?? null,
-    checkpoint_sha: (r.checkpoint_sha as string) ?? null,
-    checkpoint_ref: (r.checkpoint_ref as string) ?? null,
     diff_stat_json: (r.diff_stat_json as string) ?? null,
     git_branch: (r.git_branch as string) ?? null,
     git_head_sha: (r.git_head_sha as string) ?? null,

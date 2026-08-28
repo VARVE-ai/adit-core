@@ -86,40 +86,6 @@ export function getSessionByPlatformSessionId(
   return row ? rowToSession(row) : null;
 }
 
-/**
- * Shallow-merge keys into a session's metadata JSON.
- *
- * Used at session-start to persist launch context (model, source,
- * permission mode) on the session itself.
- */
-export function mergeSessionMetadata(
-  db: Database.Database,
-  id: string,
-  patch: Record<string, unknown>,
-): void {
-  const row = db
-    .prepare("SELECT metadata_json FROM sessions WHERE id = ?")
-    .get(id) as { metadata_json: string | null } | undefined;
-  if (!row) return;
-
-  let current: Record<string, unknown> = {};
-  if (row.metadata_json) {
-    try {
-      const parsed = JSON.parse(row.metadata_json) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        current = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Corrupt metadata: rebuild from the patch rather than fail the hook
-    }
-  }
-
-  db.prepare("UPDATE sessions SET metadata_json = ? WHERE id = ?").run(
-    JSON.stringify({ ...current, ...patch }),
-    id,
-  );
-}
-
 export function listSessions(
   db: Database.Database,
   projectId: string,

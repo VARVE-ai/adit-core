@@ -24,7 +24,6 @@ import {
 } from "./command.js";
 
 const HOOK_MAPPINGS: HookMapping[] = [
-  { platformEvent: "SessionStart", aditHandler: "session-start" },
   { platformEvent: "BeforeAgent", aditHandler: "prompt-submit" },
   { platformEvent: "AfterAgent", aditHandler: "stop" },
 ];
@@ -59,11 +58,6 @@ export const geminiAdapter: PlatformAdapter = {
       notificationMessage: raw.message as string | undefined,
       notificationTitle: raw.title as string | undefined,
       notificationType: raw.notification_type as string | undefined,
-      // Session start metadata
-      sessionSource: raw.source as string | undefined,
-      // Common metadata
-      permissionMode: raw.permission_mode as string | undefined,
-      model: raw.model as string | undefined,
       rawPlatformData: raw,
     };
   },
@@ -83,7 +77,6 @@ export const geminiAdapter: PlatformAdapter = {
       configPath: ".gemini/settings.json",
       content: {
         hooks: {
-          SessionStart: makeHookEntry("session-start"),
           BeforeAgent: makeHookEntry("prompt-submit"),
           AfterAgent: makeHookEntry("stop"),
         },
@@ -224,6 +217,7 @@ export const geminiAdapter: PlatformAdapter = {
 
     settings.hooks = mergedHooks;
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+    removeAditHookEventFromConfig(settingsPath, "SessionStart");
     removeAditHookEventFromConfig(settingsPath, "SessionEnd");
   },
 

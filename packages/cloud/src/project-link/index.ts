@@ -39,7 +39,6 @@ export {
   getProjectLinkCache,
   upsertProjectLinkCache,
   clearProjectLinkCache,
-  updateCachedCommitSha,
   updateCachedGitState,
   updateCachedDocHashes,
   updateCachedQualified,

@@ -46,7 +46,7 @@ describe("Cursor Adapter - Hook Generation", () => {
     // Verify event names match Cursor's native names
     expect(hooks.beforeSubmitPrompt).toBeDefined();
     expect(hooks.stop).toBeDefined();
-    expect(hooks.sessionStart).toBeDefined();
+    expect(hooks.sessionStart).toBeUndefined();
     expect(hooks.sessionEnd).toBeUndefined();
     // afterAgentResponse duplicates stop-side transcript extraction
     expect(hooks.afterAgentResponse).toBeUndefined();
@@ -96,24 +96,9 @@ describe("Cursor Adapter - parseInput", () => {
     expect(input.cwd).toBe("/path/to/project");
     expect(input.platformSessionId).toBe("conv-123");
     expect(input.transcriptPath).toBe("/path/to/transcript.jsonl");
-    expect(input.model).toBe("claude-sonnet-4-6");
     expect(input.platformCli).toBe("cursor");
     expect(input.hookType).toBe("prompt-submit");
     expect(input.rawPlatformData).toBe(raw);
-  });
-
-  it("uses session_id when conversation_id is absent on sessionStart", () => {
-    const raw = {
-      session_id: "sess-789",
-      is_background_agent: false,
-      composer_mode: "agent",
-      model: "claude-sonnet-4-6",
-    };
-
-    const input = cursorAdapter.parseInput(raw, "session-start");
-
-    expect(input.platformSessionId).toBe("sess-789");
-    expect(input.sessionSource).toBe("agent");
   });
 
   it("falls back to CURSOR_PROJECT_DIR env when workspace_roots is absent", () => {
@@ -169,7 +154,7 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
 
     expect(hooks.beforeSubmitPrompt).toBeDefined();
     expect(hooks.stop).toBeDefined();
-    expect(hooks.sessionStart).toBeDefined();
+    expect(hooks.sessionStart).toBeUndefined();
     expect(hooks.sessionEnd).toBeUndefined();
     expect(hooks.afterAgentResponse).toBeUndefined();
 
@@ -215,11 +200,10 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
 
     const hooks = readHooks(projectRoot);
 
-    // sessionStart should have both: Entire's hook + ADIT's hook
+    // ADIT no longer installs sessionStart; the other tool's hook is preserved.
     const sessionStartEntries = hooks.sessionStart as Array<{ command: string }>;
-    expect(sessionStartEntries).toHaveLength(2);
+    expect(sessionStartEntries).toHaveLength(1);
     expect(sessionStartEntries[0].command).toContain("entire");
-    expect(sessionStartEntries[1].command).toContain("adit-hook");
 
     // stop should also have both
     const stopEntries = hooks.stop as Array<{ command: string }>;
@@ -296,7 +280,7 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
     expect(preToolEntries[0].matcher).toBe("Write|Edit");
 
     // ADIT hooks should also be present
-    expect(hooks.sessionStart).toBeDefined();
+    expect(hooks.sessionStart).toBeUndefined();
     expect(hooks.stop).toBeDefined();
   });
 

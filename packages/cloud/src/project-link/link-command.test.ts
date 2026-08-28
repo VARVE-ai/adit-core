@@ -340,7 +340,6 @@ describe("linkCommand workspace repository requests", () => {
       repositoryId: "repo-id",
       serverUrl: "https://cloud.example.com",
       confirmedProjectId: "server-project",
-      lastCommitSha: null,
       gitRefHeads: { main: "abc" },
       gitRefsFingerprint: "fingerprint-old",
       lastBranchSyncAt: new Date().toISOString(),

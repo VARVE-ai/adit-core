@@ -6,7 +6,6 @@ export {
   getSessionById,
   getLatestSession,
   getSessionByPlatformSessionId,
-  mergeSessionMetadata,
   listSessions,
   type CreateSessionInput,
 } from "./sessions.js";
@@ -22,7 +21,7 @@ export {
   searchEvents,
   clearEvents,
   countEvents,
-  hasGitCommitEvent,
+  hasGitOperationEvent,
   type InsertEventInput,
   type EventQueryOptions,
 } from "./events.js";
@@ -49,9 +48,3 @@ export {
   clearSyncState,
   type SyncState,
 } from "./sync-state.js";
-
-export {
-  getSessionRepoHeads,
-  upsertSessionRepoHead,
-  type SessionRepoHead,
-} from "./session-repo-heads.js";

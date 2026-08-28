@@ -63,7 +63,6 @@ export interface ProjectLinkCache {
   serverUrl: string;
   /** Effective cloud project ID returned by the server, for display/debug only. */
   confirmedProjectId: string | null;
-  lastCommitSha: string | null;
   /** Last successfully uploaded branch heads, keyed by normalized branch name. */
   gitRefHeads: Record<string, string>;
   /** Fingerprint of all local and remote-tracking refs at the last successful git sync. */

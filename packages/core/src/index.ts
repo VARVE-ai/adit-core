@@ -33,7 +33,6 @@ export {
   getSessionById,
   getLatestSession,
   getSessionByPlatformSessionId,
-  mergeSessionMetadata,
   listSessions,
   insertEvent,
   insertEventAutoSeq,
@@ -45,7 +44,7 @@ export {
   searchEvents,
   clearEvents,
   countEvents,
-  hasGitCommitEvent,
+  hasGitOperationEvent,
   insertDiff,
   getDiffByEventId,
   getDiffText,
@@ -57,8 +56,6 @@ export {
   upsertSyncState,
   applyAuthoritativeSyncState,
   clearSyncState,
-  getSessionRepoHeads,
-  upsertSessionRepoHead,
 } from "./db/index.js";
 
 export type {
@@ -68,7 +65,6 @@ export type {
   DiffRecord,
   CreateEnvSnapshotInput,
   SyncState,
-  SessionRepoHead,
 } from "./db/index.js";
 
 // Config

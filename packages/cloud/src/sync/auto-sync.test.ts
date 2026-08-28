@@ -49,7 +49,6 @@ vi.mock("@varveai/adit-core", () => ({
       projectId: "proj-local-1",
       projectType: "repo",
       initialization: "initialized",
-      refPrefix: "refs/adit/checkpoints",
       captureEnv: true,
       repositories: [{
         localRepositoryId: "proj-local-1",

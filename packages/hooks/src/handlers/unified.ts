@@ -6,17 +6,13 @@
  */
 
 import {
-  mergeSessionMetadata,
   withPerf,
   insertDiff,
   generateId,
-  type LocalRepository,
 } from "@varveai/adit-core";
 import {
   createTimelineManager,
   captureEnvironment,
-  getCurrentBranch,
-  getHeadSha,
   type FileChange,
 } from "@varveai/adit-engine";
 import { initHookContext, type HookContext } from "../common/context.js";
@@ -24,17 +20,13 @@ import {
   assistantTextFromTranscriptEntry,
   type TranscriptEntryLike,
 } from "../common/transcript-entry.js";
-import {
-  detectAndRecordCommits,
-  initializeSessionRepoBaselines,
-} from "../common/commit-attribution.js";
+import { recordGitOperations } from "../git-operations/index.js";
 import { debugLog } from "../common/debug-log.js";
 import {
   classifyPromptSubmit,
   type PromptSubmitClassification,
 } from "../common/system-prompt.js";
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
 import type { NormalizedHookInput } from "../adapters/types.js";
 import {
   extractClaudeMutationsFromTranscript,
@@ -96,9 +88,6 @@ export async function dispatchHook(
         case "stop":
           await handleStopUnified(ctx, input);
           break;
-        case "session-start":
-          await handleSessionStart(ctx, input);
-          break;
         case "subagent-start":
           await handleSubagentStart(ctx, input);
           break;
@@ -142,7 +131,6 @@ export async function dispatchHook(
 function isHandledHookType(hookType: string): boolean {
   return hookType === "prompt-submit"
     || hookType === "stop"
-    || hookType === "session-start"
     || hookType === "subagent-start"
     || hookType === "subagent-stop";
 }
@@ -287,13 +275,6 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
   }
 
   const changedFiles = changesFromMutations(mutations);
-  // Mutation paths are project-root-relative after normalization, so repo
-  // matching must resolve them against the project root, not the event cwd.
-  const workspaceGitState = await resolveWorkspaceGitState(
-    ctx,
-    ctx.config.projectRoot,
-    changedFiles,
-  );
 
   const event = await timeline.recordEvent({
     sessionId: ctx.session.id,
@@ -301,10 +282,6 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     actor: "assistant",
     responseText,
     diffStatJson: mutationStatJson,
-    ...(workspaceGitState ? {
-      gitBranch: workspaceGitState.gitBranch,
-      gitHeadSha: workspaceGitState.gitHeadSha,
-    } : {}),
   });
 
   // Persist bounded diff_text from mutations (replaces old git checkpoint path)
@@ -327,9 +304,9 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     }
   }
 
-  // Attribute commits made during this turn (fail-open inside).
-  await withPerf(ctx.config.dataDir, "git", "commitAttribution", () =>
-    detectAndRecordCommits(ctx, timeline),
+  // Record only Git commands that the agent actually executed in this turn.
+  await withPerf(ctx.config.dataDir, "git", "gitOperations", () =>
+    recordGitOperations(ctx, input, timeline),
   );
 
   // Environment snapshots stay local for the TUI env screen and snapshot
@@ -356,11 +333,6 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
   }
 }
 
-interface WorkspaceGitState {
-  gitBranch: string | null;
-  gitHeadSha: string | null;
-}
-
 function changesFromMutations(mutations: AgentFileMutation[]): FileChange[] {
   const changes: FileChange[] = [];
   const seen = new Set<string>();
@@ -384,79 +356,6 @@ function mutationKindToFileStatus(kind: AgentFileMutation["kind"]): FileChange["
   if (kind === "delete") return "D";
   if (kind === "rename") return "R";
   return "M";
-}
-
-async function resolveWorkspaceGitState(
-  ctx: HookContext,
-  cwd: string,
-  changedFiles: FileChange[],
-): Promise<WorkspaceGitState | null> {
-  if (ctx.config.projectType !== "workspace") return null;
-  if (changedFiles.length === 0) return { gitBranch: null, gitHeadSha: null };
-
-  const repositories = matchedWorkspaceRepositories(ctx, cwd, changedFiles);
-  if (repositories.length === 0) return { gitBranch: null, gitHeadSha: null };
-
-  const states = await Promise.all(
-    repositories.map(async (repo) => ({
-      branch: await safeGetCurrentBranch(repo.path),
-      headSha: await safeGetHeadSha(repo.path),
-    })),
-  );
-
-  return {
-    gitBranch: joinNullable(states.map((state) => state.branch)),
-    gitHeadSha: joinNullable(states.map((state) => state.headSha)),
-  };
-}
-
-function matchedWorkspaceRepositories(
-  ctx: HookContext,
-  cwd: string,
-  changedFiles: FileChange[],
-): LocalRepository[] {
-  const matched = new Map<string, LocalRepository>();
-
-  for (const change of changedFiles) {
-    const absPath = absoluteMutationPath(cwd, change.path);
-    const repo = ctx.config.repositories.find((candidate) =>
-      isPathInsideOrEqual(absPath, resolve(candidate.path)),
-    );
-    if (repo) matched.set(repo.path, repo);
-  }
-
-  return Array.from(matched.values());
-}
-
-function absoluteMutationPath(cwd: string, path: string): string {
-  const normalized = path.replace(/\\/gu, "/");
-  return resolve(isAbsolute(normalized) ? normalized : join(cwd, normalized));
-}
-
-function isPathInsideOrEqual(path: string, parent: string): boolean {
-  const rel = relative(parent, path);
-  return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
-}
-
-function joinNullable(values: Array<string | null>): string | null {
-  const filtered = values.filter((value): value is string => !!value);
-  return filtered.length > 0 ? filtered.join(",") : null;
-}
-
-async function safeGetCurrentBranch(cwd: string): Promise<string | null> {
-  try {
-    return await getCurrentBranch(cwd);
-  } catch {
-    return null;
-  }
-}
-
-async function safeGetHeadSha(cwd: string): Promise<string | null> {
-  try {
-    return await getHeadSha(cwd);
-  } catch {
-    return null;
-  }
 }
 
 function extractLastAssistantTextFromTranscript(transcriptPath: string): string | undefined {
@@ -491,38 +390,6 @@ async function recoverAssistantMessageFromTranscript(transcriptPath?: string): P
     if (text) return text;
   }
   return undefined;
-}
-
-/** Handle session start — capture initial env snapshot and record metadata */
-async function handleSessionStart(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  // Seed per-repo HEAD baselines so first-turn commits are attributable.
-  await initializeSessionRepoBaselines(ctx);
-
-  // Persist launch context (model, source, permission mode) on the session
-  // record. Replaces the legacy "checkpoint" marker event.
-  const metadata: Record<string, unknown> = {};
-  if (input.model) metadata.model = input.model;
-  if (input.sessionSource) metadata.source = input.sessionSource;
-  if (input.permissionMode) metadata.permissionMode = input.permissionMode;
-
-  if (Object.keys(metadata).length > 0) {
-    try {
-      mergeSessionMetadata(ctx.db, ctx.session.id, metadata);
-    } catch {
-      // Fail-open
-    }
-  }
-
-  if (ctx.config.captureEnv) {
-    try {
-      await withPerf(ctx.config.dataDir, "snapshot", "captureEnvironment", () =>
-        captureEnvironment(ctx.db, ctx.config, ctx.session.id),
-      );
-    } catch {
-      // Fail-open
-    }
-  }
-
 }
 
 /** Handle subagent start — record when a subagent is spawned */

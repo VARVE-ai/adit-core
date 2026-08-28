@@ -58,7 +58,6 @@ function linkedCache() {
     repositoryId: "repo-1",
     serverUrl: "https://cloud.example.com",
     confirmedProjectId: "cloud-project-1",
-    lastCommitSha: "old-sha",
     gitRefHeads: { main: "old-sha" },
     gitRefsFingerprint: "old-fingerprint",
     lastBranchSyncAt: "2026-01-01T00:00:00.000Z",
@@ -142,7 +141,6 @@ describe("syncLinkedGitMetadata", () => {
       {
         refHeads: { main: "new-sha" },
         refsFingerprint: "new-fingerprint",
-        lastCommitSha: "new-sha",
       },
       "repo-1",
     );

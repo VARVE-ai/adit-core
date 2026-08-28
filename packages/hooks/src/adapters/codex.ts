@@ -6,10 +6,7 @@
  * All clients share the same hooks.json format and event schema.
  * Handles installation into .codex/hooks.json.
  *
- * Key differences from Claude Code:
- * - SessionStart uses matcher "startup|resume"
- * - PostToolUse uses matcher "Bash"
- * - Hooks must be trusted via [hooks.state] entries in $CODEX_HOME/config.toml
+ * Hooks must be trusted via [hooks.state] entries in $CODEX_HOME/config.toml.
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -44,7 +41,6 @@ import {
 const HOOK_TIMEOUT = 30;
 
 const HOOK_MAPPINGS: HookMapping[] = [
-  { platformEvent: "SessionStart", aditHandler: "session-start", matcher: "startup|resume" },
   { platformEvent: "UserPromptSubmit", aditHandler: "prompt-submit" },
   { platformEvent: "Stop", aditHandler: "stop" },
 ];
@@ -77,11 +73,6 @@ export const codexAdapter: PlatformAdapter = {
       toolName: raw.tool_name as string | undefined,
       toolInput: raw.tool_input as Record<string, unknown> | undefined,
       toolOutput: raw.tool_response as Record<string, unknown> | undefined,
-      // Session start metadata
-      sessionSource: raw.source as string | undefined,
-      // Common metadata (present in all events)
-      permissionMode: raw.permission_mode as string | undefined,
-      model: raw.model as string | undefined,
       rawPlatformData: raw,
     };
   },
@@ -96,22 +87,10 @@ export const codexAdapter: PlatformAdapter = {
         }],
       },
     ];
-    const makeMatcherEntry = (matcher: string, hookType: AditHookType) => [
-      {
-        matcher,
-        hooks: [{
-          type: "command",
-          command: buildAditHookCommand(aditBinaryPath, "codex", hookType, projectRoot),
-          timeout: HOOK_TIMEOUT,
-        }],
-      },
-    ];
-
     return {
       configPath: ".codex/hooks.json",
       content: {
         hooks: {
-          SessionStart: makeMatcherEntry("startup|resume", "session-start"),
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
         },
@@ -283,6 +262,8 @@ export const codexAdapter: PlatformAdapter = {
       mergedHooks[eventKey] = [...nonAditEntries, ...aditEntries];
     }
 
+    removeAditHookEvent(mergedHooks, "SessionStart");
+
     hooksConfig.hooks = mergedHooks;
     writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2) + "\n");
 
@@ -392,6 +373,14 @@ function entryContainsAditHook(entry: unknown): boolean {
   if (typeof raw.command === "string" && isAditHookCommand(raw.command)) return true;
   return Array.isArray(raw.hooks) &&
     raw.hooks.some((hook) => typeof hook.command === "string" && isAditHookCommand(hook.command));
+}
+
+function removeAditHookEvent(hooks: Record<string, unknown[]>, eventName: string): void {
+  const entries = hooks[eventName];
+  if (!Array.isArray(entries)) return;
+  const filtered = entries.filter((entry) => !entryContainsAditHook(entry));
+  if (filtered.length === 0) delete hooks[eventName];
+  else hooks[eventName] = filtered;
 }
 
 function entryContainsFixedRootAditHook(entry: unknown, projectRoot: string): boolean {

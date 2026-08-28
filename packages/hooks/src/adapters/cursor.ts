@@ -108,7 +108,6 @@ export function extractLastAssistantMessage(transcriptPath: string): string | un
 const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "beforeSubmitPrompt", aditHandler: "prompt-submit" },
   { platformEvent: "stop", aditHandler: "stop" },
-  { platformEvent: "sessionStart", aditHandler: "session-start" },
   // afterAgentResponse is deliberately NOT registered: it fires once per
   // assistant message segment and its text duplicates what the stop handler
   // already extracts from the transcript.
@@ -146,16 +145,12 @@ export const cursorAdapter: PlatformAdapter = {
       transcriptPath,
       // Prompt (from beforeSubmitPrompt)
       prompt: raw.prompt as string | undefined,
-      // Model (common field)
-      model: raw.model as string | undefined,
       // Stop (from stop event — Cursor sends status, not stop_reason;
       // assistant message must be read from transcript JSONL)
       stopReason: raw.status as string | undefined,
       lastAssistantMessage: aditHookType === "stop" && transcriptPath
         ? extractLastAssistantMessage(transcriptPath)
         : undefined,
-      // Session start metadata
-      sessionSource: raw.composer_mode as string | undefined,
       rawPlatformData: raw,
     };
   },
@@ -180,7 +175,6 @@ export const cursorAdapter: PlatformAdapter = {
         hooks: {
           beforeSubmitPrompt: makeHookEntry("prompt-submit"),
           stop: makeHookEntry("stop"),
-          sessionStart: makeHookEntry("session-start"),
         },
       },
     };
@@ -318,6 +312,7 @@ export const cursorAdapter: PlatformAdapter = {
 
     hooksConfig.hooks = mergedHooks;
     writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2) + "\n");
+    removeAditHookEventFromConfig(hooksPath, "sessionStart");
     removeAditHookEventFromConfig(hooksPath, "sessionEnd");
   },
 

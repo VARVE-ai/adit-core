@@ -315,7 +315,7 @@ describe("ensurePersistentCodexHooksInstalled", () => {
       const userConfig = readFileSync(join(codexHome, "config.toml"), "utf8");
       const fixedRootArg = `--project-root-b64 ${encodeProjectRoot(dir)}`;
 
-      expect(hooks).toContain(
+      expect(hooks).not.toContain(
         `node /tmp/adit-hook --platform codex ${fixedRootArg} session-start`,
       );
       expect(hooks).toContain(
@@ -356,8 +356,8 @@ describe("ensurePersistentCodexHooksInstalled", () => {
 
       const hooks = readFileSync(join(dir, ".codex", "hooks.json"), "utf8");
       expect(installedAgain).toBe(false);
-      // 3 hook mappings: session-start, prompt-submit, stop
-      expect((hooks.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(3);
+      // 2 hook mappings: prompt-submit, stop
+      expect((hooks.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(2);
     } finally {
       if (previousCodexHome === undefined) {
         delete process.env.CODEX_HOME;

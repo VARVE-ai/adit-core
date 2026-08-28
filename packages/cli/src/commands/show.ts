@@ -43,11 +43,6 @@ export async function showCommand(eventId: string): Promise<void> {
     console.log(`  Branch:    ${event.gitBranch ?? "-"}`);
     console.log(`  HEAD:      ${event.gitHeadSha ?? "-"}`);
 
-    if (event.checkpointSha) {
-      console.log(`  Checkpoint: ${event.checkpointSha}`);
-      console.log(`  Ref:        ${event.checkpointRef}`);
-    }
-
     const labels = parseLabels(event.labelsJson);
     if (labels.length > 0) {
       console.log(`  Labels:    ${labels.join(", ")}`);

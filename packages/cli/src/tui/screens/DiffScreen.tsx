@@ -1,5 +1,5 @@
 /**
- * Diff viewer screen — shows syntax-highlighted diff for a checkpoint event.
+ * Diff viewer screen — shows the diff captured for an event.
  */
 
 import React, { useState, useEffect } from "react";
@@ -35,18 +35,7 @@ export function DiffScreen({
     );
   }
 
-  if (!event.checkpointSha) {
-    return (
-      <Box flexDirection="column" paddingX={1}>
-        <Text>
-          Event {event.id.substring(0, 10)} has no checkpoint. Press [Esc] to
-          go back.
-        </Text>
-      </Box>
-    );
-  }
-
-  const title = `Diff for checkpoint ${event.checkpointSha.substring(0, 10)} (event ${event.id.substring(0, 10)})`;
+  const title = `Diff for event ${event.id.substring(0, 10)}`;
 
   return (
     <Box flexDirection="column" width="100%">

@@ -422,7 +422,6 @@ async function linkRepositoryCommand(
       repositoryId,
       serverUrl,
       confirmedProjectId,
-      lastCommitSha: null,
       gitRefHeads: {},
       gitRefsFingerprint: null,
       lastBranchSyncAt: null,
@@ -437,7 +436,6 @@ async function linkRepositoryCommand(
     cache.confirmedProjectId = confirmedProjectId;
     if (serverProjectChanged) {
       log("  Server project changed for this login; resetting cached sync markers.");
-      cache.lastCommitSha = null;
       cache.gitRefHeads = {};
       cache.gitRefsFingerprint = null;
       cache.lastBranchSyncAt = null;
@@ -611,8 +609,6 @@ async function linkRepositoryCommand(
           }
         }
       }
-
-      if (commits.length > 0) cache.lastCommitSha = commits[0].sha;
 
       rememberWorkspaceCommits(commits, workspaceCommitDedupeState);
       log(`  ${uploaded} new commits uploaded (${commitCount} total)`);

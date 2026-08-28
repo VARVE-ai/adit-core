@@ -104,7 +104,6 @@ export function EventList({
         const actor = actorSymbol(event.actor);
         const color = actorColor(event.actor);
         const summary = getSummary(event);
-        const hasCheckpoint = !!event.checkpointSha;
 
         // Single truncated Text per row: a wrapped row breaks ink's
         // frame-height math and leaves stale frames stacked on screen.
@@ -122,12 +121,9 @@ export function EventList({
                 {actor}
               </Text>
               <Text inverse={isSelected}>{" "}</Text>
-              <Text inverse={isSelected} bold={hasCheckpoint}>
+              <Text inverse={isSelected}>
                 {summary}
               </Text>
-              {hasCheckpoint && !isSelected && (
-                <Text color="green">{" "}*</Text>
-              )}
             </Text>
           </Box>
         );

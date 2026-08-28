@@ -74,15 +74,12 @@ export async function listCommand(opts: ListCommandOptions): Promise<void> {
       const time = formatDateTime(event.startedAt);
       const summary = getSummary(event, opts.expand);
       const idShort = event.id.substring(0, 10);
-      const checkpoint = event.checkpointSha ? " " + pc.green("*") : "";
-
       console.log(
         pc.dim(padRight(idShort, 12)) +
           colorActor(padRight(actor, 6), event.actor) +
           padRight(event.eventType, 20) +
           pc.dim(padRight(time, 20)) +
-          summary +
-          checkpoint,
+          summary,
       );
     }
 

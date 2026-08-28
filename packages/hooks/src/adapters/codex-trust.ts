@@ -19,7 +19,6 @@ interface CodexHookDefinition {
 
 const CODEX_HOOK_DEFINITIONS: CodexHookDefinition[] = [
   { eventName: "PostToolUse", keyLabel: "post_tool_use" },
-  { eventName: "SessionStart", keyLabel: "session_start", matcher: "startup|resume" },
   { eventName: "UserPromptSubmit", keyLabel: "user_prompt_submit" },
   { eventName: "Stop", keyLabel: "stop" },
 ];

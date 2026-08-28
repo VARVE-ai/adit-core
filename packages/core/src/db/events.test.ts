@@ -179,7 +179,6 @@ describe("Events CRUD", () => {
       eventType: "assistant_response",
       actor: "assistant",
       gitBranch: "main",
-      checkpointSha: "aaa111",
       startedAt: new Date().toISOString(),
       vclockJson: '{"test-client": 1}',
     });
@@ -190,7 +189,6 @@ describe("Events CRUD", () => {
       eventType: "assistant_response",
       actor: "assistant",
       gitBranch: "feature/auth",
-      checkpointSha: "bbb222",
       startedAt: new Date().toISOString(),
       vclockJson: '{"test-client": 2}',
     });
@@ -213,10 +211,6 @@ describe("Events CRUD", () => {
     expect(featureEvents).toHaveLength(1);
     expect(featureEvents[0].id).toBe("evt-002");
 
-    // Combined filter: branch + checkpoint
-    const mainCheckpoints = queryEvents(db, { gitBranch: "main", hasCheckpoint: true });
-    expect(mainCheckpoints).toHaveLength(1);
-    expect(mainCheckpoints[0].id).toBe("evt-001");
   });
 
   it("gets events by session ordered by sequence", () => {

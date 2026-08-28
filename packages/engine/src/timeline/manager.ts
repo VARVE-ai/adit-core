@@ -20,7 +20,6 @@ import {
   type Actor,
   type AditConfig,
 } from "@varveai/adit-core";
-import { getHeadSha, getCurrentBranch } from "../git/runner.js";
 
 export interface TimelineManager {
   /** Record a new event in the timeline */
@@ -58,6 +57,7 @@ export interface RecordEventParams {
   diffStatJson?: string | null;
   gitBranch?: string | null;
   gitHeadSha?: string | null;
+  status?: "success" | "error";
 }
 
 export interface ListOptions {
@@ -72,16 +72,10 @@ export function createTimelineManager(
   db: Database.Database,
   config: AditConfig,
 ): TimelineManager {
-  const cwd = config.projectRoot;
-
   return {
     async recordEvent(params: RecordEventParams): Promise<AditEvent> {
       const id = generateId();
       const now = new Date().toISOString();
-      const hasGitBranchOverride = Object.prototype.hasOwnProperty.call(params, "gitBranch");
-      const hasGitHeadShaOverride = Object.prototype.hasOwnProperty.call(params, "gitHeadSha");
-      const branch = hasGitBranchOverride ? params.gitBranch ?? null : await getCurrentBranch(cwd);
-      const headSha = hasGitHeadShaOverride ? params.gitHeadSha ?? null : await getHeadSha(cwd);
       const vclock = serialize(createClock(config.clientId));
 
       // Use insertEventAutoSeq to atomically allocate the sequence number
@@ -99,10 +93,10 @@ export function createTimelineManager(
         toolName: params.toolName ?? null,
         toolInputJson: params.toolInputJson ?? null,
         toolOutputJson: params.toolOutputJson ?? null,
-        gitBranch: branch,
-        gitHeadSha: headSha,
+        gitBranch: params.gitBranch ?? null,
+        gitHeadSha: params.gitHeadSha ?? null,
         startedAt: now,
-        status: "success",
+        status: params.status ?? "success",
         endedAt: now,
         errorJson: params.errorJson ?? null,
         diffStatJson: params.diffStatJson ?? null,

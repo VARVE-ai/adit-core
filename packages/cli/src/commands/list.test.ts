@@ -20,8 +20,6 @@ function makeEvent(overrides: Partial<AditEvent>): AditEvent {
     toolName: null,
     toolInputJson: null,
     toolOutputJson: null,
-    checkpointSha: null,
-    checkpointRef: null,
     diffStatJson: null,
     gitBranch: "main",
     gitHeadSha: "abc1234",

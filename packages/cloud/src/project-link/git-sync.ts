@@ -90,7 +90,6 @@ export async function syncLinkedGitMetadata(
             {
               refHeads: currentHeads,
               refsFingerprint: fingerprint,
-              lastCommitSha: cache.lastCommitSha,
             },
             repository.localRepositoryId,
           );
@@ -124,7 +123,6 @@ export async function syncLinkedGitMetadata(
         {
           refHeads: currentHeads,
           refsFingerprint: fingerprint,
-          lastCommitSha: commits[0]?.sha ?? cache.lastCommitSha,
         },
         repository.localRepositoryId,
       );

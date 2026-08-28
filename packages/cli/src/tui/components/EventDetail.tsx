@@ -124,18 +124,6 @@ export function EventDetail({
         </Field>
       )}
 
-      {event.checkpointSha && (
-        <Field label="Checkpoint:">
-          <Text color="green"> {event.checkpointSha.substring(0, 10)}</Text>
-        </Field>
-      )}
-
-      {event.checkpointRef && (
-        <Field label={`Ref:${"       "}`}>
-          <Text>{event.checkpointRef}</Text>
-        </Field>
-      )}
-
       {event.envSnapshotId && (
         <Field label={`Env Snap:${"  "}`}>
           <Text>{event.envSnapshotId}</Text>
