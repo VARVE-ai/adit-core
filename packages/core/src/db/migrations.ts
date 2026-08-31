@@ -438,4 +438,14 @@ export const migrations: Migration[] = [
           AND deleted_at IS NULL;
     `,
   },
+  {
+    id: 20,
+    name: "add_project_link_remote_branch_state",
+    sql: `
+      ALTER TABLE project_link_cache
+        ADD COLUMN remote_refs_fingerprint TEXT;
+      ALTER TABLE project_link_cache
+        ADD COLUMN last_remote_branch_check_at TEXT;
+    `,
+  },
 ];

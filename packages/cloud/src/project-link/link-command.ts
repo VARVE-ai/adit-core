@@ -35,6 +35,7 @@ import {
   collectDefaultBranch,
   collectGitIdentity,
   collectBranches,
+  collectRemoteBranchSnapshot,
   collectCommitLogs,
   collectCommitCount,
   collectCommitFileStats,
@@ -424,6 +425,8 @@ async function linkRepositoryCommand(
       confirmedProjectId,
       gitRefHeads: {},
       gitRefsFingerprint: null,
+      remoteRefsFingerprint: null,
+      lastRemoteBranchCheckAt: null,
       lastBranchSyncAt: null,
       lastDocSyncAt: null,
       docHashes: {},
@@ -438,6 +441,8 @@ async function linkRepositoryCommand(
       log("  Server project changed for this login; resetting cached sync markers.");
       cache.gitRefHeads = {};
       cache.gitRefsFingerprint = null;
+      cache.remoteRefsFingerprint = null;
+      cache.lastRemoteBranchCheckAt = null;
       cache.lastBranchSyncAt = null;
       cache.lastDocSyncAt = null;
       cache.docHashes = {};
@@ -472,12 +477,22 @@ async function linkRepositoryCommand(
   const currentRefsFingerprint = await runStep(currentStep, () => collectGitRefsFingerprint(projectRoot));
   const refsChanged = Boolean(currentRefsFingerprint) &&
     currentRefsFingerprint !== cache.gitRefsFingerprint;
+  const allBranches = await runStep(currentStep, () => collectBranches(projectRoot));
+  let remoteSnapshot: Awaited<ReturnType<typeof collectRemoteBranchSnapshot>> | null = null;
+  try {
+    remoteSnapshot = await collectRemoteBranchSnapshot(projectRoot);
+  } catch (error) {
+    log(`  Warning: ${error instanceof Error ? error.message : String(error)}`);
+    log("  Keeping the last successful remote branch snapshot.");
+  }
+  const remoteRefsChanged = remoteSnapshot !== null &&
+    remoteSnapshot.fingerprint !== cache.remoteRefsFingerprint;
   const branchesStale = !cache.lastBranchSyncAt ||
     (Date.now() - new Date(cache.lastBranchSyncAt).getTime() > BRANCH_STALE_MS) ||
     refsChanged ||
+    remoteRefsChanged ||
     options.force;
 
-  const allBranches = await runStep(currentStep, () => collectBranches(projectRoot));
   const defaultBranch = await runStep(currentStep, () => collectDefaultBranch(projectRoot));
   const gitIdentity = await runStep(currentStep, () => collectGitIdentity(projectRoot));
   let branchCount = 0;
@@ -508,16 +523,32 @@ async function linkRepositoryCommand(
               name: b.name,
               headSha: b.headSha,
             })),
+            ...(remoteSnapshot ? {
+              remoteBranchSnapshot: {
+                branches: remoteSnapshot.branches.map((branch) => ({
+                  name: branch.name,
+                  headSha: branch.headSha,
+                })),
+              },
+            } : {}),
           },
         )
       );
       branchCount = initResponse.projectLink.branchCount;
       cache.lastBranchSyncAt = new Date().toISOString();
+      if (remoteSnapshot) {
+        cache.remoteRefsFingerprint = remoteSnapshot.fingerprint;
+        cache.lastRemoteBranchCheckAt = new Date().toISOString();
+      }
       upsertProjectLinkCache(db, cache);
       log(`  ${branchCount} branches, default: ${defaultBranch ?? "unknown"}`);
     }
   } else {
     log("  Branches up to date (refs unchanged, synced < 1 hour ago)");
+    if (remoteSnapshot) {
+      cache.lastRemoteBranchCheckAt = new Date().toISOString();
+      upsertProjectLinkCache(db, cache);
+    }
   }
 
   // 3b. Commits

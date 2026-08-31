@@ -7,6 +7,10 @@ const mockResolveCloudProjectContext = vi.fn();
 const mockGetProjectLinkCache = vi.fn();
 const mockUpsertProjectLinkCache = vi.fn();
 const mockCollectBranches = vi.fn();
+const mockCollectRemoteBranchSnapshot = vi.fn(async () => ({
+  branches: [{ name: "main", headSha: "abc", isDefault: true }],
+  fingerprint: "remote-main",
+}));
 const mockCollectDefaultBranch = vi.fn();
 const mockCollectGitIdentity = vi.fn();
 const mockCollectCommitLogs = vi.fn();
@@ -49,6 +53,7 @@ vi.mock("./cache.js", () => ({
 
 vi.mock("./git-collector.js", () => ({
   collectBranches: (...args: unknown[]) => mockCollectBranches(...args),
+  collectRemoteBranchSnapshot: (...args: unknown[]) => mockCollectRemoteBranchSnapshot(...args),
   collectDefaultBranch: (...args: unknown[]) => mockCollectDefaultBranch(...args),
   collectGitIdentity: (...args: unknown[]) => mockCollectGitIdentity(...args),
   collectCommitLogs: (...args: unknown[]) => mockCollectCommitLogs(...args),
@@ -317,7 +322,7 @@ describe("linkCommand workspace repository requests", () => {
     }
   });
 
-  it("re-uploads branches inside the cooldown window only when git refs changed", async () => {
+  it("re-uploads branches inside the cooldown window when local or remote refs changed", async () => {
     const makeClient = () => ({
       post: vi.fn(async (path: string) => {
         if (path === "/api/project-link/negotiate") {
@@ -342,6 +347,8 @@ describe("linkCommand workspace repository requests", () => {
       confirmedProjectId: "server-project",
       gitRefHeads: { main: "abc" },
       gitRefsFingerprint: "fingerprint-old",
+      remoteRefsFingerprint: "remote-main",
+      lastRemoteBranchCheckAt: new Date().toISOString(),
       lastBranchSyncAt: new Date().toISOString(),
       lastDocSyncAt: null,
       docHashes: {},
@@ -406,6 +413,31 @@ describe("linkCommand workspace repository requests", () => {
         "/api/project-link/init",
         expect.objectContaining({
           branches: [{ name: "main", headSha: "abc" }],
+        }),
+      );
+
+      // A remote-only change also bypasses the cooldown.
+      mockGetProjectLinkCache.mockReturnValue(freshCache());
+      mockCollectGitRefsFingerprint.mockResolvedValue("fingerprint-old");
+      mockCollectRemoteBranchSnapshot.mockResolvedValueOnce({
+        branches: [{ name: "main", headSha: "remote-new", isDefault: true }],
+        fingerprint: "remote-new",
+      });
+      const remoteChangedClient = makeClient();
+      await linkCommand(
+        {} as never,
+        remoteChangedClient as never,
+        "/repo",
+        "repo-id",
+        "https://cloud.example.com",
+        options,
+      );
+      expect(remoteChangedClient.post).toHaveBeenCalledWith(
+        "/api/project-link/init",
+        expect.objectContaining({
+          remoteBranchSnapshot: {
+            branches: [{ name: "main", headSha: "remote-new" }],
+          },
         }),
       );
     } finally {

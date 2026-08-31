@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const getCache = vi.fn();
 const updateGitState = vi.fn();
+const updateRemoteState = vi.fn();
 const collectFingerprint = vi.fn();
 const collectBranches = vi.fn();
+const collectRemoteBranches = vi.fn();
 const collectDefaultBranch = vi.fn();
 const collectIdentity = vi.fn();
 const collectCommits = vi.fn();
@@ -13,11 +15,13 @@ const collectFileStats = vi.fn();
 vi.mock("./cache.js", () => ({
   getProjectLinkCache: (...args: unknown[]) => getCache(...args),
   updateCachedGitState: (...args: unknown[]) => updateGitState(...args),
+  updateCachedRemoteBranchState: (...args: unknown[]) => updateRemoteState(...args),
 }));
 
 vi.mock("./git-collector.js", () => ({
   collectGitRefsFingerprint: (...args: unknown[]) => collectFingerprint(...args),
   collectBranches: (...args: unknown[]) => collectBranches(...args),
+  collectRemoteBranchSnapshot: (...args: unknown[]) => collectRemoteBranches(...args),
   branchHeadMap: (branches: Array<{ name: string; headSha: string }>) =>
     Object.fromEntries(branches.map((branch) => [branch.name, branch.headSha])),
   collectDefaultBranch: (...args: unknown[]) => collectDefaultBranch(...args),
@@ -60,6 +64,8 @@ function linkedCache() {
     confirmedProjectId: "cloud-project-1",
     gitRefHeads: { main: "old-sha" },
     gitRefsFingerprint: "old-fingerprint",
+    remoteRefsFingerprint: "old-remote-fingerprint",
+    lastRemoteBranchCheckAt: "2026-01-01T00:00:00.000Z",
     lastBranchSyncAt: "2026-01-01T00:00:00.000Z",
     lastDocSyncAt: null,
     docHashes: {},
@@ -75,6 +81,10 @@ describe("syncLinkedGitMetadata", () => {
     getCache.mockReturnValue(linkedCache());
     collectFingerprint.mockResolvedValue("new-fingerprint");
     collectBranches.mockResolvedValue([{ name: "main", headSha: "new-sha", isDefault: true }]);
+    collectRemoteBranches.mockResolvedValue({
+      branches: [{ name: "main", headSha: "new-sha", isDefault: true }],
+      fingerprint: "old-remote-fingerprint",
+    });
     collectDefaultBranch.mockResolvedValue("main");
     collectIdentity.mockResolvedValue({ authorName: "A", authorEmail: "a@example.com" });
     collectCommits.mockResolvedValue([{
@@ -165,6 +175,75 @@ describe("syncLinkedGitMetadata", () => {
       "repo-1",
     );
     expect(result.commitsUploaded).toBe(1);
+  });
+
+  it("uploads a changed remote snapshot when local refs are unchanged", async () => {
+    collectFingerprint.mockResolvedValue("old-fingerprint");
+    collectBranches.mockResolvedValue([{ name: "feature/local", headSha: "local-sha", isDefault: false }]);
+    collectRemoteBranches.mockResolvedValue({
+      branches: [{ name: "main", headSha: "remote-main", isDefault: true }],
+      fingerprint: "new-remote-fingerprint",
+    });
+    const client = {
+      post: vi.fn(async () => ({ projectLink: { branchCount: 1 } })),
+    };
+
+    const result = await syncLinkedGitMetadata(
+      {} as never,
+      client as never,
+      context,
+      "https://cloud.example.com",
+      { forceRemoteBranchCheck: true },
+    );
+
+    expect(client.post).toHaveBeenCalledTimes(1);
+    expect(client.post).toHaveBeenCalledWith(
+      "/api/project-link/init",
+      expect.objectContaining({
+        branches: [{ name: "feature/local", headSha: "local-sha" }],
+        remoteBranchSnapshot: {
+          branches: [{ name: "main", headSha: "remote-main" }],
+        },
+      }),
+    );
+    expect(collectCommits).not.toHaveBeenCalled();
+    expect(updateGitState).not.toHaveBeenCalled();
+    expect(updateRemoteState).toHaveBeenCalled();
+    expect(result.commitsUploaded).toBe(0);
+    expect(result.branchesUploaded).toBe(1);
+  });
+
+  it("keeps syncing local commits when the remote branch check fails", async () => {
+    collectRemoteBranches.mockRejectedValue(new Error("origin unavailable"));
+    const client = {
+      post: vi.fn(async (path: string) => path.endsWith("/commits")
+        ? { accepted: 1, totalCommits: 2, latestCommitSha: "new-sha", duplicates: 0 }
+        : { projectLink: { branchCount: 1 } }),
+    };
+
+    const result = await syncLinkedGitMetadata(
+      {} as never,
+      client as never,
+      context,
+      "https://cloud.example.com",
+      { forceRemoteBranchCheck: true },
+    );
+
+    expect(client.post).toHaveBeenNthCalledWith(
+      1,
+      "/api/project-link/init",
+      expect.not.objectContaining({ remoteBranchSnapshot: expect.anything() }),
+    );
+    expect(client.post).toHaveBeenNthCalledWith(
+      2,
+      "/api/project-link/commits",
+      expect.anything(),
+    );
+    expect(result.commitsUploaded).toBe(1);
+    expect(result.warnings).toEqual([
+      expect.objectContaining({ message: "origin unavailable" }),
+    ]);
+    expect(updateRemoteState).not.toHaveBeenCalled();
   });
 
   it("does not advance the cursor when a Git upload fails", async () => {

@@ -13,6 +13,13 @@ export interface GitBranch {
   isDefault: boolean;
 }
 
+/** Authoritative branch snapshot read directly from the configured Git remote. */
+export interface RemoteBranchSnapshot {
+  branches: GitBranch[];
+  /** Stable hash of sorted branch names and heads, used to avoid redundant uploads. */
+  fingerprint: string;
+}
+
 export interface GitCommit {
   sha: string;
   parentSha: string | null;
@@ -67,6 +74,10 @@ export interface ProjectLinkCache {
   gitRefHeads: Record<string, string>;
   /** Fingerprint of all local and remote-tracking refs at the last successful git sync. */
   gitRefsFingerprint: string | null;
+  /** Fingerprint of the last authoritative origin branch snapshot uploaded to Cloud. */
+  remoteRefsFingerprint: string | null;
+  /** Last successful read of origin branches, whether or not an upload was needed. */
+  lastRemoteBranchCheckAt: string | null;
   lastBranchSyncAt: string | null;
   lastDocSyncAt: string | null;
   docHashes: Record<string, string>; // sourcePath → contentHash
@@ -108,6 +119,7 @@ export interface LinkInitResponse {
     qualified: boolean;
     lastGitSyncAt: string | null;
     lastDocSyncAt: string | null;
+    remoteBranchesCheckedAt?: string | null;
     createdAt: string;
   };
   status: "created" | "updated";

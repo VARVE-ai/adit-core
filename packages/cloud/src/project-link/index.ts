@@ -22,6 +22,7 @@ export {
   collectCurrentBranch,
   collectGitIdentity,
   collectBranches,
+  collectRemoteBranchSnapshot,
   branchHeadMap,
   collectGitRefsFingerprint,
   collectCommitLogs,
@@ -40,6 +41,7 @@ export {
   upsertProjectLinkCache,
   clearProjectLinkCache,
   updateCachedGitState,
+  updateCachedRemoteBranchState,
   updateCachedDocHashes,
   updateCachedQualified,
 } from "./cache.js";

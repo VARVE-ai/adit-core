@@ -23,6 +23,8 @@ export async function runSyncCycle(options: {
   dataDir?: string;
   /** Manual syncs inspect Git even when conversation data is already current. */
   syncGitWhenNoBatches?: boolean;
+  /** Manual commands bypass the hourly remote branch check cooldown. */
+  forceRemoteBranchCheck?: boolean;
 }): Promise<SyncCycleResult> {
   const serverUrl = normalizeServerUrl(options.serverUrl);
   const engine = new SyncEngine(options.db, options.client, {
@@ -48,6 +50,7 @@ export async function runSyncCycle(options: {
     options.client,
     options.projectContext,
     serverUrl,
+    { forceRemoteBranchCheck: options.forceRemoteBranchCheck },
   );
   return { ...sync, git };
 }

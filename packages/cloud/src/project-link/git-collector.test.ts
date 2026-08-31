@@ -9,11 +9,12 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { execSync } from "node:child_process";
 import {
   projectNameFromRemoteUrl,
   collectBranches,
+  collectRemoteBranchSnapshot,
   branchHeadMap,
   collectGitRefsFingerprint,
   collectCommitsBetweenRefSnapshots,
@@ -139,6 +140,36 @@ describe("Git Collector (with temp repo)", () => {
     const branches = await collectBranches(repoDir);
     expect(branches.some((branch) => branch.name === "origin")).toBe(false);
     expect(branches.filter((branch) => branch.name === "main")).toHaveLength(1);
+  });
+
+  it("collectRemoteBranchSnapshot ignores local and stale remote-tracking branches", async () => {
+    const remoteDir = mkdtempSync(join(tmpdir(), "adit-remote-"));
+    try {
+      execSync("git init --bare", { cwd: remoteDir, stdio: "pipe" });
+      execSync(`git remote add origin ${JSON.stringify(remoteDir)}`, {
+        cwd: repoDir,
+        stdio: "pipe",
+      });
+      execSync("git push -u origin main", { cwd: repoDir, stdio: "pipe" });
+      execSync("git checkout -b feature/stale", { cwd: repoDir, stdio: "pipe" });
+      writeFileSync(join(repoDir, "stale.txt"), "stale\n");
+      execSync("git add . && git commit -m 'Stale feature'", { cwd: repoDir, stdio: "pipe" });
+      execSync("git push -u origin feature/stale", { cwd: repoDir, stdio: "pipe" });
+      execSync("git push origin --delete feature/stale", { cwd: repoDir, stdio: "pipe" });
+      execSync("git update-ref refs/remotes/origin/feature/stale HEAD", {
+        cwd: repoDir,
+        stdio: "pipe",
+      });
+
+      const allBranches = await collectBranches(repoDir);
+      const remoteSnapshot = await collectRemoteBranchSnapshot(repoDir);
+
+      expect(allBranches.some((branch) => branch.name === "feature/stale")).toBe(true);
+      expect(remoteSnapshot.branches.map((branch) => branch.name)).toEqual(["main"]);
+      expect(remoteSnapshot.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      rmSync(remoteDir, { recursive: true, force: true });
+    }
   });
 
   it("collectCommitLogs returns commits", async () => {

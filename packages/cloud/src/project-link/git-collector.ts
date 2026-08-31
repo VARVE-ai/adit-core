@@ -9,7 +9,15 @@
 
 import { createHash } from "node:crypto";
 import { runGit, getRemoteUrl } from "@varveai/adit-engine";
-import type { GitBranch, GitCommit, GitCommitFileStat, GitIdentity } from "./types.js";
+import type {
+  GitBranch,
+  GitCommit,
+  GitCommitFileStat,
+  GitIdentity,
+  RemoteBranchSnapshot,
+} from "./types.js";
+
+const REMOTE_BRANCH_TIMEOUT_MS = 10_000;
 
 /** Collect the remote origin URL. Throws if no remote is configured. */
 export async function collectRemoteUrl(cwd: string): Promise<string> {
@@ -120,6 +128,58 @@ export async function collectBranches(cwd: string): Promise<GitBranch[]> {
   }
 
   return Array.from(seen.values());
+}
+
+/**
+ * Read the branches that currently exist on origin without changing local
+ * refs. Unlike `git branch -a`, this does not trust stale remote-tracking
+ * refs, so a branch deleted on the remote is absent even when it remains
+ * locally under refs/heads or refs/remotes/origin.
+ */
+export async function collectRemoteBranchSnapshot(
+  cwd: string,
+): Promise<RemoteBranchSnapshot> {
+  const result = await runGit(["ls-remote", "--heads", "origin"], {
+    cwd,
+    timeout: REMOTE_BRANCH_TIMEOUT_MS,
+    env: { GIT_TERMINAL_PROMPT: "0" },
+  });
+  if (result.exitCode !== 0) {
+    const message = result.stderr.trim() || "git ls-remote failed";
+    throw new Error(`Unable to read remote branches: ${message}`);
+  }
+
+  const defaultBranch = await collectDefaultBranch(cwd);
+  const byName = new Map<string, GitBranch>();
+  for (const line of result.stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const [headSha, refName] = trimmed.split(/\s+/, 2);
+    if (!headSha || !refName?.startsWith("refs/heads/")) continue;
+    const name = refName.slice("refs/heads/".length);
+    if (!name) continue;
+    byName.set(name, {
+      name,
+      headSha,
+      isDefault: name === defaultBranch,
+    });
+  }
+
+  const branches = Array.from(byName.values()).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  );
+  const fingerprint = createHash("sha256")
+    .update(
+      JSON.stringify(
+        branches.map((branch) => ({
+          name: branch.name,
+          headSha: branch.headSha,
+        })),
+      ),
+    )
+    .digest("hex");
+
+  return { branches, fingerprint };
 }
 
 /** Build the branch-head snapshot used as the incremental git cursor. */

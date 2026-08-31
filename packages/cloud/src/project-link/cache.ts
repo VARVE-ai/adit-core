@@ -18,6 +18,8 @@ interface CacheRow {
   confirmed_project_id: string | null;
   git_ref_heads_json: string;
   git_refs_fingerprint: string | null;
+  remote_refs_fingerprint: string | null;
+  last_remote_branch_check_at: string | null;
   last_branch_sync_at: string | null;
   last_doc_sync_at: string | null;
   doc_hashes_json: string;
@@ -73,6 +75,8 @@ export function getProjectLinkCache(
     confirmedProjectId: row.confirmed_project_id,
     gitRefHeads,
     gitRefsFingerprint: row.git_refs_fingerprint ?? legacyRefsFingerprint,
+    remoteRefsFingerprint: row.remote_refs_fingerprint,
+    lastRemoteBranchCheckAt: row.last_remote_branch_check_at,
     lastBranchSyncAt: row.last_branch_sync_at,
     lastDocSyncAt: row.last_doc_sync_at,
     docHashes,
@@ -91,13 +95,16 @@ export function upsertProjectLinkCache(
     INSERT INTO project_link_cache (
       project_id, repository_id, server_url, confirmed_project_id,
       git_ref_heads_json, git_refs_fingerprint,
+      remote_refs_fingerprint, last_remote_branch_check_at,
       last_branch_sync_at, last_doc_sync_at,
       doc_hashes_json, qualified, initialized_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (project_id, repository_id, server_url) DO UPDATE SET
       confirmed_project_id = excluded.confirmed_project_id,
       git_ref_heads_json = excluded.git_ref_heads_json,
       git_refs_fingerprint = excluded.git_refs_fingerprint,
+      remote_refs_fingerprint = excluded.remote_refs_fingerprint,
+      last_remote_branch_check_at = excluded.last_remote_branch_check_at,
       last_branch_sync_at = excluded.last_branch_sync_at,
       last_doc_sync_at = excluded.last_doc_sync_at,
       doc_hashes_json = excluded.doc_hashes_json,
@@ -110,12 +117,40 @@ export function upsertProjectLinkCache(
     cache.confirmedProjectId,
     JSON.stringify(cache.gitRefHeads),
     cache.gitRefsFingerprint,
+    cache.remoteRefsFingerprint,
+    cache.lastRemoteBranchCheckAt,
     cache.lastBranchSyncAt,
     cache.lastDocSyncAt,
     JSON.stringify(cache.docHashes),
     cache.qualified ? 1 : 0,
     cache.initializedAt,
     cache.updatedAt,
+  );
+}
+
+/** Persist the last successful authoritative origin branch read. */
+export function updateCachedRemoteBranchState(
+  db: Database.Database,
+  projectId: string,
+  serverUrl: string,
+  state: {
+    refsFingerprint: string;
+    checkedAt?: string;
+  },
+  repositoryId = projectId,
+): void {
+  const checkedAt = state.checkedAt ?? new Date().toISOString();
+  db.prepare(`
+    UPDATE project_link_cache
+    SET remote_refs_fingerprint = ?, last_remote_branch_check_at = ?, updated_at = ?
+    WHERE project_id = ? AND repository_id = ? AND server_url = ?
+  `).run(
+    state.refsFingerprint,
+    checkedAt,
+    checkedAt,
+    projectId,
+    repositoryId,
+    normalizeServerUrl(serverUrl),
   );
 }
 

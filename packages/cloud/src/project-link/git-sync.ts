@@ -5,7 +5,11 @@ import type { CloudProjectContext, CloudRepository } from "../project-context.js
 import { repositoryPayloads } from "../project-context.js";
 import type { CloudClient } from "../http/client.js";
 import type { CommitUploadResponse, LinkInitResponse } from "./types.js";
-import { getProjectLinkCache, updateCachedGitState } from "./cache.js";
+import {
+  getProjectLinkCache,
+  updateCachedGitState,
+  updateCachedRemoteBranchState,
+} from "./cache.js";
 import {
   branchHeadMap,
   collectBranches,
@@ -14,11 +18,13 @@ import {
   collectDefaultBranch,
   collectGitIdentity,
   collectGitRefsFingerprint,
+  collectRemoteBranchSnapshot,
   resolveCommitBranches,
 } from "./git-collector.js";
 
 const COMMIT_BATCH_SIZE = 1000;
 const COMMIT_FILE_STAT_LIMIT = 500;
+const REMOTE_BRANCH_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 export interface GitSyncFailure {
   repositoryId: string;
@@ -43,6 +49,7 @@ export interface GitSyncResult {
   commitsUploaded: number;
   skips: GitSyncSkip[];
   failures: GitSyncFailure[];
+  warnings: GitSyncFailure[];
 }
 
 /**
@@ -57,6 +64,7 @@ export async function syncLinkedGitMetadata(
   client: CloudClient,
   context: CloudProjectContext,
   serverUrl: string,
+  options: { forceRemoteBranchCheck?: boolean } = {},
 ): Promise<GitSyncResult> {
   const result: GitSyncResult = {
     repositoriesChecked: 0,
@@ -66,6 +74,7 @@ export async function syncLinkedGitMetadata(
     commitsUploaded: 0,
     skips: [],
     failures: [],
+    warnings: [],
   };
 
   for (const repository of context.repositories) {
@@ -95,8 +104,39 @@ export async function syncLinkedGitMetadata(
 
       const branches = await collectBranches(repository.path);
       const currentHeads = branchHeadMap(branches);
+      const localRefsChanged = fingerprint !== cache.gitRefsFingerprint;
+      const lastRemoteCheckTime = cache.lastRemoteBranchCheckAt
+        ? new Date(cache.lastRemoteBranchCheckAt).getTime()
+        : NaN;
+      const remoteCheckDue = options.forceRemoteBranchCheck === true ||
+        localRefsChanged ||
+        !Number.isFinite(lastRemoteCheckTime) ||
+        Date.now() - lastRemoteCheckTime >= REMOTE_BRANCH_CHECK_INTERVAL_MS;
+      let remoteSnapshot: Awaited<ReturnType<typeof collectRemoteBranchSnapshot>> | null = null;
+      if (remoteCheckDue) {
+        try {
+          remoteSnapshot = await collectRemoteBranchSnapshot(repository.path);
+        } catch (error) {
+          result.warnings.push({
+            repositoryId: repository.localRepositoryId,
+            relativePath: repository.relativePath,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      const remoteRefsChanged = remoteSnapshot !== null &&
+        remoteSnapshot.fingerprint !== cache.remoteRefsFingerprint;
 
-      if (fingerprint === cache.gitRefsFingerprint) {
+      if (!localRefsChanged && !remoteRefsChanged) {
+        if (remoteSnapshot) {
+          updateCachedRemoteBranchState(
+            db,
+            context.localProjectId,
+            serverUrl,
+            { refsFingerprint: remoteSnapshot.fingerprint },
+            repository.localRepositoryId,
+          );
+        }
         // Older versions stored only the fingerprint. Seed the new ref-head
         // cursor without uploading data that was already confirmed.
         if (Object.keys(cache.gitRefHeads).length === 0) {
@@ -123,15 +163,36 @@ export async function syncLinkedGitMetadata(
 
       const defaultBranch = await collectDefaultBranch(repository.path);
       const identity = await collectGitIdentity(repository.path);
-      const commits = await collectCommitsBetweenRefSnapshots(
-        repository.path,
-        currentHeads,
-        cache.gitRefHeads,
-      );
-      await resolveCommitBranches(repository.path, commits, branches, defaultBranch);
-      await attachRecentFileStats(repository.path, commits);
+      const commits = localRefsChanged
+        ? await collectCommitsBetweenRefSnapshots(
+            repository.path,
+            currentHeads,
+            cache.gitRefHeads,
+          )
+        : [];
+      if (localRefsChanged) {
+        await resolveCommitBranches(repository.path, commits, branches, defaultBranch);
+        await attachRecentFileStats(repository.path, commits);
+      }
 
-      await uploadBranches(client, context, repository, branches, defaultBranch, identity);
+      await uploadBranches(
+        client,
+        context,
+        repository,
+        branches,
+        defaultBranch,
+        identity,
+        remoteSnapshot,
+      );
+      if (remoteSnapshot) {
+        updateCachedRemoteBranchState(
+          db,
+          context.localProjectId,
+          serverUrl,
+          { refsFingerprint: remoteSnapshot.fingerprint },
+          repository.localRepositoryId,
+        );
+      }
       const accepted = await uploadCommits(
         client,
         context.localProjectId,
@@ -139,16 +200,18 @@ export async function syncLinkedGitMetadata(
         commits,
       );
 
-      updateCachedGitState(
-        db,
-        context.localProjectId,
-        serverUrl,
-        {
-          refHeads: currentHeads,
-          refsFingerprint: fingerprint,
-        },
-        repository.localRepositoryId,
-      );
+      if (localRefsChanged) {
+        updateCachedGitState(
+          db,
+          context.localProjectId,
+          serverUrl,
+          {
+            refHeads: currentHeads,
+            refsFingerprint: fingerprint,
+          },
+          repository.localRepositoryId,
+        );
+      }
 
       result.repositoriesUpdated++;
       result.branchesUploaded += branches.length;
@@ -172,6 +235,7 @@ async function uploadBranches(
   branches: Awaited<ReturnType<typeof collectBranches>>,
   defaultBranch: string | null,
   identity: Awaited<ReturnType<typeof collectGitIdentity>>,
+  remoteSnapshot: Awaited<ReturnType<typeof collectRemoteBranchSnapshot>> | null,
 ): Promise<void> {
   const remoteUrl = repository.repositoryUrl?.trim();
   if (!remoteUrl) {
@@ -195,6 +259,14 @@ async function uploadBranches(
       name: branch.name,
       headSha: branch.headSha,
     })),
+    ...(remoteSnapshot ? {
+      remoteBranchSnapshot: {
+        branches: remoteSnapshot.branches.map((branch) => ({
+          name: branch.name,
+          headSha: branch.headSha,
+        })),
+      },
+    } : {}),
   });
 }
 

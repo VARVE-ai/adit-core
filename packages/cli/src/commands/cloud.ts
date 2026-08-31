@@ -223,6 +223,7 @@ export async function cloudSyncCommand(opts?: {
       cloudClientId: credentials.clientId,
       dataDir: config.dataDir,
       syncGitWhenNoBatches: true,
+      forceRemoteBranchCheck: true,
     });
 
     if (opts?.json) {
@@ -255,6 +256,11 @@ export async function cloudSyncCommand(opts?: {
         for (const failure of result.git.failures) {
           console.error(
             `Git sync failed for ${failure.relativePath}: ${failure.message}`,
+          );
+        }
+        for (const warning of result.git.warnings) {
+          console.error(
+            `Remote branch check warning for ${warning.relativePath}: ${warning.message}. Keeping the last successful snapshot.`,
           );
         }
       }

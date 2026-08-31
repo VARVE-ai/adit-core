@@ -79,6 +79,7 @@ describe("runSyncCycle", () => {
         message: "Local Git refs have not changed",
       }],
       failures: [],
+      warnings: [],
     });
 
     const result = await runSyncCycle({
@@ -96,6 +97,7 @@ describe("runSyncCycle", () => {
       expect.anything(),
       projectContext,
       "https://cloud.example.com",
+      { forceRemoteBranchCheck: undefined },
     );
     expect(result.git?.repositoriesSkipped).toBe(1);
   });
@@ -117,6 +119,7 @@ describe("runSyncCycle", () => {
       commitsUploaded: 1,
       skips: [],
       failures: [],
+      warnings: [],
     });
 
     const result = await runSyncCycle({

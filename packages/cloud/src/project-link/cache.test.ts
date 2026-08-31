@@ -14,6 +14,7 @@ import {
   upsertProjectLinkCache,
   clearProjectLinkCache,
   updateCachedGitState,
+  updateCachedRemoteBranchState,
   updateCachedDocHashes,
   updateCachedQualified,
 } from "./cache.js";
@@ -31,6 +32,8 @@ function makeCache(overrides: Partial<ProjectLinkCache> = {}): ProjectLinkCache 
     confirmedProjectId: null,
     gitRefHeads: {},
     gitRefsFingerprint: null,
+    remoteRefsFingerprint: null,
+    lastRemoteBranchCheckAt: null,
     lastBranchSyncAt: null,
     lastDocSyncAt: null,
     docHashes: {},
@@ -40,7 +43,6 @@ function makeCache(overrides: Partial<ProjectLinkCache> = {}): ProjectLinkCache 
     ...overrides,
   };
 }
-
 describe("Project Link Cache", () => {
   let db: Database.Database;
   let dbPath: string;
@@ -139,6 +141,21 @@ describe("Project Link Cache", () => {
     expect(result!.gitRefHeads).toEqual({ main: "sha-main", feature: "sha-feature" });
     expect(result!.gitRefsFingerprint).toBe("fingerprint-1");
     expect(result!.lastBranchSyncAt).not.toBeNull();
+  });
+
+  it("updates the authoritative remote branch state independently", () => {
+    const cache = makeCache();
+    upsertProjectLinkCache(db, cache);
+
+    updateCachedRemoteBranchState(db, cache.projectId, cache.serverUrl, {
+      refsFingerprint: "remote-fingerprint-1",
+      checkedAt: "2026-03-10T14:00:00.000Z",
+    });
+
+    const result = getProjectLinkCache(db, cache.projectId, cache.serverUrl);
+    expect(result!.remoteRefsFingerprint).toBe("remote-fingerprint-1");
+    expect(result!.lastRemoteBranchCheckAt).toBe("2026-03-10T14:00:00.000Z");
+    expect(result!.gitRefsFingerprint).toBeNull();
   });
 
   it("updates qualified status", () => {
