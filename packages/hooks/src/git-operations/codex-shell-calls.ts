@@ -137,8 +137,33 @@ function jsonStringProperty(source: string, property: "cmd" | "workdir"): string
 function stripRunnerEnvelope(output: string): string | null {
   const marker = "\nOutput:\n";
   const markerIndex = output.indexOf(marker);
-  if (markerIndex < 0) return output.trim() || null;
-  return output.slice(markerIndex + marker.length).trim() || null;
+  const payload = (markerIndex < 0
+    ? output
+    : output.slice(markerIndex + marker.length)).trim();
+  if (!payload) return null;
+
+  const wrappedOutput = execCommandResultOutput(payload);
+  return wrappedOutput !== undefined ? wrappedOutput : payload;
+}
+
+function execCommandResultOutput(payload: string): string | null | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload) as unknown;
+  } catch {
+    return undefined;
+  }
+
+  const result = asRecord(parsed);
+  if (
+    !result
+    || !("wall_time_seconds" in result)
+    || (!("session_id" in result) && !("exit_code" in result))
+  ) {
+    return undefined;
+  }
+
+  return typeof result.output === "string" ? result.output.trim() || null : null;
 }
 
 function commandText(value: unknown): string | null {

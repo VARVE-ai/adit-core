@@ -90,6 +90,63 @@ describe("extractGitOperations", () => {
     ]);
   });
 
+  it("unwraps yielded Codex desktop exec command results", () => {
+    const path = transcript([
+      { type: "session_meta", payload: { session_id: "codex-desktop-1" } },
+      { type: "response_item", payload: { type: "message", role: "user", content: "commit it" } },
+      {
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          status: "completed",
+          call_id: "call-commit",
+          name: "exec",
+          input: 'const r = await tools.exec_command({cmd:"git commit -m \\"Improve comparison\\" && git push",workdir:"/repo",yield_time_ms:1000,max_output_tokens:6000}); text(JSON.stringify(r));',
+        },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: "call-commit",
+          output: [
+            { type: "input_text", text: "Script completed\nWall time 1.2 seconds\nOutput:\n" },
+            {
+              type: "input_text",
+              text: JSON.stringify({
+                chunk_id: "chunk-1",
+                wall_time_seconds: 1.002,
+                session_id: 123,
+                output: "[bugfix/adit-core-bugs 7282e07] Improve comparison\n 2 files changed\n",
+              }),
+            },
+          ],
+        },
+      },
+    ]);
+
+    expect(extractGitOperations({
+      platform: "codex",
+      transcriptPath: path,
+      expectedSessionId: "codex-desktop-1",
+      defaultCwd: "/fallback",
+    })).toEqual([
+      expect.objectContaining({
+        toolCallId: "call-commit",
+        operation: "commit",
+        status: "success",
+        cwd: "/repo",
+        output: "[bugfix/adit-core-bugs 7282e07] Improve comparison\n 2 files changed",
+      }),
+      expect.objectContaining({
+        toolCallId: "call-commit",
+        operation: "push",
+        status: "success",
+        cwd: "/repo",
+      }),
+    ]);
+  });
+
   it("ignores ambiguous Codex desktop programs with multiple shell calls", () => {
     const path = transcript([
       { payload: { type: "message", role: "user", content: "inspect" } },
