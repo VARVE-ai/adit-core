@@ -86,6 +86,7 @@ describe("extractGitOperations", () => {
         status: "success",
         cwd: "/repo",
         output: "[main abc1234] fix: save work",
+        commitMessage: "fix: save work",
       }),
     ]);
   });
@@ -137,6 +138,7 @@ describe("extractGitOperations", () => {
         status: "success",
         cwd: "/repo",
         output: "[bugfix/adit-core-bugs 7282e07] Improve comparison\n 2 files changed",
+        commitMessage: "Improve comparison",
       }),
       expect.objectContaining({
         toolCallId: "call-commit",

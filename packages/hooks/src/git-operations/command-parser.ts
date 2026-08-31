@@ -64,10 +64,58 @@ function parseGitInvocation(args: string[], initialCwd: string): ParsedGitComman
       continue;
     }
     if (!arg) return null;
-    return { operation: normalizeOperation(arg), cwd };
+    const operation = normalizeOperation(arg);
+    return {
+      operation,
+      cwd,
+      ...(operation === "commit"
+        ? { commitMessage: parseLiteralCommitMessage(args.slice(index + 1)) }
+        : {}),
+    };
   }
 
   return null;
+}
+
+function parseLiteralCommitMessage(args: string[]): string | null {
+  const messages: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--") break;
+
+    let candidate: string | undefined;
+    if (arg === "-m" || arg === "--message") {
+      candidate = args[index + 1];
+      index += 1;
+    } else if (arg?.startsWith("--message=")) {
+      candidate = arg.slice("--message=".length);
+    } else if (arg?.startsWith("-m") && arg.length > 2) {
+      candidate = arg.slice(2);
+    } else if (
+      arg === "-F"
+      || arg === "--file"
+      || arg?.startsWith("--file=")
+      || arg === "-C"
+      || arg === "-c"
+      || arg === "--reuse-message"
+      || arg === "--reedit-message"
+      || arg?.startsWith("--reuse-message=")
+      || arg?.startsWith("--reedit-message=")
+    ) {
+      return null;
+    }
+
+    if (candidate === undefined) continue;
+    if (!isLiteralCommitMessage(candidate)) return null;
+    messages.push(candidate);
+  }
+
+  return messages.length > 0 ? messages.join("\n\n") : null;
+}
+
+function isLiteralCommitMessage(value: string): boolean {
+  return value.length > 0 && !/[$`]/u.test(value);
 }
 
 function findExecutableIndex(words: string[]): number {

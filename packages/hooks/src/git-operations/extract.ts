@@ -44,6 +44,7 @@ export function extractGitOperations(input: ExtractGitOperationsInput): AgentGit
         status: call.success ? "success" : "error",
         cwd: operation.cwd,
         output: call.output ?? null,
+        commitMessage: operation.commitMessage ?? null,
       });
     });
   }

@@ -91,7 +91,12 @@ async function resolveOperationDetails(
 ): Promise<GitOperationDetails> {
   const repository = findRepository(ctx.config.repositories, operation.cwd);
   if (!operation.output) {
-    return { repository, branch: null, sha: null, commitMessage: null };
+    return {
+      repository,
+      branch: null,
+      sha: null,
+      commitMessage: operation.commitMessage,
+    };
   }
 
   const candidate = explicitShaCandidate(operation.operation, operation.output);
@@ -100,7 +105,8 @@ async function resolveOperationDetails(
     : null;
   const commitMessage = repository && sha
     ? await readCommitMessage(repository.path, sha)
-    : explicitCommitSubject(operation.operation, operation.output);
+    : explicitCommitSubject(operation.operation, operation.output)
+      ?? operation.commitMessage;
 
   return {
     repository,

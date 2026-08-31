@@ -8,6 +8,7 @@ export interface AgentGitOperation {
   status: "success" | "error";
   cwd: string;
   output: string | null;
+  commitMessage: string | null;
 }
 
 export interface ExtractGitOperationsInput {
@@ -20,4 +21,5 @@ export interface ExtractGitOperationsInput {
 export interface ParsedGitCommand {
   operation: string;
   cwd: string;
+  commitMessage?: string | null;
 }
