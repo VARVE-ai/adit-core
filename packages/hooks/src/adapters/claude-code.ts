@@ -30,8 +30,6 @@ const HOOK_MAPPINGS: HookMapping[] = [
   // Route it through the stop handler so edits made before the failure are
   // still extracted from the transcript.
   { platformEvent: "StopFailure", aditHandler: "stop" },
-  { platformEvent: "SessionStart", aditHandler: "session-start" },
-  { platformEvent: "SessionEnd", aditHandler: "session-end" },
   { platformEvent: "SubagentStart", aditHandler: "subagent-start" },
   { platformEvent: "SubagentStop", aditHandler: "subagent-stop" },
 ];
@@ -143,12 +141,6 @@ export const claudeCodeAdapter: PlatformAdapter = {
       agentId: raw.agent_id as string | undefined,
       agentType: raw.agent_type as string | undefined,
       agentTranscriptPath: raw.agent_transcript_path as string | undefined,
-      // Common metadata (present in all events)
-      permissionMode: raw.permission_mode as string | undefined,
-      model: raw.model as string | undefined,
-      // Session lifecycle
-      sessionSource: raw.source as string | undefined,
-      sessionEndReason: raw.reason as string | undefined,
       rawPlatformData: raw,
     };
   },
@@ -173,8 +165,6 @@ export const claudeCodeAdapter: PlatformAdapter = {
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
           StopFailure: makeHookEntry("stop"),
-          SessionStart: makeHookEntry("session-start"),
-          SessionEnd: makeHookEntry("session-end"),
           SubagentStart: makeHookEntry("subagent-start"),
           SubagentStop: makeHookEntry("subagent-stop"),
         },
@@ -327,6 +317,10 @@ export const claudeCodeAdapter: PlatformAdapter = {
 
     settings.hooks = mergedHooks;
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+    removeAditHookEventFromConfig(settingsPath, "SessionStart");
+    removeAditHookEventFromConfig(join(claudeDir, "settings.json"), "SessionStart");
+    removeAditHookEventFromConfig(settingsPath, "SessionEnd");
+    removeAditHookEventFromConfig(join(claudeDir, "settings.json"), "SessionEnd");
 
     // Install slash command
     const commandsDir = join(claudeDir, "commands");
@@ -403,4 +397,20 @@ function entryContainsAditHook(entry: unknown): boolean {
   if (typeof raw.command === "string" && isAditHookCommand(raw.command)) return true;
   return Array.isArray(raw.hooks) &&
     raw.hooks.some((hook) => typeof hook.command === "string" && isAditHookCommand(hook.command));
+}
+
+function removeAditHookEventFromConfig(settingsPath: string, eventName: string): void {
+  if (!existsSync(settingsPath)) return;
+  try {
+    const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { hooks?: Record<string, unknown> };
+    const entries = settings.hooks?.[eventName];
+    if (!Array.isArray(entries)) return;
+    const filtered = entries.filter((entry) => !entryContainsAditHook(entry));
+    if (filtered.length === 0) delete settings.hooks![eventName];
+    else settings.hooks![eventName] = filtered;
+    if (Object.keys(settings.hooks!).length === 0) delete settings.hooks;
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  } catch {
+    // Preserve invalid or unreadable user settings.
+  }
 }

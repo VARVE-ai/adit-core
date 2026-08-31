@@ -46,8 +46,8 @@ describe("Cursor Adapter - Hook Generation", () => {
     // Verify event names match Cursor's native names
     expect(hooks.beforeSubmitPrompt).toBeDefined();
     expect(hooks.stop).toBeDefined();
-    expect(hooks.sessionStart).toBeDefined();
-    expect(hooks.sessionEnd).toBeDefined();
+    expect(hooks.sessionStart).toBeUndefined();
+    expect(hooks.sessionEnd).toBeUndefined();
     // afterAgentResponse duplicates stop-side transcript extraction
     expect(hooks.afterAgentResponse).toBeUndefined();
 
@@ -96,37 +96,9 @@ describe("Cursor Adapter - parseInput", () => {
     expect(input.cwd).toBe("/path/to/project");
     expect(input.platformSessionId).toBe("conv-123");
     expect(input.transcriptPath).toBe("/path/to/transcript.jsonl");
-    expect(input.model).toBe("claude-sonnet-4-6");
     expect(input.platformCli).toBe("cursor");
     expect(input.hookType).toBe("prompt-submit");
     expect(input.rawPlatformData).toBe(raw);
-  });
-
-  it("uses session_id when conversation_id is absent (sessionStart/sessionEnd)", () => {
-    const raw = {
-      session_id: "sess-789",
-      is_background_agent: false,
-      composer_mode: "agent",
-      model: "claude-sonnet-4-6",
-    };
-
-    const input = cursorAdapter.parseInput(raw, "session-start");
-
-    expect(input.platformSessionId).toBe("sess-789");
-    expect(input.sessionSource).toBe("agent");
-  });
-
-  it("maps sessionEnd reason field", () => {
-    const raw = {
-      session_id: "sess-789",
-      reason: "completed",
-      duration_ms: 5000,
-      final_status: "success",
-    };
-
-    const input = cursorAdapter.parseInput(raw, "session-end");
-
-    expect(input.sessionEndReason).toBe("completed");
   });
 
   it("falls back to CURSOR_PROJECT_DIR env when workspace_roots is absent", () => {
@@ -182,8 +154,8 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
 
     expect(hooks.beforeSubmitPrompt).toBeDefined();
     expect(hooks.stop).toBeDefined();
-    expect(hooks.sessionStart).toBeDefined();
-    expect(hooks.sessionEnd).toBeDefined();
+    expect(hooks.sessionStart).toBeUndefined();
+    expect(hooks.sessionEnd).toBeUndefined();
     expect(hooks.afterAgentResponse).toBeUndefined();
 
     // Each event should have exactly one flat entry
@@ -192,6 +164,23 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
     expect(stopEntries[0].command).toContain("adit-hook");
     expect(stopEntries[0].type).toBe("command");
     expect(stopEntries[0].timeout).toBe(10);
+  });
+
+  it("removes legacy ADIT sessionEnd hooks while preserving other tools", async () => {
+    writeHooks(projectRoot, {
+      hooks: {
+        sessionEnd: [
+          { command: "CURSOR=1 npx adit-hook session-end", type: "command" },
+          { command: "other-tool session-end", type: "command" },
+        ],
+      },
+    });
+
+    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    const hooks = readHooks(projectRoot);
+    expect(JSON.stringify(hooks.sessionEnd)).not.toContain("adit-hook session-end");
+    expect(JSON.stringify(hooks.sessionEnd)).toContain("other-tool session-end");
   });
 
   it("preserves other tools' hooks when installing ADIT hooks", async () => {
@@ -211,11 +200,10 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
 
     const hooks = readHooks(projectRoot);
 
-    // sessionStart should have both: Entire's hook + ADIT's hook
+    // ADIT no longer installs sessionStart; the other tool's hook is preserved.
     const sessionStartEntries = hooks.sessionStart as Array<{ command: string }>;
-    expect(sessionStartEntries).toHaveLength(2);
+    expect(sessionStartEntries).toHaveLength(1);
     expect(sessionStartEntries[0].command).toContain("entire");
-    expect(sessionStartEntries[1].command).toContain("adit-hook");
 
     // stop should also have both
     const stopEntries = hooks.stop as Array<{ command: string }>;
@@ -292,7 +280,7 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
     expect(preToolEntries[0].matcher).toBe("Write|Edit");
 
     // ADIT hooks should also be present
-    expect(hooks.sessionStart).toBeDefined();
+    expect(hooks.sessionStart).toBeUndefined();
     expect(hooks.stop).toBeDefined();
   });
 

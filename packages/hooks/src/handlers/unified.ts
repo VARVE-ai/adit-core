@@ -6,19 +6,13 @@
  */
 
 import {
-  endSession,
-  endStaleSessions,
-  mergeSessionMetadata,
   withPerf,
   insertDiff,
   generateId,
-  type LocalRepository,
 } from "@varveai/adit-core";
 import {
   createTimelineManager,
   captureEnvironment,
-  getCurrentBranch,
-  getHeadSha,
   type FileChange,
 } from "@varveai/adit-engine";
 import { initHookContext, type HookContext } from "../common/context.js";
@@ -26,17 +20,13 @@ import {
   assistantTextFromTranscriptEntry,
   type TranscriptEntryLike,
 } from "../common/transcript-entry.js";
-import {
-  detectAndRecordCommits,
-  initializeSessionRepoBaselines,
-} from "../common/commit-attribution.js";
+import { recordGitCommits } from "../git-operations/index.js";
 import { debugLog } from "../common/debug-log.js";
 import {
   classifyPromptSubmit,
   type PromptSubmitClassification,
 } from "../common/system-prompt.js";
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
 import type { NormalizedHookInput } from "../adapters/types.js";
 import {
   extractClaudeMutationsFromTranscript,
@@ -61,6 +51,11 @@ export async function dispatchHook(
   input: NormalizedHookInput,
   options: DispatchHookOptions = {},
 ): Promise<void> {
+  // Older installs can still invoke retired hook commands. Reject them before
+  // context initialization so a stale SessionEnd command cannot create an
+  // otherwise empty local session.
+  if (!isHandledHookType(input.hookType)) return;
+
   const ctx = await initHookContext(
     input.cwd,
     input.platformCli ?? "other",
@@ -72,12 +67,7 @@ export async function dispatchHook(
   const dataDir = ctx.config.dataDir;
 
   try {
-    if (isIgnoredSystemSession(ctx)) {
-      if (input.hookType === "session-end") {
-        endSession(ctx.db, ctx.session.id, "completed");
-      }
-      return;
-    }
+    if (isIgnoredSystemSession(ctx)) return;
 
     const classification =
       input.hookType === "prompt-submit"
@@ -98,12 +88,6 @@ export async function dispatchHook(
         case "stop":
           await handleStopUnified(ctx, input);
           break;
-        case "session-start":
-          await handleSessionStart(ctx, input);
-          break;
-        case "session-end":
-          await handleSessionEnd(ctx, input);
-          break;
         case "subagent-start":
           await handleSubagentStart(ctx, input);
           break;
@@ -113,23 +97,10 @@ export async function dispatchHook(
       }
     });
 
-    // Trigger transcript upload (fail-open).
-    // Every hook event carries transcript_path, so we check on each event.
-    // Awaited so db stays open until the query finishes.
-    if (input.transcriptPath) {
-      await withPerf(dataDir, "hook", "transcript-upload", () =>
-        triggerTranscriptUploadIfEnabled(ctx, input),
-      ).catch(() => {
-        /* fail-open */
-      });
-    }
-
     // Auto-sync to cloud on stable hook boundaries (fail-open).
     // Uses dynamic import so @varveai/adit-cloud is not a build-time dependency.
     // The module name is constructed to prevent TypeScript from resolving it.
-    // All stable hook boundaries, including session-end, use the count/time
-    // thresholds in triggerAutoSync. Session-end force sync is temporarily disabled
-    // because some SDK-driven Claude queries emit SessionEnd after each turn.
+    // Stable hook boundaries use the count/time thresholds in triggerAutoSync.
     // prompt-submit is deliberately skipped so cloud does not receive half a turn
     // containing a user prompt without its assistant response.
     if (shouldTriggerCloudAutoSync(input.hookType)) {
@@ -140,14 +111,11 @@ export async function dispatchHook(
             triggerAutoSync: (
               db: unknown,
               projectId: string,
-              options?: { force?: boolean; projectRoot?: string },
+              options?: { projectRoot?: string },
             ) => Promise<void>;
           };
           // Awaited so db stays open until triggerAutoSync finishes querying and pushing.
-          // Temporarily disabled: SessionEnd must not bypass the normal sync threshold.
-          // const force = input.hookType === "session-end";
           await cloudModule.triggerAutoSync(ctx.db, ctx.config.projectId, {
-            // ...(force ? { force: true } : {}),
             projectRoot: ctx.config.projectRoot,
           });
         });
@@ -158,6 +126,13 @@ export async function dispatchHook(
   } finally {
     ctx.db.close();
   }
+}
+
+function isHandledHookType(hookType: string): boolean {
+  return hookType === "prompt-submit"
+    || hookType === "stop"
+    || hookType === "subagent-start"
+    || hookType === "subagent-stop";
 }
 
 interface IgnoredSessionMetadata {
@@ -218,7 +193,9 @@ function parseSessionMetadata(metadataJson: string | null): IgnoredSessionMetada
 }
 
 function shouldTriggerCloudAutoSync(hookType: NormalizedHookInput["hookType"]): boolean {
-  return hookType !== "prompt-submit";
+  return hookType === "stop"
+    || hookType === "subagent-start"
+    || hookType === "subagent-stop";
 }
 
 /** Handle prompt submission (kept lightweight — no git operations) */
@@ -298,13 +275,6 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
   }
 
   const changedFiles = changesFromMutations(mutations);
-  // Mutation paths are project-root-relative after normalization, so repo
-  // matching must resolve them against the project root, not the event cwd.
-  const workspaceGitState = await resolveWorkspaceGitState(
-    ctx,
-    ctx.config.projectRoot,
-    changedFiles,
-  );
 
   const event = await timeline.recordEvent({
     sessionId: ctx.session.id,
@@ -312,10 +282,6 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     actor: "assistant",
     responseText,
     diffStatJson: mutationStatJson,
-    ...(workspaceGitState ? {
-      gitBranch: workspaceGitState.gitBranch,
-      gitHeadSha: workspaceGitState.gitHeadSha,
-    } : {}),
   });
 
   // Persist bounded diff_text from mutations (replaces old git checkpoint path)
@@ -338,9 +304,9 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     }
   }
 
-  // Attribute commits made during this turn (fail-open inside).
-  await withPerf(ctx.config.dataDir, "git", "commitAttribution", () =>
-    detectAndRecordCommits(ctx, timeline),
+  // Record only successful git commit commands actually executed in this turn.
+  await withPerf(ctx.config.dataDir, "git", "gitCommits", () =>
+    recordGitCommits(ctx, input, timeline),
   );
 
   // Environment snapshots stay local for the TUI env screen and snapshot
@@ -367,11 +333,6 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
   }
 }
 
-interface WorkspaceGitState {
-  gitBranch: string | null;
-  gitHeadSha: string | null;
-}
-
 function changesFromMutations(mutations: AgentFileMutation[]): FileChange[] {
   const changes: FileChange[] = [];
   const seen = new Set<string>();
@@ -395,79 +356,6 @@ function mutationKindToFileStatus(kind: AgentFileMutation["kind"]): FileChange["
   if (kind === "delete") return "D";
   if (kind === "rename") return "R";
   return "M";
-}
-
-async function resolveWorkspaceGitState(
-  ctx: HookContext,
-  cwd: string,
-  changedFiles: FileChange[],
-): Promise<WorkspaceGitState | null> {
-  if (ctx.config.projectType !== "workspace") return null;
-  if (changedFiles.length === 0) return { gitBranch: null, gitHeadSha: null };
-
-  const repositories = matchedWorkspaceRepositories(ctx, cwd, changedFiles);
-  if (repositories.length === 0) return { gitBranch: null, gitHeadSha: null };
-
-  const states = await Promise.all(
-    repositories.map(async (repo) => ({
-      branch: await safeGetCurrentBranch(repo.path),
-      headSha: await safeGetHeadSha(repo.path),
-    })),
-  );
-
-  return {
-    gitBranch: joinNullable(states.map((state) => state.branch)),
-    gitHeadSha: joinNullable(states.map((state) => state.headSha)),
-  };
-}
-
-function matchedWorkspaceRepositories(
-  ctx: HookContext,
-  cwd: string,
-  changedFiles: FileChange[],
-): LocalRepository[] {
-  const matched = new Map<string, LocalRepository>();
-
-  for (const change of changedFiles) {
-    const absPath = absoluteMutationPath(cwd, change.path);
-    const repo = ctx.config.repositories.find((candidate) =>
-      isPathInsideOrEqual(absPath, resolve(candidate.path)),
-    );
-    if (repo) matched.set(repo.path, repo);
-  }
-
-  return Array.from(matched.values());
-}
-
-function absoluteMutationPath(cwd: string, path: string): string {
-  const normalized = path.replace(/\\/gu, "/");
-  return resolve(isAbsolute(normalized) ? normalized : join(cwd, normalized));
-}
-
-function isPathInsideOrEqual(path: string, parent: string): boolean {
-  const rel = relative(parent, path);
-  return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
-}
-
-function joinNullable(values: Array<string | null>): string | null {
-  const filtered = values.filter((value): value is string => !!value);
-  return filtered.length > 0 ? filtered.join(",") : null;
-}
-
-async function safeGetCurrentBranch(cwd: string): Promise<string | null> {
-  try {
-    return await getCurrentBranch(cwd);
-  } catch {
-    return null;
-  }
-}
-
-async function safeGetHeadSha(cwd: string): Promise<string | null> {
-  try {
-    return await getHeadSha(cwd);
-  } catch {
-    return null;
-  }
 }
 
 function extractLastAssistantTextFromTranscript(transcriptPath: string): string | undefined {
@@ -502,108 +390,6 @@ async function recoverAssistantMessageFromTranscript(transcriptPath?: string): P
     if (text) return text;
   }
   return undefined;
-}
-
-/** How long a session may sit with no events before the lazy sweep closes it */
-const STALE_SESSION_MAX_IDLE_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Codex has no SessionEnd hook at all, so every codex session stays active
- * until the next codex SessionStart sweeps it. With the default 24h window,
- * "completed" codex sessions were measured lingering for 30+ days locally.
- * A 2h idle window closes them promptly while still surviving long breaks
- * within a real working session.
- */
-const CODEX_STALE_SESSION_MAX_IDLE_MS = 2 * 60 * 60 * 1000;
-
-function staleSessionIdleMsFor(platform: string): number {
-  return platform === "codex" ? CODEX_STALE_SESSION_MAX_IDLE_MS : STALE_SESSION_MAX_IDLE_MS;
-}
-
-/** Handle session start — capture initial env snapshot and record metadata */
-async function handleSessionStart(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  // Lazily close zombie sessions for this platform. Codex has no SessionEnd
-  // hook event, so its sessions would otherwise stay active forever and
-  // become targets for the sessionless getActiveSession fallback.
-  if (input.platformCli) {
-    try {
-      endStaleSessions(ctx.db, {
-        projectId: ctx.config.projectId,
-        platform: input.platformCli,
-        cutoffIso: new Date(Date.now() - staleSessionIdleMsFor(input.platformCli)).toISOString(),
-        excludeSessionId: ctx.session.id,
-      });
-    } catch {
-      // Fail-open
-    }
-  }
-
-  // Seed per-repo HEAD baselines so first-turn commits are attributable.
-  await initializeSessionRepoBaselines(ctx);
-
-  // Persist launch context (model, source, permission mode) on the session
-  // record. Replaces the legacy "checkpoint" marker event. Metadata-only
-  // updates on revived sessions reach the cloud when the session next ends
-  // (sync detects modified sessions via ended_at).
-  const metadata: Record<string, unknown> = {};
-  if (input.model) metadata.model = input.model;
-  if (input.sessionSource) metadata.source = input.sessionSource;
-  if (input.permissionMode) metadata.permissionMode = input.permissionMode;
-
-  if (Object.keys(metadata).length > 0) {
-    try {
-      mergeSessionMetadata(ctx.db, ctx.session.id, metadata);
-    } catch {
-      // Fail-open
-    }
-  }
-
-  if (ctx.config.captureEnv) {
-    try {
-      await withPerf(ctx.config.dataDir, "snapshot", "captureEnvironment", () =>
-        captureEnvironment(ctx.db, ctx.config, ctx.session.id),
-      );
-    } catch {
-      // Fail-open
-    }
-  }
-
-  // Trigger project-link auto-sync (fire-and-forget, fail-open).
-  // Spawns a detached background process to sync branches, commits,
-  // and documents — won't be killed by the 10s hook timeout.
-  try {
-    const cloudModuleName = ["@varveai", "adit-cloud"].join("/");
-    const { triggerProjectLinkSync } = await import(cloudModuleName) as {
-      triggerProjectLinkSync: (db: unknown, projectId: string, projectRoot: string) => Promise<void>;
-    };
-    triggerProjectLinkSync(ctx.db, ctx.config.projectId, ctx.config.projectRoot)
-      .catch(() => {});
-  } catch {
-    // Fail-open — cloud package may not be available
-  }
-}
-
-/** Handle session end — capture final env snapshot and close session */
-async function handleSessionEnd(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  if (ctx.config.captureEnv) {
-    try {
-      await withPerf(ctx.config.dataDir, "snapshot", "captureEnvironment", () =>
-        captureEnvironment(ctx.db, ctx.config, ctx.session.id),
-      );
-    } catch {
-      // Fail-open
-    }
-  }
-
-  // Sweep commits from the final turn before the session closes.
-  const timeline = createTimelineManager(ctx.db, ctx.config);
-  await withPerf(ctx.config.dataDir, "git", "commitAttribution", () =>
-    detectAndRecordCommits(ctx, timeline),
-  );
-
-  // Mark session as completed with end reason
-  const status = input.sessionEndReason === "error" ? "error" : "completed";
-  endSession(ctx.db, ctx.session.id, status);
 }
 
 /** Handle subagent start — record when a subagent is spawned */
@@ -644,37 +430,4 @@ async function handleSubagentStop(ctx: HookContext, input: NormalizedHookInput):
       ? JSON.stringify({ lastAssistantMessage: input.lastAssistantMessage })
       : null,
   });
-}
-
-/**
- * Trigger transcript upload if cloud is configured.
- *
- * Uses dynamic import so @varveai/adit-cloud is not a build-time dependency.
- * Fully fail-open: errors are silently swallowed.
- *
- * Reuses the existing HookContext to avoid opening a second DB connection.
- */
-async function triggerTranscriptUploadIfEnabled(
-  ctx: HookContext,
-  input: NormalizedHookInput,
-): Promise<void> {
-  if (!input.transcriptPath) return;
-
-  try {
-    const cloudModuleName = ["@varveai", "adit-cloud"].join("/");
-    const cloudModule = (await import(cloudModuleName)) as {
-      triggerTranscriptUpload: (
-        db: unknown,
-        sessionId: string,
-        transcriptPath: string,
-      ) => Promise<void>;
-    };
-    await cloudModule.triggerTranscriptUpload(
-      ctx.db,
-      ctx.session.id,
-      input.transcriptPath,
-    );
-  } catch {
-    // @varveai/adit-cloud not installed or other error — silently skip
-  }
 }

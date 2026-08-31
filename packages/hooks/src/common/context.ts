@@ -10,10 +10,8 @@ import {
   ProjectManifestError,
   loadConfig,
   openDatabase,
-  getActiveSession,
   getSessionByPlatformSessionId,
   insertSession,
-  reviveSession,
   generateId,
   createClock,
   serialize,
@@ -58,24 +56,15 @@ export async function initHookContext(
   if (config.initialization !== "initialized") return null;
   if (!existsSync(config.dbPath)) return null;
 
+  // A platform session ID is the only reliable way to associate an incoming
+  // hook with its conversation. Never guess by reusing the most recent local
+  // session: concurrent windows would silently contaminate each other.
+  if (!platformSessionId) return null;
+
   const db = openDatabase(config.dbPath);
 
-  // Get or create session — prefer platform session ID lookup. The
-  // sessionless fallback is platform-scoped so events without a session id
-  // never attach to another CLI's active session.
-  let session: AditSession | null = null;
-  if (platformSessionId) {
-    session = getSessionByPlatformSessionId(db, platformSessionId);
-    // Resume of a closed platform session: reattach to the same row instead
-    // of minting a duplicate, and reopen it so later lifecycle handling
-    // (session-end, stale sweeps) behaves normally.
-    if (session && session.status !== "active") {
-      reviveSession(db, session.id);
-      session = { ...session, status: "active", endedAt: null };
-    }
-  } else {
-    session = getActiveSession(db, config.projectId, config.clientId, platform);
-  }
+  // The same platform session ID always reattaches to the same local row.
+  let session: AditSession | null = getSessionByPlatformSessionId(db, platformSessionId);
   if (!session) {
     const id = generateId();
     const now = new Date().toISOString();
@@ -95,15 +84,10 @@ export async function initHookContext(
         workingDirectory: cwd,
       }),
       vclockJson: serialize(createClock(config.clientId)),
-      platformSessionId: platformSessionId ?? null,
+      platformSessionId,
     });
 
-    // Re-fetch via platform session ID if available, else fall back
-    if (platformSessionId) {
-      session = getSessionByPlatformSessionId(db, platformSessionId)!;
-    } else {
-      session = getActiveSession(db, config.projectId, config.clientId, platform)!;
-    }
+    session = getSessionByPlatformSessionId(db, platformSessionId)!;
   }
 
   return { db, config, session };

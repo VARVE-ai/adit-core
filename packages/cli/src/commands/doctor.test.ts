@@ -7,7 +7,6 @@ const mocks = vi.hoisted(() => ({
   closeDatabase: vi.fn(),
   queryEvents: vi.fn(),
   listSessions: vi.fn(),
-  endSession: vi.fn(),
   discoverWorkspaceRepositories: vi.fn(() => [] as Array<{ relativePath: string }>),
   getRemoteUrl: vi.fn(async () => "https://example.com/repo.git" as string | null),
   detectPlatform: vi.fn(),
@@ -27,7 +26,6 @@ vi.mock("@varveai/adit-core", () => ({
   closeDatabase: mocks.closeDatabase,
   queryEvents: mocks.queryEvents,
   listSessions: mocks.listSessions,
-  endSession: mocks.endSession,
   discoverWorkspaceRepositories: mocks.discoverWorkspaceRepositories,
   projectManifestPath: (projectRoot: string) => `${projectRoot}/.adit/project.json`,
 }));

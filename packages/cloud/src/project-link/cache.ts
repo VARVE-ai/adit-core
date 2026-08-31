@@ -1,12 +1,13 @@
 /**
  * Local SQLite cache for project link state.
  *
- * Tracks the server-confirmed project ID, last-synced commit SHA,
+ * Tracks the server-confirmed project ID, Git ref heads,
  * document content hashes, and qualification status. Stored in the
  * existing adit database ($projectRoot/.adit/adit.sqlite).
  */
 
 import type Database from "better-sqlite3";
+import { normalizeServerUrl } from "@varveai/adit-core";
 import type { ProjectLinkCache } from "./types.js";
 
 /** Row shape from the project_link_cache table */
@@ -15,7 +16,10 @@ interface CacheRow {
   repository_id: string;
   server_url: string;
   confirmed_project_id: string | null;
-  last_commit_sha: string | null;
+  git_ref_heads_json: string;
+  git_refs_fingerprint: string | null;
+  remote_refs_fingerprint: string | null;
+  last_remote_branch_check_at: string | null;
   last_branch_sync_at: string | null;
   last_doc_sync_at: string | null;
   doc_hashes_json: string;
@@ -23,6 +27,8 @@ interface CacheRow {
   initialized_at: string;
   updated_at: string;
 }
+
+const LEGACY_REFS_FINGERPRINT_KEY = "__adit_git_refs_fingerprint";
 
 /** Get cached state for a project link */
 export function getProjectLinkCache(
@@ -35,7 +41,11 @@ export function getProjectLinkCache(
     .prepare(
       "SELECT * FROM project_link_cache WHERE project_id = ? AND repository_id = ? AND server_url = ?",
     )
-    .get(projectId, repositoryId, serverUrl) as CacheRow | undefined;
+    .get(
+      projectId,
+      repositoryId,
+      normalizeServerUrl(serverUrl),
+    ) as CacheRow | undefined;
 
   if (!row) return null;
 
@@ -46,12 +56,27 @@ export function getProjectLinkCache(
     // Corrupted JSON — treat as empty (documents will be re-uploaded)
   }
 
+  let gitRefHeads: Record<string, string> = {};
+  try {
+    gitRefHeads = JSON.parse(row.git_ref_heads_json) as Record<string, string>;
+  } catch {
+    // Corrupted JSON — the next git sync will rebuild the baseline.
+  }
+
+  const legacyRefsFingerprint = typeof docHashes[LEGACY_REFS_FINGERPRINT_KEY] === "string"
+    ? docHashes[LEGACY_REFS_FINGERPRINT_KEY]
+    : null;
+  delete docHashes[LEGACY_REFS_FINGERPRINT_KEY];
+
   return {
     projectId: row.project_id,
     repositoryId: row.repository_id,
     serverUrl: row.server_url,
     confirmedProjectId: row.confirmed_project_id,
-    lastCommitSha: row.last_commit_sha,
+    gitRefHeads,
+    gitRefsFingerprint: row.git_refs_fingerprint ?? legacyRefsFingerprint,
+    remoteRefsFingerprint: row.remote_refs_fingerprint,
+    lastRemoteBranchCheckAt: row.last_remote_branch_check_at,
     lastBranchSyncAt: row.last_branch_sync_at,
     lastDocSyncAt: row.last_doc_sync_at,
     docHashes,
@@ -69,12 +94,17 @@ export function upsertProjectLinkCache(
   db.prepare(`
     INSERT INTO project_link_cache (
       project_id, repository_id, server_url, confirmed_project_id,
-      last_commit_sha, last_branch_sync_at, last_doc_sync_at,
+      git_ref_heads_json, git_refs_fingerprint,
+      remote_refs_fingerprint, last_remote_branch_check_at,
+      last_branch_sync_at, last_doc_sync_at,
       doc_hashes_json, qualified, initialized_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (project_id, repository_id, server_url) DO UPDATE SET
       confirmed_project_id = excluded.confirmed_project_id,
-      last_commit_sha = excluded.last_commit_sha,
+      git_ref_heads_json = excluded.git_ref_heads_json,
+      git_refs_fingerprint = excluded.git_refs_fingerprint,
+      remote_refs_fingerprint = excluded.remote_refs_fingerprint,
+      last_remote_branch_check_at = excluded.last_remote_branch_check_at,
       last_branch_sync_at = excluded.last_branch_sync_at,
       last_doc_sync_at = excluded.last_doc_sync_at,
       doc_hashes_json = excluded.doc_hashes_json,
@@ -83,15 +113,72 @@ export function upsertProjectLinkCache(
   `).run(
     cache.projectId,
     cache.repositoryId,
-    cache.serverUrl,
+    normalizeServerUrl(cache.serverUrl),
     cache.confirmedProjectId,
-    cache.lastCommitSha,
+    JSON.stringify(cache.gitRefHeads),
+    cache.gitRefsFingerprint,
+    cache.remoteRefsFingerprint,
+    cache.lastRemoteBranchCheckAt,
     cache.lastBranchSyncAt,
     cache.lastDocSyncAt,
     JSON.stringify(cache.docHashes),
     cache.qualified ? 1 : 0,
     cache.initializedAt,
     cache.updatedAt,
+  );
+}
+
+/** Persist the last successful authoritative origin branch read. */
+export function updateCachedRemoteBranchState(
+  db: Database.Database,
+  projectId: string,
+  serverUrl: string,
+  state: {
+    refsFingerprint: string;
+    checkedAt?: string;
+  },
+  repositoryId = projectId,
+): void {
+  const checkedAt = state.checkedAt ?? new Date().toISOString();
+  db.prepare(`
+    UPDATE project_link_cache
+    SET remote_refs_fingerprint = ?, last_remote_branch_check_at = ?, updated_at = ?
+    WHERE project_id = ? AND repository_id = ? AND server_url = ?
+  `).run(
+    state.refsFingerprint,
+    checkedAt,
+    checkedAt,
+    projectId,
+    repositoryId,
+    normalizeServerUrl(serverUrl),
+  );
+}
+
+/** Persist git progress only after branches and commits have both uploaded. */
+export function updateCachedGitState(
+  db: Database.Database,
+  projectId: string,
+  serverUrl: string,
+  state: {
+    refHeads: Record<string, string>;
+    refsFingerprint: string;
+  },
+  repositoryId = projectId,
+): void {
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE project_link_cache
+    SET git_ref_heads_json = ?, git_refs_fingerprint = ?,
+        last_branch_sync_at = ?, updated_at = ?
+    WHERE project_id = ? AND repository_id = ? AND server_url = ?
+  `).run(
+    JSON.stringify(state.refHeads),
+    state.refsFingerprint,
+    now,
+    now,
+    projectId,
+    repositoryId,
+    normalizeServerUrl(serverUrl),
   );
 }
 
@@ -105,27 +192,12 @@ export function clearProjectLinkCache(
   if (repositoryId) {
     db.prepare(
       "DELETE FROM project_link_cache WHERE project_id = ? AND repository_id = ? AND server_url = ?",
-    ).run(projectId, repositoryId, serverUrl);
+    ).run(projectId, repositoryId, normalizeServerUrl(serverUrl));
     return;
   }
 
   db.prepare("DELETE FROM project_link_cache WHERE project_id = ? AND server_url = ?")
-    .run(projectId, serverUrl);
-}
-
-/** Update the last-synced commit SHA after upload */
-export function updateCachedCommitSha(
-  db: Database.Database,
-  projectId: string,
-  serverUrl: string,
-  sha: string,
-  repositoryId = projectId,
-): void {
-  db.prepare(`
-    UPDATE project_link_cache
-    SET last_commit_sha = ?, updated_at = ?
-    WHERE project_id = ? AND repository_id = ? AND server_url = ?
-  `).run(sha, new Date().toISOString(), projectId, repositoryId, serverUrl);
+    .run(projectId, normalizeServerUrl(serverUrl));
 }
 
 /** Update cached document hashes after upload */
@@ -146,28 +218,7 @@ export function updateCachedDocHashes(
     new Date().toISOString(),
     projectId,
     repositoryId,
-    serverUrl,
-  );
-}
-
-/** Update cached metadata JSON without marking documents as synced. */
-export function updateCachedMetadata(
-  db: Database.Database,
-  projectId: string,
-  serverUrl: string,
-  hashes: Record<string, string>,
-  repositoryId = projectId,
-): void {
-  db.prepare(`
-    UPDATE project_link_cache
-    SET doc_hashes_json = ?, updated_at = ?
-    WHERE project_id = ? AND repository_id = ? AND server_url = ?
-  `).run(
-    JSON.stringify(hashes),
-    new Date().toISOString(),
-    projectId,
-    repositoryId,
-    serverUrl,
+    normalizeServerUrl(serverUrl),
   );
 }
 
@@ -183,5 +234,11 @@ export function updateCachedQualified(
     UPDATE project_link_cache
     SET qualified = ?, updated_at = ?
     WHERE project_id = ? AND repository_id = ? AND server_url = ?
-  `).run(qualified ? 1 : 0, new Date().toISOString(), projectId, repositoryId, serverUrl);
+  `).run(
+    qualified ? 1 : 0,
+    new Date().toISOString(),
+    projectId,
+    repositoryId,
+    normalizeServerUrl(serverUrl),
+  );
 }

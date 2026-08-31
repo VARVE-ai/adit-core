@@ -7,6 +7,7 @@
  * 3. Client polls until approved, then receives tokens
  */
 
+import { normalizeServerUrl } from "@varveai/adit-core";
 import { CloudApiError, CloudNetworkError } from "../http/errors.js";
 
 export interface DeviceCodeResponse {
@@ -41,7 +42,7 @@ export async function requestDeviceCode(
   serverUrl: string,
   options: DeviceAuthOptions,
 ): Promise<DeviceCodeResponse> {
-  const url = `${serverUrl.replace(/\/$/, "")}/api/auth/device`;
+  const url = `${normalizeServerUrl(serverUrl)}/api/auth/device`;
 
   try {
     const response = await fetch(url, {
@@ -86,7 +87,7 @@ export async function pollForToken(
   intervalMs = 5000,
   timeoutMs = 300_000, // 5 minutes
 ): Promise<TokenResponse> {
-  const url = `${serverUrl.replace(/\/$/, "")}/api/auth/device/token`;
+  const url = `${normalizeServerUrl(serverUrl)}/api/auth/device/token`;
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {

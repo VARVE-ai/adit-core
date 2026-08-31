@@ -100,14 +100,6 @@ export interface NormalizedHookInput {
   agentId?: string;
   agentType?: string;
   agentTranscriptPath?: string;
-  /** Permission mode the AI agent is running in */
-  permissionMode?: string;
-  /** Which AI model is being used (from SessionStart) */
-  model?: string;
-  /** Session source: startup, resume, clear, compact (from SessionStart) */
-  sessionSource?: string;
-  /** Why the session ended: clear, logout, exit, etc. (from SessionEnd) */
-  sessionEndReason?: string;
   rawPlatformData?: Record<string, unknown>;
 }
 
@@ -142,8 +134,6 @@ export interface ValidationCheck {
 export type AditHookType =
   | "prompt-submit"
   | "stop"
-  | "session-start"
-  | "session-end"
   | "task-completed"
   | "notification"
   | "subagent-start"

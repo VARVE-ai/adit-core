@@ -18,7 +18,7 @@ import {
 } from "@varveai/adit-core";
 import type { ProjectType, SyncState } from "@varveai/adit-core";
 import type { CloudClient } from "../http/client.js";
-import { buildSyncBatch, batchRecordCount, countUnsyncedRecords } from "./serializer.js";
+import { buildSyncBatch, batchRecordCount, countUnsyncedEvents } from "./serializer.js";
 import { handleConflicts, type SyncConflict } from "./conflicts.js";
 
 export type { SyncConflict } from "./conflicts.js";
@@ -206,18 +206,8 @@ export class SyncEngine {
         lastSyncedAt = serverStatus.lastSyncedAt;
 
         if (cursor) {
-          const unsyncedWithCursor = countUnsyncedRecords(
-            this.db,
-            cursor,
-            lastSyncedAt,
-            this.projectId,
-          );
-          const totalLocal = countUnsyncedRecords(
-            this.db,
-            null,
-            null,
-            this.projectId,
-          );
+          const unsyncedWithCursor = countUnsyncedEvents(this.db, cursor, this.projectId);
+          const totalLocal = countUnsyncedEvents(this.db, null, this.projectId);
           if (unsyncedWithCursor === 0 && totalLocal > 0) {
             if (process.env.ADIT_DEBUG) {
               process.stderr.write(
@@ -253,7 +243,7 @@ export class SyncEngine {
           diffByteCapApplied,
           payloadByteCapApplied,
           payload,
-        } = this.buildSizedPush(cursor, lastSyncedAt, syncVersion, isNewProject);
+        } = this.buildSizedPush(cursor, syncVersion, isNewProject);
         if (count === 0) break; // All synced
 
         const response = await this.client.post<PushResponse>(
@@ -339,7 +329,6 @@ export class SyncEngine {
 
   private buildSizedPush(
     cursor: string | null,
-    lastSyncedAt: string | null,
     syncVersion: number,
     isNewProject: boolean,
   ): SizedSyncPush {
@@ -350,7 +339,6 @@ export class SyncEngine {
       const { batch, diffByteCapApplied } = buildSyncBatch(
         this.db,
         cursor,
-        lastSyncedAt,
         this.projectId,
         this.cloudClientId,
         limit,

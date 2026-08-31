@@ -45,8 +45,6 @@ export interface AditConfig {
   repositories: LocalRepository[];
   /** Whether a project manifest was found at the resolved root */
   initialization: ProjectInitializationState;
-  /** Git ref prefix for checkpoints */
-  refPrefix: string;
   /** Whether to capture environment snapshots */
   captureEnv: boolean;
 }
@@ -187,7 +185,6 @@ export function loadConfig(cwd?: string): AditConfig {
     projectType,
     repositories,
     initialization,
-    refPrefix: "refs/adit/checkpoints",
     captureEnv: process.env.ADIT_CAPTURE_ENV !== undefined
       ? process.env.ADIT_CAPTURE_ENV !== "false"
       : (fileSettings.captureEnv as boolean) ?? true,

@@ -26,8 +26,6 @@ export interface InsertEventInput {
   toolName?: string | null;
   toolInputJson?: string | null;
   toolOutputJson?: string | null;
-  checkpointSha?: string | null;
-  checkpointRef?: string | null;
   diffStatJson?: string | null;
   gitBranch?: string | null;
   gitHeadSha?: string | null;
@@ -37,7 +35,6 @@ export interface InsertEventInput {
   status?: EventStatus;
   errorJson?: string | null;
   labelsJson?: string | null;
-  planTaskId?: string | null;
   clientId?: string | null;
   vclockJson: string;
 }
@@ -47,17 +44,17 @@ const INSERT_SQL = `
     id, session_id, parent_event_id, sequence, event_type, actor,
     prompt_text, cot_text, response_text,
     tool_name, tool_input_json, tool_output_json,
-    checkpoint_sha, checkpoint_ref, diff_stat_json,
+    diff_stat_json,
     git_branch, git_head_sha, env_snapshot_id,
-    started_at, ended_at, status, error_json, labels_json, plan_task_id,
+    started_at, ended_at, status, error_json, labels_json,
     client_id, vclock_json
   ) VALUES (
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?,
     ?, ?, ?,
+    ?,
     ?, ?, ?,
-    ?, ?, ?,
-    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?,
     ?, ?
   )
 `;
@@ -73,9 +70,9 @@ const INSERT_WITH_SEQ_SQL = `
     id, session_id, parent_event_id, sequence, event_type, actor,
     prompt_text, cot_text, response_text,
     tool_name, tool_input_json, tool_output_json,
-    checkpoint_sha, checkpoint_ref, diff_stat_json,
+    diff_stat_json,
     git_branch, git_head_sha, env_snapshot_id,
-    started_at, ended_at, status, error_json, labels_json, plan_task_id,
+    started_at, ended_at, status, error_json, labels_json,
     client_id, vclock_json
   ) VALUES (
     ?, ?, ?,
@@ -83,9 +80,9 @@ const INSERT_WITH_SEQ_SQL = `
     ?, ?,
     ?, ?, ?,
     ?, ?, ?,
+    ?,
     ?, ?, ?,
-    ?, ?, ?,
-    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?,
     ?, ?
   )
 `;
@@ -107,8 +104,6 @@ export function insertEvent(
     input.toolName ?? null,
     input.toolInputJson ?? null,
     input.toolOutputJson ?? null,
-    input.checkpointSha ?? null,
-    input.checkpointRef ?? null,
     input.diffStatJson ?? null,
     input.gitBranch ?? null,
     input.gitHeadSha ?? null,
@@ -118,7 +113,6 @@ export function insertEvent(
     input.status ?? "running",
     input.errorJson ?? null,
     input.labelsJson ?? null,
-    input.planTaskId ?? null,
     input.clientId ?? null,
     input.vclockJson,
   );
@@ -147,8 +141,6 @@ export function insertEventAutoSeq(
     input.toolName ?? null,
     input.toolInputJson ?? null,
     input.toolOutputJson ?? null,
-    input.checkpointSha ?? null,
-    input.checkpointRef ?? null,
     input.diffStatJson ?? null,
     input.gitBranch ?? null,
     input.gitHeadSha ?? null,
@@ -158,7 +150,6 @@ export function insertEventAutoSeq(
     input.status ?? "running",
     input.errorJson ?? null,
     input.labelsJson ?? null,
-    input.planTaskId ?? null,
     input.clientId ?? null,
     input.vclockJson,
   );
@@ -179,7 +170,6 @@ export interface EventQueryOptions {
   eventType?: EventType;
   actor?: Actor;
   status?: EventStatus;
-  hasCheckpoint?: boolean;
   gitBranch?: string;
   limit?: number;
   afterSequence?: number;
@@ -207,9 +197,6 @@ export function queryEvents(
   if (opts.status) {
     conditions.push("status = ?");
     params.push(opts.status);
-  }
-  if (opts.hasCheckpoint) {
-    conditions.push("checkpoint_sha IS NOT NULL");
   }
   if (opts.gitBranch) {
     conditions.push("git_branch = ?");
@@ -352,25 +339,25 @@ export function countEvents(
   return row.cnt;
 }
 
-/**
- * Whether this session already attributed the given commit.
- * Guards against re-attribution when the per-repo baseline legally moves
- * backward (e.g. a pure checkout to an ancestor) and a later turn's
- * baseline..HEAD range contains commits from earlier turns again.
- */
+/** Whether an extracted tool call has already produced this Git commit event. */
 export function hasGitCommitEvent(
   db: Database.Database,
   sessionId: string,
-  commitSha: string,
+  provider: string,
+  toolCallId: string,
+  operationIndex: number,
 ): boolean {
   const row = db
     .prepare(
       `SELECT 1 FROM events
-       WHERE session_id = ? AND event_type = 'git_commit'
-         AND git_head_sha = ? AND deleted_at IS NULL
+       WHERE session_id = ? AND event_type = 'git_commit' AND tool_name = 'commit'
+         AND json_extract(tool_input_json, '$.provider') = ?
+         AND json_extract(tool_input_json, '$.toolCallId') = ?
+         AND json_extract(tool_input_json, '$.operationIndex') = ?
+         AND deleted_at IS NULL
        LIMIT 1`,
     )
-    .get(sessionId, commitSha);
+    .get(sessionId, provider, toolCallId, operationIndex);
   return row !== undefined;
 }
 
@@ -388,8 +375,6 @@ function rowToEvent(row: Record<string, unknown>): AditEvent {
     toolName: (row.tool_name as string) ?? null,
     toolInputJson: (row.tool_input_json as string) ?? null,
     toolOutputJson: (row.tool_output_json as string) ?? null,
-    checkpointSha: (row.checkpoint_sha as string) ?? null,
-    checkpointRef: (row.checkpoint_ref as string) ?? null,
     diffStatJson: (row.diff_stat_json as string) ?? null,
     gitBranch: (row.git_branch as string) ?? null,
     gitHeadSha: (row.git_head_sha as string) ?? null,
@@ -399,7 +384,6 @@ function rowToEvent(row: Record<string, unknown>): AditEvent {
     status: row.status as EventStatus,
     errorJson: (row.error_json as string) ?? null,
     labelsJson: (row.labels_json as string) ?? null,
-    planTaskId: (row.plan_task_id as string) ?? null,
     clientId: (row.client_id as string) ?? null,
     vclockJson: row.vclock_json as string,
     deletedAt: (row.deleted_at as string) ?? null,

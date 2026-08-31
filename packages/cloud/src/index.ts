@@ -6,7 +6,8 @@
  */
 
 // Config
-export { loadCloudConfig, DEFAULT_SERVER_URL, type CloudConfig, type ProjectLinkConfig } from "./config.js";
+export { loadCloudConfig, DEFAULT_SERVER_URL, type CloudConfig } from "./config.js";
+export { normalizeServerUrl } from "@varveai/adit-core";
 export {
   resolveCloudProjectContext,
   repositoryPayloads,
@@ -52,32 +53,14 @@ export {
   type SyncResult,
   type SyncConflict,
 } from "./sync/engine.js";
+export { runSyncCycle, type SyncCycleResult } from "./sync/sync-cycle.js";
 export {
   buildSyncBatch,
-  countUnsyncedRecords,
+  countUnsyncedEvents,
   batchRecordCount,
   type SyncBatch,
 } from "./sync/serializer.js";
 export { triggerAutoSync } from "./sync/auto-sync.js";
-
-// Transcript / file upload
-export {
-  triggerTranscriptUpload,
-  registerTranscript,
-  processTranscriptUploads,
-  uploadChunk,
-  uploadFull,
-  checkUploadStatus,
-  lookupUploadByPath,
-  type TranscriptManagerOptions,
-  type TranscriptProcessResult,
-  type SyncUploadType,
-  type SyncUploadResponse,
-  type SyncUploadStatus,
-  type UploadChunkParams,
-} from "./transcript/index.js";
-
-export { type TranscriptUploadConfig } from "./config.js";
 
 // Project Link
 export {
@@ -86,12 +69,14 @@ export {
   intentCommand,
   formatIntentList,
   formatIntentDetail,
-  triggerProjectLinkSync,
   checkQuality,
   formatQualityFeedback,
   collectRemoteUrl,
   collectBranches,
+  branchHeadMap,
+  collectGitRefsFingerprint,
   collectCommitLogs,
+  collectCommitsBetweenRefSnapshots,
   collectCommitCount,
   collectDefaultBranch,
   collectCurrentBranch,
@@ -102,6 +87,8 @@ export {
   getProjectLinkCache,
   upsertProjectLinkCache,
   clearProjectLinkCache,
+  updateCachedGitState,
+  syncLinkedGitMetadata,
   type LinkResult,
   type WorkspaceRepositoryResult,
   type WorkspaceRepositoryFailure,
@@ -116,6 +103,10 @@ export {
   type GitCommit,
   type DiscoveredDocument,
   type ProjectLinkCache,
+  type GitSyncResult,
+  type GitSyncFailure,
+  type GitSyncSkip,
+  type GitSyncSkipReason,
   type QualifyResponse,
 } from "./project-link/index.js";
 

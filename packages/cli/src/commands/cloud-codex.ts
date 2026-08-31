@@ -601,6 +601,11 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
       if (stopping) return;
       stopping = true;
       notices.shutdown(signal);
+      try {
+        // Deliberate shutdown: tell the relay now so the final offline feed
+        // record is written immediately instead of after the grace delay.
+        if (provider) ws.sendHeartbeat(provider.state, "offline");
+      } catch {}
       provider?.stop();
       ws.close();
       try {

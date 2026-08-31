@@ -2794,14 +2794,12 @@ describe("buildClaudeCloudRelayEnv", () => {
       TERM: "screen-256color",
       ADIT_CLOUD_AUTO_SYNC: "true",
       ADIT_PROJECT_LINK_AUTO_SYNC: "true",
-      ADIT_TRANSCRIPT_UPLOAD: "true",
     });
 
     expect(env.TERM).toBe("screen-256color");
     expect(env.DISABLE_AUTOUPDATER).toBe("1");
     expect(env.ADIT_CLOUD_AUTO_SYNC).toBe("true");
     expect(env.ADIT_PROJECT_LINK_AUTO_SYNC).toBe("true");
-    expect(env.ADIT_TRANSCRIPT_UPLOAD).toBe("true");
     expect(buildClaudeCloudRelayEnv({}).ADIT_CLOUD_AUTO_SYNC).toBeUndefined();
   });
 

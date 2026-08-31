@@ -118,7 +118,6 @@ describe("cloud agent initialization guard", () => {
       projectType: "repo",
       repositories: [],
       initialization: "uninitialized",
-      refPrefix: "refs/adit/checkpoints",
       captureEnv: true,
     }));
     mocks.resolveExecutable.mockReturnValue("/usr/local/bin/claude");
@@ -202,7 +201,6 @@ describe("cloud agent initialization guard", () => {
       projectType: "workspace",
       repositories: [],
       initialization: "initialized",
-      refPrefix: "refs/adit/checkpoints",
       captureEnv: true,
     });
     mocks.loadCredentials.mockReturnValue(null);

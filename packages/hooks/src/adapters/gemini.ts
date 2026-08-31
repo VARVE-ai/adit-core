@@ -24,10 +24,8 @@ import {
 } from "./command.js";
 
 const HOOK_MAPPINGS: HookMapping[] = [
-  { platformEvent: "SessionStart", aditHandler: "session-start" },
   { platformEvent: "BeforeAgent", aditHandler: "prompt-submit" },
   { platformEvent: "AfterAgent", aditHandler: "stop" },
-  { platformEvent: "SessionEnd", aditHandler: "session-end" },
 ];
 
 export const geminiAdapter: PlatformAdapter = {
@@ -60,12 +58,6 @@ export const geminiAdapter: PlatformAdapter = {
       notificationMessage: raw.message as string | undefined,
       notificationTitle: raw.title as string | undefined,
       notificationType: raw.notification_type as string | undefined,
-      // Session lifecycle
-      sessionSource: raw.source as string | undefined,
-      sessionEndReason: raw.reason as string | undefined,
-      // Common metadata
-      permissionMode: raw.permission_mode as string | undefined,
-      model: raw.model as string | undefined,
       rawPlatformData: raw,
     };
   },
@@ -85,10 +77,8 @@ export const geminiAdapter: PlatformAdapter = {
       configPath: ".gemini/settings.json",
       content: {
         hooks: {
-          SessionStart: makeHookEntry("session-start"),
           BeforeAgent: makeHookEntry("prompt-submit"),
           AfterAgent: makeHookEntry("stop"),
-          SessionEnd: makeHookEntry("session-end"),
         },
       },
     };
@@ -227,6 +217,8 @@ export const geminiAdapter: PlatformAdapter = {
 
     settings.hooks = mergedHooks;
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+    removeAditHookEventFromConfig(settingsPath, "SessionStart");
+    removeAditHookEventFromConfig(settingsPath, "SessionEnd");
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {
@@ -293,4 +285,20 @@ function entryContainsAditHook(entry: unknown): boolean {
   if (typeof raw.command === "string" && isAditHookCommand(raw.command)) return true;
   return Array.isArray(raw.hooks) &&
     raw.hooks.some((hook) => typeof hook.command === "string" && isAditHookCommand(hook.command));
+}
+
+function removeAditHookEventFromConfig(settingsPath: string, eventName: string): void {
+  if (!existsSync(settingsPath)) return;
+  try {
+    const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { hooks?: Record<string, unknown> };
+    const entries = settings.hooks?.[eventName];
+    if (!Array.isArray(entries)) return;
+    const filtered = entries.filter((entry) => !entryContainsAditHook(entry));
+    if (filtered.length === 0) delete settings.hooks![eventName];
+    else settings.hooks![eventName] = filtered;
+    if (Object.keys(settings.hooks!).length === 0) delete settings.hooks;
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  } catch {
+    // Preserve invalid or unreadable user settings.
+  }
 }

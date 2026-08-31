@@ -46,13 +46,11 @@ describe("Gemini CLI Hook Chaining", () => {
     } catch { /* best-effort */ }
   });
 
-  it("has 4 hook mappings", () => {
-    expect(geminiAdapter.hookMappings).toHaveLength(4);
+  it("has 2 hook mappings", () => {
+    expect(geminiAdapter.hookMappings).toHaveLength(2);
     expect(geminiAdapter.hookMappings.map(m => m.platformEvent)).toEqual([
-      "SessionStart",
       "BeforeAgent",
-      "AfterAgent",
-      "SessionEnd"
+      "AfterAgent"
     ]);
   });
 
@@ -138,37 +136,6 @@ describe("Gemini CLI Hook Chaining", () => {
       expect(result.notificationTitle).toBe("Tool Result");
     });
 
-    it("parses SessionStart event", () => {
-      const raw = {
-        session_id: "session123",
-        cwd: "/project",
-        hook_event_name: "SessionStart",
-        timestamp: "2024-01-01T12:00:00Z",
-        source: "startup",
-        model: "gemini-pro"
-      };
-
-      const result = geminiAdapter.parseInput(raw, "session-start");
-
-      expect(result.hookType).toBe("session-start");
-      expect(result.sessionSource).toBe("startup");
-    });
-
-    it("parses SessionEnd event", () => {
-      const raw = {
-        session_id: "session123",
-        cwd: "/project",
-        hook_event_name: "SessionEnd",
-        timestamp: "2024-01-01T12:30:00Z",
-        reason: "exit",
-        model: "gemini-pro"
-      };
-
-      const result = geminiAdapter.parseInput(raw, "session-end");
-
-      expect(result.hookType).toBe("session-end");
-      expect(result.sessionEndReason).toBe("exit");
-    });
   });
 
   describe("generateHookConfig", () => {
@@ -177,31 +144,31 @@ describe("Gemini CLI Hook Chaining", () => {
 
       expect(config.configPath).toBe(".gemini/settings.json");
       expect(config.content.hooks).toBeDefined();
-      expect(Object.keys(config.content.hooks)).toHaveLength(4);
-      expect(config.content.hooks.SessionStart).toBeDefined();
+      expect(Object.keys(config.content.hooks)).toHaveLength(2);
+      expect(config.content.hooks.SessionStart).toBeUndefined();
       expect(config.content.hooks.BeforeAgent).toBeDefined();
       expect(config.content.hooks.AfterAgent).toBeDefined();
-      expect(config.content.hooks.SessionEnd).toBeDefined();
+      expect(config.content.hooks.SessionEnd).toBeUndefined();
       // notification collection was retired — no AfterTool/Notification hooks
       expect(config.content.hooks.AfterTool).toBeUndefined();
       expect(config.content.hooks.Notification).toBeUndefined();
     });
 
-    it("carries no matcher on lifecycle hook entries", () => {
+    it("carries no matcher on agent hook entries", () => {
       const config = geminiAdapter.generateHookConfig("npx adit-hook");
-      const sessionEntry = config.content.hooks.SessionStart[0] as { matcher?: string };
-      expect(sessionEntry.matcher).toBeUndefined();
+      const beforeAgentEntry = config.content.hooks.BeforeAgent[0] as { matcher?: string };
+      expect(beforeAgentEntry.matcher).toBeUndefined();
     });
 
     it("uses explicit platform argument and a 10s millisecond timeout", () => {
       const config = geminiAdapter.generateHookConfig("npx adit-hook", "/project");
 
-      const entry = config.content.hooks.SessionStart[0];
+      const entry = config.content.hooks.BeforeAgent[0];
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("--platform gemini");
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("--project-root-b64");
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).not.toContain("GEMINI=1");
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("npx adit-hook");
-      expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("session-start");
+      expect((entry as { hooks: Array<{ command: string }> }).hooks[0].command).toContain("prompt-submit");
       // Gemini timeouts are milliseconds — 10000 = 10s, matching the
       // adit-hook self-kill guard (NOT seconds like other platforms).
       expect((entry as { hooks: Array<{ command: string }> }).hooks[0].timeout).toBe(10000);
@@ -214,10 +181,10 @@ describe("Gemini CLI Hook Chaining", () => {
     const settings = readSettings(projectRoot);
     const hooks = settings.hooks as Record<string, unknown[]>;
 
-    expect(hooks.SessionStart).toBeDefined();
+    expect(hooks.SessionStart).toBeUndefined();
     expect(hooks.BeforeAgent).toBeDefined();
     expect(hooks.AfterAgent).toBeDefined();
-    expect(hooks.SessionEnd).toBeDefined();
+    expect(hooks.SessionEnd).toBeUndefined();
     // notification collection was retired
     expect(hooks.AfterTool).toBeUndefined();
     expect(hooks.Notification).toBeUndefined();
@@ -226,6 +193,23 @@ describe("Gemini CLI Hook Chaining", () => {
     const stopEntries = hooks.AfterAgent as Array<{ hooks: Array<{ command: string }> }>;
     expect(stopEntries).toHaveLength(1);
     expect(stopEntries[0].hooks[0].command).toContain("adit-hook");
+  });
+
+  it("removes legacy ADIT SessionEnd hooks while preserving other tools", async () => {
+    writeSettings(projectRoot, {
+      hooks: {
+        SessionEnd: [
+          { hooks: [{ type: "command", command: "GEMINI=1 npx adit-hook session-end" }] },
+          { hooks: [{ type: "command", command: "other-tool session-end" }] },
+        ],
+      },
+    });
+
+    await geminiAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    const hooks = readSettings(projectRoot).hooks as Record<string, unknown[]>;
+    expect(JSON.stringify(hooks.SessionEnd)).not.toContain("adit-hook session-end");
+    expect(JSON.stringify(hooks.SessionEnd)).toContain("other-tool session-end");
   });
 
   it("preserves other tools' hooks when installing ADIT hooks", async () => {
@@ -249,11 +233,10 @@ describe("Gemini CLI Hook Chaining", () => {
     const settings = readSettings(projectRoot);
     const hooks = settings.hooks as Record<string, unknown[]>;
 
-    // SessionStart should have both: Entire's hook + ADIT's hook
+    // ADIT no longer installs SessionStart; the other tool's hook is preserved.
     const sessionStartEntries = hooks.SessionStart as Array<{ hooks: Array<{ command: string }> }>;
-    expect(sessionStartEntries).toHaveLength(2);
+    expect(sessionStartEntries).toHaveLength(1);
     expect(sessionStartEntries[0].hooks[0].command).toContain("entire");
-    expect(sessionStartEntries[1].hooks[0].command).toContain("adit-hook");
 
     // AfterAgent should also have both
     const afterAgentEntries = hooks.AfterAgent as Array<{ hooks: Array<{ command: string }> }>;
@@ -335,7 +318,7 @@ describe("Gemini CLI Hook Chaining", () => {
     expect(beforeQueryEntries[0].hooks[0].command).toBe("sql-validator run");
 
     // ADIT hooks should also be present
-    expect(hooks.SessionStart).toBeDefined();
+    expect(hooks.SessionStart).toBeUndefined();
     expect(hooks.AfterAgent).toBeDefined();
   });
 

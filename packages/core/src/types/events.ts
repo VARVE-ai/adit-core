@@ -16,10 +16,9 @@ export type EventType =
   | "mcp_call" // MCP server tool call
   | "checkpoint" // DEPRECATED 2026-07: no longer collected (was session-start marker; metadata now lives on the session); kept for historical rows
   | "revert" // User reverted to checkpoint
-  | "git_commit" // Commit attributed to this session (gitHeadSha holds the commit sha itself)
+  | "git_commit" // Successful git commit actually executed by the agent (gitHeadSha holds the commit sha)
   | "env_snapshot" // Environment captured
   | "env_drift" // DEPRECATED 2026-07: no longer collected; kept for historical rows
-  | "plan_update" // SpecFlow plan modified
   | "task_completed" // DEPRECATED 2026-07: no longer collected; kept for historical rows
   | "notification" // DEPRECATED 2026-07: no longer collected; kept for historical rows
   | "subagent_start" // Subagent spawned by the AI
@@ -91,11 +90,6 @@ export interface AditEvent {
   /** Serialized tool output */
   toolOutputJson: string | null;
 
-  // -- Git checkpoint --
-  /** Git commit SHA for this checkpoint */
-  checkpointSha: string | null;
-  /** Ref path: refs/adit/checkpoints/<id> */
-  checkpointRef: string | null;
   /** Per-file change stats */
   diffStatJson: string | null;
 
@@ -115,9 +109,6 @@ export interface AditEvent {
   errorJson: string | null;
   /** User-assigned labels */
   labelsJson: string | null;
-  /** FK to plans table for SpecFlow task linking */
-  planTaskId: string | null;
-
   // -- Sync --
   /** Client that created this event (for multi-client provenance) */
   clientId: string | null;

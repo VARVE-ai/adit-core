@@ -189,6 +189,13 @@ describe("Circuit Breaker", () => {
 });
 
 describe("Token expiry diagnostics", () => {
+  it("stores and loads a canonical server URL", () => {
+    mkdirSync(join(tempHome, ".adit"), { recursive: true });
+    saveCredentials(makeCreds({ serverUrl: " http://localhost:3000/// " }));
+
+    expect(loadCredentials()?.serverUrl).toBe("http://localhost:3000");
+  });
+
   it("treats missing or invalid device expiresAt as expired", () => {
     expect(isTokenExpired(makeCreds({ authType: "device", refreshToken: "r", expiresAt: "" }))).toBe(true);
     expect(isTokenExpired(makeCreds({ authType: "device", refreshToken: "r", expiresAt: "not-a-date" }))).toBe(true);

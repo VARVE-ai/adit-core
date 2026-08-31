@@ -4,7 +4,7 @@
  * Subcommands:
  *   login             — Authenticate via device code flow
  *   logout            — Clear stored credentials
- *   sync              — Push unsynced records to cloud
+ *   sync              — Push conversation records, then linked Git metadata
  *   status            — Show sync state and unsynced count
  *   auth reset        — Force-clear all credentials and sync state
  */
@@ -13,6 +13,7 @@ import {
   loadConfig,
   openDatabase,
   closeDatabase,
+  normalizeServerUrl,
 } from "@varveai/adit-core";
 import { existsSync } from "node:fs";
 import {
@@ -24,8 +25,8 @@ import {
   requestDeviceCode,
   pollForToken,
   CloudClient,
-  SyncEngine,
-  countUnsyncedRecords,
+  runSyncCycle,
+  countUnsyncedEvents,
   CloudAuthError,
   CloudNetworkError,
   CloudApiError,
@@ -33,7 +34,6 @@ import {
   isSyncDisabled,
   DEFAULT_SERVER_URL,
   resolveCloudProjectContext,
-  repositoryPayloads,
 } from "@varveai/adit-cloud";
 import type { DeviceAuthOptions } from "@varveai/adit-cloud";
 import { createHash } from "node:crypto";
@@ -47,7 +47,9 @@ import { loadInitializedProjectConfig } from "./project-initialization.js";
 export async function cloudLoginCommand(opts?: {
   server?: string;
 }): Promise<void> {
-  const serverUrl = opts?.server ?? process.env.ADIT_CLOUD_URL ?? DEFAULT_SERVER_URL;
+  const serverUrl = normalizeServerUrl(
+    opts?.server ?? process.env.ADIT_CLOUD_URL ?? DEFAULT_SERVER_URL,
+  );
   const config = loadConfig();
 
   // Single-server binding: reject login if already bound to a different server
@@ -175,7 +177,7 @@ export async function cloudLogoutCommand(): Promise<void> {
 }
 
 /**
- * `adit cloud sync` — Push unsynced records to cloud.
+ * `adit cloud sync` — Push conversation records, then linked Git metadata.
  */
 export async function cloudSyncCommand(opts?: {
   json?: boolean;
@@ -212,29 +214,55 @@ export async function cloudSyncCommand(opts?: {
   try {
     const client = new CloudClient(serverUrl, credentials);
     const projectContext = await resolveCloudProjectContext(config);
-    const engine = new SyncEngine(db, client, {
-      projectId: projectContext.localProjectId,
-      projectName: projectContext.projectName,
-      projectType: projectContext.projectType,
-      repositories: repositoryPayloads(projectContext.repositories),
-      remoteUrl: projectContext.remoteUrl,
-      canonicalRepoKey: projectContext.canonicalRepoKey,
+    const result = await runSyncCycle({
+      db,
+      client,
+      projectContext,
       batchSize: cloudConfig.batchSize,
       serverUrl,
       cloudClientId: credentials.clientId,
+      dataDir: config.dataDir,
+      syncGitWhenNoBatches: true,
+      forceRemoteBranchCheck: true,
     });
-
-    const result = await engine.sync();
 
     if (opts?.json) {
       console.log(JSON.stringify(result, null, 2));
     } else {
       if (result.batches === 0) {
-        console.log("Already up to date. No records to sync.");
+        console.log("Conversation sync: already up to date.");
       } else {
         console.log(
           `Sync complete: ${result.accepted} accepted, ${result.duplicates} duplicates, ${result.conflicts.length} conflicts (${result.batches} batch${result.batches !== 1 ? "es" : ""})`,
         );
+      }
+      if (result.git) {
+        const unchanged = result.git.skips.filter(
+          (skip) => skip.reason === "unchanged",
+        ).length;
+        const notLinked = result.git.skips.filter(
+          (skip) => skip.reason === "not-linked",
+        ).length;
+        console.log(
+          `Git sync: ${result.git.commitsUploaded} commits, ${result.git.branchesUploaded} branches; ${result.git.repositoriesUpdated} updated, ${unchanged} unchanged, ${notLinked} not linked.`,
+        );
+        for (const skip of result.git.skips) {
+          if (skip.reason === "not-linked") {
+            console.error(
+              `Git sync skipped for ${skip.relativePath}: ${skip.message}`,
+            );
+          }
+        }
+        for (const failure of result.git.failures) {
+          console.error(
+            `Git sync failed for ${failure.relativePath}: ${failure.message}`,
+          );
+        }
+        for (const warning of result.git.warnings) {
+          console.error(
+            `Remote branch check warning for ${warning.relativePath}: ${warning.message}. Keeping the last successful snapshot.`,
+          );
+        }
       }
     }
   } catch (error) {
@@ -345,10 +373,9 @@ export async function cloudStatusCommand(opts?: {
           }
         : null;
 
-      const unsyncedCount = countUnsyncedRecords(
+      const unsyncedCount = countUnsyncedEvents(
         db,
         syncState?.lastSyncedEventId ?? null,
-        syncState?.lastSyncedAt ?? null,
         config.projectId,
       );
       status.unsyncedRecords = unsyncedCount;
@@ -575,10 +602,9 @@ export async function cloudAuthTokenCommand(
 function printUploadDisclosure(): void {
   console.log();
   console.log("While logged in, ADIT automatically uploads to this server:");
-  console.log("  - Timeline events (prompts, responses, tool activity — as-is, unredacted)");
-  console.log("  - Session transcripts        disable: adit cloud transcript disable");
-  console.log("  - Project docs & git metadata on session start");
-  console.log("                               disable: ADIT_PROJECT_LINK_AUTO_SYNC=false");
+  console.log("  - Conversation events, their sessions, and code diffs (as-is, unredacted)");
+  console.log("  - Git metadata for already-linked projects, after a conversation batch syncs");
+  console.log("Project documents upload only when you run 'adit cloud link'.");
   console.log();
   console.log("Disable all auto-sync with ADIT_CLOUD_AUTO_SYNC=false, or run 'adit cloud logout'.");
 }

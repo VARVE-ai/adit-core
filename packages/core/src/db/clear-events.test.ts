@@ -76,7 +76,6 @@ describe("clearEvents", () => {
       sequence: 1,
       eventType: "assistant_response",
       actor: "assistant",
-      checkpointSha: "abc123",
       startedAt: new Date().toISOString(),
       vclockJson: '{"test-client": 1}',
     });

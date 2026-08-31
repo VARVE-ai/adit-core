@@ -108,8 +108,6 @@ export function extractLastAssistantMessage(transcriptPath: string): string | un
 const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "beforeSubmitPrompt", aditHandler: "prompt-submit" },
   { platformEvent: "stop", aditHandler: "stop" },
-  { platformEvent: "sessionStart", aditHandler: "session-start" },
-  { platformEvent: "sessionEnd", aditHandler: "session-end" },
   // afterAgentResponse is deliberately NOT registered: it fires once per
   // assistant message segment and its text duplicates what the stop handler
   // already extracts from the transcript.
@@ -147,17 +145,12 @@ export const cursorAdapter: PlatformAdapter = {
       transcriptPath,
       // Prompt (from beforeSubmitPrompt)
       prompt: raw.prompt as string | undefined,
-      // Model (common field)
-      model: raw.model as string | undefined,
       // Stop (from stop event — Cursor sends status, not stop_reason;
       // assistant message must be read from transcript JSONL)
       stopReason: raw.status as string | undefined,
       lastAssistantMessage: aditHookType === "stop" && transcriptPath
         ? extractLastAssistantMessage(transcriptPath)
         : undefined,
-      // Session lifecycle
-      sessionSource: raw.composer_mode as string | undefined,
-      sessionEndReason: raw.reason as string | undefined,
       rawPlatformData: raw,
     };
   },
@@ -182,8 +175,6 @@ export const cursorAdapter: PlatformAdapter = {
         hooks: {
           beforeSubmitPrompt: makeHookEntry("prompt-submit"),
           stop: makeHookEntry("stop"),
-          sessionStart: makeHookEntry("session-start"),
-          sessionEnd: makeHookEntry("session-end"),
         },
       },
     };
@@ -321,6 +312,8 @@ export const cursorAdapter: PlatformAdapter = {
 
     hooksConfig.hooks = mergedHooks;
     writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2) + "\n");
+    removeAditHookEventFromConfig(hooksPath, "sessionStart");
+    removeAditHookEventFromConfig(hooksPath, "sessionEnd");
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {
@@ -387,4 +380,20 @@ function entryContainsAditHook(entry: unknown): boolean {
   if (typeof raw.command === "string" && isAditHookCommand(raw.command)) return true;
   return Array.isArray(raw.hooks) &&
     raw.hooks.some((hook) => typeof hook.command === "string" && isAditHookCommand(hook.command));
+}
+
+function removeAditHookEventFromConfig(settingsPath: string, eventName: string): void {
+  if (!existsSync(settingsPath)) return;
+  try {
+    const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { hooks?: Record<string, unknown> };
+    const entries = settings.hooks?.[eventName];
+    if (!Array.isArray(entries)) return;
+    const filtered = entries.filter((entry) => !entryContainsAditHook(entry));
+    if (filtered.length === 0) delete settings.hooks![eventName];
+    else settings.hooks![eventName] = filtered;
+    if (Object.keys(settings.hooks!).length === 0) delete settings.hooks;
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  } catch {
+    // Preserve invalid or unreadable user settings.
+  }
 }

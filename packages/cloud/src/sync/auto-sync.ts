@@ -1,14 +1,13 @@
 /**
- * Auto-sync trigger — fire-and-forget sync after hook events.
+ * Auto-sync trigger — coordinated sync after stable hook events.
  *
  * Called from the hooks system via dynamic import. Fully fail-open:
  * any error is swallowed so it never blocks the AI agent.
  *
  * Sync is triggered when any of the following is true:
- * - `options.force` is true (used on session-end to flush all data), OR
  * - The number of unsynced events meets the configured threshold
  *   (ADIT_CLOUD_SYNC_THRESHOLD, default 10). Only events count toward
- *   the threshold; session records, diffs and plans ride along in the batch
+ *   the threshold; session records and diffs ride along in the batch
  *   once a sync is triggered. Environment snapshots remain local. OR
  * - More than syncTimeoutHours (default 2h) have elapsed since
  *   the last successful sync (ADIT_CLOUD_SYNC_TIMEOUT_HOURS).
@@ -17,8 +16,9 @@
  * sync_state row (single PK lookup), skipping the events COUNT query
  * when the timeout has elapsed.
  *
- * Failed syncs are not retried immediately — they will be picked up
- * on the next trigger when conditions are still met.
+ * Once a conversation batch succeeds, linked repositories get an incremental
+ * Git metadata refresh. Project documents are never uploaded here.
+ * Failed syncs are picked up on a later trigger.
  */
 
 import type Database from "better-sqlite3";
@@ -36,16 +36,16 @@ import {
 } from "../auth/credentials.js";
 import { CloudClient } from "../http/client.js";
 import { CloudNetworkError, CloudAuthError } from "../http/errors.js";
-import { SyncEngine } from "./engine.js";
+import { runSyncCycle } from "./sync-cycle.js";
 import { countUnsyncedEvents } from "./serializer.js";
-import { repositoryPayloads, resolveCloudProjectContext } from "../project-context.js";
+import { resolveCloudProjectContext } from "../project-context.js";
 
 /**
- * Trigger a background sync if credentials exist and the unsynced record
+ * Trigger a sync cycle if credentials exist and the unsynced Event
  * count meets the threshold (or the time trigger fires).
  *
- * This function is designed to be called as fire-and-forget:
- *   triggerAutoSync(db, projectId).catch(() => {})
+ * The hook awaits this function so the database stays open for the complete
+ * Event → Session/Diff → Git cycle.
  *
  * Precondition checks (in order):
  * 1. Valid credentials present (client is authenticated)
@@ -60,7 +60,7 @@ import { repositoryPayloads, resolveCloudProjectContext } from "../project-conte
 export async function triggerAutoSync(
   db: Database.Database,
   _projectId: string,
-  options?: { force?: boolean; projectRoot?: string },
+  options?: { projectRoot?: string },
 ): Promise<void> {
   const cloudConfig = loadCloudConfig();
 
@@ -112,29 +112,27 @@ export async function triggerAutoSync(
   if (projectConfig.initialization !== "initialized") return;
   const projectId = projectConfig.projectId;
 
-  // 4. Check sync triggers (skipped when force=true, e.g. session-end)
-  if (!options?.force) {
-    const syncState = getSyncState(db, serverUrl);
+  // 4. Check sync triggers.
+  const syncState = getSyncState(db, serverUrl);
 
-    // 4a. Time-based trigger: if more than syncTimeoutHours since last successful sync,
-    //     skip the expensive multi-table COUNT and trigger sync directly.
-    //     Only applies when we have a previous sync timestamp (first sync uses count-based).
-    const timeoutMs = cloudConfig.syncTimeoutHours * 60 * 60 * 1000;
-    const timeTriggered =
-      syncState?.lastSyncedAt != null &&
-      Date.now() - new Date(syncState.lastSyncedAt).getTime() > timeoutMs;
+  // 4a. Time-based trigger: if more than syncTimeoutHours since last successful sync,
+  //     skip the events COUNT and trigger sync directly. Only applies when we
+  //     have a previous sync timestamp (first sync uses count-based).
+  const timeoutMs = cloudConfig.syncTimeoutHours * 60 * 60 * 1000;
+  const timeTriggered =
+    syncState?.lastSyncedAt != null &&
+    Date.now() - new Date(syncState.lastSyncedAt).getTime() > timeoutMs;
 
-    // 4b. Count-based trigger: only run the expensive count if time didn't trigger
-    if (!timeTriggered) {
-      const unsyncedCount = countUnsyncedEvents(
-        db,
-        syncState?.lastSyncedEventId ?? null,
-        projectId,
-      );
+  // 4b. Count-based trigger: only run the count if time didn't trigger.
+  if (!timeTriggered) {
+    const unsyncedCount = countUnsyncedEvents(
+      db,
+      syncState?.lastSyncedEventId ?? null,
+      projectId,
+    );
 
-      if (unsyncedCount < cloudConfig.syncThreshold) {
-        return;
-      }
+    if (unsyncedCount < cloudConfig.syncThreshold) {
+      return;
     }
   }
 
@@ -152,19 +150,22 @@ export async function triggerAutoSync(
       timeoutMs: 5_000,
       maxRetries: 1,
     });
-    const engine = new SyncEngine(db, client, {
-      projectId: projectContext.localProjectId,
-      projectName: projectContext.projectName,
-      projectType: projectContext.projectType,
-      repositories: repositoryPayloads(projectContext.repositories),
-      remoteUrl: projectContext.remoteUrl,
-      canonicalRepoKey: projectContext.canonicalRepoKey,
+    const result = await runSyncCycle({
+      db,
+      client,
+      projectContext,
       batchSize: cloudConfig.batchSize,
       serverUrl,
       cloudClientId: credentials.clientId,
+      dataDir: projectConfig.dataDir,
     });
-
-    await engine.sync();
+    if (process.env.ADIT_DEBUG && result.git?.failures.length) {
+      for (const failure of result.git.failures) {
+        process.stderr.write(
+          `[adit-cloud] git sync failed for ${failure.relativePath}: ${failure.message}\n`,
+        );
+      }
+    }
     clearSyncErrors();
   } catch (error) {
     // Track consecutive failures — disable sync after threshold

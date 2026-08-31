@@ -19,6 +19,7 @@ import type {
 } from "../types.js";
 import {
   CodexAppServerClient,
+  CodexAppServerExitError,
   type CodexJsonRpcMessage,
 } from "./codex-app-server-client.js";
 import {
@@ -145,6 +146,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private reasoningEffortBySession = new Map<string, string>();
   private promptQueue: PendingPrompt[] = [];
   private promptActive = false;
+  private readonly reportedAppServerErrors = new WeakSet<Error>();
   private activeTurnId: string | null = null;
   private activeTurnErrorNotice: { turnId: string; message: string | null } | null = null;
   private activePromptMode: CodexPromptMode | null = null;
@@ -899,6 +901,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
 
     child.on("error", (error) => {
       this.pushEvent("error", {
+        title: "Codex failed to start",
         message: error.message,
         sessionId: this.activeSessionId ?? this.resumeSessionId ?? undefined,
         createdAt: Date.now(),
@@ -983,6 +986,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       );
       item.reject(error);
       this.pushEvent("error", {
+        title: "Codex prompt cancelled",
         message: error.message,
         sessionId: item.targetSessionId,
         createdAt: Date.now(),
@@ -1053,16 +1057,20 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
         await this.collaboration.releaseContext(contextClaim);
       }
       this.activePromptMode = null;
-      item.reject(error instanceof Error ? error : new Error(String(error)));
-      this.pushEvent("error", {
-        message: error instanceof Error ? error.message : String(error),
-        sessionId: item.targetSessionId ??
-          item.pendingSessionId ??
-          this.activeSessionId ??
-          this.resumeSessionId ??
-          undefined,
-        createdAt: Date.now(),
-      });
+      const promptError = error instanceof Error ? error : new Error(String(error));
+      item.reject(promptError);
+      if (!this.reportedAppServerErrors.has(promptError)) {
+        this.pushEvent("error", {
+          title: "Codex operation failed",
+          message: promptError.message,
+          sessionId: item.targetSessionId ??
+            item.pendingSessionId ??
+            this.activeSessionId ??
+            this.resumeSessionId ??
+            undefined,
+          createdAt: Date.now(),
+        });
+      }
     } finally {
       this.promptActive = false;
     }
@@ -1098,8 +1106,23 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       onNotification: (message) => this.handleAppNotification(message),
       onServerRequest: (message) => this.handleAppServerRequest(message),
       onError: (error) => {
+        this.reportedAppServerErrors.add(error);
+        if (error instanceof CodexAppServerExitError) {
+          for (const line of error.diagnostics) {
+            this.notices.debug(`[codex app-server] ${line}`);
+          }
+        } else {
+          this.notices.debug(`Codex app-server failure: ${error.message}`);
+        }
         this.pushEvent("error", {
-          message: error.message,
+          title: error instanceof CodexAppServerExitError
+            ? "Codex connection interrupted"
+            : "Codex background service failed",
+          message: error instanceof CodexAppServerExitError
+            ? `Codex background service exited unexpectedly. Retry the Web action, or type ${RECLAIM_COMMAND} here to return control to the local Codex.`
+            : this.ownerValue === "web"
+              ? `Codex background service encountered an error: ${error.message}. Retry the Web action, or type ${RECLAIM_COMMAND} here to return control to the local Codex.`
+              : `Codex background service could not start: ${error.message}. Local Codex keeps control.`,
           sessionId: this.activeSessionId ?? this.resumeSessionId ?? undefined,
           createdAt: Date.now(),
         });
@@ -1213,6 +1236,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
         if (!message) return;
       }
       this.pushEvent("error", {
+        title: "Codex operation failed",
         message: message ?? "Codex app-server error",
         sessionId: threadId ??
           this.activeSessionId ??
@@ -1284,6 +1308,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
         const alreadyReported = noticeMatchesTurn && notice?.message === message;
         if (!alreadyReported) {
           this.pushEvent("error", {
+            title: "Codex operation failed",
             message,
             sessionId: threadId ?? this.activeSessionId ?? this.resumeSessionId ?? undefined,
             createdAt: Date.now(),
@@ -1811,7 +1836,11 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
 
   private pushEvent(type: string, payload: Record<string, unknown>): void {
     if (type === "error" && this.ownerValue === "web") {
-      writeCliAgentErrorToTerminal("adit codex", payload);
+      writeCliAgentErrorToTerminal(
+        "adit codex",
+        payload,
+        (message) => this.notices.debug(message),
+      );
     }
     this.opts.onEvent?.({ type, payload });
   }

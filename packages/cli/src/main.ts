@@ -43,13 +43,6 @@ import { registerCloudCliAgentCommands } from "./commands/cloud-cli-agent.js";
 import { cloudClaudeCommand } from "./commands/cloud-claude.js";
 import { cloudCodexCommand } from "./commands/cloud-codex.js";
 import { dbClearEventsCommand } from "./commands/db.js";
-import {
-  transcriptEnableCommand,
-  transcriptDisableCommand,
-  transcriptStatusCommand,
-  transcriptUploadCommand,
-  transcriptResetCommand,
-} from "./commands/transcript.js";
 import { perfCommand, perfClearCommand } from "./commands/perf.js";
 import {
   projectLinkCliHandler,
@@ -265,7 +258,7 @@ export function createProgram(): Command {
 
   cloudCmd
     .command("sync")
-    .description("Push unsynced records to cloud")
+    .description("Push conversation records, then linked Git metadata")
     .option("--json", "Output as JSON")
     .action(withUpdateWarning("cloud.sync", (opts) =>
       cloudSyncCommand({ json: opts.json }),
@@ -293,45 +286,6 @@ export function createProgram(): Command {
     claude: withUpdateWarning("cloud.claude", cloudClaudeCommand),
     codex: withUpdateWarning("cloud.codex", cloudCodexCommand),
   });
-
-  // Transcript upload management (under cloud)
-  const transcriptCmd = cloudCmd
-    .command("transcript")
-    .description("Manage transcript upload to cloud");
-
-  transcriptCmd
-    .command("enable")
-    .description("Enable automatic transcript upload (default)")
-    .action(() => transcriptEnableCommand());
-
-  transcriptCmd
-    .command("disable")
-    .description("Disable automatic transcript upload")
-    .action(() => transcriptDisableCommand());
-
-  transcriptCmd
-    .command("status")
-    .description("Show transcript upload status")
-    .option("--json", "Output as JSON")
-    .action(withUpdateWarning("cloud.transcript.status", (opts) =>
-      transcriptStatusCommand({ json: opts.json }),
-    ));
-
-  transcriptCmd
-    .command("upload")
-    .description("Manually trigger transcript uploads")
-    .option("--json", "Output as JSON")
-    .action(withUpdateWarning("cloud.transcript.upload", (opts) =>
-      transcriptUploadCommand({ json: opts.json }),
-    ));
-
-  transcriptCmd
-    .command("reset <id>")
-    .description("Reset a failed transcript for re-upload")
-    .option("--json", "Output as JSON")
-    .action(withUpdateWarning("cloud.transcript.reset", (id, opts) =>
-      transcriptResetCommand(id, { json: opts.json }),
-    ));
 
   cloudCmd
     .command("link")

@@ -1,7 +1,7 @@
 {
   "name": "@varveai/adit-plans",
   "version": "0.0.0",
-  "description": "SpecFlow-inspired plan artifact generator for ADIT",
+  "description": "Project document templates and validation for ADIT",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
@@ -21,11 +21,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {
-    "@varveai/adit-core": "workspace:*"
-  },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "typescript": "^5.7.2"
   }
 }

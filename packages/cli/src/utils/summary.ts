@@ -67,8 +67,6 @@ export function getEventSummary(event: AditEvent, maxLen = 60): string {
       const meta = parseJson<{ source?: string; model?: string }>(event.toolInputJson);
       if (meta?.source || meta?.model) {
         text = [meta.source, meta.model].filter(Boolean).join(" ");
-      } else if (event.checkpointSha) {
-        text = `checkpoint ${event.checkpointSha.substring(0, 8)}`;
       }
       break;
     }

@@ -57,8 +57,8 @@ describe("Claude Code Hook Chaining", () => {
     expect(hooks.Stop).toBeDefined();
     // StopFailure routes API-error turn ends through the stop handler
     expect(hooks.StopFailure).toBeDefined();
-    expect(hooks.SessionStart).toBeDefined();
-    expect(hooks.SessionEnd).toBeDefined();
+    expect(hooks.SessionStart).toBeUndefined();
+    expect(hooks.SessionEnd).toBeUndefined();
     // notification / task-completed collection was retired
     expect(hooks.TaskCompleted).toBeUndefined();
     expect(hooks.Notification).toBeUndefined();
@@ -70,6 +70,23 @@ describe("Claude Code Hook Chaining", () => {
     expect(stopEntries).toHaveLength(1);
     expect(stopEntries[0].hooks[0].command).toContain("adit-hook");
     expect(stopEntries[0].hooks[0].command).toContain("--project-root-b64");
+  });
+
+  it("removes legacy ADIT SessionEnd hooks while preserving other tools", async () => {
+    writeSettings(projectRoot, {
+      hooks: {
+        SessionEnd: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook session-end" }] },
+          { hooks: [{ type: "command", command: "other-tool session-end" }] },
+        ],
+      },
+    });
+
+    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    const hooks = readSettings(projectRoot).hooks as Record<string, unknown[]>;
+    expect(JSON.stringify(hooks.SessionEnd)).not.toContain("adit-hook session-end");
+    expect(JSON.stringify(hooks.SessionEnd)).toContain("other-tool session-end");
   });
 
   it("preserves other tools' hooks when installing ADIT hooks", async () => {
@@ -93,11 +110,10 @@ describe("Claude Code Hook Chaining", () => {
     const settings = readSettings(projectRoot);
     const hooks = settings.hooks as Record<string, unknown[]>;
 
-    // SessionStart should have both: Entire's hook + ADIT's hook
+    // ADIT no longer installs SessionStart; the other tool's hook is preserved.
     const sessionStartEntries = hooks.SessionStart as Array<{ hooks: Array<{ command: string }> }>;
-    expect(sessionStartEntries).toHaveLength(2);
+    expect(sessionStartEntries).toHaveLength(1);
     expect(sessionStartEntries[0].hooks[0].command).toContain("entire");
-    expect(sessionStartEntries[1].hooks[0].command).toContain("adit-hook");
 
     // Stop should also have both
     const stopEntries = hooks.Stop as Array<{ hooks: Array<{ command: string }> }>;
@@ -179,7 +195,7 @@ describe("Claude Code Hook Chaining", () => {
     expect(postToolEntries[0].hooks[0].command).toBe("my-formatter run");
 
     // ADIT hooks should also be present
-    expect(hooks.SessionStart).toBeDefined();
+    expect(hooks.SessionStart).toBeUndefined();
     expect(hooks.Stop).toBeDefined();
   });
 

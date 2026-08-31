@@ -3,13 +3,10 @@
  *
  * Mocks all external dependencies (DB, engine, cloud) to verify
  * that dispatchHook correctly routes each hook type, handles
- * cloud auto-sync with threshold-based and force flags, and maintains fail-open behavior.
+ * cloud auto-sync thresholds, and maintains fail-open behavior.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 // ---- Mocks ----
 
@@ -24,8 +21,6 @@ const mockList = vi.fn().mockResolvedValue([]);
 
 vi.mock("@varveai/adit-core", () => ({
   getLatestEnvSnapshot: vi.fn(() => null),
-  endSession: vi.fn(),
-  mergeSessionMetadata: vi.fn(),
   withPerf: vi.fn((_dir: string, _cat: string, _op: string, fn: () => unknown) => fn()),
 }));
 
@@ -36,12 +31,13 @@ vi.mock("@varveai/adit-engine", () => ({
   })),
   captureEnvironment: vi.fn().mockResolvedValue("env-001"),
   diffEnvironments: vi.fn().mockReturnValue({ changes: [], severity: "none" }),
-  getCurrentBranch: vi.fn().mockResolvedValue("main"),
-  getHeadSha: vi.fn().mockResolvedValue("head-sha-123"),
+}));
+
+vi.mock("../git-operations/index.js", () => ({
+  recordGitCommits: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@varveai/adit-cloud", () => ({
-  triggerTranscriptUpload: vi.fn().mockResolvedValue(undefined),
   triggerAutoSync: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -61,17 +57,10 @@ vi.mock("../common/context.js", () => ({
 }));
 
 import { dispatchHook } from "./unified.js";
-import { endSession, mergeSessionMetadata } from "@varveai/adit-core";
-import { getCurrentBranch, getHeadSha } from "@varveai/adit-engine";
-import { triggerAutoSync, triggerTranscriptUpload } from "@varveai/adit-cloud";
+import { triggerAutoSync } from "@varveai/adit-cloud";
 import type { NormalizedHookInput } from "../adapters/types.js";
 
-const mockEndSession = vi.mocked(endSession);
-const mockMergeSessionMetadata = vi.mocked(mergeSessionMetadata);
-const mockGetCurrentBranch = vi.mocked(getCurrentBranch);
-const mockGetHeadSha = vi.mocked(getHeadSha);
 const mockTriggerAutoSync = vi.mocked(triggerAutoSync);
-const mockTriggerTranscriptUpload = vi.mocked(triggerTranscriptUpload);
 
 describe("dispatchHook", () => {
   beforeEach(() => {
@@ -197,7 +186,6 @@ describe("dispatchHook", () => {
     expect(updateRun).toHaveBeenCalled();
     expect(mockRecordEvent).not.toHaveBeenCalled();
     expect(mockTriggerAutoSync).not.toHaveBeenCalled();
-    expect(mockTriggerTranscriptUpload).not.toHaveBeenCalled();
   });
 
   it("skips prompt-submit events from official subagents", async () => {
@@ -295,7 +283,7 @@ describe("dispatchHook", () => {
     );
   });
 
-  it("records null workspace git state when stop has no turn mutations", async () => {
+  it("does not attach ambient Git state to an ordinary response event", async () => {
     const { initHookContext } = await import("../common/context.js");
     vi.mocked(initHookContext).mockResolvedValueOnce({
       db: { close: vi.fn() } as never,
@@ -325,304 +313,33 @@ describe("dispatchHook", () => {
       stopReason: "completed",
     });
 
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        eventType: "assistant_response",
-        gitBranch: null,
-        gitHeadSha: null,
-      }),
-    );
-    expect(mockGetCurrentBranch).not.toHaveBeenCalled();
-    expect(mockGetHeadSha).not.toHaveBeenCalled();
+    const ordinaryResponse = mockRecordEvent.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(ordinaryResponse.eventType).toBe("assistant_response");
+    expect(ordinaryResponse).not.toHaveProperty("gitBranch");
+    expect(ordinaryResponse).not.toHaveProperty("gitHeadSha");
   });
 
-  it("records workspace repository git state from turn mutations", async () => {
-    const transcriptDir = mkdtempSync(join(tmpdir(), "adit-hook-transcript-"));
-    const transcriptPath = join(transcriptDir, "019efde3-72c7-7f82-9f7c-5f3d63cee24f.jsonl");
+  it("silently ignores a stale session-start command without creating a session", async () => {
     const { initHookContext } = await import("../common/context.js");
+    await dispatchHook({ cwd: "/test", hookType: "session-start" } as unknown as NormalizedHookInput);
 
-    try {
-      writeFileSync(
-        transcriptPath,
-        [
-          JSON.stringify({
-            type: "response_item",
-            payload: {
-              type: "message",
-              role: "user",
-              content: [{ type: "input_text", text: "edit workspace repos" }],
-            },
-          }),
-          JSON.stringify({
-            type: "event_msg",
-            payload: {
-              type: "patch_apply_end",
-              call_id: "call_patch",
-              success: true,
-              status: "completed",
-              changes: {
-                "/workspace/adit-cloud/src/a.ts": {
-                  type: "update",
-                  unified_diff: "@@ -1,1 +1,1 @@\n-old\n+new\n",
-                },
-                "/workspace/adit-cloud/src/b.ts": {
-                  type: "update",
-                  unified_diff: "@@ -1,1 +1,1 @@\n-old\n+new\n",
-                },
-                "/workspace/adit-core/src/c.ts": {
-                  type: "update",
-                  unified_diff: "@@ -1,1 +1,1 @@\n-old\n+new\n",
-                },
-              },
-            },
-          }),
-        ].join("\n"),
-      );
-
-      vi.mocked(initHookContext).mockResolvedValueOnce({
-        db: { close: vi.fn() } as never,
-        config: {
-          projectId: "workspace-001",
-          projectRoot: "/workspace",
-          dataDir: "/tmp/adit-test",
-          clientId: "client-001",
-          dbPath: "/tmp/test.db",
-          captureEnv: false,
-          projectType: "workspace",
-          repositories: [
-            {
-              localRepositoryId: "repo-cloud",
-              relativePath: "adit-cloud",
-              displayName: "adit-cloud",
-              repositoryUrl: null,
-              canonicalRepoKey: null,
-              path: "/workspace/adit-cloud",
-            },
-            {
-              localRepositoryId: "repo-core",
-              relativePath: "adit-core",
-              displayName: "adit-core",
-              repositoryUrl: null,
-              canonicalRepoKey: null,
-              path: "/workspace/adit-core",
-            },
-          ],
-        },
-        session: { id: "sess-001" } as never,
-      });
-      mockGetCurrentBranch.mockImplementation(async (cwd) =>
-        cwd.endsWith("adit-cloud") ? "cloud-branch" : "core-branch",
-      );
-      mockGetHeadSha.mockImplementation(async (cwd) =>
-        cwd.endsWith("adit-cloud") ? "cloud-sha" : "core-sha",
-      );
-
-      await dispatchHook({
-        cwd: "/workspace",
-        hookType: "stop",
-        stopReason: "completed",
-        platformCli: "codex",
-        transcriptPath,
-      });
-    } finally {
-      rmSync(transcriptDir, { recursive: true, force: true });
-    }
-
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        eventType: "assistant_response",
-        gitBranch: "cloud-branch,core-branch",
-        gitHeadSha: "cloud-sha,core-sha",
-      }),
-    );
-  });
-
-  it("records workspace git state from Codex Bash writes in a child repo cwd", async () => {
-    const transcriptDir = mkdtempSync(join(tmpdir(), "adit-hook-transcript-"));
-    const transcriptPath = join(transcriptDir, "019efde3-72c7-7f82-9f7c-5f3d63cee24f.jsonl");
-    const { initHookContext } = await import("../common/context.js");
-
-    try {
-      writeFileSync(
-        transcriptPath,
-        [
-          JSON.stringify({
-            type: "response_item",
-            payload: {
-              type: "message",
-              role: "user",
-              content: [{ type: "input_text", text: "generate file with bash" }],
-            },
-          }),
-          JSON.stringify({
-            type: "event_msg",
-            payload: {
-              type: "exec_command_end",
-              call_id: "call_bash",
-              command: ["/bin/zsh", "-lc", "printf hi > src/generated.ts"],
-              cwd: "/workspace/adit-core",
-              parsed_cmd: [{ type: "unknown", cmd: "printf hi > src/generated.ts" }],
-              exit_code: 0,
-              status: "completed",
-            },
-          }),
-        ].join("\n"),
-      );
-
-      vi.mocked(initHookContext).mockResolvedValueOnce({
-        db: { close: vi.fn() } as never,
-        config: {
-          projectId: "workspace-001",
-          projectRoot: "/workspace",
-          dataDir: "/tmp/adit-test",
-          clientId: "client-001",
-          dbPath: "/tmp/test.db",
-          captureEnv: false,
-          projectType: "workspace",
-          repositories: [{
-            localRepositoryId: "repo-core",
-            relativePath: "adit-core",
-            displayName: "adit-core",
-            repositoryUrl: null,
-            canonicalRepoKey: null,
-            path: "/workspace/adit-core",
-          }],
-        },
-        session: { id: "sess-001" } as never,
-      });
-      mockGetCurrentBranch.mockResolvedValueOnce("core-branch");
-      mockGetHeadSha.mockResolvedValueOnce("core-sha");
-
-      await dispatchHook({
-        cwd: "/workspace",
-        hookType: "stop",
-        stopReason: "completed",
-        platformCli: "codex",
-        transcriptPath,
-      });
-    } finally {
-      rmSync(transcriptDir, { recursive: true, force: true });
-    }
-
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        eventType: "assistant_response",
-        gitBranch: "core-branch",
-        gitHeadSha: "core-sha",
-      }),
-    );
-  });
-
-  it("routes session-end and calls endSession", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "session-end",
-      sessionEndReason: "exit",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockEndSession).toHaveBeenCalledWith(
-      expect.anything(),
-      "sess-001",
-      "completed",
-    );
-  });
-
-  it("persists session-start launch metadata on the session instead of a checkpoint event", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "session-start",
-      sessionSource: "startup",
-      model: "claude-fable-5",
-      permissionMode: "default",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockMergeSessionMetadata).toHaveBeenCalledWith(
-      expect.anything(),
-      "sess-001",
-      { model: "claude-fable-5", source: "startup", permissionMode: "default" },
-    );
+    expect(initHookContext).not.toHaveBeenCalled();
     expect(mockRecordEvent).not.toHaveBeenCalled();
+    expect(mockTriggerAutoSync).not.toHaveBeenCalled();
   });
 
-  it("skips the metadata merge when the platform reports nothing", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "session-start",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockMergeSessionMetadata).not.toHaveBeenCalled();
-  });
-
-  it("triggers cloud auto-sync once on session-start", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "session-start",
-      sessionSource: "startup",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockTriggerAutoSync).toHaveBeenCalledTimes(1);
-    expect(mockTriggerAutoSync).toHaveBeenCalledWith(
-      expect.anything(),
-      "proj-001",
-      { projectRoot: "/test" },
-    );
-  });
-
-  it("applies normal auto-sync thresholds on session-end", async () => {
-    const input: NormalizedHookInput = {
+  it("silently ignores a stale session-end command without syncing", async () => {
+    const { initHookContext } = await import("../common/context.js");
+    const input = {
       cwd: "/test",
       hookType: "session-end",
-      sessionEndReason: "exit",
-    };
+    } as unknown as NormalizedHookInput;
 
     await dispatchHook(input);
 
-    expect(mockTriggerAutoSync).toHaveBeenCalledWith(
-      expect.anything(),
-      "proj-001",
-      { projectRoot: "/test" },
-    );
-  });
-
-  it("triggers transcript upload through the cloud package when a transcript path exists", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "prompt-submit",
-      prompt: "Fix the bug in auth.ts",
-      transcriptPath: "/tmp/transcript.jsonl",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockTriggerTranscriptUpload).toHaveBeenCalledWith(
-      expect.anything(),
-      "sess-001",
-      "/tmp/transcript.jsonl",
-    );
-  });
-
-  it("routes session-end with error reason", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "session-end",
-      sessionEndReason: "error",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockEndSession).toHaveBeenCalledWith(
-      expect.anything(),
-      "sess-001",
-      "error",
-    );
+    expect(initHookContext).not.toHaveBeenCalled();
+    expect(mockRecordEvent).not.toHaveBeenCalled();
+    expect(mockTriggerAutoSync).not.toHaveBeenCalled();
   });
 
   // notification and task-completed hooks were retired: stale hook entries

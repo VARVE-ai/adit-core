@@ -35,9 +35,12 @@ import {
   collectDefaultBranch,
   collectGitIdentity,
   collectBranches,
+  collectRemoteBranchSnapshot,
   collectCommitLogs,
   collectCommitCount,
   collectCommitFileStats,
+  branchHeadMap,
+  collectGitRefsFingerprint,
   resolveCommitBranches,
   projectNameFromRemoteUrl,
 } from "./git-collector.js";
@@ -46,14 +49,11 @@ import {
   getProjectLinkCache,
   upsertProjectLinkCache,
   clearProjectLinkCache,
-  updateCachedCommitSha,
   updateCachedDocHashes,
-  updateCachedMetadata,
   updateCachedQualified,
 } from "./cache.js";
 import { checkQuality, formatQualityFeedback } from "./qualify.js";
 import { validateDocument } from "@varveai/adit-plans";
-import { collectGitRefsFingerprint, REFS_FINGERPRINT_CACHE_KEY } from "./auto-link.js";
 import { normalizeGitHubRepoKey } from "./repo-key.js";
 
 /** Maximum number of commits per upload batch */
@@ -423,7 +423,10 @@ async function linkRepositoryCommand(
       repositoryId,
       serverUrl,
       confirmedProjectId,
-      lastCommitSha: null,
+      gitRefHeads: {},
+      gitRefsFingerprint: null,
+      remoteRefsFingerprint: null,
+      lastRemoteBranchCheckAt: null,
       lastBranchSyncAt: null,
       lastDocSyncAt: null,
       docHashes: {},
@@ -436,7 +439,10 @@ async function linkRepositoryCommand(
     cache.confirmedProjectId = confirmedProjectId;
     if (serverProjectChanged) {
       log("  Server project changed for this login; resetting cached sync markers.");
-      cache.lastCommitSha = null;
+      cache.gitRefHeads = {};
+      cache.gitRefsFingerprint = null;
+      cache.remoteRefsFingerprint = null;
+      cache.lastRemoteBranchCheckAt = null;
       cache.lastBranchSyncAt = null;
       cache.lastDocSyncAt = null;
       cache.docHashes = {};
@@ -469,17 +475,24 @@ async function linkRepositoryCommand(
   // A refs fingerprint change bypasses the time-based cooldown so branch
   // creations/deletions reach the server snapshot without waiting it out.
   const currentRefsFingerprint = await runStep(currentStep, () => collectGitRefsFingerprint(projectRoot));
-  const cachedRefsFingerprint = typeof cache.docHashes[REFS_FINGERPRINT_CACHE_KEY] === "string"
-    ? cache.docHashes[REFS_FINGERPRINT_CACHE_KEY]
-    : null;
   const refsChanged = Boolean(currentRefsFingerprint) &&
-    currentRefsFingerprint !== cachedRefsFingerprint;
+    currentRefsFingerprint !== cache.gitRefsFingerprint;
+  const allBranches = await runStep(currentStep, () => collectBranches(projectRoot));
+  let remoteSnapshot: Awaited<ReturnType<typeof collectRemoteBranchSnapshot>> | null = null;
+  try {
+    remoteSnapshot = await collectRemoteBranchSnapshot(projectRoot);
+  } catch (error) {
+    log(`  Warning: ${error instanceof Error ? error.message : String(error)}`);
+    log("  Keeping the last successful remote branch snapshot.");
+  }
+  const remoteRefsChanged = remoteSnapshot !== null &&
+    remoteSnapshot.fingerprint !== cache.remoteRefsFingerprint;
   const branchesStale = !cache.lastBranchSyncAt ||
     (Date.now() - new Date(cache.lastBranchSyncAt).getTime() > BRANCH_STALE_MS) ||
     refsChanged ||
+    remoteRefsChanged ||
     options.force;
 
-  const allBranches = await runStep(currentStep, () => collectBranches(projectRoot));
   const defaultBranch = await runStep(currentStep, () => collectDefaultBranch(projectRoot));
   const gitIdentity = await runStep(currentStep, () => collectGitIdentity(projectRoot));
   let branchCount = 0;
@@ -510,16 +523,32 @@ async function linkRepositoryCommand(
               name: b.name,
               headSha: b.headSha,
             })),
+            ...(remoteSnapshot ? {
+              remoteBranchSnapshot: {
+                branches: remoteSnapshot.branches.map((branch) => ({
+                  name: branch.name,
+                  headSha: branch.headSha,
+                })),
+              },
+            } : {}),
           },
         )
       );
       branchCount = initResponse.projectLink.branchCount;
       cache.lastBranchSyncAt = new Date().toISOString();
+      if (remoteSnapshot) {
+        cache.remoteRefsFingerprint = remoteSnapshot.fingerprint;
+        cache.lastRemoteBranchCheckAt = new Date().toISOString();
+      }
       upsertProjectLinkCache(db, cache);
       log(`  ${branchCount} branches, default: ${defaultBranch ?? "unknown"}`);
     }
   } else {
     log("  Branches up to date (refs unchanged, synced < 1 hour ago)");
+    if (remoteSnapshot) {
+      cache.lastRemoteBranchCheckAt = new Date().toISOString();
+      upsertProjectLinkCache(db, cache);
+    }
   }
 
   // 3b. Commits
@@ -612,25 +641,15 @@ async function linkRepositoryCommand(
         }
       }
 
-      // Update cache with latest commit SHA
-      if (commits.length > 0) {
-        updateCachedCommitSha(db, localProjectId, serverUrl, commits[0].sha, repositoryId);
-        cache.lastCommitSha = commits[0].sha;
-      }
-
       rememberWorkspaceCommits(commits, workspaceCommitDedupeState);
       log(`  ${uploaded} new commits uploaded (${commitCount} total)`);
     }
 
-    currentStep = "Collect git refs";
-    const refsFingerprint = await runStep(currentStep, () => collectGitRefsFingerprint(projectRoot));
-    if (refsFingerprint) {
-      const docHashes = {
-        ...cache.docHashes,
-        [REFS_FINGERPRINT_CACHE_KEY]: refsFingerprint,
-      };
-      updateCachedMetadata(db, localProjectId, serverUrl, docHashes, repositoryId);
-      cache.docHashes = docHashes;
+    if (!options.dryRun && currentRefsFingerprint) {
+      cache.gitRefHeads = branchHeadMap(allBranches);
+      cache.gitRefsFingerprint = currentRefsFingerprint;
+      cache.updatedAt = new Date().toISOString();
+      upsertProjectLinkCache(db, cache);
     }
   } else {
     log("  Skipping commit history (--skip-commits)");

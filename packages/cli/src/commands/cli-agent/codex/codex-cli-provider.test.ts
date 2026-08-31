@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   flushDeferredSystemSkillsStderr: vi.fn(),
   appServerOptions: null as null | {
     onNotification?: (message: unknown) => void;
+    onError?: (error: Error) => void;
   },
   resumeWatcherOptions: null as null | {
     cwd: string;
@@ -40,6 +41,16 @@ vi.mock("node:child_process", () => ({
 
 vi.mock("./codex-app-server-client.js", () => ({
   CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_FEATURE: "default_mode_request_user_input",
+  CodexAppServerExitError: class CodexAppServerExitError extends Error {
+    constructor(
+      readonly code: number | null,
+      readonly signal: NodeJS.Signals | null,
+      readonly diagnostics: readonly string[],
+    ) {
+      super(`Codex app-server exited (${signal ?? code ?? "unknown"})`);
+      this.name = "CodexAppServerExitError";
+    }
+  },
   CodexAppServerClient: class {
     constructor(options: unknown) {
       mocks.appServerOptions = options as typeof mocks.appServerOptions;
@@ -113,6 +124,7 @@ import {
   normalizeCodexReclaimInput,
   promptInputForCodexMode,
 } from "./provider.js";
+import { CodexAppServerExitError } from "./codex-app-server-client.js";
 import { createRelayNotices } from "../relay-console.js";
 import {
   LOCAL_CLI_EXIT_WAIT_MS,
@@ -2666,8 +2678,77 @@ describe("CodexCliProvider app-server errors", () => {
     await tick();
 
     expect(errorEvents(events)).toEqual([
-      expect.objectContaining({ message: "upstream 400", sessionId: thread }),
-      expect.objectContaining({ message: "legacy shape", sessionId: thread }),
+      expect.objectContaining({
+        title: "Codex operation failed",
+        message: "upstream 400",
+        sessionId: thread,
+      }),
+      expect.objectContaining({
+        title: "Codex operation failed",
+        message: "legacy shape",
+        sessionId: thread,
+      }),
+    ]);
+
+    provider.stop();
+  });
+
+  it("shows a friendly app-server exit message and keeps raw diagnostics off the terminal", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const notices = createRelayNotices("codex", {
+      write: () => undefined,
+      debugEnabled: () => false,
+    });
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      notices,
+      onEvent: (event) => events.push(event),
+    });
+    await provider.takeover();
+
+    mocks.appServerOptions?.onError?.(new CodexAppServerExitError(1, null, [
+      "2026-08-27T01:57:09.015013Z ERROR codex_models_manager::manager: failed to refresh available models: timeout waiting for child process to exit",
+    ]));
+
+    expect(errorEvents(events)).toContainEqual(expect.objectContaining({
+      title: "Codex connection interrupted",
+      message: expect.stringContaining("Retry the Web action"),
+    }));
+    const terminalOutput = stderrWrite.mock.calls.map(([text]) => String(text)).join("");
+    expect(terminalOutput).toContain("Codex connection interrupted");
+    expect(terminalOutput).toContain("type /local here");
+    expect(terminalOutput).not.toContain("codex_models_manager::manager");
+    expect(terminalOutput).not.toContain("timeout waiting for child process to exit");
+
+    provider.stop();
+  });
+
+  it("does not duplicate an app-server failure through the active prompt", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+    await provider.takeover();
+    const exitError = new CodexAppServerExitError(1, null, []);
+    const originalRequest = mocks.appRequest.getMockImplementation();
+    mocks.appRequest.mockImplementation((method: string, params: unknown) => {
+      if (method === "turn/start") {
+        mocks.appServerOptions?.onError?.(exitError);
+        return Promise.reject(exitError);
+      }
+      return originalRequest?.(method, params);
+    });
+
+    await expect(provider.sendPrompt("hello")).rejects.toBe(exitError);
+
+    expect(errorEvents(events)).toEqual([
+      expect.objectContaining({ title: "Codex connection interrupted" }),
     ]);
 
     provider.stop();

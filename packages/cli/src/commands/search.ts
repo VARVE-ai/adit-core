@@ -77,9 +77,8 @@ function printEventLine(event: AditEvent): void {
   const idShort = event.id.substring(0, 10);
   const time = event.startedAt.substring(5, 19).replace("T", " ");
   const labels = event.labelsJson ? ` ${JSON.parse(event.labelsJson).map((l: string) => `[${l}]`).join("")}` : "";
-  const checkpoint = event.checkpointSha ? " *" : "";
   const snippet = getEventSummary(event, 80);
-  console.log(`  ${idShort}  ${time}  [${event.actor[0].toUpperCase()}]${checkpoint}  ${snippet}${labels}`);
+  console.log(`  ${idShort}  ${time}  [${event.actor[0].toUpperCase()}]  ${snippet}${labels}`);
 }
 
 function formatEventSummary(event: AditEvent): Record<string, unknown> {
@@ -89,7 +88,6 @@ function formatEventSummary(event: AditEvent): Record<string, unknown> {
     actor: event.actor,
     startedAt: event.startedAt,
     gitBranch: event.gitBranch,
-    checkpointSha: event.checkpointSha,
     labels: event.labelsJson ? JSON.parse(event.labelsJson) : [],
     snippet: getEventSummary(event, 200),
   };

@@ -14,7 +14,7 @@ import {
   loadConfig,
   openDatabase,
   closeDatabase,
-  getActiveSession,
+  getLatestSession,
   countEvents,
   queryEvents,
   getSyncState,
@@ -122,14 +122,13 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
   let latestPromptText: string | null = null;
 
   try {
-    // Active session
-    const session = getActiveSession(db, config.projectId, config.clientId);
+    // Most recently active session, derived from its events.
+    const session = getLatestSession(db, config.projectId, config.clientId);
     status.session = session
       ? {
           id: session.id,
           platform: session.platform,
           startedAt: session.startedAt,
-          status: session.status,
         }
       : null;
 
@@ -182,17 +181,6 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
       (status.events as Record<string, unknown>).unsynced = totalEvents;
     }
 
-    // Failed transcript uploads — permanently stalled until manually reset
-    try {
-      const failedRow = db
-        .prepare(
-          `SELECT COUNT(*) as cnt FROM transcript_uploads WHERE status = 'failed'`,
-        )
-        .get() as { cnt: number };
-      status.failedTranscripts = failedRow.cnt;
-    } catch {
-      status.failedTranscripts = 0;
-    }
   } finally {
     closeDatabase(db);
   }
@@ -252,7 +240,6 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
         lastAuthFailure?: { at: string; stage: string; message: string } | null;
       }
     | undefined;
-  const failedTranscripts = (status.failedTranscripts as number) ?? 0;
   const git = status.git as
     | {
         workspace: true;
@@ -309,7 +296,7 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
     ]);
     console.log(pc.dim(statsLine));
   } else {
-    console.log(pc.dim("No active session"));
+    console.log(pc.dim("No sessions"));
   }
 
   // ── Git ──────────────────────────────────────
@@ -372,11 +359,6 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
   if (cloud?.lastAuthFailure) {
     warnings.push(
       `cloud auth failing (${cloud.lastAuthFailure.stage}, ${timeAgo(cloud.lastAuthFailure.at)}): re-run 'adit cloud login'`,
-    );
-  }
-  if (failedTranscripts > 0) {
-    warnings.push(
-      `${failedTranscripts} transcript upload(s) stopped after repeated failures — see 'adit cloud transcript status'`,
     );
   }
   if (warnings.length > 0) {

@@ -63,10 +63,7 @@ export function installCodexHooks(opts: {
   const hooks = asObject(existing.hooks) ?? {};
   existing.hooks = hooks;
 
-  setCodexHook(hooks, "SessionStart", {
-    matcher: "startup|resume",
-    hooks: [{ type: "command", command, timeout: 30 }],
-  }, hookMarker);
+  removeCodexHook(hooks, "SessionStart", hookMarker);
   setCodexHook(hooks, "UserPromptSubmit", {
     hooks: [{ type: "command", command, timeout: 30 }],
   }, hookMarker);
@@ -141,10 +138,26 @@ function setCodexHook(
   marker: string,
 ): void {
   const existing = Array.isArray(hooks[eventName]) ? hooks[eventName] as unknown[] : [];
-  hooks[eventName] = [
-    ...existing.filter((item) => !codexEntryHasMarker(item, marker)),
-    entry,
-  ];
+  let replaced = false;
+  const next = existing.flatMap((item) => {
+    if (!codexEntryHasMarker(item, marker)) return [item];
+    if (replaced) return [];
+    replaced = true;
+    return [entry];
+  });
+  if (!replaced) next.push(entry);
+  hooks[eventName] = next;
+}
+
+function removeCodexHook(
+  hooks: Record<string, unknown>,
+  eventName: string,
+  marker: string,
+): void {
+  const existing = Array.isArray(hooks[eventName]) ? hooks[eventName] as unknown[] : [];
+  const filtered = existing.filter((item) => !codexEntryHasMarker(item, marker));
+  if (filtered.length === 0) delete hooks[eventName];
+  else hooks[eventName] = filtered;
 }
 
 function codexEntryHasMarker(entry: unknown, marker: string): boolean {

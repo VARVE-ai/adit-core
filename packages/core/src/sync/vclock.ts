@@ -7,7 +7,7 @@
  *
  * For ADIT's append-only events, conflicts are rare (two clients
  * can't create the same ULID). Vector clocks primarily help with
- * mutable records like sessions and plans.
+ * mutable session records.
  */
 
 export interface VectorClock {

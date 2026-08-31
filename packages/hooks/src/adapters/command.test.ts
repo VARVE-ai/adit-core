@@ -232,14 +232,14 @@ describe("describeHookValidation", () => {
   it("hints at a moved project when pinned roots differ", () => {
     const result = describeHookValidation({
       ...base,
-      missingHooks: ["SessionEnd"],
+      missingHooks: ["SessionStart"],
       staleHooks: ["Stop"],
       stalePinnedRoots: ["/old/location"],
     });
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("project moved?");
     expect(result.detail).toContain("/old/location");
-    expect(result.detail).toContain("Missing hooks: SessionEnd");
+    expect(result.detail).toContain("Missing hooks: SessionStart");
   });
 
   it("points at the missing script for broken hooks", () => {

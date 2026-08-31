@@ -142,14 +142,14 @@ describe("detectInstalledPlatforms", () => {
 
 describe("Claude Code Adapter", () => {
   it("has correct hook mappings", () => {
-    expect(claudeCodeAdapter.hookMappings).toHaveLength(7);
+    expect(claudeCodeAdapter.hookMappings).toHaveLength(5);
 
     const mappings = claudeCodeAdapter.hookMappings.map((m) => m.platformEvent);
     expect(mappings).toContain("UserPromptSubmit");
     expect(mappings).toContain("Stop");
     expect(mappings).toContain("StopFailure");
-    expect(mappings).toContain("SessionStart");
-    expect(mappings).toContain("SessionEnd");
+    expect(mappings).not.toContain("SessionStart");
+    expect(mappings).not.toContain("SessionEnd");
     // notification / task-completed collection was retired
     expect(mappings).not.toContain("TaskCompleted");
     expect(mappings).not.toContain("Notification");
@@ -175,14 +175,6 @@ describe("Claude Code Adapter", () => {
     );
     expect(input.hookType).toBe("stop");
     expect(input.stopReason).toBe("end_turn");
-  });
-
-  it("parseInput normalizes session-start", () => {
-    const input = claudeCodeAdapter.parseInput(
-      { cwd: "/project" },
-      "session-start",
-    );
-    expect(input.hookType).toBe("session-start");
   });
 
   it("parseInput normalizes task-completed with task fields", () => {
@@ -272,8 +264,8 @@ describe("Claude Code Adapter", () => {
     const hooks = config.content.hooks as Record<string, unknown>;
     expect(hooks.UserPromptSubmit).toBeDefined();
     expect(hooks.Stop).toBeDefined();
-    expect(hooks.SessionStart).toBeDefined();
-    expect(hooks.SessionEnd).toBeDefined();
+    expect(hooks.SessionStart).toBeUndefined();
+    expect(hooks.SessionEnd).toBeUndefined();
     // notification / task-completed collection was retired
     expect(hooks.TaskCompleted).toBeUndefined();
     expect(hooks.Notification).toBeUndefined();
@@ -293,17 +285,15 @@ describe("Claude Code Adapter", () => {
 
 describe("OpenCode Adapter", () => {
   it("has correct hook mappings", () => {
-    expect(opencodeAdapter.hookMappings.length).toBe(5);
+    expect(opencodeAdapter.hookMappings.length).toBe(2);
 
     const mappings = opencodeAdapter.hookMappings.map((m) => m.platformEvent);
     expect(mappings).toContain("chat.message");
-    // OpenCode has no "stop" hook; session.idle fires when the AI finishes
-    // and also triggers a forced cloud sync (guards against lost data on /exit)
+    // OpenCode has no "stop" hook; session.idle fires when the AI finishes.
     expect(mappings).toContain("session.idle");
-    expect(mappings).toContain("session.created");
-    expect(mappings).toContain("session.deleted");
-    // /exit fires command.executed (not session.deleted); intercepted synchronously
-    expect(mappings).toContain("command.executed");
+    expect(mappings).not.toContain("session.created");
+    expect(mappings).not.toContain("session.deleted");
+    expect(mappings).not.toContain("command.executed");
     // message.updated (assistant_metadata) removed — LLM cost/token tracking not needed
     expect(mappings).not.toContain("message.updated");
     // notification / task-completed collection was retired
@@ -344,34 +334,6 @@ describe("OpenCode Adapter", () => {
     expect(input.lastAssistantMessage).toBe("Done.");
   });
 
-  it("parseInput normalizes session-start", () => {
-    const input = opencodeAdapter.parseInput(
-      { cwd: "/project", source: "startup", session_id: "sess-2", model: "claude-sonnet" },
-      "session-start",
-    );
-    expect(input.hookType).toBe("session-start");
-    expect(input.sessionSource).toBe("startup");
-    expect(input.model).toBe("claude-sonnet");
-  });
-
-  it("parseInput normalizes session-end from session.deleted", () => {
-    const input = opencodeAdapter.parseInput(
-      { cwd: "/project", reason: "deleted", session_id: "sess-3" },
-      "session-end",
-    );
-    expect(input.hookType).toBe("session-end");
-    expect(input.sessionEndReason).toBe("deleted");
-  });
-
-  it("parseInput maps session.error to session-end", () => {
-    const input = opencodeAdapter.parseInput(
-      { cwd: "/project", reason: "error" },
-      "session.error",
-    );
-    expect(input.hookType).toBe("session-end");
-    expect(input.sessionEndReason).toBe("error");
-  });
-
   it("parseInput normalizes notification (assistant_metadata)", () => {
     const input = opencodeAdapter.parseInput(
       {
@@ -389,7 +351,6 @@ describe("OpenCode Adapter", () => {
     expect(input.hookType).toBe("notification");
     expect(input.notificationType).toBe("assistant_metadata");
     expect(input.notificationTitle).toBe("Assistant Response");
-    expect(input.model).toBe("claude-sonnet");
     expect(input.rawPlatformData?.cost).toBe(0.05);
   });
 
@@ -463,18 +424,15 @@ describe("OpenCode Adapter", () => {
     // session.idle replaces the non-existent "stop" hook
     expect(pluginContent).toContain("session.idle");
     expect(pluginContent).toContain("session.created");
+    // session.deleted only clears the plugin's in-memory session id; it does
+    // not invoke an ADIT SessionEnd hook.
     expect(pluginContent).toContain("session.deleted");
-    expect(pluginContent).toContain("session.error");
-    // command.executed intercepts /exit synchronously
-    expect(pluginContent).toContain("command.executed");
-    expect(pluginContent).toContain("spawnAditHookSync");
-    // process.on('exit') safety net for reliable cloud sync on exit
-    expect(pluginContent).toContain('process.on("exit"');
-    expect(pluginContent).toContain("flushOnExit");
-    expect(pluginContent).toContain("SIGINT");
-    expect(pluginContent).toContain("SIGTERM");
-    // sessionEndFired flag prevents duplicate session-end calls
-    expect(pluginContent).toContain("sessionEndFired");
+    expect(pluginContent).not.toContain("session.error");
+    expect(pluginContent).not.toContain("command.executed");
+    expect(pluginContent).not.toContain("spawnAditHookSync");
+    expect(pluginContent).not.toContain('process.on("exit"');
+    expect(pluginContent).not.toContain("flushOnExit");
+    expect(pluginContent).not.toContain("sessionEndFired");
     // notification / task-completed collection was retired: the plugin no
     // longer listens for tool results, todo updates, or session diffs
     expect(pluginContent).not.toContain("message.updated");
@@ -542,7 +500,7 @@ describe("Claude Code VS Code Adapter", () => {
 
   it("shares hook mappings with claude-code adapter", () => {
     expect(claudeVscodeAdapter.hookMappings).toBe(claudeCodeAdapter.hookMappings);
-    expect(claudeVscodeAdapter.hookMappings).toHaveLength(7);
+    expect(claudeVscodeAdapter.hookMappings).toHaveLength(5);
   });
 
   it("parseInput overrides platformCli to claude-vscode", () => {

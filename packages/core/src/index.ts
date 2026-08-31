@@ -16,18 +16,14 @@ export type {
 } from "./types/index.js";
 export { parseLabels, parseDiffStats, parseError } from "./types/index.js";
 
+// Cloud server identity
+export { normalizeServerUrl } from "./server-url.js";
+
 export type {
-  SessionStatus,
   Platform,
   SessionType,
   SessionMetadata,
   AditSession,
-} from "./types/index.js";
-
-export type {
-  PlanType,
-  PlanStatus,
-  AditPlan,
 } from "./types/index.js";
 
 export type { EnvSnapshot, EnvDiff, EnvChange } from "./types/index.js";
@@ -38,12 +34,8 @@ export {
   closeDatabase,
   insertSession,
   getSessionById,
-  getActiveSession,
+  getLatestSession,
   getSessionByPlatformSessionId,
-  reviveSession,
-  mergeSessionMetadata,
-  endSession,
-  endStaleSessions,
   listSessions,
   insertEvent,
   insertEventAutoSeq,
@@ -59,12 +51,6 @@ export {
   insertDiff,
   getDiffByEventId,
   getDiffText,
-  insertPlan,
-  getPlanById,
-  listPlans,
-  getChildPlans,
-  updatePlanStatus,
-  updatePlanContent,
   insertEnvSnapshot,
   getEnvSnapshotById,
   getLatestEnvSnapshot,
@@ -73,16 +59,6 @@ export {
   upsertSyncState,
   applyAuthoritativeSyncState,
   clearSyncState,
-  upsertTranscriptUpload,
-  getTranscriptUpload,
-  getTranscriptUploadById,
-  listPendingTranscriptUploads,
-  markTranscriptUploaded,
-  markTranscriptUploadFailed,
-  resetTranscriptUpload,
-  countActiveTranscriptUploads,
-  getSessionRepoHeads,
-  upsertSessionRepoHead,
 } from "./db/index.js";
 
 export type {
@@ -90,13 +66,8 @@ export type {
   InsertEventInput,
   EventQueryOptions,
   DiffRecord,
-  CreatePlanInput,
   CreateEnvSnapshotInput,
   SyncState,
-  TranscriptUpload,
-  TranscriptUploadStatus,
-  UpsertTranscriptUploadInput,
-  SessionRepoHead,
 } from "./db/index.js";
 
 // Config
