@@ -38,8 +38,17 @@ export async function recordGitCommits(
     return;
   }
 
+  // A single tool call can run several commits; each shares the call's full
+  // combined output, so track each commit's ordinal within its call to match
+  // it to its own "[branch sha]" summary line.
+  const commitCountByCall = new Map<string, number>();
+
   for (const operation of operations) {
     if (operation.operation !== "commit" || operation.status !== "success") continue;
+
+    const callKey = `${operation.provider}:${operation.toolCallId}`;
+    const commitOrdinal = commitCountByCall.get(callKey) ?? 0;
+    commitCountByCall.set(callKey, commitOrdinal + 1);
 
     try {
       if (hasGitCommitEvent(
@@ -50,7 +59,7 @@ export async function recordGitCommits(
         operation.operationIndex,
       )) continue;
 
-      const details = await resolveOperationDetails(ctx, operation);
+      const details = await resolveOperationDetails(ctx, operation, commitOrdinal);
       const toolInputJson = JSON.stringify({
         schemaVersion: 1,
         provider: operation.provider,
@@ -88,6 +97,7 @@ export async function recordGitCommits(
 async function resolveOperationDetails(
   ctx: HookContext,
   operation: AgentGitOperation,
+  commitOrdinal: number,
 ): Promise<GitOperationDetails> {
   const repository = findRepository(ctx.config.repositories, operation.cwd);
   if (!operation.output) {
@@ -99,18 +109,18 @@ async function resolveOperationDetails(
     };
   }
 
-  const candidate = explicitShaCandidate(operation.operation, operation.output);
+  const candidate = explicitShaCandidate(operation.operation, operation.output, commitOrdinal);
   const sha = repository && candidate
     ? await validateCommitSha(repository.path, candidate)
     : null;
   const commitMessage = repository && sha
     ? await readCommitMessage(repository.path, sha)
-    : explicitCommitSubject(operation.operation, operation.output)
+    : explicitCommitSubject(operation.operation, operation.output, commitOrdinal)
       ?? operation.commitMessage;
 
   return {
     repository,
-    branch: explicitBranch(operation.output),
+    branch: explicitBranch(operation.output, commitOrdinal),
     sha,
     commitMessage,
   };
@@ -120,10 +130,10 @@ function commitSubject(message: string | null): string | null {
   return message?.split(/\r?\n/u, 1)[0]?.trim() || null;
 }
 
-function explicitCommitSubject(operation: string, output: string): string | null {
+function explicitCommitSubject(operation: string, output: string, commitOrdinal: number): string | null {
   if (operation !== "commit") return null;
-  const match = output.match(/^\[[^\]\r\n]+\]\s+([^\r\n]+)$/mu);
-  return match?.[1]?.trim() || null;
+  const matches = [...output.matchAll(/^\[[^\]\r\n]+\]\s+([^\r\n]+)$/gmu)];
+  return matches[commitOrdinal]?.[1]?.trim() || null;
 }
 
 function findRepository(repositories: LocalRepository[], cwd: string): LocalRepository | null {
@@ -144,24 +154,24 @@ function relativeWorkingDirectory(repository: LocalRepository | null, cwd: strin
   return rel || ".";
 }
 
-function explicitShaCandidate(operation: string, output: string): string | null {
+function explicitShaCandidate(operation: string, output: string, commitOrdinal: number): string | null {
   const trimmed = output.trim();
-  if (/^[0-9a-f]{7,64}$/iu.test(trimmed)) return trimmed;
+  if (/^[0-9a-f]{7,64}$/iu.test(trimmed)) return commitOrdinal === 0 ? trimmed : null;
 
   if (operation === "commit") {
-    const bracket = output.match(/^\[[^\]\n]+\s([0-9a-f]{7,64})\](?:\s|$)/imu);
-    if (bracket?.[1]) return bracket[1];
+    const brackets = [...output.matchAll(/^\[[^\]\n]+\s([0-9a-f]{7,64})\](?:\s|$)/gimu)];
+    return brackets[commitOrdinal]?.[1] ?? null;
   }
 
   return null;
 }
 
-function explicitBranch(output: string): string | null {
+function explicitBranch(output: string, commitOrdinal: number): string | null {
   const switched = output.match(/(?:Switched to branch|Already on) ['"]([^'"]+)['"]/iu);
   if (switched?.[1]) return switched[1];
 
-  const bracket = output.match(/^\[([^\]\n]+?)\s(?:\(root-commit\)\s)?[0-9a-f]{7,64}\](?:\s|$)/imu);
-  return bracket?.[1]?.trim() || null;
+  const brackets = [...output.matchAll(/^\[([^\]\n]+?)\s(?:\(root-commit\)\s)?[0-9a-f]{7,64}\](?:\s|$)/gimu)];
+  return brackets[commitOrdinal]?.[1]?.trim() || null;
 }
 
 async function validateCommitSha(repositoryPath: string, candidate: string): Promise<string | null> {

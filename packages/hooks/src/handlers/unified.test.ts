@@ -375,45 +375,19 @@ describe("dispatchHook", () => {
     expect(mockRecordEvent).not.toHaveBeenCalled();
   });
 
-  it("routes subagent-start and records event", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "subagent-start",
-      agentId: "agent-001",
-      agentType: "code-reviewer",
-    };
+  it("silently ignores retired subagent hookTypes from stale installs", async () => {
+    for (const hookType of ["subagent-start", "subagent-stop"] as const) {
+      const input: NormalizedHookInput = {
+        cwd: "/test",
+        hookType,
+        agentId: "agent-001",
+        agentType: "code-reviewer",
+      };
 
-    await dispatchHook(input);
+      await dispatchHook(input);
+    }
 
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: "sess-001",
-        eventType: "subagent_start",
-        actor: "assistant",
-        toolName: "code-reviewer",
-      }),
-    );
-  });
-
-  it("routes subagent-stop and records event", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "subagent-stop",
-      agentId: "agent-001",
-      agentType: "code-reviewer",
-      lastAssistantMessage: "Review complete, 3 issues found.",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: "sess-001",
-        eventType: "subagent_stop",
-        actor: "assistant",
-        toolName: "code-reviewer",
-      }),
-    );
+    expect(mockRecordEvent).not.toHaveBeenCalled();
   });
 
   it("closes database in finally block even if handler throws", async () => {

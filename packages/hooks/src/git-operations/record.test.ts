@@ -153,6 +153,132 @@ describe("recordGitCommits", () => {
     closeDatabase(db);
   });
 
+  it("records two commits from one tool call with their own SHAs and messages", async () => {
+    const root = mkdtempSync(join(tmpdir(), "adit-git-commit-multi-"));
+    tempDirs.push(root);
+    execFileSync("git", ["init", "-b", "main"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
+    writeFileSync(join(root, "a.txt"), "a\n");
+    execFileSync("git", ["add", "a.txt"], { cwd: root });
+    execFileSync("git", ["commit", "-m", "first"], { cwd: root });
+    const firstSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+    writeFileSync(join(root, "b.txt"), "b\n");
+    execFileSync("git", ["add", "b.txt"], { cwd: root });
+    execFileSync("git", ["commit", "-m", "second"], { cwd: root });
+    const secondSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+
+    const transcriptPath = join(root, "turn.jsonl");
+    writeFileSync(transcriptPath, [
+      JSON.stringify({
+        type: "user",
+        sessionId: "claude-1",
+        message: { content: "commit twice" },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "claude-1",
+        message: {
+          content: [{
+            type: "tool_use",
+            id: "tool-1",
+            name: "Bash",
+            input: {
+              command: "git add a.txt && git commit -m first && git add b.txt && git commit -m second",
+            },
+          }],
+        },
+      }),
+      JSON.stringify({
+        type: "user",
+        sessionId: "claude-1",
+        message: {
+          content: [{
+            type: "tool_result",
+            tool_use_id: "tool-1",
+            content: "ok",
+          }],
+        },
+        toolUseResult: {
+          stdout: `[main ${firstSha.slice(0, 7)}] first\n[main ${secondSha.slice(0, 7)}] second`,
+          interrupted: false,
+        },
+      }),
+    ].join("\n"));
+
+    const dbPath = join(root, ".adit", "adit.sqlite");
+    const db = openDatabase(dbPath);
+    const config: AditConfig = {
+      projectRoot: root,
+      dataDir: join(root, ".adit"),
+      dbPath,
+      clientId: "client-1",
+      projectId: "project-1",
+      projectType: "repo",
+      repositories: [{
+        localRepositoryId: "repo-1",
+        relativePath: ".",
+        displayName: "repo",
+        repositoryUrl: null,
+        canonicalRepoKey: null,
+        path: root,
+      }],
+      initialization: "initialized",
+      captureEnv: false,
+    };
+    insertSession(db, {
+      id: "session-1",
+      projectId: config.projectId,
+      clientId: config.clientId,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: new Date().toISOString(),
+      vclockJson: "{}",
+      platformSessionId: "claude-1",
+    });
+    const ctx = {
+      db,
+      config,
+      session: {
+        id: "session-1",
+        projectId: config.projectId,
+        clientId: config.clientId,
+        sessionType: "interactive" as const,
+        platform: "claude-code" as const,
+        startedAt: new Date().toISOString(),
+        metadataJson: null,
+        vclockJson: "{}",
+        platformSessionId: "claude-1",
+        deletedAt: null,
+      },
+    };
+
+    await recordGitCommits(ctx, {
+      cwd: root,
+      hookType: "stop",
+      platformCli: "claude-code",
+      platformSessionId: "claude-1",
+      transcriptPath,
+    }, createTimelineManager(db, config));
+
+    const events = queryEvents(db, { eventType: "git_commit", limit: 10 });
+    expect(events).toHaveLength(2);
+
+    const first = events.find((event) => event.responseText === "first");
+    const second = events.find((event) => event.responseText === "second");
+    expect(first?.gitHeadSha).toBe(firstSha);
+    expect(second?.gitHeadSha).toBe(secondSha);
+    expect(JSON.parse(first?.toolInputJson ?? "{}")).toMatchObject({
+      operationIndex: 1,
+      commitMessage: "first",
+    });
+    expect(JSON.parse(second?.toolInputJson ?? "{}")).toMatchObject({
+      operationIndex: 3,
+      commitMessage: "second",
+    });
+    closeDatabase(db);
+  });
+
   it("keeps Claude's printed commit subject when the command ran outside a configured repository", async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), "adit-git-commit-project-"));
     const commandRoot = mkdtempSync(join(tmpdir(), "adit-git-commit-external-"));

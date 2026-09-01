@@ -59,11 +59,11 @@ describe("Claude Code Hook Chaining", () => {
     expect(hooks.StopFailure).toBeDefined();
     expect(hooks.SessionStart).toBeUndefined();
     expect(hooks.SessionEnd).toBeUndefined();
-    // notification / task-completed collection was retired
+    // notification / task-completed / subagent collection was retired
     expect(hooks.TaskCompleted).toBeUndefined();
     expect(hooks.Notification).toBeUndefined();
-    expect(hooks.SubagentStart).toBeDefined();
-    expect(hooks.SubagentStop).toBeDefined();
+    expect(hooks.SubagentStart).toBeUndefined();
+    expect(hooks.SubagentStop).toBeUndefined();
 
     // Each event should have exactly one matcher group with one ADIT hook
     const stopEntries = hooks.Stop as Array<{ hooks: Array<{ command: string }> }>;
@@ -87,6 +87,27 @@ describe("Claude Code Hook Chaining", () => {
     const hooks = readSettings(projectRoot).hooks as Record<string, unknown[]>;
     expect(JSON.stringify(hooks.SessionEnd)).not.toContain("adit-hook session-end");
     expect(JSON.stringify(hooks.SessionEnd)).toContain("other-tool session-end");
+  });
+
+  it("removes retired ADIT subagent hooks while preserving other tools", async () => {
+    writeSettings(projectRoot, {
+      hooks: {
+        SubagentStart: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook subagent-start" }] },
+        ],
+        SubagentStop: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook subagent-stop" }] },
+          { hooks: [{ type: "command", command: "other-tool subagent-stop" }] },
+        ],
+      },
+    });
+
+    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    const hooks = readSettings(projectRoot).hooks as Record<string, unknown[]>;
+    expect(hooks.SubagentStart).toBeUndefined();
+    expect(JSON.stringify(hooks.SubagentStop)).not.toContain("adit-hook subagent-stop");
+    expect(JSON.stringify(hooks.SubagentStop)).toContain("other-tool subagent-stop");
   });
 
   it("preserves other tools' hooks when installing ADIT hooks", async () => {
