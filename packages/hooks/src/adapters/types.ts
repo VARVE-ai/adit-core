@@ -130,7 +130,8 @@ export interface ValidationCheck {
   advisory?: boolean;
 }
 
-/** All ADIT hook types */
+/** All ADIT hook types (task-completed/notification/subagent-* are retired
+ * but stay typed so stale installs' hook calls can be parsed and ignored) */
 export type AditHookType =
   | "prompt-submit"
   | "stop"

@@ -88,12 +88,6 @@ export async function dispatchHook(
         case "stop":
           await handleStopUnified(ctx, input);
           break;
-        case "subagent-start":
-          await handleSubagentStart(ctx, input);
-          break;
-        case "subagent-stop":
-          await handleSubagentStop(ctx, input);
-          break;
       }
     });
 
@@ -130,9 +124,7 @@ export async function dispatchHook(
 
 function isHandledHookType(hookType: string): boolean {
   return hookType === "prompt-submit"
-    || hookType === "stop"
-    || hookType === "subagent-start"
-    || hookType === "subagent-stop";
+    || hookType === "stop";
 }
 
 interface IgnoredSessionMetadata {
@@ -193,9 +185,7 @@ function parseSessionMetadata(metadataJson: string | null): IgnoredSessionMetada
 }
 
 function shouldTriggerCloudAutoSync(hookType: NormalizedHookInput["hookType"]): boolean {
-  return hookType === "stop"
-    || hookType === "subagent-start"
-    || hookType === "subagent-stop";
+  return hookType === "stop";
 }
 
 /** Handle prompt submission (kept lightweight — no git operations) */
@@ -392,42 +382,3 @@ async function recoverAssistantMessageFromTranscript(transcriptPath?: string): P
   return undefined;
 }
 
-/** Handle subagent start — record when a subagent is spawned */
-async function handleSubagentStart(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  const timeline = createTimelineManager(ctx.db, ctx.config);
-
-  await timeline.recordEvent({
-    sessionId: ctx.session.id,
-    eventType: "subagent_start",
-    actor: "assistant",
-    responseText: `Subagent started: ${input.agentType ?? "unknown"}`,
-    toolName: input.agentType ?? null,
-    toolInputJson: JSON.stringify({
-      agentId: input.agentId,
-      agentType: input.agentType,
-    }),
-  });
-}
-
-/** Handle subagent stop — record when a subagent finishes */
-async function handleSubagentStop(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  const timeline = createTimelineManager(ctx.db, ctx.config);
-
-  await timeline.recordEvent({
-    sessionId: ctx.session.id,
-    eventType: "subagent_stop",
-    actor: "assistant",
-    responseText: input.lastAssistantMessage
-      ? `Subagent finished: ${input.agentType ?? "unknown"}`
-      : `Subagent stopped: ${input.agentType ?? "unknown"}`,
-    toolName: input.agentType ?? null,
-    toolInputJson: JSON.stringify({
-      agentId: input.agentId,
-      agentType: input.agentType,
-      agentTranscriptPath: input.agentTranscriptPath,
-    }),
-    toolOutputJson: input.lastAssistantMessage
-      ? JSON.stringify({ lastAssistantMessage: input.lastAssistantMessage })
-      : null,
-  });
-}

@@ -30,8 +30,6 @@ const HOOK_MAPPINGS: HookMapping[] = [
   // Route it through the stop handler so edits made before the failure are
   // still extracted from the transcript.
   { platformEvent: "StopFailure", aditHandler: "stop" },
-  { platformEvent: "SubagentStart", aditHandler: "subagent-start" },
-  { platformEvent: "SubagentStop", aditHandler: "subagent-stop" },
 ];
 
 /** Slash command installed into .claude/commands/ */
@@ -165,8 +163,6 @@ export const claudeCodeAdapter: PlatformAdapter = {
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
           StopFailure: makeHookEntry("stop"),
-          SubagentStart: makeHookEntry("subagent-start"),
-          SubagentStop: makeHookEntry("subagent-stop"),
         },
       },
     };
@@ -317,10 +313,10 @@ export const claudeCodeAdapter: PlatformAdapter = {
 
     settings.hooks = mergedHooks;
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-    removeAditHookEventFromConfig(settingsPath, "SessionStart");
-    removeAditHookEventFromConfig(join(claudeDir, "settings.json"), "SessionStart");
-    removeAditHookEventFromConfig(settingsPath, "SessionEnd");
-    removeAditHookEventFromConfig(join(claudeDir, "settings.json"), "SessionEnd");
+    for (const retiredEvent of ["SessionStart", "SessionEnd", "SubagentStart", "SubagentStop"]) {
+      removeAditHookEventFromConfig(settingsPath, retiredEvent);
+      removeAditHookEventFromConfig(join(claudeDir, "settings.json"), retiredEvent);
+    }
 
     // Install slash command
     const commandsDir = join(claudeDir, "commands");

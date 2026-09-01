@@ -142,7 +142,7 @@ describe("detectInstalledPlatforms", () => {
 
 describe("Claude Code Adapter", () => {
   it("has correct hook mappings", () => {
-    expect(claudeCodeAdapter.hookMappings).toHaveLength(5);
+    expect(claudeCodeAdapter.hookMappings).toHaveLength(3);
 
     const mappings = claudeCodeAdapter.hookMappings.map((m) => m.platformEvent);
     expect(mappings).toContain("UserPromptSubmit");
@@ -150,11 +150,11 @@ describe("Claude Code Adapter", () => {
     expect(mappings).toContain("StopFailure");
     expect(mappings).not.toContain("SessionStart");
     expect(mappings).not.toContain("SessionEnd");
-    // notification / task-completed collection was retired
+    // notification / task-completed / subagent collection was retired
     expect(mappings).not.toContain("TaskCompleted");
     expect(mappings).not.toContain("Notification");
-    expect(mappings).toContain("SubagentStart");
-    expect(mappings).toContain("SubagentStop");
+    expect(mappings).not.toContain("SubagentStart");
+    expect(mappings).not.toContain("SubagentStop");
     expect(mappings).not.toContain("PostToolUse");
   });
 
@@ -213,36 +213,19 @@ describe("Claude Code Adapter", () => {
     expect(input.notificationType).toBe("permission_prompt");
   });
 
-  it("parseInput normalizes subagent-start with agent fields", () => {
+  it("parseInput keeps agent fields on prompt-submit for subagent classification", () => {
     const input = claudeCodeAdapter.parseInput(
       {
         cwd: "/project",
+        prompt: "internal subagent prompt",
         agent_id: "agent-abc123",
         agent_type: "Explore",
       },
-      "subagent-start",
+      "prompt-submit",
     );
-    expect(input.hookType).toBe("subagent-start");
+    expect(input.hookType).toBe("prompt-submit");
     expect(input.agentId).toBe("agent-abc123");
     expect(input.agentType).toBe("Explore");
-  });
-
-  it("parseInput normalizes subagent-stop with agent fields", () => {
-    const input = claudeCodeAdapter.parseInput(
-      {
-        cwd: "/project",
-        agent_id: "agent-def456",
-        agent_type: "Plan",
-        agent_transcript_path: "/path/to/transcript.jsonl",
-        last_assistant_message: "Analysis complete.",
-      },
-      "subagent-stop",
-    );
-    expect(input.hookType).toBe("subagent-stop");
-    expect(input.agentId).toBe("agent-def456");
-    expect(input.agentType).toBe("Plan");
-    expect(input.agentTranscriptPath).toBe("/path/to/transcript.jsonl");
-    expect(input.lastAssistantMessage).toBe("Analysis complete.");
   });
 
   it("keeps task-notification prompt-submit payloads for unified classification", () => {
@@ -266,11 +249,11 @@ describe("Claude Code Adapter", () => {
     expect(hooks.Stop).toBeDefined();
     expect(hooks.SessionStart).toBeUndefined();
     expect(hooks.SessionEnd).toBeUndefined();
-    // notification / task-completed collection was retired
+    // notification / task-completed / subagent collection was retired
     expect(hooks.TaskCompleted).toBeUndefined();
     expect(hooks.Notification).toBeUndefined();
-    expect(hooks.SubagentStart).toBeDefined();
-    expect(hooks.SubagentStop).toBeDefined();
+    expect(hooks.SubagentStart).toBeUndefined();
+    expect(hooks.SubagentStop).toBeUndefined();
 
     // Verify hooks run synchronously (no async flag)
     for (const hookName of Object.keys(hooks)) {
@@ -500,7 +483,7 @@ describe("Claude Code VS Code Adapter", () => {
 
   it("shares hook mappings with claude-code adapter", () => {
     expect(claudeVscodeAdapter.hookMappings).toBe(claudeCodeAdapter.hookMappings);
-    expect(claudeVscodeAdapter.hookMappings).toHaveLength(5);
+    expect(claudeVscodeAdapter.hookMappings).toHaveLength(3);
   });
 
   it("parseInput overrides platformCli to claude-vscode", () => {
