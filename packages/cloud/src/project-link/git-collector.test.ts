@@ -17,10 +17,13 @@ import {
   collectCurrentBranch,
   collectCommitLogs,
   collectCommitCount,
+  collectCommitFileStats,
   collectDefaultBranch,
   collectGitIdentity,
   collectRemoteUrl,
+  parseNumstatLog,
   resolveCommitBranches,
+  resolveNumstatPath,
 } from "./git-collector.js";
 
 describe("projectNameFromRemoteUrl", () => {
@@ -101,12 +104,10 @@ describe("Git Collector (with temp repo)", () => {
       stdio: "pipe",
     });
 
-    const rawBranches = execSync(
-      "git branch -a --format='%(refname)|%(refname:short)|%(objectname:short)'",
-      { cwd: repoDir, encoding: "utf-8" },
-    );
-    expect(rawBranches).toContain("refs/remotes/origin/HEAD|origin|");
-
+    // No assertion on the raw `git branch -a` listing here: whether the
+    // origin/HEAD symref shows up in it depends on the git version
+    // (2.50 prints it, 2.39 does not). Either way collectBranches must
+    // not surface it as a branch.
     const branches = await collectBranches(repoDir);
     expect(branches.some((branch) => branch.name === "origin")).toBe(false);
     expect(branches.filter((branch) => branch.name === "main")).toHaveLength(1);
@@ -446,5 +447,109 @@ describe("Git Collector (with temp repo)", () => {
     for (const c of commits) {
       expect(c.branch).toBeUndefined();
     }
+  });
+});
+
+describe("resolveNumstatPath", () => {
+  it("keeps plain paths", () => {
+    expect(resolveNumstatPath("src/lib/db.ts")).toBe("src/lib/db.ts");
+  });
+
+  it("resolves brace renames to the new side", () => {
+    expect(resolveNumstatPath("src/{old => new}/file.ts")).toBe("src/new/file.ts");
+  });
+
+  it("resolves brace renames with an empty side", () => {
+    expect(resolveNumstatPath("src/{ => nested}/file.ts")).toBe("src/nested/file.ts");
+  });
+
+  it("resolves bare arrow renames to the new side", () => {
+    expect(resolveNumstatPath("old-name.ts => new-name.ts")).toBe("new-name.ts");
+  });
+
+  it("returns null for empty input", () => {
+    expect(resolveNumstatPath("  ")).toBeNull();
+  });
+});
+
+describe("parseNumstatLog", () => {
+  it("parses multi-commit numstat output with binary entries", () => {
+    const stdout = [
+      "\0abc123",
+      "10\t2\tsrc/a.ts",
+      "-\t-\tassets/logo.png",
+      "\0def456",
+      "0\t5\tREADME.md",
+      "",
+    ].join("\n");
+
+    const parsed = parseNumstatLog(stdout);
+    expect(parsed.get("abc123")).toEqual([
+      { path: "src/a.ts", additions: 10, deletions: 2 },
+      { path: "assets/logo.png", additions: 0, deletions: 0 },
+    ]);
+    expect(parsed.get("def456")).toEqual([
+      { path: "README.md", additions: 0, deletions: 5 },
+    ]);
+  });
+
+  it("keeps commits without numstat lines (merges) with empty file lists", () => {
+    const parsed = parseNumstatLog("\0abc123\n\0def456\n1\t1\tx.ts\n");
+    expect(parsed.get("abc123")).toEqual([]);
+    expect(parsed.get("def456")).toEqual([{ path: "x.ts", additions: 1, deletions: 1 }]);
+  });
+});
+
+describe("collectCommitFileStats (with temp repo)", () => {
+  let repoDir: string;
+
+  beforeEach(() => {
+    repoDir = join(tmpdir(), `adit-git-filestat-${randomBytes(8).toString("hex")}`);
+    mkdirSync(repoDir, { recursive: true });
+    execSync("git init", { cwd: repoDir, stdio: "pipe" });
+    execSync("git config user.email 'test@example.com'", { cwd: repoDir, stdio: "pipe" });
+    execSync("git config user.name 'Test User'", { cwd: repoDir, stdio: "pipe" });
+    execSync("git checkout -b main", { cwd: repoDir, stdio: "pipe" });
+    writeFileSync(join(repoDir, "README.md"), "# Test\n");
+    execSync("git add . && git commit -m 'Initial commit'", { cwd: repoDir, stdio: "pipe" });
+  });
+
+  afterEach(() => {
+    try { rmSync(repoDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  it("collects per-commit changed files for the requested shas only", async () => {
+    writeFileSync(join(repoDir, "a.ts"), "const a = 1;\nconst b = 2;\n");
+    execSync("git add . && git commit -m 'add a'", { cwd: repoDir, stdio: "pipe" });
+    const firstSha = execSync("git rev-parse HEAD", { cwd: repoDir }).toString().trim();
+
+    writeFileSync(join(repoDir, "b.ts"), "export {};\n");
+    execSync("git add . && git commit -m 'add b'", { cwd: repoDir, stdio: "pipe" });
+    const secondSha = execSync("git rev-parse HEAD", { cwd: repoDir }).toString().trim();
+
+    const stats = await collectCommitFileStats(repoDir, [firstSha, secondSha]);
+    expect(stats.get(firstSha)).toEqual([
+      { path: "a.ts", additions: 2, deletions: 0 },
+    ]);
+    expect(stats.get(secondSha)).toEqual([
+      { path: "b.ts", additions: 1, deletions: 0 },
+    ]);
+  });
+
+  it("resolves renames to the new path", async () => {
+    writeFileSync(join(repoDir, "old.ts"), "export const x = 1;\n");
+    execSync("git add . && git commit -m 'add old'", { cwd: repoDir, stdio: "pipe" });
+    execSync("git mv old.ts new.ts && git commit -m 'rename'", { cwd: repoDir, stdio: "pipe" });
+    const renameSha = execSync("git rev-parse HEAD", { cwd: repoDir }).toString().trim();
+
+    const stats = await collectCommitFileStats(repoDir, [renameSha]);
+    expect(stats.get(renameSha)).toEqual([
+      { path: "new.ts", additions: 0, deletions: 0 },
+    ]);
+  });
+
+  it("returns an empty map for unknown shas", async () => {
+    const stats = await collectCommitFileStats(repoDir, ["0000000000000000000000000000000000000000"]);
+    expect(stats.size).toBe(0);
   });
 });

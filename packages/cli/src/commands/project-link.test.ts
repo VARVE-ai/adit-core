@@ -5,7 +5,6 @@ const mocks = vi.hoisted(() => ({
   loadConfig: vi.fn(),
   openDatabase: vi.fn(() => ({})),
   closeDatabase: vi.fn(),
-  discoverWorkspaceRepositories: vi.fn(() => [{ relativePath: "repo" }]),
   loadCloudConfig: vi.fn(() => ({ serverUrl: "https://cloud.example.com" })),
   loadCredentials: vi.fn(() => ({
     serverUrl: "https://cloud.example.com",
@@ -18,7 +17,7 @@ const mocks = vi.hoisted(() => ({
   isTokenExpired: vi.fn(() => false),
   linkCommand: vi.fn(),
   healthGet: vi.fn(async () => ({ ok: true })),
-  isGitRepo: vi.fn(async () => true),
+  getRemoteUrl: vi.fn(async () => "https://example.com/repo.git" as string | null),
   WorkspaceLinkPartialFailureError: class WorkspaceLinkPartialFailureError extends Error {
     readonly result: LinkResult;
     readonly repositoryResults: LinkResult["repositoryResults"];
@@ -47,14 +46,21 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 vi.mock("@varveai/adit-core", () => ({
+  ProjectManifestError: class ProjectManifestError extends Error {
+    constructor(
+      message: string,
+      public readonly manifestPath: string,
+    ) {
+      super(message);
+    }
+  },
   loadConfig: (...args: unknown[]) => mocks.loadConfig(...args),
   openDatabase: (...args: unknown[]) => mocks.openDatabase(...args),
   closeDatabase: (...args: unknown[]) => mocks.closeDatabase(...args),
-  discoverWorkspaceRepositories: (...args: unknown[]) => mocks.discoverWorkspaceRepositories(...args),
 }));
 
 vi.mock("@varveai/adit-engine", () => ({
-  isGitRepo: (...args: unknown[]) => mocks.isGitRepo(...args),
+  getRemoteUrl: (...args: unknown[]) => mocks.getRemoteUrl(...args),
 }));
 
 vi.mock("@varveai/adit-cloud", async (importOriginal) => {
@@ -77,6 +83,34 @@ vi.mock("@varveai/adit-cloud", async (importOriginal) => {
 
 import type { LinkResult } from "@varveai/adit-cloud";
 import { projectLinkCliHandler } from "./project-link.js";
+
+function workspaceConfig() {
+  return {
+    projectType: "workspace",
+    projectRoot: "/workspace",
+    projectId: "workspace-id",
+    dbPath: "/workspace/.adit/adit.sqlite",
+    initialization: "initialized",
+    repositories: [
+      {
+        localRepositoryId: "repo-a",
+        relativePath: "a",
+        displayName: "a",
+        repositoryUrl: null,
+        canonicalRepoKey: null,
+        path: "/workspace/a",
+      },
+      {
+        localRepositoryId: "repo-b",
+        relativePath: "b",
+        displayName: "b",
+        repositoryUrl: null,
+        canonicalRepoKey: null,
+        path: "/workspace/b",
+      },
+    ],
+  };
+}
 
 function makeWorkspaceResult(): LinkResult {
   return {
@@ -120,17 +154,13 @@ describe("projectLinkCliHandler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.existsSync.mockReturnValue(true);
+    mocks.getRemoteUrl.mockResolvedValue("https://example.com/repo.git");
     process.exitCode = undefined;
     originalLog = console.log;
     originalError = console.error;
     console.log = vi.fn() as never;
     console.error = vi.fn() as never;
-    mocks.loadConfig.mockReturnValue({
-      projectType: "workspace",
-      projectRoot: "/workspace",
-      projectId: "workspace-id",
-      dbPath: "/workspace/.adit/adit.sqlite",
-    });
+    mocks.loadConfig.mockReturnValue(workspaceConfig());
   });
 
   afterEach(() => {
@@ -176,10 +206,11 @@ describe("projectLinkCliHandler", () => {
     mocks.loadConfig.mockReturnValue({
       projectType: "repo",
       projectRoot: "/workspace/repo",
-      projectId: "repo-id",
+      projectId: "",
       dbPath: "/workspace/repo/.adit/adit.sqlite",
+      initialization: "uninitialized",
+      repositories: [],
     });
-    mocks.existsSync.mockReturnValue(false);
 
     await projectLinkCliHandler({});
 
@@ -196,6 +227,33 @@ describe("projectLinkCliHandler", () => {
     expect(mocks.loadCredentials).not.toHaveBeenCalled();
     expect(mocks.healthGet).not.toHaveBeenCalled();
     expect(mocks.openDatabase).not.toHaveBeenCalled();
+    expect(mocks.linkCommand).not.toHaveBeenCalled();
+  });
+
+  it("lists every repository missing an origin before any auth or network call", async () => {
+    mocks.getRemoteUrl.mockResolvedValue(null);
+
+    await projectLinkCliHandler({});
+
+    expect(process.exitCode).toBe(1);
+    const errors = vi.mocked(console.error).mock.calls.map((call) => String(call[0]));
+    expect(errors.some((line) => line.includes("a: no git remote 'origin'"))).toBe(true);
+    expect(errors.some((line) => line.includes("b: no git remote 'origin'"))).toBe(true);
+    expect(mocks.loadCredentials).not.toHaveBeenCalled();
+    expect(mocks.healthGet).not.toHaveBeenCalled();
+    expect(mocks.linkCommand).not.toHaveBeenCalled();
+  });
+
+  it("stops before auth and points at re-running init when a registered repository is missing", async () => {
+    mocks.existsSync.mockImplementation((path: unknown) => !String(path).includes("/workspace/a"));
+
+    await projectLinkCliHandler({});
+
+    expect(process.exitCode).toBe(1);
+    const errors = vi.mocked(console.error).mock.calls.map((call) => String(call[0]));
+    expect(errors.some((line) => line.includes("a: repository is missing"))).toBe(true);
+    expect(errors.some((line) => line.includes("re-run 'adit init'"))).toBe(true);
+    expect(mocks.loadCredentials).not.toHaveBeenCalled();
     expect(mocks.linkCommand).not.toHaveBeenCalled();
   });
 });

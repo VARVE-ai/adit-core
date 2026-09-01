@@ -111,8 +111,11 @@ describe("CodexTranscriptSync", () => {
     const dir = tempDir();
     try {
       const transcriptPath = join(dir, "019e0d36-9fd9-7c40-add5-01d6d8bc49d3.jsonl");
-      const sync = new CodexTranscriptSync();
       const sessionId = "019e0d36-9fd9-7c40-add5-01d6d8bc49d3";
+      const efforts: Array<{ sessionId: string; effort: string | null }> = [];
+      const sync = new CodexTranscriptSync((reportedSessionId, effort) => {
+        efforts.push({ sessionId: reportedSessionId, effort });
+      });
 
       sync.noteHook({
         eventType: "SessionStart",
@@ -130,6 +133,7 @@ describe("CodexTranscriptSync", () => {
           type: "turn_context",
           payload: {
             model: "gpt-5.5",
+            effort: "xhigh",
           },
         },
         {
@@ -155,6 +159,7 @@ describe("CodexTranscriptSync", () => {
       const events = sync.drainSession(sessionId);
 
       expect(events.map((event) => event.type)).toEqual(["reasoning", "message"]);
+      expect(efforts).toEqual([{ sessionId, effort: "xhigh" }]);
       expect(events[0]?.payload).toMatchObject({
         sessionId,
         modelId: "gpt-5.5",

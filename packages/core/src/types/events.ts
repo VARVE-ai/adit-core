@@ -14,14 +14,14 @@ export type EventType =
   | "subagent_call" // Subagent spawned
   | "skill_call" // Skill invoked
   | "mcp_call" // MCP server tool call
-  | "checkpoint" // Git checkpoint created
+  | "checkpoint" // DEPRECATED 2026-07: no longer collected (was session-start marker; metadata now lives on the session); kept for historical rows
   | "revert" // User reverted to checkpoint
   | "git_commit" // Commit attributed to this session (gitHeadSha holds the commit sha itself)
   | "env_snapshot" // Environment captured
-  | "env_drift" // Environment changed between snapshots
+  | "env_drift" // DEPRECATED 2026-07: no longer collected; kept for historical rows
   | "plan_update" // SpecFlow plan modified
-  | "task_completed" // Agent marked a task as done
-  | "notification" // Claude Code notification fired
+  | "task_completed" // DEPRECATED 2026-07: no longer collected; kept for historical rows
+  | "notification" // DEPRECATED 2026-07: no longer collected; kept for historical rows
   | "subagent_start" // Subagent spawned by the AI
   | "subagent_stop"; // Subagent finished execution
 

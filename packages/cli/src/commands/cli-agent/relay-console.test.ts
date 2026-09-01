@@ -55,6 +55,16 @@ describe("createRelayNotices", () => {
     expect(verbose.output).toEqual(["[adit claude] debug: terminal abc\n"]);
   });
 
+  it("announces takeover start and failure with the tool subject", () => {
+    const codex = makeNotices({ tool: "codex" });
+    codex.notices.takeoverStarted();
+    codex.notices.takeoverFailed();
+    expect(codex.output).toEqual([
+      "\n[adit codex] Web is taking over this session — local Codex will hand off shortly…\n",
+      "\n[adit codex] Web takeover failed — local Codex keeps control.\n",
+    ]);
+  });
+
   it("resets the terminal and uses one reclaim phrasing on takeover", () => {
     const { notices, output, restoreTerminal } = makeNotices({ tool: "codex" });
     notices.takenOverByWeb();

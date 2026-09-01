@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "description": "SpecFlow-inspired plan artifact generator for ADIT",
   "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "files": [
     "dist"
   ],

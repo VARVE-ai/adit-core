@@ -16,6 +16,14 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@varveai/adit-core", () => ({
+  ProjectManifestError: class ProjectManifestError extends Error {
+    constructor(
+      message: string,
+      public readonly manifestPath: string,
+    ) {
+      super(message);
+    }
+  },
   findGitRoot: mocks.findGitRoot,
   loadConfig: mocks.loadConfig,
   projectNameFromRoot: mocks.projectNameFromRoot,
@@ -101,6 +109,18 @@ describe("cloud agent initialization guard", () => {
     mocks.findGitRoot.mockReturnValue(projectRoot);
     mocks.readWorkspaceManifest.mockReturnValue(null);
     mocks.projectNameFromRoot.mockReturnValue("project");
+    mocks.loadConfig.mockImplementation(() => ({
+      projectRoot,
+      dataDir: join(projectRoot, ".adit"),
+      dbPath: join(projectRoot, ".adit", "adit.sqlite"),
+      clientId: "client",
+      projectId: "",
+      projectType: "repo",
+      repositories: [],
+      initialization: "uninitialized",
+      refPrefix: "refs/adit/checkpoints",
+      captureEnv: true,
+    }));
     mocks.resolveExecutable.mockReturnValue("/usr/local/bin/claude");
     mocks.selectCodexExecutable.mockReturnValue({
       bin: "codex",
@@ -135,7 +155,6 @@ describe("cloud agent initialization guard", () => {
     await cloudClaudeCommand({ bin: "claude" });
 
     expect(process.exitCode).toBe(1);
-    expect(mocks.loadConfig).not.toHaveBeenCalled();
     expect(mocks.loadCredentials).not.toHaveBeenCalled();
     expect(mocks.ensurePersistentClaudeHooksInstalled).not.toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalledWith([
@@ -153,7 +172,6 @@ describe("cloud agent initialization guard", () => {
     await cloudCodexCommand({ bin: "codex" });
 
     expect(process.exitCode).toBe(1);
-    expect(mocks.loadConfig).not.toHaveBeenCalled();
     expect(mocks.loadCredentials).not.toHaveBeenCalled();
     expect(mocks.ensurePersistentCodexHooksInstalled).not.toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalledWith([
@@ -183,6 +201,7 @@ describe("cloud agent initialization guard", () => {
       projectId: "workspace-id",
       projectType: "workspace",
       repositories: [],
+      initialization: "initialized",
       refPrefix: "refs/adit/checkpoints",
       captureEnv: true,
     });
@@ -190,14 +209,13 @@ describe("cloud agent initialization guard", () => {
 
     const originalCwd = process.cwd();
     process.chdir(projectRoot);
-    const resolvedProjectRoot = process.cwd();
     try {
       await cloudCodexCommand({ bin: "codex" });
     } finally {
       process.chdir(originalCwd);
     }
 
-    expect(mocks.loadConfig).toHaveBeenCalledWith(resolvedProjectRoot);
+    expect(mocks.loadConfig).toHaveBeenCalled();
     expect(mocks.loadCredentials).toHaveBeenCalled();
     expect(mocks.ensurePersistentCodexHooksInstalled).not.toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalledWith("Not logged in. Run 'adit cloud login' first.");

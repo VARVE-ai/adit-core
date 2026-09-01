@@ -85,6 +85,10 @@ Shows intents (development plans) and tasks from the connected adit-cloud projec
 - \`/adit intent\` — list all intents
 - \`/adit intent --state execution\` — show active intents
 
+> **Before linking:** the project must be initialized — run \`adit init\` in the project root once. Link only connects an already initialized project; it never changes the project structure.
+>
+> **Multi-repo projects:** start your coding tools from the project root — work across all member repositories is recorded there. Sessions started inside a member repository are not recorded.
+>
 > **Tip:** Not logged in? Run \`adit cloud login\` in your terminal first.
 `,
 };
@@ -278,9 +282,6 @@ const HOOK_MAPPINGS: HookMapping[] = [
   // /exit does not fire session.deleted; command.executed is intercepted
   // synchronously in the plugin to flush cloud sync before process exit.
   { platformEvent: "command.executed", aditHandler: "session-end" },
-  { platformEvent: "message.part.updated", aditHandler: "notification" },
-  { platformEvent: "session.diff", aditHandler: "notification" },
-  { platformEvent: "todo.updated", aditHandler: "task-completed" },
 ];
 
 /** Map OpenCode hook/event types to ADIT hook types */
@@ -292,8 +293,6 @@ const EVENT_TO_ADIT: Record<string, AditHookType> = {
   "session.created": "session-start",
   "session.deleted": "session-end",
   "session.error": "session-end",
-  "notification": "notification",
-  "task-completed": "task-completed",
 };
 
 /** Check if a file is an ADIT-generated plugin */
@@ -314,9 +313,6 @@ function isAditPlugin(content: string): boolean {
  * - session.created/deleted   → session-start/session-end
  * - session.error             → session-end
  * - command.executed          → session-end (exit/quit/q only, synchronous)
- * - message.part.updated      → notification (tool results, step finishes)
- * - session.diff              → notification (file-level diffs)
- * - todo.updated              → task-completed (AI task tracking)
  *
  * Note: OpenCode's Plugin API has no "stop" hook key. The equivalent is the
  * "session.idle" event, which fires when the assistant finishes a response.
@@ -356,6 +352,9 @@ const path = require("path");
 
 const ADIT_CMD = ${JSON.stringify(cmd)};
 const ADIT_BASE_ARGS = ${JSON.stringify(baseArgs)};
+// Fixed at install time — transcripts always land in the project's own
+// .adit directory, never in whatever directory the session started from.
+const ADIT_PROJECT_ROOT = ${projectRoot ? JSON.stringify(projectRoot) : "null"};
 
 function spawnAditHook(hookType, data) {
   try {
@@ -492,7 +491,7 @@ function fetchTranscript(cwd, sessionID) {
     }
 
     // Ensure transcript directory exists
-    var transcriptDir = path.join(cwd, ".adit", "transcripts");
+    var transcriptDir = path.join(ADIT_PROJECT_ROOT || cwd, ".adit", "transcripts");
     mkdirSync(transcriptDir, { recursive: true });
 
     var filePath = path.join(transcriptDir, "opencode-" + sessionID + ".jsonl");
@@ -719,77 +718,6 @@ exports.AditPlugin = async (ctx) => {
             break;
           }
 
-          // --- Message parts (tool results, step finishes) ---
-          case "message.part.updated": {
-            const part = props.part;
-            if (!part) break;
-
-            // Tool completion — captures tool name, input, output, timing
-            if (part.type === "tool" && part.state && part.state.status === "completed") {
-              spawnAditHook("notification", {
-                cwd,
-                session_id: part.sessionID,
-                notification_type: "tool_result",
-                title: part.state.title || part.tool,
-                message: "Tool " + part.tool + ": " + (part.state.title || "completed"),
-                tool_name: part.tool,
-                tool_input: part.state.input,
-                tool_output: part.state.output,
-                tool_time: part.state.time,
-                tool_metadata: part.state.metadata,
-              });
-            }
-
-            // Tool error
-            if (part.type === "tool" && part.state && part.state.status === "error") {
-              spawnAditHook("notification", {
-                cwd,
-                session_id: part.sessionID,
-                notification_type: "tool_error",
-                title: part.tool + " error",
-                message: "Tool " + part.tool + " failed: " + (part.state.error || "unknown"),
-                tool_name: part.tool,
-                tool_input: part.state.input,
-                error: part.state.error,
-              });
-            }
-
-            break;
-          }
-
-          // --- AI task tracking ---
-          case "todo.updated": {
-            const todos = props.todos;
-            if (!Array.isArray(todos)) break;
-
-            // Record the full todo list state as a notification so the
-            // complete task plan (pending, in_progress, completed) is
-            // captured and synced to the server.
-            spawnAditHook("notification", {
-              cwd,
-              session_id: props.sessionID,
-              notification_type: "todo_updated",
-              title: "Todo list updated (" + todos.length + " items)",
-              message: JSON.stringify(todos),
-            });
-
-            // Also emit individual task-completed events for completed
-            // todos (backward compatibility + semantic milestone tracking).
-            for (let i = 0; i < todos.length; i++) {
-              const todo = todos[i];
-              if (todo.status === "completed") {
-                spawnAditHook("task-completed", {
-                  cwd,
-                  session_id: props.sessionID,
-                  task_id: todo.id,
-                  task_subject: todo.content,
-                  task_description: "Priority: " + (todo.priority || "medium"),
-                });
-              }
-            }
-            break;
-          }
-
           // --- /exit, /quit, /q interception ---
           // session.deleted does NOT fire on /exit — OpenCode just terminates.
           // command.executed fires for ALL slash commands with { name, sessionID }.
@@ -824,6 +752,7 @@ exports.AditPlugin = async (ctx) => {
 export const opencodeAdapter: PlatformAdapter = {
   platform: "opencode" as Platform,
   displayName: "OpenCode",
+  cliBinary: "opencode",
   hookMappings: HOOK_MAPPINGS,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {

@@ -37,6 +37,7 @@ import {
   collectBranches,
   collectCommitLogs,
   collectCommitCount,
+  collectCommitFileStats,
   resolveCommitBranches,
   projectNameFromRemoteUrl,
 } from "./git-collector.js";
@@ -57,6 +58,13 @@ import { normalizeGitHubRepoKey } from "./repo-key.js";
 
 /** Maximum number of commits per upload batch */
 const COMMIT_BATCH_SIZE = 1000;
+
+/**
+ * Only the newest commits get changed-file lists attached. File lists
+ * feed cloud-side content attribution, which only matters for recent
+ * commits; skipping deep history keeps first-link sync fast and small.
+ */
+const COMMIT_FILE_STAT_LIMIT = 500;
 
 /** Minimum staleness before re-uploading branches (1 hour) */
 const BRANCH_STALE_MS = 60 * 60 * 1000;
@@ -154,7 +162,7 @@ async function linkWorkspaceProject(
   const repositorySet = repositoryPayloads(repositories);
   const commitDedupeState: WorkspaceCommitDedupeState = new Set();
   const totalStart = performance.now();
-  const log = options.json ? (() => {}) : console.log.bind(console);
+  const log = options.json || options.silent ? (() => {}) : console.log.bind(console);
 
   log("");
   log("Workspace project link");
@@ -208,6 +216,21 @@ async function linkWorkspaceProject(
     serverUrl,
     totalDurationMs,
   );
+
+  // Per-repository links run silent, so surface the same-remote notice from
+  // negotiate here — it only ever appears on the negotiate that created the
+  // project, and the user must see it in multi-repo mode too.
+  const similarProjects = results.flatMap((repoResult) => repoResult.similarProjects ?? []);
+  if (similarProjects.length > 0) {
+    result.similarProjects = similarProjects;
+    log("");
+    log("Note: your cloud account already has projects pointing at the same git remote:");
+    for (const similar of similarProjects) {
+      const lastActive = similar.lastActivityAt ? ` (last active ${similar.lastActivityAt.slice(0, 10)})` : "";
+      log(`  - ${similar.name || "(unnamed project)"}${lastActive}`);
+    }
+    log("This link created a NEW project; nothing was merged. If those are leftovers from another machine, delete them on the cloud settings page.");
+  }
 
   logWorkspaceSummary(result, failures, log);
 
@@ -286,9 +309,11 @@ async function linkRepositoryCommand(
   workspaceCommitDedupeState?: WorkspaceCommitDedupeState,
   internalOptions: LinkRepositoryInternalOptions = {},
 ): Promise<LinkResult> {
-  // In JSON mode, suppress progress output
-  const log = options.json || internalOptions.silent ? (() => {}) : console.log.bind(console);
-  const shouldWrapStepErrors = internalOptions.silent === true;
+  // In JSON or silent mode, suppress progress output
+  const log = options.json || options.silent || internalOptions.silent
+    ? (() => {})
+    : console.log.bind(console);
+  const shouldWrapStepErrors = internalOptions.silent === true || options.silent === true;
   const runStep = <T>(step: string, operation: () => Promise<T>): Promise<T> =>
     runLinkStep(step, operation, shouldWrapStepErrors);
   const runStepSync = <T>(step: string, operation: () => T): T =>
@@ -310,7 +335,9 @@ async function linkRepositoryCommand(
   }
 
   function endStep(stepName: string, stepStart: number): void {
-    stepTimings.push({ step: stepName, durationMs: Math.round(performance.now() - stepStart) });
+    const entry = { step: stepName, durationMs: Math.round(performance.now() - stepStart) };
+    stepTimings.push(entry);
+    options.onStepComplete?.(entry);
   }
 
   // Handle --force: clear local cache and server data
@@ -378,6 +405,15 @@ async function linkRepositoryCommand(
 
   log(`  Project confirmed: ${negotiate.projectName} (${confirmedProjectId.slice(0, 12)}...)`);
 
+  if (negotiate.similarProjects && negotiate.similarProjects.length > 0) {
+    log("  Note: your cloud account already has projects pointing at the same git remote:");
+    for (const similar of negotiate.similarProjects) {
+      const lastActive = similar.lastActivityAt ? ` (last active ${similar.lastActivityAt.slice(0, 10)})` : "";
+      log(`    - ${similar.name || "(unnamed project)"}${lastActive}`);
+    }
+    log("  This link created a NEW project; nothing was merged. If those are leftovers from another machine, delete them on the cloud settings page.");
+  }
+
   // Initialize or update cache. The cache key remains the local project ID;
   // confirmedProjectId is only the latest server ID seen for this login.
   const now = new Date().toISOString();
@@ -429,9 +465,18 @@ async function linkRepositoryCommand(
   log("\n[Step 2/6] Uploading git metadata...");
   const step2Start = startStep();
 
-  // 3a. Branches — collect once and reuse for commit branch resolution
+  // 3a. Branches — collect once and reuse for commit branch resolution.
+  // A refs fingerprint change bypasses the time-based cooldown so branch
+  // creations/deletions reach the server snapshot without waiting it out.
+  const currentRefsFingerprint = await runStep(currentStep, () => collectGitRefsFingerprint(projectRoot));
+  const cachedRefsFingerprint = typeof cache.docHashes[REFS_FINGERPRINT_CACHE_KEY] === "string"
+    ? cache.docHashes[REFS_FINGERPRINT_CACHE_KEY]
+    : null;
+  const refsChanged = Boolean(currentRefsFingerprint) &&
+    currentRefsFingerprint !== cachedRefsFingerprint;
   const branchesStale = !cache.lastBranchSyncAt ||
     (Date.now() - new Date(cache.lastBranchSyncAt).getTime() > BRANCH_STALE_MS) ||
+    refsChanged ||
     options.force;
 
   const allBranches = await runStep(currentStep, () => collectBranches(projectRoot));
@@ -474,7 +519,7 @@ async function linkRepositoryCommand(
       log(`  ${branchCount} branches, default: ${defaultBranch ?? "unknown"}`);
     }
   } else {
-    log("  Branches up to date (synced < 1 hour ago)");
+    log("  Branches up to date (refs unchanged, synced < 1 hour ago)");
   }
 
   // 3b. Commits
@@ -517,6 +562,21 @@ async function linkRepositoryCommand(
       if (commitsToUpload.length === 0) {
         log(`  ${commits.length} commits already uploaded by another workspace repository.`);
       } else {
+        // Attach changed-file lists to the newest commits (commits arrive
+        // newest-first from git log). Fail-open: an empty map only means
+        // uploads go out without file lists.
+        currentStep = "Collect commit file stats";
+        const fileStatTargets = commitsToUpload
+          .slice(0, COMMIT_FILE_STAT_LIMIT)
+          .map((c) => c.sha);
+        const fileStatsBySha = await runStep(currentStep, () =>
+          collectCommitFileStats(projectRoot, fileStatTargets)
+        );
+        for (const c of commitsToUpload) {
+          const files = fileStatsBySha.get(c.sha);
+          if (files && files.length > 0) c.files = files;
+        }
+
         for (let i = 0; i < commitsToUpload.length; i += COMMIT_BATCH_SIZE) {
           const batch = commitsToUpload.slice(i, i + COMMIT_BATCH_SIZE);
           currentStep = "Upload commits";
@@ -536,6 +596,7 @@ async function linkRepositoryCommand(
                   date: c.date,
                   message: c.message,
                   branch: c.branch,
+                  ...(c.files && c.files.length > 0 ? { files: c.files } : {}),
                 })),
               },
             )
@@ -781,6 +842,9 @@ async function linkRepositoryCommand(
     summaryPrompt,
     stepTimings,
     totalDurationMs,
+    ...(negotiate.similarProjects && negotiate.similarProjects.length > 0
+      ? { similarProjects: negotiate.similarProjects }
+      : {}),
   };
 }
 

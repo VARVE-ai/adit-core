@@ -6,14 +6,16 @@
  *
  * Sync is triggered when any of the following is true:
  * - `options.force` is true (used on session-end to flush all data), OR
- * - The number of unsynced records meets the configured threshold
- *   (ADIT_CLOUD_SYNC_THRESHOLD, default 20), OR
+ * - The number of unsynced events meets the configured threshold
+ *   (ADIT_CLOUD_SYNC_THRESHOLD, default 10). Only events count toward
+ *   the threshold; session records, diffs and plans ride along in the batch
+ *   once a sync is triggered. Environment snapshots remain local. OR
  * - More than syncTimeoutHours (default 2h) have elapsed since
  *   the last successful sync (ADIT_CLOUD_SYNC_TIMEOUT_HOURS).
  *
  * The time-based trigger is checked first using the already-loaded
- * sync_state row (single PK lookup), skipping the more expensive
- * multi-table COUNT queries when the timeout has elapsed.
+ * sync_state row (single PK lookup), skipping the events COUNT query
+ * when the timeout has elapsed.
  *
  * Failed syncs are not retried immediately — they will be picked up
  * on the next trigger when conditions are still met.
@@ -35,7 +37,7 @@ import {
 import { CloudClient } from "../http/client.js";
 import { CloudNetworkError, CloudAuthError } from "../http/errors.js";
 import { SyncEngine } from "./engine.js";
-import { countUnsyncedRecords } from "./serializer.js";
+import { countUnsyncedEvents } from "./serializer.js";
 import { repositoryPayloads, resolveCloudProjectContext } from "../project-context.js";
 
 /**
@@ -50,14 +52,14 @@ import { repositoryPayloads, resolveCloudProjectContext } from "../project-conte
  * 2. Resolve server URL: env var takes priority, falls back to credentials
  * 3. Auto-sync not explicitly disabled (ADIT_CLOUD_AUTO_SYNC !== "false")
  * 4. Time-based trigger: >syncTimeoutHours since last sync (skips count)
- * 5. Count-based trigger: unsynced record count >= syncThreshold
+ * 5. Count-based trigger: unsynced event count >= syncThreshold
  *
  * If any check fails, the function returns silently. Failed events
  * remain unsynced and will be retried on the next trigger.
  */
 export async function triggerAutoSync(
   db: Database.Database,
-  projectId: string,
+  _projectId: string,
   options?: { force?: boolean; projectRoot?: string },
 ): Promise<void> {
   const cloudConfig = loadCloudConfig();
@@ -98,6 +100,18 @@ export async function triggerAutoSync(
   if (process.env.ADIT_CLOUD_AUTO_SYNC === "false") return;
   if (process.env.ADIT_CLOUD_ENABLED === "false") return;
 
+  // 3b. Resolve the project once — the SAME config drives both the trigger
+  //     decision and the actual upload, so the two can never disagree about
+  //     which project this is. A damaged or un-migrated project never syncs.
+  let projectConfig: ReturnType<typeof loadConfig>;
+  try {
+    projectConfig = options?.projectRoot ? loadConfig(options.projectRoot) : loadConfig();
+  } catch {
+    return;
+  }
+  if (projectConfig.initialization !== "initialized") return;
+  const projectId = projectConfig.projectId;
+
   // 4. Check sync triggers (skipped when force=true, e.g. session-end)
   if (!options?.force) {
     const syncState = getSyncState(db, serverUrl);
@@ -112,10 +126,9 @@ export async function triggerAutoSync(
 
     // 4b. Count-based trigger: only run the expensive count if time didn't trigger
     if (!timeTriggered) {
-      const unsyncedCount = countUnsyncedRecords(
+      const unsyncedCount = countUnsyncedEvents(
         db,
         syncState?.lastSyncedEventId ?? null,
-        syncState?.lastSyncedAt ?? null,
         projectId,
       );
 
@@ -132,8 +145,6 @@ export async function triggerAutoSync(
   }
 
   try {
-    const projectRoot = options?.projectRoot ?? loadConfig().projectRoot;
-    const projectConfig = loadConfig(projectRoot);
     const projectContext = await resolveCloudProjectContext(projectConfig);
     // Tight budget: the hook process is hard-killed after 10s, so a dead
     // request must not eat the whole window in backoff loops.

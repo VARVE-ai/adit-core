@@ -32,8 +32,6 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "StopFailure", aditHandler: "stop" },
   { platformEvent: "SessionStart", aditHandler: "session-start" },
   { platformEvent: "SessionEnd", aditHandler: "session-end" },
-  { platformEvent: "TaskCompleted", aditHandler: "task-completed" },
-  { platformEvent: "Notification", aditHandler: "notification" },
   { platformEvent: "SubagentStart", aditHandler: "subagent-start" },
   { platformEvent: "SubagentStop", aditHandler: "subagent-stop" },
 ];
@@ -95,6 +93,10 @@ Shows intents (development plans) and tasks from the connected adit-cloud projec
 - \`/adit intent\` — list all intents
 - \`/adit intent --state execution\` — show active intents
 
+> **Before linking:** the project must be initialized — run \`adit init\` in the project root once. Link only connects an already initialized project; it never changes the project structure.
+>
+> **Multi-repo projects:** start your coding tools from the project root — work across all member repositories is recorded there. Sessions started inside a member repository are not recorded.
+>
 > **Tip:** Not logged in? Run \`adit cloud login\` in your terminal first.
 `,
 };
@@ -102,6 +104,7 @@ Shows intents (development plans) and tasks from the connected adit-cloud projec
 export const claudeCodeAdapter: PlatformAdapter = {
   platform: "claude-code" as Platform,
   displayName: "Claude Code",
+  cliBinary: "claude",
   hookMappings: HOOK_MAPPINGS,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {
@@ -172,8 +175,6 @@ export const claudeCodeAdapter: PlatformAdapter = {
           StopFailure: makeHookEntry("stop"),
           SessionStart: makeHookEntry("session-start"),
           SessionEnd: makeHookEntry("session-end"),
-          TaskCompleted: makeHookEntry("task-completed"),
-          Notification: makeHookEntry("notification"),
           SubagentStart: makeHookEntry("subagent-start"),
           SubagentStop: makeHookEntry("subagent-stop"),
         },
@@ -205,6 +206,8 @@ export const claudeCodeAdapter: PlatformAdapter = {
     const missingHooks: string[] = [];
     const staleHooks: string[] = [];
     const stalePinnedRoots = new Set<string>();
+    const brokenHooks: string[] = [];
+    const brokenScriptPaths = new Set<string>();
 
     for (const settingsPath of settingsFiles) {
       if (!existsSync(settingsPath)) continue;
@@ -218,11 +221,16 @@ export const claudeCodeAdapter: PlatformAdapter = {
             missingHooks.push(hookName);
             continue;
           }
-          const { status, stalePinnedRoots: roots } = classifyAditHookEntries(entries, projectRoot);
+          const { status, stalePinnedRoots: roots, brokenScriptPaths: missingScripts } =
+            classifyAditHookEntries(entries, projectRoot);
           if (status === "absent") missingHooks.push(hookName);
           if (status === "stale") {
             staleHooks.push(hookName);
             roots.forEach((root) => stalePinnedRoots.add(root));
+          }
+          if (status === "broken") {
+            brokenHooks.push(hookName);
+            missingScripts.forEach((scriptPath) => brokenScriptPaths.add(scriptPath));
           }
         }
 
@@ -232,6 +240,8 @@ export const claudeCodeAdapter: PlatformAdapter = {
           missingHooks,
           staleHooks,
           stalePinnedRoots: Array.from(stalePinnedRoots),
+          brokenHooks,
+          brokenScriptPaths: Array.from(brokenScriptPaths),
         });
         hooksFound = summary.ok;
         hooksDetail = summary.detail;

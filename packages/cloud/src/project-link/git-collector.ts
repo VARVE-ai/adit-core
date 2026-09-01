@@ -8,7 +8,7 @@
  */
 
 import { runGit, getRemoteUrl } from "@varveai/adit-engine";
-import type { GitBranch, GitCommit, GitIdentity } from "./types.js";
+import type { GitBranch, GitCommit, GitCommitFileStat, GitIdentity } from "./types.js";
 
 /** Collect the remote origin URL. Throws if no remote is configured. */
 export async function collectRemoteUrl(cwd: string): Promise<string> {
@@ -344,6 +344,115 @@ export async function resolveCommitBranches(
   }
 
   return commits;
+}
+
+/** Upper bound of files reported per commit (runaway guard for huge commits). */
+const MAX_FILES_PER_COMMIT = 200;
+
+/** Max shas per `git log --no-walk` invocation (Windows argv length safety). */
+const FILE_STAT_SHA_CHUNK = 300;
+
+/**
+ * Collect per-commit changed-file stats (numstat) for a set of commits.
+ *
+ * Runs `git log --no-walk --numstat` in sha chunks so only the requested
+ * commits are inspected — no history walk. Merge commits produce no
+ * numstat output by default and end up with an empty file list, which is
+ * intentional: content attribution has nothing to say about merges.
+ *
+ * Fail-safe: any git failure yields an empty map (commit file lists are
+ * an enrichment, never a sync blocker).
+ */
+export async function collectCommitFileStats(
+  cwd: string,
+  shas: string[],
+): Promise<Map<string, GitCommitFileStat[]>> {
+  const result = new Map<string, GitCommitFileStat[]>();
+  const unique = Array.from(new Set(shas.filter(Boolean)));
+
+  for (let i = 0; i < unique.length; i += FILE_STAT_SHA_CHUNK) {
+    const chunk = unique.slice(i, i + FILE_STAT_SHA_CHUNK);
+    const gitResult = await runGit(
+      ["log", "--no-walk=unsorted", "--numstat", "--format=%x00%H", ...chunk],
+      { cwd, timeout: 60_000 },
+    );
+    if (gitResult.exitCode !== 0) continue;
+    for (const [sha, files] of parseNumstatLog(gitResult.stdout)) {
+      result.set(sha, files);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Parse `git log --numstat --format=%x00%H` output into per-commit file
+ * stats. Each NUL-delimited record is the commit sha on the first line
+ * followed by numstat lines ("adds<TAB>dels<TAB>path"). Binary files
+ * report "-" for both counters and are kept with 0/0 — path presence is
+ * the signal that matters for content matching.
+ */
+export function parseNumstatLog(stdout: string): Map<string, GitCommitFileStat[]> {
+  const bySha = new Map<string, GitCommitFileStat[]>();
+
+  for (const record of stdout.split("\0")) {
+    const trimmed = record.trim();
+    if (!trimmed) continue;
+
+    const lines = trimmed.split("\n");
+    const sha = lines[0]?.trim();
+    if (!sha) continue;
+
+    const files: GitCommitFileStat[] = [];
+    for (const line of lines.slice(1)) {
+      if (files.length >= MAX_FILES_PER_COMMIT) break;
+      const parts = line.split("\t");
+      if (parts.length < 3) continue;
+      const additions = parseNumstatCount(parts[0]);
+      const deletions = parseNumstatCount(parts[1]);
+      const path = resolveNumstatPath(parts.slice(2).join("\t"));
+      if (!path) continue;
+      files.push({ path, additions, deletions });
+    }
+
+    bySha.set(sha, files);
+  }
+
+  return bySha;
+}
+
+/** "-" (binary) parses to 0; anything non-numeric parses to 0. */
+function parseNumstatCount(value: string | undefined): number {
+  const parsed = parseInt(value?.trim() ?? "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+/**
+ * Resolve a numstat path to the post-change path.
+ *
+ * Renames appear as "old => new" or with a shared prefix/suffix as
+ * "dir/{old => new}/file" (either side may be empty). We keep the NEW
+ * side, since attribution compares against diffs of the resulting tree.
+ */
+export function resolveNumstatPath(rawPath: string): string | null {
+  const trimmed = rawPath.trim();
+  if (!trimmed) return null;
+
+  const braceRename = /\{(.*?) => (.*?)\}/;
+  if (braceRename.test(trimmed)) {
+    return trimmed
+      .replace(braceRename, (_match, _from: string, to: string) => to)
+      .replace(/\/{2,}/g, "/")
+      .replace(/^\//, "");
+  }
+
+  const arrowIndex = trimmed.indexOf(" => ");
+  if (arrowIndex >= 0) {
+    const to = trimmed.slice(arrowIndex + 4).trim();
+    return to || null;
+  }
+
+  return trimmed;
 }
 
 /** Count total commits reachable from all local/remote branch refs. */

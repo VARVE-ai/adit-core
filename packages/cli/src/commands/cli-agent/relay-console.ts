@@ -62,6 +62,32 @@ export function restoreTerminalForReclaim(): void {
   } catch {}
 }
 
+export function beginTerminalReclaimInput(): boolean {
+  restoreTerminalForReclaim();
+  try {
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+      process.stdin.setRawMode(true);
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+export function endTerminalReclaimInput(): void {
+  try {
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+      process.stdin.setRawMode(false);
+    }
+  } catch {}
+}
+
+export function writeTerminalReclaimEcho(text: string): void {
+  if (!text || !process.stderr.isTTY) return;
+  try {
+    process.stderr.write(text);
+  } catch {}
+}
+
 export function describeRelayError(error: unknown): string {
   if (error instanceof CloudAuthError) {
     return "authentication failed — run 'adit cloud login' again";
@@ -77,6 +103,8 @@ export interface RelayNotices {
   notice(text: string): void;
   debug(text: string): void;
   cloudError(context: string, error: unknown): void;
+  takeoverStarted(): void;
+  takeoverFailed(): void;
   takenOverByWeb(): void;
   webOwnsReminder(): void;
   releasingToLocal(): void;
@@ -119,6 +147,12 @@ export function createRelayNotices(tool: RelayTool, opts: RelayNoticesOptions = 
       } else {
         line(`${context}: ${error instanceof Error ? error.message : String(error)}`);
       }
+    },
+    takeoverStarted(): void {
+      notice(`Web is taking over this session — local ${subject} will hand off shortly…`);
+    },
+    takeoverFailed(): void {
+      notice(`Web takeover failed — local ${subject} keeps control.`);
     },
     takenOverByWeb(): void {
       restoreTerminal();

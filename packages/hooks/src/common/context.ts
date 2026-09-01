@@ -7,11 +7,13 @@
  */
 
 import {
+  ProjectManifestError,
   loadConfig,
   openDatabase,
   getActiveSession,
   getSessionByPlatformSessionId,
   insertSession,
+  reviveSession,
   generateId,
   createClock,
   serialize,
@@ -43,7 +45,17 @@ export async function initHookContext(
   const projectRoot = options.projectRoot ?? null;
   if (!projectRoot) return null;
 
-  const config = loadHookConfig(projectRoot);
+  // Only a project with a valid manifest records events. Legacy projects
+  // (awaiting `adit init` migration) and damaged manifests skip silently —
+  // hooks must never mint an identity or block the agent.
+  let config: AditConfig;
+  try {
+    config = loadHookConfig(projectRoot);
+  } catch (err) {
+    if (err instanceof ProjectManifestError) return null;
+    throw err;
+  }
+  if (config.initialization !== "initialized") return null;
   if (!existsSync(config.dbPath)) return null;
 
   const db = openDatabase(config.dbPath);
@@ -54,6 +66,13 @@ export async function initHookContext(
   let session: AditSession | null = null;
   if (platformSessionId) {
     session = getSessionByPlatformSessionId(db, platformSessionId);
+    // Resume of a closed platform session: reattach to the same row instead
+    // of minting a duplicate, and reopen it so later lifecycle handling
+    // (session-end, stale sweeps) behaves normally.
+    if (session && session.status !== "active") {
+      reviveSession(db, session.id);
+      session = { ...session, status: "active", endedAt: null };
+    }
   } else {
     session = getActiveSession(db, config.projectId, config.clientId, platform);
   }

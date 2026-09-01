@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { describe, it, expect } from "vitest";
-import { getAdapter, listAdapters, detectPlatform, registerAdapter } from "./registry.js";
+import { getAdapter, listAdapters, detectPlatform, detectInstalledPlatforms, registerAdapter } from "./registry.js";
 import { claudeCodeAdapter } from "./claude-code.js";
 import { claudeVscodeAdapter } from "./claude-vscode.js";
 import { opencodeAdapter } from "./opencode.js";
@@ -100,9 +100,49 @@ describe("Adapter Registry", () => {
   });
 });
 
+describe("detectInstalledPlatforms", () => {
+  it("finds platforms whose CLI binary is on PATH", () => {
+    const onDisk = new Set(["/usr/local/bin/claude", "/opt/tools/codex"]);
+    const result = detectInstalledPlatforms({
+      env: { PATH: "/usr/local/bin:/opt/tools" },
+      fileExists: (path) => onDisk.has(path),
+      osPlatform: "darwin",
+    });
+    expect(result).toContain("claude-code");
+    expect(result).toContain("codex");
+    expect(result).not.toContain("gemini");
+    expect(result).not.toContain("opencode");
+  });
+
+  it("never returns platforms without a CLI binary (cursor, claude-vscode)", () => {
+    const result = detectInstalledPlatforms({
+      env: { PATH: "/bin" },
+      fileExists: () => true,
+      osPlatform: "darwin",
+    });
+    expect(result).not.toContain("cursor");
+    expect(result).not.toContain("claude-vscode");
+  });
+
+  it("returns nothing when PATH is empty or unset", () => {
+    expect(detectInstalledPlatforms({ env: {}, fileExists: () => true, osPlatform: "darwin" }))
+      .toEqual([]);
+  });
+
+  it("resolves Windows executables via PATHEXT", () => {
+    const expected = join("tools", "claude.CMD");
+    const result = detectInstalledPlatforms({
+      env: { PATH: "tools", PATHEXT: ".COM;.EXE;.BAT;.CMD" },
+      fileExists: (path) => path === expected,
+      osPlatform: "win32",
+    });
+    expect(result).toEqual(["claude-code"]);
+  });
+});
+
 describe("Claude Code Adapter", () => {
   it("has correct hook mappings", () => {
-    expect(claudeCodeAdapter.hookMappings).toHaveLength(9);
+    expect(claudeCodeAdapter.hookMappings).toHaveLength(7);
 
     const mappings = claudeCodeAdapter.hookMappings.map((m) => m.platformEvent);
     expect(mappings).toContain("UserPromptSubmit");
@@ -110,8 +150,9 @@ describe("Claude Code Adapter", () => {
     expect(mappings).toContain("StopFailure");
     expect(mappings).toContain("SessionStart");
     expect(mappings).toContain("SessionEnd");
-    expect(mappings).toContain("TaskCompleted");
-    expect(mappings).toContain("Notification");
+    // notification / task-completed collection was retired
+    expect(mappings).not.toContain("TaskCompleted");
+    expect(mappings).not.toContain("Notification");
     expect(mappings).toContain("SubagentStart");
     expect(mappings).toContain("SubagentStop");
     expect(mappings).not.toContain("PostToolUse");
@@ -233,8 +274,9 @@ describe("Claude Code Adapter", () => {
     expect(hooks.Stop).toBeDefined();
     expect(hooks.SessionStart).toBeDefined();
     expect(hooks.SessionEnd).toBeDefined();
-    expect(hooks.TaskCompleted).toBeDefined();
-    expect(hooks.Notification).toBeDefined();
+    // notification / task-completed collection was retired
+    expect(hooks.TaskCompleted).toBeUndefined();
+    expect(hooks.Notification).toBeUndefined();
     expect(hooks.SubagentStart).toBeDefined();
     expect(hooks.SubagentStop).toBeDefined();
 
@@ -251,7 +293,7 @@ describe("Claude Code Adapter", () => {
 
 describe("OpenCode Adapter", () => {
   it("has correct hook mappings", () => {
-    expect(opencodeAdapter.hookMappings.length).toBe(8);
+    expect(opencodeAdapter.hookMappings.length).toBe(5);
 
     const mappings = opencodeAdapter.hookMappings.map((m) => m.platformEvent);
     expect(mappings).toContain("chat.message");
@@ -264,9 +306,10 @@ describe("OpenCode Adapter", () => {
     expect(mappings).toContain("command.executed");
     // message.updated (assistant_metadata) removed — LLM cost/token tracking not needed
     expect(mappings).not.toContain("message.updated");
-    expect(mappings).toContain("message.part.updated");
-    expect(mappings).toContain("session.diff");
-    expect(mappings).toContain("todo.updated");
+    // notification / task-completed collection was retired
+    expect(mappings).not.toContain("message.part.updated");
+    expect(mappings).not.toContain("session.diff");
+    expect(mappings).not.toContain("todo.updated");
   });
 
   it("parseInput normalizes prompt-submit", () => {
@@ -422,9 +465,6 @@ describe("OpenCode Adapter", () => {
     expect(pluginContent).toContain("session.created");
     expect(pluginContent).toContain("session.deleted");
     expect(pluginContent).toContain("session.error");
-    // New events
-    expect(pluginContent).toContain("message.part.updated");
-    expect(pluginContent).toContain("todo.updated");
     // command.executed intercepts /exit synchronously
     expect(pluginContent).toContain("command.executed");
     expect(pluginContent).toContain("spawnAditHookSync");
@@ -435,12 +475,14 @@ describe("OpenCode Adapter", () => {
     expect(pluginContent).toContain("SIGTERM");
     // sessionEndFired flag prevents duplicate session-end calls
     expect(pluginContent).toContain("sessionEndFired");
-    // Notification types — assistant_metadata removed (LLM cost/token tracking not needed)
+    // notification / task-completed collection was retired: the plugin no
+    // longer listens for tool results, todo updates, or session diffs
     expect(pluginContent).not.toContain("message.updated");
     expect(pluginContent).not.toContain("assistant_metadata");
-    expect(pluginContent).toContain("tool_result");
-    expect(pluginContent).toContain("task-completed");
-    // Removed: step_finish and session_diff are no longer recorded
+    expect(pluginContent).not.toContain("message.part.updated");
+    expect(pluginContent).not.toContain("tool_result");
+    expect(pluginContent).not.toContain("todo.updated");
+    expect(pluginContent).not.toContain("task-completed");
     expect(pluginContent).not.toContain("step_finish");
     expect(pluginContent).not.toContain("session_diff");
     expect(pluginContent).not.toContain("session.diff");
@@ -500,7 +542,7 @@ describe("Claude Code VS Code Adapter", () => {
 
   it("shares hook mappings with claude-code adapter", () => {
     expect(claudeVscodeAdapter.hookMappings).toBe(claudeCodeAdapter.hookMappings);
-    expect(claudeVscodeAdapter.hookMappings).toHaveLength(9);
+    expect(claudeVscodeAdapter.hookMappings).toHaveLength(7);
   });
 
   it("parseInput overrides platformCli to claude-vscode", () => {

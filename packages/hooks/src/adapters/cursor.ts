@@ -209,6 +209,8 @@ export const cursorAdapter: PlatformAdapter = {
     const missingHooks: string[] = [];
     const staleHooks: string[] = [];
     const stalePinnedRoots = new Set<string>();
+    const brokenHooks: string[] = [];
+    const brokenScriptPaths = new Set<string>();
 
     if (existsSync(hooksPath)) {
       try {
@@ -222,21 +224,29 @@ export const cursorAdapter: PlatformAdapter = {
               missingHooks.push(hookName);
               continue;
             }
-            const { status, stalePinnedRoots: roots } = classifyAditHookEntries(entries, projectRoot);
+            const { status, stalePinnedRoots: roots, brokenScriptPaths: missingScripts } =
+              classifyAditHookEntries(entries, projectRoot);
             if (status === "absent") missingHooks.push(hookName);
             if (status === "stale") {
               staleHooks.push(hookName);
               roots.forEach((root) => stalePinnedRoots.add(root));
             }
+            if (status === "broken") {
+              brokenHooks.push(hookName);
+              missingScripts.forEach((scriptPath) => brokenScriptPaths.add(scriptPath));
+            }
           }
 
-          hooksFound = missingHooks.length === 0 && staleHooks.length === 0;
+          hooksFound = missingHooks.length === 0 && staleHooks.length === 0 &&
+            brokenHooks.length === 0;
           hooksDetail = describeHookValidation({
             configPath: hooksPath,
             projectRoot,
             missingHooks,
             staleHooks,
             stalePinnedRoots: Array.from(stalePinnedRoots),
+            brokenHooks,
+            brokenScriptPaths: Array.from(brokenScriptPaths),
           }).detail;
         }
       } catch {

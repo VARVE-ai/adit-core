@@ -10,10 +10,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   closeDatabase,
   createClock,
+  endSession,
+  getSessionById,
   insertSession,
   loadConfig,
   openDatabase,
   serialize,
+  writeProjectManifest,
 } from "@varveai/adit-core";
 import type Database from "better-sqlite3";
 
@@ -44,6 +47,15 @@ describe("initHookContext", () => {
     dir = tempDir();
     mkdirSync(join(dir, ".adit"), { recursive: true });
     dbPath = join(dir, ".adit", "adit.sqlite");
+    const now = new Date().toISOString();
+    writeProjectManifest(dir, {
+      schemaVersion: 1,
+      projectId: "11111111-2222-4333-8444-555555555555",
+      projectType: "repo",
+      repositories: [{ relativePath: "." }],
+      createdAt: now,
+      updatedAt: now,
+    });
     process.env.ADIT_PROJECT_ROOT = dir;
     process.env.ADIT_DATA_DIR = join(dir, ".adit");
     process.env.ADIT_DB_PATH = dbPath;
@@ -90,6 +102,37 @@ describe("initHookContext", () => {
     closeDatabase(ctx!.db);
   });
 
+  it("reattaches to a closed session on resume and revives it instead of duplicating", async () => {
+    insertSession(db, {
+      id: "resumed-session",
+      projectId,
+      clientId,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: "2026-05-11T02:00:00.000Z",
+      vclockJson: serialize(createClock(clientId)),
+      platformSessionId: "claude-platform-resume",
+    });
+    endSession(db, "resumed-session", "completed");
+
+    const { initHookContext } = await loadContextModule();
+    const ctx = await initHookContext(
+      dir,
+      "claude-code",
+      "claude-platform-resume",
+      { projectRoot: dir },
+    );
+
+    expect(ctx?.session.id).toBe("resumed-session");
+    expect(ctx?.session.status).toBe("active");
+    expect(ctx?.session.endedAt).toBeNull();
+    const persisted = getSessionById(ctx!.db, "resumed-session");
+    expect(persisted?.status).toBe("active");
+    expect(persisted?.endedAt).toBeNull();
+
+    closeDatabase(ctx!.db);
+  });
+
   it("reuses active session only when no platform session id is available", async () => {
     insertSession(db, {
       id: "legacy-session",
@@ -118,6 +161,15 @@ describe("initHookContext", () => {
     const childRepo = join(workspaceRoot, "adit-core");
     mkdirSync(join(childRepo, ".git"), { recursive: true });
     mkdirSync(join(workspaceRoot, ".adit"), { recursive: true });
+    const now = new Date().toISOString();
+    writeProjectManifest(workspaceRoot, {
+      schemaVersion: 1,
+      projectId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      projectType: "workspace",
+      repositories: [{ relativePath: "adit-core" }],
+      createdAt: now,
+      updatedAt: now,
+    });
     const workspaceDbPath = join(workspaceRoot, ".adit", "adit.sqlite");
     closeDatabase(openDatabase(workspaceDbPath));
 

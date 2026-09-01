@@ -9,6 +9,10 @@ import {
   insertSession,
   getActiveSession,
   getSessionById,
+  getSessionByPlatformSessionId,
+  reviveSession,
+  mergeSessionMetadata,
+  endSession,
   endStaleSessions,
 } from "./sessions.js";
 import { insertEvent } from "./events.js";
@@ -166,5 +170,133 @@ describe("endStaleSessions", () => {
     expect(getSessionById(db, "stale-codex")?.status).toBe("completed");
     expect(getSessionById(db, "stale-claude")?.status).toBe("active");
     expect(getSessionById(db, "current-codex")?.status).toBe("active");
+  });
+});
+
+
+describe("getSessionByPlatformSessionId resume reuse", () => {
+  let db: Database.Database;
+  let dbPath: string;
+
+  beforeEach(() => {
+    dbPath = tempDbPath();
+    db = openDatabase(dbPath);
+    insertSession(db, {
+      id: "ulid-1",
+      projectId: PROJECT,
+      clientId: CLIENT,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: isoHoursAgo(3),
+      vclockJson: "{}",
+      platformSessionId: "platform-abc",
+    });
+  });
+
+  afterEach(() => {
+    closeDatabase(db);
+    if (existsSync(dbPath)) unlinkSync(dbPath);
+  });
+
+  it("returns a closed session for the same platform session id instead of null", () => {
+    endSession(db, "ulid-1", "completed");
+
+    const found = getSessionByPlatformSessionId(db, "platform-abc");
+    expect(found?.id).toBe("ulid-1");
+    expect(found?.status).toBe("completed");
+  });
+
+  it("prefers a still-active row over a newer closed row", () => {
+    endSession(db, "ulid-1", "completed");
+    insertSession(db, {
+      id: "ulid-2",
+      projectId: PROJECT,
+      clientId: CLIENT,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: isoHoursAgo(1),
+      vclockJson: "{}",
+      platformSessionId: "platform-abc",
+    });
+
+    const found = getSessionByPlatformSessionId(db, "platform-abc");
+    expect(found?.id).toBe("ulid-2");
+    expect(found?.status).toBe("active");
+  });
+
+  it("reviveSession reopens a closed session and clears ended_at", () => {
+    endSession(db, "ulid-1", "completed");
+    reviveSession(db, "ulid-1");
+
+    const revived = getSessionById(db, "ulid-1");
+    expect(revived?.status).toBe("active");
+    expect(revived?.endedAt).toBeNull();
+  });
+});
+
+describe("mergeSessionMetadata", () => {
+  let db: Database.Database;
+  let dbPath: string;
+
+  beforeEach(() => {
+    dbPath = tempDbPath();
+    db = openDatabase(dbPath);
+  });
+
+  afterEach(() => {
+    closeDatabase(db);
+    if (existsSync(dbPath)) unlinkSync(dbPath);
+  });
+
+  function addSession(id: string, metadataJson?: string | null): void {
+    insertSession(db, {
+      id,
+      projectId: PROJECT,
+      clientId: CLIENT,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: isoHoursAgo(1),
+      vclockJson: "{}",
+      metadataJson: metadataJson ?? null,
+    });
+  }
+
+  function readMetadata(id: string): Record<string, unknown> {
+    return JSON.parse(getSessionById(db, id)?.metadataJson ?? "{}");
+  }
+
+  it("merges new keys while preserving existing metadata", () => {
+    addSession("s1", JSON.stringify({ gitBranch: "main", workingDirectory: "/repo" }));
+
+    mergeSessionMetadata(db, "s1", { model: "claude-fable-5", source: "startup" });
+
+    expect(readMetadata("s1")).toEqual({
+      gitBranch: "main",
+      workingDirectory: "/repo",
+      model: "claude-fable-5",
+      source: "startup",
+    });
+  });
+
+  it("overwrites values for keys present in the patch", () => {
+    addSession("s2", JSON.stringify({ model: "old-model", gitBranch: "main" }));
+
+    mergeSessionMetadata(db, "s2", { model: "new-model" });
+
+    expect(readMetadata("s2")).toEqual({ model: "new-model", gitBranch: "main" });
+  });
+
+  it("writes a fresh object when metadata is null or corrupt", () => {
+    addSession("s3", null);
+    mergeSessionMetadata(db, "s3", { model: "m1" });
+    expect(readMetadata("s3")).toEqual({ model: "m1" });
+
+    addSession("s4", "{not-json");
+    mergeSessionMetadata(db, "s4", { model: "m2" });
+    expect(readMetadata("s4")).toEqual({ model: "m2" });
+  });
+
+  it("is a no-op for an unknown session id", () => {
+    expect(() => mergeSessionMetadata(db, "missing", { model: "x" })).not.toThrow();
   });
 });

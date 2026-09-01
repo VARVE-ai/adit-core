@@ -68,7 +68,8 @@ describe("Codex CLI Hook Chaining", () => {
     expect(hooks.UserPromptSubmit).toBeDefined();
     expect(hooks.Stop).toBeDefined();
     expect(hooks.SessionStart).toBeDefined();
-    expect(hooks.PostToolUse).toBeDefined();
+    // notification collection was retired — fresh installs carry no PostToolUse
+    expect(hooks.PostToolUse).toBeUndefined();
 
     // Each event should have exactly one matcher group with one ADIT hook
     const stopEntries = hooks.Stop as Array<{ hooks: Array<{ command: string }> }>;
@@ -83,7 +84,7 @@ describe("Codex CLI Hook Chaining", () => {
     expect(userConfig).toContain(".codex/hooks.json:session_start:0:0");
     expect(userConfig).toContain(".codex/hooks.json:user_prompt_submit:0:0");
     expect(userConfig).toContain(".codex/hooks.json:stop:0:0");
-    expect(userConfig).toContain(".codex/hooks.json:post_tool_use:0:0");
+    expect(userConfig).not.toContain(".codex/hooks.json:post_tool_use:0:0");
     expect(userConfig).toContain("enabled = true");
     expect(userConfig).toContain("trusted_hash = \"sha256:");
   });
@@ -202,8 +203,6 @@ describe("Codex CLI Hook Chaining", () => {
     // ADIT hooks should also be present
     expect(hooks.SessionStart).toBeDefined();
     expect(hooks.Stop).toBeDefined();
-    expect(hooks.PostToolUse).toBeDefined();
-    expect(hooks.PostToolUse).toBeDefined();
   });
 
   it("preserves non-hook settings keys", async () => {
@@ -385,8 +384,8 @@ describe("Codex CLI Hook Chaining", () => {
   });
 
   describe("Hook mappings", () => {
-    it("has exactly 4 hook mappings", () => {
-      expect(codexAdapter.hookMappings).toHaveLength(4);
+    it("has exactly 3 hook mappings", () => {
+      expect(codexAdapter.hookMappings).toHaveLength(3);
     });
 
     it("maps UserPromptSubmit to prompt-submit", () => {
@@ -414,13 +413,9 @@ describe("Codex CLI Hook Chaining", () => {
       });
     });
 
-    it("maps PostToolUse to notification with matcher", () => {
+    it("does not register PostToolUse (notification collection retired)", () => {
       const mapping = codexAdapter.hookMappings.find(m => m.platformEvent === "PostToolUse");
-      expect(mapping).toEqual({
-        platformEvent: "PostToolUse",
-        aditHandler: "notification",
-        matcher: "Bash"
-      });
+      expect(mapping).toBeUndefined();
     });
   });
 
@@ -565,13 +560,29 @@ describe("Codex CLI Hook Chaining", () => {
             ],
             Stop: [
               { hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} stop`, timeout: 30 }] }
-            ],
-            PostToolUse: [
-              { matcher: "Bash", hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} notification`, timeout: 30 }] }
             ]
           }
         }
       });
+    });
+  });
+
+  describe("hasProjectHooks", () => {
+    it("ignores user-level trust residue after the project's .codex is deleted", async () => {
+      // The real-world pollution case: install writes project hooks AND a
+      // user-level trust block; wiping the project directory leaves the
+      // trust residue behind. hasHooks stays true (uninstall must clean the
+      // residue) but hasProjectHooks must not report the project connected.
+      await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+      rmSync(join(projectRoot, ".codex"), { recursive: true, force: true });
+
+      expect(await codexAdapter.hasHooks?.(projectRoot)).toBe(true);
+      expect(await codexAdapter.hasProjectHooks?.(projectRoot)).toBe(false);
+    });
+
+    it("reports true when the project hooks file carries ADIT entries", async () => {
+      await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+      expect(await codexAdapter.hasProjectHooks?.(projectRoot)).toBe(true);
     });
   });
 
@@ -623,7 +634,7 @@ describe("Codex CLI Hook Chaining", () => {
       expect(result.checks[1].ok).toBe(true);
       expect(result.checks[2].name).toBe("Codex hook trust");
       expect(result.checks[2].ok).toBe(false);
-      expect(result.checks[2].detail).toContain("4 hook(s) need review");
+      expect(result.checks[2].detail).toContain("3 hook(s) need review");
     });
 
     it("detects old ADIT hook commands as needing upgrade", async () => {

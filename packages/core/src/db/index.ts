@@ -6,6 +6,8 @@ export {
   getSessionById,
   getActiveSession,
   getSessionByPlatformSessionId,
+  reviveSession,
+  mergeSessionMetadata,
   endSession,
   endStaleSessions,
   listSessions,

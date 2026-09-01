@@ -21,6 +21,7 @@ interface CodexSessionState {
   seenKeys: Set<string>;
   lastAssistantMessageId?: string;
   activeModelId?: string;
+  reasoningEffort?: string;
   seenAssistantStops: Set<string>;
   seenHookToolResults: Set<string>;
 }
@@ -30,6 +31,10 @@ const MAX_TEXT_LENGTH = 12_000;
 export class CodexTranscriptSync {
   private readonly sessions = new Map<string, CodexSessionState>();
 
+  constructor(
+    private readonly onReasoningEffort?: (sessionId: string, effort: string | null) => void,
+  ) {}
+
   noteHook(input: NoteHookInput): string | null {
     const sessionId = input.sessionId ?? readSessionId(input.body);
     if (!sessionId) return null;
@@ -37,6 +42,9 @@ export class CodexTranscriptSync {
     const session = this.ensureSession(sessionId);
     const modelId = readModelId(input.body);
     if (modelId) session.activeModelId = modelId;
+    if (hasReasoningEffort(input.body)) {
+      this.noteReasoningEffort(session, readReasoningEffort(input.body));
+    }
 
     const transcriptPath = readString(input.body.transcript_path) ?? readString(input.body.transcriptPath);
     const isNewTranscript = Boolean(transcriptPath && transcriptPath !== session.transcriptPath);
@@ -251,6 +259,7 @@ export class CodexTranscriptSync {
     if (readString(obj.type) === "turn_context") {
       const modelId = readModelId(payload);
       if (modelId) session.activeModelId = modelId;
+      this.noteReasoningEffort(session, readReasoningEffort(payload));
       return [];
     }
 
@@ -412,6 +421,16 @@ export class CodexTranscriptSync {
     if (session.seenKeys.has(key)) return;
     session.seenKeys.add(key);
     events.push(event);
+  }
+
+  private noteReasoningEffort(
+    session: CodexSessionState,
+    effort: string | null,
+  ): void {
+    if (effort === (session.reasoningEffort ?? null)) return;
+    if (effort) session.reasoningEffort = effort;
+    else delete session.reasoningEffort;
+    this.onReasoningEffort?.(session.id, effort);
   }
 }
 
@@ -584,6 +603,22 @@ function readModelId(value: Record<string, unknown>): string | null {
   return readString(value.model) ??
     readString(value.activeModelId) ??
     readString(value.active_model_id);
+}
+
+function readReasoningEffort(value: Record<string, unknown>): string | null {
+  const effort = asRecord(value.effort);
+  return (
+    readString(value.reasoningEffort) ??
+    readString(value.reasoning_effort) ??
+    readString(value.effort) ??
+    readString(effort?.level)
+  );
+}
+
+function hasReasoningEffort(value: Record<string, unknown>): boolean {
+  return ["reasoningEffort", "reasoning_effort", "effort"].some((key) =>
+    Object.prototype.hasOwnProperty.call(value, key)
+  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

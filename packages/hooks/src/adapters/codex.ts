@@ -47,12 +47,12 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "SessionStart", aditHandler: "session-start", matcher: "startup|resume" },
   { platformEvent: "UserPromptSubmit", aditHandler: "prompt-submit" },
   { platformEvent: "Stop", aditHandler: "stop" },
-  { platformEvent: "PostToolUse", aditHandler: "notification", matcher: "Bash" },
 ];
 
 export const codexAdapter: PlatformAdapter = {
   platform: "codex" as Platform,
   displayName: "Codex",
+  cliBinary: "codex",
   hookMappings: HOOK_MAPPINGS,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {
@@ -115,7 +115,6 @@ export const codexAdapter: PlatformAdapter = {
           SessionStart: makeMatcherEntry("startup|resume", "session-start"),
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
-          PostToolUse: makeMatcherEntry("Bash", "notification"),
         },
       },
     };
@@ -141,6 +140,8 @@ export const codexAdapter: PlatformAdapter = {
     const missingHooks: string[] = [];
     const staleHooks: string[] = [];
     const stalePinnedRoots = new Set<string>();
+    const brokenHooks: string[] = [];
+    const brokenScriptPaths = new Set<string>();
 
     if (existsSync(hooksPath)) {
       try {
@@ -154,11 +155,16 @@ export const codexAdapter: PlatformAdapter = {
               missingHooks.push(hookName);
               continue;
             }
-            const { status, stalePinnedRoots: roots } = classifyAditHookEntries(entries, projectRoot);
+            const { status, stalePinnedRoots: roots, brokenScriptPaths: missingScripts } =
+              classifyAditHookEntries(entries, projectRoot);
             if (status === "absent") missingHooks.push(hookName);
             if (status === "stale") {
               staleHooks.push(hookName);
               roots.forEach((root) => stalePinnedRoots.add(root));
+            }
+            if (status === "broken") {
+              brokenHooks.push(hookName);
+              missingScripts.forEach((scriptPath) => brokenScriptPaths.add(scriptPath));
             }
           }
 
@@ -168,6 +174,8 @@ export const codexAdapter: PlatformAdapter = {
             missingHooks,
             staleHooks,
             stalePinnedRoots: Array.from(stalePinnedRoots),
+            brokenHooks,
+            brokenScriptPaths: Array.from(brokenScriptPaths),
           });
           hooksFound = summary.ok;
           hooksDetail = summary.detail;
@@ -301,6 +309,13 @@ export const codexAdapter: PlatformAdapter = {
     const trustConfig = readTextFile(resolveCodexHookTrustConfigPath());
     const marker = codexHookTrustMarkerForPath(hooksPath);
     return trustConfig !== null && trustConfig.includes(`>>> ${ADIT_CODEX_HOOK_TRUST_BLOCK} ${marker}`);
+  },
+
+  async hasProjectHooks(projectRoot: string): Promise<boolean> {
+    // Project files only: leftover user-level trust config (which survives
+    // deleting the project's .codex/) must not make a fresh project look
+    // connected. hasHooks keeps the looser semantics for uninstall cleanup.
+    return configHasAditHooks(join(projectRoot, ".codex", "hooks.json"));
   },
 
   async uninstallHooks(projectRoot: string): Promise<void> {

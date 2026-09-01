@@ -5,10 +5,12 @@
  * command handlers from @varveai/adit-cloud/project-link.
  */
 
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   openDatabase,
   closeDatabase,
-  discoverWorkspaceRepositories,
+  type AditConfig,
 } from "@varveai/adit-core";
 import {
   loadCloudConfig,
@@ -25,27 +27,72 @@ import {
   formatIntentDetail,
   DEFAULT_SERVER_URL,
 } from "@varveai/adit-cloud";
-import type { LinkOptions, IntentOptions } from "@varveai/adit-cloud";
-import { isGitRepo } from "@varveai/adit-engine";
+import type { LinkOptions, LinkResult, IntentOptions } from "@varveai/adit-cloud";
+import { getRemoteUrl } from "@varveai/adit-engine";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
+
+interface RepositoryPrecheckIssue {
+  label: string;
+  problem: "missing" | "no-origin";
+}
+
+/**
+ * Validate every manifest repository locally — existence and origin — so all
+ * problems are reported at once, before any authentication or network call.
+ */
+async function precheckManifestRepositories(config: AditConfig): Promise<RepositoryPrecheckIssue[]> {
+  const issues: RepositoryPrecheckIssue[] = [];
+  for (const repository of config.repositories) {
+    const label = repository.relativePath === "." ? repository.displayName : repository.relativePath;
+    if (!existsSync(join(repository.path, ".git"))) {
+      issues.push({ label, problem: "missing" });
+      continue;
+    }
+    const remoteUrl = await getRemoteUrl(repository.path).catch(() => null);
+    if (!remoteUrl) {
+      issues.push({ label, problem: "no-origin" });
+    }
+  }
+  return issues;
+}
+
+function reportPrecheckIssues(issues: RepositoryPrecheckIssue[]): void {
+  console.error("Cannot link this project yet:");
+  for (const issue of issues) {
+    if (issue.problem === "missing") {
+      console.error(`  - ${issue.label}: repository is missing or no longer a Git repository.`);
+    } else {
+      console.error(`  - ${issue.label}: no git remote 'origin'. Add one with: git remote add origin <url>`);
+    }
+  }
+  if (issues.some((issue) => issue.problem === "missing")) {
+    console.error("\nIf the project structure changed, re-run 'adit init' to update the repository list.");
+  }
+}
 
 /**
  * `adit cloud link` — Link this project to adit-cloud.
+ *
+ * Returns the link result on success so callers embedding the link flow
+ * (adit init) can render their own summary; null on any failure.
  */
-export async function projectLinkCliHandler(opts: LinkOptions): Promise<void> {
+export async function projectLinkCliHandler(opts: LinkOptions): Promise<LinkResult | null> {
   const config = loadInitializedProjectConfig("adit cloud link");
-  if (!config) return;
+  if (!config) return null;
 
-  // Prerequisite: git repo or initialized workspace with child repos
-  if (config.projectType !== "workspace" && !(await isGitRepo(config.projectRoot))) {
-    console.error("Not a git repository. Run this from within a git project.");
+  // Local validation first — all problems reported before auth or network.
+  const issues = await precheckManifestRepositories(config);
+  if (issues.length > 0) {
+    reportPrecheckIssues(issues);
     process.exitCode = 1;
-    return;
+    return null;
   }
-  if (config.projectType === "workspace" && discoverWorkspaceRepositories(config.projectRoot).length === 0) {
-    console.error("No Git repositories found one level below this workspace.");
-    process.exitCode = 1;
-    return;
+  if (!opts.json && !opts.silent) {
+    console.log("Checking project repositories...");
+    for (const repository of config.repositories) {
+      const label = repository.relativePath === "." ? repository.displayName : repository.relativePath;
+      console.log(`  [+] ${label}`);
+    }
   }
 
   // Prerequisite: credentials
@@ -56,10 +103,10 @@ export async function projectLinkCliHandler(opts: LinkOptions): Promise<void> {
       "Run 'adit cloud login' to authenticate, or 'adit cloud login --token <token>' for token auth.",
     );
     process.exitCode = 1;
-    return;
+    return null;
   }
 
-  if (isTokenExpired(credentials) && credentials.authType !== "token") {
+  if (isTokenExpired(credentials) && credentials.authType !== "token" && !opts.silent) {
     // CloudClient will attempt auto-refresh — just warn
     console.log("Token expired — will attempt auto-refresh...");
   }
@@ -87,11 +134,11 @@ export async function projectLinkCliHandler(opts: LinkOptions): Promise<void> {
       );
     }
     process.exitCode = 1;
-    return;
+    return null;
   }
 
-  // Suppress non-JSON output in JSON mode
-  if (!opts.json) {
+  // Suppress non-JSON output in JSON/silent mode
+  if (!opts.json && !opts.silent) {
     console.log(`Authenticated on ${serverUrl}`);
   }
 
@@ -109,6 +156,7 @@ export async function projectLinkCliHandler(opts: LinkOptions): Promise<void> {
     if (opts.json) {
       console.log(JSON.stringify(result, null, 2));
     }
+    return result;
   } catch (error) {
     if (error instanceof WorkspaceLinkPartialFailureError) {
       if (opts.json) {
@@ -135,6 +183,7 @@ export async function projectLinkCliHandler(opts: LinkOptions): Promise<void> {
       );
     }
     process.exitCode = 1;
+    return null;
   } finally {
     closeDatabase(db);
   }

@@ -2,6 +2,8 @@ import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import { getCurrentBranch } from "@varveai/adit-engine";
 import type {
+  AppendSessionContextInput,
+  AppendSessionContextResult,
   CliAgentProvider,
   CliAgentRelayEvent,
   CliAgentState,
@@ -12,6 +14,8 @@ import type {
   CliAgentContextUsage,
   CliAgentTokenUsage,
   PromptImageAttachment,
+  StartCollaborationConsultationInput,
+  StartCollaborationConsultationResult,
 } from "../types.js";
 import {
   CodexAppServerClient,
@@ -51,16 +55,15 @@ import {
   buildApprovalResponse,
   buildQuestionResponse,
 } from "./requests.js";
-import {
-  applyReclaimText,
-  normalizeCodexReclaimInput,
-  stopLocalCodexProcess,
-} from "./terminal.js";
+import { stopLocalCodexProcess } from "./terminal.js";
+import { applyReclaimInput } from "../reclaim-input.js";
 import {
   RECLAIM_COMMAND,
+  beginTerminalReclaimInput,
   createRelayNotices,
-  restoreTerminalForReclaim,
+  endTerminalReclaimInput,
   type RelayNotices,
+  writeTerminalReclaimEcho,
 } from "../relay-console.js";
 import {
   buildCodexContextUsage,
@@ -73,10 +76,11 @@ import {
 import { emitCodexThreadItem } from "./thread-items.js";
 export { promptInputForCodexMode, codexThreadModeOverrides, codexTurnModeOverrides } from "./input-mode.js";
 export type { CodexPromptMode } from "./input-mode.js";
-export { normalizeCodexReclaimInput } from "./terminal.js";
+export { normalizeReclaimInput as normalizeCodexReclaimInput } from "../reclaim-input.js";
 import { killCliProcessTree, spawnCliProcess } from "../cli-process.js";
 import {
   isCodexThreadSavedForCwd,
+  readMaxCodexLogId,
   startCodexResumeLogWatcher,
   type CodexResumeLogWatcher,
 } from "./codex-resume-log-watcher.js";
@@ -84,6 +88,10 @@ import {
   startCodexModelConfigWatcher,
   type CodexModelConfigWatcher,
 } from "./codex-model-config-watcher.js";
+import {
+  CodexProviderCollaboration,
+  type CodexCollaborationPromptMarker,
+} from "./provider-collaboration.js";
 
 interface PendingPrompt {
   message: string;
@@ -93,6 +101,7 @@ interface PendingPrompt {
   localMessageId: string | null;
   /** Session the prompt was addressed to when enqueued; null means "whatever is active". */
   targetSessionId: string | null;
+  collaboration: CodexCollaborationPromptMarker | null;
   resolve: () => void;
   reject: (error: Error) => void;
 }
@@ -101,6 +110,7 @@ interface CodexCliProviderOptions {
   bin: string;
   args: string[];
   cwd: string;
+  dataDir?: string;
   hookEndpoint?: string;
   hookMarker?: string;
   onEvent?: (event: CliAgentRelayEvent) => void;
@@ -108,6 +118,7 @@ interface CodexCliProviderOptions {
 }
 
 const BRANCH_REFRESH_INTERVAL_MS = 5_000;
+export const CODEX_LOCAL_WRITER_RELEASE_RETRY_DELAYS_MS = [100, 250, 500, 750] as const;
 
 export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   readonly provider = "codex" as const;
@@ -120,6 +131,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private resumeSessionId: string | null = null;
   private sdkSessionId: string | null = null;
   private activeModelId: string | null = null;
+  private reasoningEffortValue: string | null = null;
   private currentBranch: string | null = null;
   private branchRefreshAt = 0;
   private branchRefreshPromise: Promise<void> | null = null;
@@ -130,11 +142,13 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private lastTokenUsageBySession = new Map<string, CliAgentTokenUsage>();
   private contextWindowBySession = new Map<string, number>();
   private threadModelBySession = new Map<string, string>();
+  private reasoningEffortBySession = new Map<string, string>();
   private promptQueue: PendingPrompt[] = [];
   private promptActive = false;
   private activeTurnId: string | null = null;
   private activeTurnErrorNotice: { turnId: string; message: string | null } | null = null;
   private activePromptMode: CodexPromptMode | null = null;
+  private readonly collaboration: CodexProviderCollaboration;
   private loadedThreadIds = new Set<string>();
   private emptyThreadIds = new Set<string>();
   private boundPendingSessionIds = new Set<string>();
@@ -143,6 +157,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private lastAssistantMessageBySession = new Map<string, string>();
   private reclaimAttached = false;
   private reclaimBuffer = "";
+  private reclaimManualEcho = false;
   private suppressNextLocalExit = false;
   private supportedAppServerMethods = new Set<string>();
   private slashCommandsByName = new Map<string, CliSlashCommandInfo>();
@@ -157,6 +172,12 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   constructor(private readonly opts: CodexCliProviderOptions) {
     super();
     this.notices = opts.notices ?? createRelayNotices("codex");
+    this.collaboration = new CodexProviderCollaboration({
+      cwd: opts.cwd,
+      dataDir: opts.dataDir,
+      emitEvent: (type, payload) => this.pushEvent(type, payload),
+      debug: (message) => this.notices.debug(message),
+    });
     this.startLocal();
   }
 
@@ -170,6 +191,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       resumeSessionId: this.resumeSessionId,
       sdkSessionId: this.sdkSessionId,
       activeModelId: this.activeModelId,
+      reasoningEffort: this.reasoningEffortValue,
       currentBranch: this.currentBranch,
       contextUsage: this.contextUsage,
       lastTokenUsage: this.lastTokenUsage,
@@ -202,13 +224,37 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.emitState();
   }
 
+  noteReasoningEffort(
+    effort: string | null | undefined,
+    sessionId?: string | null,
+  ): void {
+    if (effort === undefined) return;
+    const normalized = readString(effort);
+    if (sessionId) {
+      if (normalized) this.reasoningEffortBySession.set(sessionId, normalized);
+      else this.reasoningEffortBySession.delete(sessionId);
+    }
+    if (
+      sessionId &&
+      sessionId !== this.activeSessionId &&
+      sessionId !== this.resumeSessionId
+    ) {
+      return;
+    }
+    if (normalized === this.reasoningEffortValue) return;
+    this.reasoningEffortValue = normalized;
+    this.emitState();
+  }
+
   noteLocalSession(id: string): void {
     if (!id) return;
+    this.localResumeLogWatcher?.claimProcessForThread(id);
     const changed = this.activeSessionId !== id || this.resumeSessionId !== id;
     this.activeSessionId = id;
     this.resumeSessionId = id;
     this.sdkSessionId = id;
     this.applyStoredUsageForSession(id);
+    this.reasoningEffortValue = this.reasoningEffortBySession.get(id) ?? null;
     if (!changed) return;
     this.emitState();
   }
@@ -239,21 +285,71 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       });
     }
 
-    await this.ensureAppServer();
-    await this.hydrateAppServerCapabilities();
-    const resumeId = this.activeSessionId ?? this.resumeSessionId;
-    if (resumeId) {
-      await this.resumeThread(resumeId);
-    } else {
-      await this.startThread("build");
-    }
+    // Announced before the slow prep (app-server spawn, capability hydrate,
+    // thread resume) so the local terminal sees the takeover begin at the
+    // same moment the web button starts waiting.
+    this.notices.takeoverStarted();
+    let resumeId: string | null = null;
+    let localReleased = false;
+    let detachedLocal: ChildProcess | null | undefined;
+    try {
+      await this.ensureAppServer();
+      await this.hydrateAppServerCapabilities();
+      if (this.ownerValue !== "local") {
+        throw Object.assign(new Error("local Codex owner is not available"), {
+          statusCode: 409,
+        });
+      }
+      if (this.busyValue || this.thinkingValue) {
+        throw Object.assign(new Error("local Codex is busy"), {
+          statusCode: 409,
+        });
+      }
+      resumeId = this.activeSessionId ?? this.resumeSessionId;
 
-    const oldLocal = this.local;
-    this.suppressNextLocalExit = Boolean(oldLocal);
-    this.local = null;
-    this.stopLocalResumeLogWatcher();
-    this.stopLocalModelConfigWatcher();
-    await stopLocalCodexProcess(oldLocal);
+      // Codex permits only one writer per persisted thread. Release the local
+      // TUI before app-server resumes that thread, otherwise sessions with
+      // history fail with "already has an active writer".
+      const oldLocal = this.local;
+      detachedLocal = oldLocal;
+      this.suppressNextLocalExit = Boolean(oldLocal);
+      this.local = null;
+      this.stopLocalModelConfigWatcher();
+      const localExited = await stopLocalCodexProcess(oldLocal);
+      this.suppressNextLocalExit = false;
+      if (!localExited) {
+        throw Object.assign(new Error("local Codex did not exit during Web takeover"), {
+          statusCode: 409,
+        });
+      }
+      this.stopLocalResumeLogWatcher();
+      localReleased = true;
+
+      if (resumeId) {
+        await this.resumeThreadAfterLocalExit(resumeId);
+      } else {
+        await this.startThread("build");
+      }
+    } catch (error) {
+      this.appServer?.stop();
+      this.appServer = null;
+      this.loadedThreadIds = new Set<string>();
+      this.emptyThreadIds = new Set<string>();
+      this.suppressNextLocalExit = false;
+      if (localReleased) {
+        this.startLocal(resumeId ? ["resume", resumeId] : []);
+      } else if (detachedLocal !== undefined) {
+        this.local = detachedLocal;
+        if (detachedLocal) {
+          if (!this.localResumeLogWatcher) {
+            this.startLocalResumeLogWatcher(detachedLocal);
+          }
+          this.startLocalModelConfigWatcher(detachedLocal);
+        }
+      }
+      this.notices.takeoverFailed();
+      throw error;
+    }
 
     this.ownerValue = "web";
     this.emitState();
@@ -268,6 +364,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     await this.finishActiveRunAsAborted({
       errorMessage: "Web control released to local CLI",
       eventMessage: "Web control released to local CLI.",
+      collaborationErrorCode: "LOCAL_TAKEOVER_DURING_RUN",
       interruptTurn: true,
     });
     this.appServer?.stop();
@@ -298,6 +395,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     await this.finishActiveRunAsAborted({
       errorMessage: "Codex session switched",
       eventMessage: "Codex session switched.",
+      collaborationErrorCode: "EXECUTION_ABORTED",
       interruptTurn: true,
     });
     const threadId = await this.startThread("build");
@@ -340,6 +438,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       await this.finishActiveRunAsAborted({
         errorMessage: "Codex session switched",
         eventMessage: "Codex session switched.",
+        collaborationErrorCode: "EXECUTION_ABORTED",
         interruptTurn: true,
       });
       await this.ensureAppServer();
@@ -352,6 +451,12 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       this.setThinking(false);
       return;
     }
+  }
+
+  async appendSessionContext(
+    input: AppendSessionContextInput,
+  ): Promise<AppendSessionContextResult> {
+    return this.collaboration.appendContext(input);
   }
 
   async sendPrompt(
@@ -383,11 +488,60 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
         targetSessionId: opts.pendingSessionId
           ? null
           : opts.sessionId ?? this.activeSessionId ?? this.resumeSessionId,
+        collaboration: null,
         resolve,
         reject,
       });
       void this.drainPromptQueue();
     });
+  }
+
+  async startCollaborationConsultation(
+    input: StartCollaborationConsultationInput,
+  ): Promise<StartCollaborationConsultationResult> {
+    if (this.ownerValue !== "web") {
+      throw Object.assign(new Error("Web has not taken over this Codex session"), {
+        statusCode: 409,
+      });
+    }
+    if (
+      this.collaboration.active
+      || this.promptActive
+      || this.busyValue
+      || this.thinkingValue
+      || this.promptQueue.length > 0
+    ) {
+      throw Object.assign(new Error("Codex is currently running another task"), {
+        statusCode: 409,
+      });
+    }
+    const currentSessionId = this.activeSessionId ?? this.resumeSessionId;
+    if (!currentSessionId || currentSessionId !== input.targetSessionId) {
+      throw Object.assign(new Error("Codex session changed before collaboration delivery"), {
+        statusCode: 409,
+      });
+    }
+    return this.collaboration.start(
+      input,
+      (question, collaboration) => new Promise<void>((resolve, reject) => {
+        this.promptQueue.push({
+          message: question,
+          attachments: [],
+          mode: "plan",
+          pendingSessionId: null,
+          localMessageId: `collaboration_${input.runId}`,
+          targetSessionId: input.targetSessionId,
+          collaboration,
+          resolve,
+          reject,
+        });
+        void this.drainPromptQueue();
+      }),
+      () => ({
+        sessionId: input.targetSessionId,
+        providerRunId: this.activeTurnId,
+      }),
+    );
   }
 
   async steerPrompt(
@@ -690,6 +844,8 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     await this.finishActiveRunAsAborted({
       errorMessage: "Codex run aborted",
       eventMessage: "Codex run aborted.",
+      collaborationErrorMessage: "Collaboration stopped by user",
+      collaborationErrorCode: "USER_STOPPED",
       interruptTurn: true,
     });
   }
@@ -698,6 +854,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.finishActiveRunAsAborted({
       errorMessage: "Codex provider stopped",
       eventMessage: "Codex provider stopped.",
+      collaborationErrorCode: "EXECUTION_ABORTED",
       interruptTurn: false,
     });
     this.detachReclaimInput();
@@ -706,6 +863,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     killCliProcessTree(this.local);
     this.stopLocalResumeLogWatcher();
     this.stopLocalModelConfigWatcher();
+    this.collaboration.close();
     this.local = null;
     this.ownerValue = "stopped";
     this.setThinking(false);
@@ -724,6 +882,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     // replayed to future viewers; the next takeover re-hydrates instead.
     this.appServer?.stop();
     this.appServer = null;
+    const resumeLogWatermark = readMaxCodexLogId();
     const child = spawnCliProcess(this.opts.bin, [...extraArgs, ...this.opts.args], {
       cwd: this.opts.cwd,
       env: this.buildEnv(),
@@ -734,7 +893,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     });
     this.local = child;
     this.ownerValue = "local";
-    this.startLocalResumeLogWatcher(child);
+    this.startLocalResumeLogWatcher(child, resumeLogWatermark);
     this.startLocalModelConfigWatcher(child);
     this.emitState();
 
@@ -772,9 +931,13 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     });
   }
 
-  private startLocalResumeLogWatcher(child: ChildProcess): void {
+  private startLocalResumeLogWatcher(
+    child: ChildProcess,
+    afterLogId = readMaxCodexLogId(),
+  ): void {
     this.localResumeLogWatcher = startCodexResumeLogWatcher({
       cwd: this.opts.cwd,
+      afterLogId,
       onResume: (threadId) => {
         if (this.ownerValue !== "local" || this.local !== child) return;
         this.noteLocalSession(threadId);
@@ -829,10 +992,16 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     }
     this.promptActive = true;
     this.activePromptMode = item.mode;
+    let contextClaim: Awaited<ReturnType<CodexProviderCollaboration["claimContext"]>>["claim"] = null;
+    let providerAcceptedPrompt = false;
     try {
       await this.ensureAppServer();
       const threadId = await this.ensureThreadForPrompt(item.pendingSessionId, item.mode);
       await this.applyActiveModelToThread(threadId, this.activeModelId);
+      const context = item.collaboration
+        ? { claim: null, text: null }
+        : await this.collaboration.claimContext(threadId, false);
+      contextClaim = context.claim;
       this.pushEvent("message", {
         role: "user",
         sessionId: threadId,
@@ -843,19 +1012,46 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
         mode: item.mode,
         createdAt: Date.now(),
       });
+      const modelPrompt = this.collaboration.modelPrompt(item.message, item.collaboration);
       const result = asRecord(await this.appServer?.request("turn/start", {
         threadId,
-        input: await codexInputItems(item.message, item.mode, item.attachments),
+        input: [
+          ...(context.text
+            ? [{ type: "text", text: context.text, text_elements: [] }]
+            : []),
+          ...await codexInputItems(modelPrompt, item.mode, item.attachments),
+        ],
         cwd: this.opts.cwd,
         ...codexTurnModeOverrides(item.mode),
       }));
+      providerAcceptedPrompt = true;
       const turn = asRecord(result?.turn);
-      this.activeTurnId = readString(turn?.id) ?? this.activeTurnId;
+      const startedTurnId = readString(turn?.id);
+      if (item.collaboration && !startedTurnId) {
+        this.appServer?.stop();
+        this.appServer = null;
+        this.loadedThreadIds = new Set<string>();
+        this.emptyThreadIds = new Set<string>();
+        this.collaboration.fail(
+          "Codex did not return collaboration run identifiers",
+          threadId,
+          null,
+        );
+        throw new Error("Codex did not return collaboration run identifiers");
+      }
+      this.activeTurnId = startedTurnId ?? this.activeTurnId;
+      if (item.collaboration) {
+        this.collaboration.markStarted(item.collaboration.runId, threadId, this.activeTurnId);
+      }
+      await this.collaboration.commitContext(contextClaim, this.activeTurnId);
       this.emptyThreadIds.delete(threadId);
       this.setBusy(true);
       this.setThinking(true);
       item.resolve();
     } catch (error) {
+      if (contextClaim && !providerAcceptedPrompt) {
+        await this.collaboration.releaseContext(contextClaim);
+      }
       this.activePromptMode = null;
       item.reject(error instanceof Error ? error : new Error(String(error)));
       this.pushEvent("error", {
@@ -966,6 +1162,27 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     await this.applyActiveModelToThread(resumedId, preferredModelId);
   }
 
+  private async resumeThreadAfterLocalExit(threadId: string): Promise<void> {
+    for (
+      let attempt = 0;
+      attempt <= CODEX_LOCAL_WRITER_RELEASE_RETRY_DELAYS_MS.length;
+      attempt += 1
+    ) {
+      try {
+        await this.resumeThread(threadId);
+        return;
+      } catch (error) {
+        if (
+          !isCodexActiveWriterError(error) ||
+          attempt >= CODEX_LOCAL_WRITER_RELEASE_RETRY_DELAYS_MS.length
+        ) {
+          throw error;
+        }
+        await delay(CODEX_LOCAL_WRITER_RELEASE_RETRY_DELAYS_MS[attempt]);
+      }
+    }
+  }
+
   /**
    * Turn-level notifications may arrive late from a thread we already
    * switched away from; only the current thread may mutate shared state.
@@ -1030,6 +1247,13 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
           this.noteModel(modelId);
         }
       }
+      if (
+        sessionId &&
+        settings &&
+        Object.prototype.hasOwnProperty.call(settings, "effort")
+      ) {
+        this.noteReasoningEffort(readString(settings.effort), sessionId);
+      }
       return;
     }
 
@@ -1066,6 +1290,13 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
           });
         }
       }
+      const error = asRecord(turn?.error);
+      this.collaboration.completeTurn({
+        status,
+        sessionId: threadId,
+        providerRunId: turnId,
+        error: readString(error?.message),
+      });
       if (!this.isCurrentThreadNotification(threadId)) return;
       this.activeTurnId = null;
       this.activePromptMode = null;
@@ -1084,7 +1315,16 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     }
 
     if (method === "item/completed") {
-      this.emitThreadItem(asRecord(params.item), {
+      const item = asRecord(params.item);
+      const itemThreadId = readString(params.threadId);
+      if (readString(item?.type) === "agentMessage") {
+        this.collaboration.captureAnswer({
+          sessionId: itemThreadId,
+          text: readString(item?.text),
+          messageId: readString(item?.id),
+        });
+      }
+      this.emitThreadItem(item, {
         threadId: readString(params.threadId),
         running: false,
       });
@@ -1202,6 +1442,14 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.sdkSessionId = threadId;
     this.loadedThreadIds.add(threadId);
     this.applyStoredUsageForSession(threadId);
+    if (result && Object.prototype.hasOwnProperty.call(result, "reasoningEffort")) {
+      const reasoningEffort = readString(result.reasoningEffort);
+      if (reasoningEffort) this.reasoningEffortBySession.set(threadId, reasoningEffort);
+      else this.reasoningEffortBySession.delete(threadId);
+      this.reasoningEffortValue = reasoningEffort;
+    } else {
+      this.reasoningEffortValue = this.reasoningEffortBySession.get(threadId) ?? null;
+    }
     const modelId = readString(result?.model);
     if (modelId) {
       this.threadModelBySession.set(threadId, modelId);
@@ -1309,16 +1557,22 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private finishActiveRunAsAborted(input: {
     errorMessage: string;
     eventMessage: string;
+    collaborationErrorMessage?: string;
+    collaborationErrorCode: string;
     interruptTurn: false;
   }): void;
   private finishActiveRunAsAborted(input: {
     errorMessage: string;
     eventMessage: string;
+    collaborationErrorMessage?: string;
+    collaborationErrorCode: string;
     interruptTurn: true;
   }): Promise<void>;
   private finishActiveRunAsAborted(input: {
     errorMessage: string;
     eventMessage: string;
+    collaborationErrorMessage?: string;
+    collaborationErrorCode: string;
     interruptTurn: boolean;
   }): void | Promise<void> {
     const sessionId = this.activeSessionId ?? this.resumeSessionId;
@@ -1328,6 +1582,12 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
 
     this.finishWebPrompts(error);
     this.rejectPendingRequests(error);
+    this.collaboration.fail(
+      input.collaborationErrorMessage ?? input.errorMessage,
+      sessionId,
+      turnId,
+      input.collaborationErrorCode,
+    );
     this.activeTurnId = null;
     this.setThinking(false);
     this.setBusy(false);
@@ -1362,6 +1622,76 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       }
       emitAbortEvent();
     })();
+  }
+
+  async abortCollaborationConsultation(input: {
+    requestId: string;
+    attemptId: string;
+    runId: string;
+    code: "RUN_TIMEOUT" | "EXECUTION_ABORTED";
+    message: string;
+  }): Promise<void> {
+    const active = this.collaboration.assertAbortTarget(input.requestId, input.runId);
+
+    const sessionId = active?.sessionId ?? this.activeSessionId ?? this.resumeSessionId;
+    const providerRunId = active?.providerRunId ?? this.activeTurnId;
+    const hadMatchingRun = active !== null;
+    if (hadMatchingRun) {
+      const error = new Error(input.message);
+      this.finishWebPrompts(error);
+      this.rejectPendingRequests(error);
+      this.collaboration.clear();
+      this.activeTurnId = null;
+
+      if (sessionId && providerRunId) {
+        try {
+          await this.appServer?.request("turn/interrupt", {
+            threadId: sessionId,
+            turnId: providerRunId,
+          });
+        } catch {
+          // A failed interrupt acknowledgement cannot leave an unknown run alive.
+          this.appServer?.stop();
+          this.appServer = null;
+          this.loadedThreadIds = new Set<string>();
+          this.emptyThreadIds = new Set<string>();
+        }
+      } else {
+        this.appServer?.stop();
+        this.appServer = null;
+        this.loadedThreadIds = new Set<string>();
+        this.emptyThreadIds = new Set<string>();
+      }
+      this.setThinking(false);
+      this.setBusy(false);
+      this.pushEvent("run.aborted", {
+        message: input.message,
+        ...(sessionId ? { sessionId } : {}),
+        createdAt: Date.now(),
+      });
+    }
+
+    this.collaboration.emitAbort({
+      requestId: input.requestId,
+      attemptId: active?.attemptId ?? input.attemptId,
+      runId: input.runId,
+      sessionId,
+      providerRunId,
+      message: input.message,
+      code: input.code,
+    });
+  }
+
+  async abortCollaborationOnRelayDisconnect(): Promise<void> {
+    const active = this.collaboration.active;
+    if (!active) return;
+    await this.abortCollaborationConsultation({
+      requestId: active.requestId,
+      attemptId: active.attemptId,
+      runId: active.runId,
+      code: "EXECUTION_ABORTED",
+      message: "Collaboration interrupted because the Relay connection closed",
+    });
   }
 
   private acceptsSteerSessionId(sessionIdInput: string, threadId: string): boolean {
@@ -1417,6 +1747,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       resumeSessionId: this.resumeSessionId,
       sdkSessionId: this.sdkSessionId,
       activeModelId: this.activeModelId,
+      reasoningEffort: this.reasoningEffortValue,
       currentBranch: this.currentBranch,
       contextUsage: this.contextUsage,
       lastTokenUsage: this.lastTokenUsage,
@@ -1727,12 +2058,14 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.reclaimAttached = true;
     this.reclaimBuffer = "";
     try {
-      restoreTerminalForReclaim();
+      this.reclaimManualEcho = beginTerminalReclaimInput();
       process.stdin.setEncoding("utf8");
       process.stdin.resume();
       process.stdin.on("data", this.onReclaimInput);
     } catch {
       this.reclaimAttached = false;
+      this.reclaimManualEcho = false;
+      endTerminalReclaimInput();
     }
   }
 
@@ -1741,33 +2074,35 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.reclaimAttached = false;
     process.stdin.off("data", this.onReclaimInput);
     this.reclaimBuffer = "";
+    this.reclaimManualEcho = false;
     try {
       process.stdin.pause();
-      if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
-        process.stdin.setRawMode(false);
-      }
+      endTerminalReclaimInput();
     } catch {}
   }
 
   private onReclaimInput = (chunk: string | Buffer) => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    const normalized = normalizeCodexReclaimInput(text);
-    if (text.includes("\u0003") || normalized.includes("\u0003")) {
+    const update = applyReclaimInput(this.reclaimBuffer, text);
+    if (this.reclaimManualEcho) writeTerminalReclaimEcho(update.echo);
+    this.reclaimBuffer = update.buffer.slice(-200);
+    if (update.interrupted) {
       this.stop();
       this.emit("exit", { code: null, signal: "SIGINT" });
       return;
     }
-    this.reclaimBuffer = applyReclaimText(this.reclaimBuffer, normalized);
-    if (this.reclaimBuffer.length > 200) {
-      this.reclaimBuffer = this.reclaimBuffer.slice(-200);
-    }
-    if (this.reclaimBuffer.includes(RECLAIM_COMMAND)) {
+    if (update.submittedLines.some((line) => line.trim() === RECLAIM_COMMAND)) {
       this.reclaimBuffer = "";
       void this.releaseToLocal();
       return;
     }
-    if (text.includes("\n") || text.includes("\r")) {
+    if (update.submittedLines.length > 0) {
       this.notices.webOwnsReminder();
     }
   };
+}
+
+function isCodexActiveWriterError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /already has an active writer/i.test(message);
 }

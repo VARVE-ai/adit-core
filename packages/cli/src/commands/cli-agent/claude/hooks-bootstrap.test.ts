@@ -172,6 +172,7 @@ describe("installClaudeHooks", () => {
             id: "glm-5.2[1M][1m]",
             display_name: "glm-5.2[1M][1m]",
           },
+          effort: { level: "high" },
           session_id: "session-1",
           transcript_path: "/tmp/session-1.jsonl",
           cwd: dir,
@@ -185,6 +186,7 @@ describe("installClaudeHooks", () => {
           event: "StatusLine",
           model: "glm-5.2[1M][1m]",
           activeModelId: "glm-5.2[1M][1m]",
+          reasoningEffort: "high",
           session_id: "session-1",
           transcript_path: "/tmp/session-1.jsonl",
           cwd: dir,
@@ -271,8 +273,6 @@ describe("ensurePersistentClaudeHooksInstalled", () => {
         "stop",
         "session-start",
         "session-end",
-        "task-completed",
-        "notification",
         "subagent-start",
         "subagent-stop",
       ]) {
@@ -280,6 +280,9 @@ describe("ensurePersistentClaudeHooksInstalled", () => {
           `node /tmp/adit-hook --platform claude ${fixedRootArg} ${hookType}`,
         );
       }
+      // notification / task-completed collection was retired
+      expect(settings).not.toContain(` ${fixedRootArg} task-completed`);
+      expect(settings).not.toContain(` ${fixedRootArg} notification`);
       expect(existsSync(join(dir, ".claude", "commands", "adit.md"))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -300,7 +303,9 @@ describe("ensurePersistentClaudeHooksInstalled", () => {
 
       const settings = readFileSync(join(dir, ".claude", "settings.local.json"), "utf8");
       expect(installedAgain).toBe(false);
-      expect((settings.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(9);
+      // 7 hook mappings: prompt-submit, stop (Stop + StopFailure),
+      // session-start, session-end, subagent-start, subagent-stop
+      expect((settings.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(7);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

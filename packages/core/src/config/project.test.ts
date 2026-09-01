@@ -1,112 +1,398 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  ProjectInitLockError,
+  ProjectManifestError,
+  computeLocalRepositoryId,
   discoverWorkspaceRepositories,
-  ensureWorkspaceManifest,
-  findWorkspaceRoot,
-  computeRepoProjectId,
-  readWorkspaceManifest,
+  findProjectManifestRoot,
+  generateProjectId,
+  projectManifestPath,
+  readProjectManifest,
+  resolveManifestRepositories,
+  withProjectInitLock,
+  writeProjectManifest,
+  type ProjectManifest,
 } from "./project.js";
 import { loadConfig } from "./index.js";
 
-describe("workspace project discovery", () => {
+const ENV_KEYS = ["ADIT_PROJECT_ROOT", "ADIT_DATA_DIR", "ADIT_DB_PATH", "ADIT_REMOTE_URL"] as const;
+
+function manifestFor(overrides: Partial<ProjectManifest> = {}): ProjectManifest {
+  const now = new Date().toISOString();
+  return {
+    schemaVersion: 1,
+    projectId: "11111111-2222-4333-8444-555555555555",
+    projectType: "repo",
+    repositories: [{ relativePath: "." }],
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+describe("project manifest", () => {
   let root: string;
+  const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), "adit-workspace-"));
+    root = mkdtempSync(join(tmpdir(), "adit-manifest-"));
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
   });
 
   afterEach(() => {
     rmSync(root, { recursive: true, force: true });
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
   });
 
-  it("discovers only immediate child Git repositories", () => {
-    mkdirSync(join(root, "api", ".git"), { recursive: true });
-    mkdirSync(join(root, "web", ".git"), { recursive: true });
-    mkdirSync(join(root, "nested", "worker", ".git"), { recursive: true });
-    mkdirSync(join(root, ".hidden", ".git"), { recursive: true });
+  it("round-trips a single-repo manifest", () => {
+    const manifest = manifestFor();
+    writeProjectManifest(root, manifest);
 
-    expect(discoverWorkspaceRepositories(root).map((repo) => repo.relativePath)).toEqual([
-      ".hidden",
-      "api",
-      "web",
+    const read = readProjectManifest(root);
+    expect(read).toEqual(manifest);
+
+    const repos = resolveManifestRepositories(root, read!);
+    expect(repos).toHaveLength(1);
+    expect(repos[0].relativePath).toBe(".");
+    expect(repos[0].localRepositoryId).toBe(manifest.projectId);
+  });
+
+  it("round-trips a workspace manifest with the frozen repository ID formula", () => {
+    const manifest = manifestFor({
+      projectType: "workspace",
+      repositories: [{ relativePath: "api" }, { relativePath: "web" }],
+    });
+    writeProjectManifest(root, manifest);
+
+    const repos = resolveManifestRepositories(root, readProjectManifest(root)!);
+    expect(repos.map((repo) => repo.relativePath)).toEqual(["api", "web"]);
+    expect(repos[0].localRepositoryId).toBe(computeLocalRepositoryId(manifest.projectId, "api"));
+    expect(repos[0].path).toBe(join(root, "api"));
+  });
+
+  it("uses the stored repositoryId instead of re-deriving it from the path", () => {
+    const manifest = manifestFor({
+      projectType: "workspace",
+      repositories: [
+        { relativePath: "renamed-api", repositoryId: "persisted-id-1", repositoryUrl: "https://example.com/api.git" },
+      ],
+    });
+    writeProjectManifest(root, manifest);
+
+    const repos = resolveManifestRepositories(root, readProjectManifest(root)!);
+    expect(repos[0].localRepositoryId).toBe("persisted-id-1");
+    expect(repos[0].localRepositoryId).not.toBe(
+      computeLocalRepositoryId(manifest.projectId, "renamed-api"),
+    );
+  });
+
+  it("round-trips repository identity and recorded remote hints", () => {
+    const manifest = manifestFor({
+      projectType: "workspace",
+      repositories: [
+        { relativePath: "api", repositoryId: "id-a", repositoryUrl: "https://example.com/a.git" },
+        { relativePath: "web", repositoryId: "id-b" },
+      ],
+    });
+    writeProjectManifest(root, manifest);
+    expect(readProjectManifest(root)).toEqual(manifest);
+  });
+
+  it("rejects duplicate repositoryIds", () => {
+    mkdirSync(join(root, ".adit"), { recursive: true });
+    writeFileSync(
+      projectManifestPath(root),
+      JSON.stringify(
+        manifestFor({
+          projectType: "workspace",
+          repositories: [
+            { relativePath: "api", repositoryId: "same" },
+            { relativePath: "web", repositoryId: "same" },
+          ],
+        }),
+      ),
+      "utf-8",
+    );
+    expect(() => readProjectManifest(root)).toThrow(/repositoryId/u);
+  });
+
+  it("returns null when no manifest exists", () => {
+    expect(readProjectManifest(root)).toBeNull();
+  });
+
+  it("throws on corrupt JSON without minting a new identity", () => {
+    mkdirSync(join(root, ".adit"), { recursive: true });
+    writeFileSync(projectManifestPath(root), "{bad", "utf-8");
+    expect(() => readProjectManifest(root)).toThrow(ProjectManifestError);
+  });
+
+  it("throws on an unsupported schemaVersion", () => {
+    mkdirSync(join(root, ".adit"), { recursive: true });
+    writeFileSync(
+      projectManifestPath(root),
+      JSON.stringify({ ...manifestFor(), schemaVersion: 99 }),
+      "utf-8",
+    );
+    expect(() => readProjectManifest(root)).toThrow(/schemaVersion/u);
+  });
+
+  it.each([
+    ["absolute path", [{ relativePath: "/etc" }]],
+    ["parent traversal", [{ relativePath: ".." }]],
+    ["nested path", [{ relativePath: "a/b" }]],
+    ["empty path", [{ relativePath: "" }]],
+    ["duplicate path", [{ relativePath: "api" }, { relativePath: "api" }]],
+  ])("rejects a workspace manifest with %s", (_label, repositories) => {
+    mkdirSync(join(root, ".adit"), { recursive: true });
+    writeFileSync(
+      projectManifestPath(root),
+      JSON.stringify(manifestFor({ projectType: "workspace", repositories })),
+      "utf-8",
+    );
+    expect(() => readProjectManifest(root)).toThrow(ProjectManifestError);
+  });
+
+  it("rejects a repo manifest that is not exactly ['.']", () => {
+    mkdirSync(join(root, ".adit"), { recursive: true });
+    writeFileSync(
+      projectManifestPath(root),
+      JSON.stringify(manifestFor({ repositories: [{ relativePath: "api" }] })),
+      "utf-8",
+    );
+    expect(() => readProjectManifest(root)).toThrow(ProjectManifestError);
+  });
+
+  it("rejects a workspace manifest containing '.'", () => {
+    mkdirSync(join(root, ".adit"), { recursive: true });
+    writeFileSync(
+      projectManifestPath(root),
+      JSON.stringify(
+        manifestFor({ projectType: "workspace", repositories: [{ relativePath: "." }] }),
+      ),
+      "utf-8",
+    );
+    expect(() => readProjectManifest(root)).toThrow(ProjectManifestError);
+  });
+
+  it("rejects a symlinked repository that escapes the project root", () => {
+    const outside = mkdtempSync(join(tmpdir(), "adit-outside-"));
+    try {
+      symlinkSync(outside, join(root, "escape"));
+      const manifest = manifestFor({
+        projectType: "workspace",
+        repositories: [{ relativePath: "escape" }],
+      });
+      expect(() => resolveManifestRepositories(root, manifest)).toThrow(/outside the project root/u);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps missing repository directories as a soft condition", () => {
+    const manifest = manifestFor({
+      projectType: "workspace",
+      repositories: [{ relativePath: "gone" }],
+    });
+    const repos = resolveManifestRepositories(root, manifest);
+    expect(repos).toHaveLength(1);
+    expect(existsSync(repos[0].path)).toBe(false);
+  });
+
+  it("finds the nearest manifest root from a nested plain directory", () => {
+    writeProjectManifest(root, manifestFor());
+    const nested = join(root, "docs", "deep");
+    mkdirSync(nested, { recursive: true });
+    expect(findProjectManifestRoot(nested)).toBe(root);
+  });
+
+  it("generates UUID project IDs", () => {
+    expect(generateProjectId()).toMatch(/^[0-9a-f-]{36}$/u);
+  });
+
+  it("refuses a second concurrent init via the lock", async () => {
+    await withProjectInitLock(root, async () => {
+      await expect(withProjectInitLock(root, async () => "inner")).rejects.toBeInstanceOf(
+        ProjectInitLockError,
+      );
+    });
+    // released after the outer run completes
+    await expect(withProjectInitLock(root, async () => "again")).resolves.toBe("again");
+  });
+
+  it("recovers a stale init lock", async () => {
+    const lockPath = join(root, ".adit", "init.lock");
+    mkdirSync(join(root, ".adit"), { recursive: true });
+    writeFileSync(lockPath, "12345", "utf-8");
+    const old = new Date(Date.now() - 11 * 60 * 1000);
+    utimesSync(lockPath, old, old);
+
+    await expect(withProjectInitLock(root, async () => "ok")).resolves.toBe("ok");
+  });
+
+  it("writes the manifest atomically without leaving temp files", () => {
+    writeProjectManifest(root, manifestFor());
+    writeProjectManifest(root, manifestFor({ updatedAt: new Date().toISOString() }));
+    const entries = readFileSync(projectManifestPath(root), "utf-8");
+    expect(JSON.parse(entries).schemaVersion).toBe(1);
+  });
+});
+
+describe("loadConfig project resolution", () => {
+  let root: string;
+  const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "adit-loadconfig-"));
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+  });
+
+  it("loads identity from a single-repo manifest", () => {
+    mkdirSync(join(root, ".git"), { recursive: true });
+    const manifest = manifestFor();
+    writeProjectManifest(root, manifest);
+
+    const config = loadConfig(root);
+    expect(config.initialization).toBe("initialized");
+    expect(config.projectType).toBe("repo");
+    expect(config.projectId).toBe(manifest.projectId);
+    expect(config.repositories).toMatchObject([
+      { localRepositoryId: manifest.projectId, relativePath: "." },
     ]);
   });
 
-  it("creates and finds a workspace manifest", () => {
-    const manifest = ensureWorkspaceManifest(root);
-    const child = join(root, "api");
-    mkdirSync(child);
+  it("resolves a plain subdirectory of a container to the container manifest", () => {
+    const manifest = manifestFor({
+      projectType: "workspace",
+      repositories: [{ relativePath: "api" }],
+    });
+    writeProjectManifest(root, manifest);
+    mkdirSync(join(root, "api", ".git"), { recursive: true });
+    const plain = join(root, "notes");
+    mkdirSync(plain, { recursive: true });
 
-    expect(manifest.workspaceId).toHaveLength(16);
-    expect(readWorkspaceManifest(root)?.workspaceId).toBe(manifest.workspaceId);
-    expect(findWorkspaceRoot(child)).toBe(root);
+    const config = loadConfig(plain);
+    expect(config.projectRoot).toBe(root);
+    expect(config.projectId).toBe(manifest.projectId);
+    expect(config.repositories.map((repo) => repo.relativePath)).toEqual(["api"]);
   });
 
-  it("ignores invalid workspace manifests", () => {
+  it("treats a member repository without its own manifest as uninitialized (no pass-through)", () => {
+    writeProjectManifest(
+      root,
+      manifestFor({ projectType: "workspace", repositories: [{ relativePath: "api" }] }),
+    );
+    const child = join(root, "api");
+    mkdirSync(join(child, ".git"), { recursive: true });
+
+    const config = loadConfig(child);
+    expect(config.projectRoot).toBe(child);
+    expect(config.initialization).toBe("uninitialized");
+    expect(config.projectId).toBe("");
+    expect(config.repositories).toEqual([]);
+  });
+
+  it("prefers a member repository's own manifest over the parent", () => {
+    writeProjectManifest(
+      root,
+      manifestFor({ projectType: "workspace", repositories: [{ relativePath: "api" }] }),
+    );
+    const child = join(root, "api");
+    mkdirSync(join(child, ".git"), { recursive: true });
+    const childManifest = manifestFor({ projectId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" });
+    writeProjectManifest(child, childManifest);
+
+    const config = loadConfig(child);
+    expect(config.projectRoot).toBe(child);
+    expect(config.projectId).toBe(childManifest.projectId);
+  });
+
+  it("flags legacy traces as needing migration", () => {
+    mkdirSync(join(root, ".git"), { recursive: true });
     mkdirSync(join(root, ".adit"), { recursive: true });
-    writeFileSync(join(root, ".adit", "workspace.json"), "{bad", "utf-8");
+    writeFileSync(join(root, ".adit", "adit.sqlite"), "", "utf-8");
 
-    expect(readWorkspaceManifest(root)).toBeNull();
-    expect(findWorkspaceRoot(root)).toBeNull();
+    const config = loadConfig(root);
+    expect(config.initialization).toBe("legacy");
+    expect(config.projectId).toBe("");
   });
 
-  it("loads a child Git repository as an independent repo project inside a workspace", () => {
-    ensureWorkspaceManifest(root);
-    const child = join(root, "adit-core");
-    mkdirSync(join(child, ".git"), { recursive: true });
-    mkdirSync(join(child, ".adit"), { recursive: true });
-    writeFileSync(join(child, ".adit", "adit.sqlite"), "", "utf-8");
-
-    const config = loadConfig(child);
-
-    expect(config.projectType).toBe("repo");
-    expect(config.projectRoot).toBe(child);
-    expect(config.projectId).toBe(computeRepoProjectId(child));
-    expect(config.repositories).toMatchObject([{
-      localRepositoryId: config.projectId,
-      relativePath: ".",
-      displayName: "adit-core",
-      path: child,
-    }]);
-  });
-
-  it("loads an uninitialized child Git repository as its own repo candidate", () => {
-    ensureWorkspaceManifest(root);
-    const child = join(root, "api");
-    mkdirSync(join(child, ".git"), { recursive: true });
-
-    const config = loadConfig(child);
-
-    expect(config.projectType).toBe("repo");
-    expect(config.projectRoot).toBe(child);
-    expect(config.projectId).toBe(computeRepoProjectId(child));
-    expect(config.repositories).toMatchObject([{
-      localRepositoryId: config.projectId,
-      relativePath: ".",
-      displayName: "api",
-      path: child,
-    }]);
-  });
-
-  it("loads a non-Git child directory as its own repo candidate instead of the parent workspace", () => {
-    ensureWorkspaceManifest(root);
-    const child = join(root, "scratch");
-    mkdirSync(child, { recursive: true });
+  it("flags an old workspace manifest as needing migration", () => {
+    mkdirSync(join(root, ".adit"), { recursive: true });
+    writeFileSync(
+      join(root, ".adit", "workspace.json"),
+      JSON.stringify({ workspaceId: "abc123", createdAt: new Date().toISOString() }),
+      "utf-8",
+    );
     mkdirSync(join(root, "api", ".git"), { recursive: true });
 
-    const config = loadConfig(child);
+    const config = loadConfig(root);
+    expect(config.initialization).toBe("legacy");
+  });
 
-    expect(config.projectType).toBe("repo");
-    expect(config.projectRoot).toBe(child);
-    expect(config.projectId).toBe(computeRepoProjectId(child));
-    expect(config.repositories).toMatchObject([{
-      localRepositoryId: config.projectId,
-      relativePath: ".",
-      displayName: "scratch",
-      path: child,
-    }]);
+  it("reports uninitialized for a plain directory without minting an identity", () => {
+    const config = loadConfig(root);
+    expect(config.initialization).toBe("uninitialized");
+    expect(config.projectId).toBe("");
+    expect(config.repositories).toEqual([]);
+  });
+
+  it("propagates manifest corruption instead of falling back", () => {
+    mkdirSync(join(root, ".adit"), { recursive: true });
+    writeFileSync(projectManifestPath(root), "{bad", "utf-8");
+    expect(() => loadConfig(root)).toThrow(ProjectManifestError);
+  });
+
+  it("honors ADIT_PROJECT_ROOT above git and manifest lookup", () => {
+    const pinned = join(root, "pinned");
+    mkdirSync(pinned, { recursive: true });
+    writeProjectManifest(pinned, manifestFor());
+    process.env.ADIT_PROJECT_ROOT = pinned;
+
+    const elsewhere = join(root, "elsewhere");
+    mkdirSync(join(elsewhere, ".git"), { recursive: true });
+
+    const config = loadConfig(elsewhere);
+    expect(config.projectRoot).toBe(pinned);
+    expect(config.initialization).toBe("initialized");
+  });
+});
+
+describe("discoverWorkspaceRepositories", () => {
+  it("discovers only visible immediate child Git repositories", () => {
+    const root = mkdtempSync(join(tmpdir(), "adit-discover-"));
+    try {
+      mkdirSync(join(root, "api", ".git"), { recursive: true });
+      mkdirSync(join(root, "web", ".git"), { recursive: true });
+      mkdirSync(join(root, "nested", "worker", ".git"), { recursive: true });
+      mkdirSync(join(root, ".hidden", ".git"), { recursive: true });
+      mkdirSync(join(root, "plain"), { recursive: true });
+
+      expect(discoverWorkspaceRepositories(root).map((repo) => repo.relativePath)).toEqual([
+        "api",
+        "web",
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

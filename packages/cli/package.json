@@ -3,8 +3,11 @@
   "version": "0.0.0",
   "description": "AI Development Intent Tracker — Transparent Time Machine for your codebase",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/main.js",
+  "types": "./dist/main.d.ts",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "files": [
     "dist"
   ],
@@ -13,8 +16,8 @@
   },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/main.d.ts",
+      "import": "./dist/main.js"
     }
   },
   "publishConfig": {
@@ -38,7 +41,7 @@
     "@varveai/adit-engine": "workspace:*",
     "@varveai/adit-hooks": "workspace:*",
     "@varveai/adit-plans": "workspace:*",
-    "better-sqlite3": "12.10.0",
+    "better-sqlite3": "13.0.3",
     "commander": "^13.0.0",
     "ink": "^5.2.1",
     "ink-spinner": "^5.0.0",

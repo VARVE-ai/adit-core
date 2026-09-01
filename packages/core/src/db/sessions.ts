@@ -107,12 +107,68 @@ export function getSessionByPlatformSessionId(
   db: Database.Database,
   platformSessionId: string,
 ): AditSession | null {
+  // Deliberately NOT filtered to status='active': a platform session id is a
+  // stable identity, and resuming a closed CLI session must reattach to the
+  // same row instead of minting a duplicate. (Measured before this change:
+  // 17.7% of platform session ids had duplicate rows, all from resumes.)
+  // Prefer a still-active row if one exists, then the most recent.
   const row = db
     .prepare(
-      "SELECT * FROM sessions WHERE platform_session_id = ? AND status = 'active' AND deleted_at IS NULL ORDER BY started_at DESC LIMIT 1",
+      `SELECT * FROM sessions WHERE platform_session_id = ? AND deleted_at IS NULL
+       ORDER BY (status = 'active') DESC, started_at DESC LIMIT 1`,
     )
     .get(platformSessionId) as Record<string, unknown> | undefined;
   return row ? rowToSession(row) : null;
+}
+
+/**
+ * Reopen a closed session that received new activity (CLI resume).
+ *
+ * Clears ended_at and flips status back to active. Note the sync tradeoff:
+ * the cloud detects session modifications via ended_at advancing, so the
+ * revival itself is not pushed — the cloud shows the session as ended until
+ * it ends again (eventual consistency). Its new events sync normally.
+ */
+export function reviveSession(db: Database.Database, id: string): void {
+  db.prepare(
+    "UPDATE sessions SET status = 'active', ended_at = NULL WHERE id = ? AND status != 'active'",
+  ).run(id);
+}
+
+/**
+ * Shallow-merge keys into a session's metadata JSON.
+ *
+ * Used at session-start to persist launch context (model, source,
+ * permission mode) on the session itself. Note the sync tradeoff:
+ * metadata-only changes are not detected by the modified-session check
+ * (ended_at), so revived sessions push the update when they next end.
+ */
+export function mergeSessionMetadata(
+  db: Database.Database,
+  id: string,
+  patch: Record<string, unknown>,
+): void {
+  const row = db
+    .prepare("SELECT metadata_json FROM sessions WHERE id = ?")
+    .get(id) as { metadata_json: string | null } | undefined;
+  if (!row) return;
+
+  let current: Record<string, unknown> = {};
+  if (row.metadata_json) {
+    try {
+      const parsed = JSON.parse(row.metadata_json) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        current = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Corrupt metadata: rebuild from the patch rather than fail the hook
+    }
+  }
+
+  db.prepare("UPDATE sessions SET metadata_json = ? WHERE id = ?").run(
+    JSON.stringify({ ...current, ...patch }),
+    id,
+  );
 }
 
 export function endSession(

@@ -89,6 +89,7 @@ describe("triggerProjectLinkSync", () => {
     mockGetProjectLinkCache.mockReturnValue(null);
     mockLoadConfig.mockReturnValue({
       clientId: "local-client",
+      initialization: "initialized",
       repositories: [{
         localRepositoryId: "proj_123",
         relativePath: ".",

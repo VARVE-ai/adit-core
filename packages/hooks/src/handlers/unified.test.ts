@@ -25,6 +25,7 @@ const mockList = vi.fn().mockResolvedValue([]);
 vi.mock("@varveai/adit-core", () => ({
   getLatestEnvSnapshot: vi.fn(() => null),
   endSession: vi.fn(),
+  mergeSessionMetadata: vi.fn(),
   withPerf: vi.fn((_dir: string, _cat: string, _op: string, fn: () => unknown) => fn()),
 }));
 
@@ -60,12 +61,13 @@ vi.mock("../common/context.js", () => ({
 }));
 
 import { dispatchHook } from "./unified.js";
-import { endSession } from "@varveai/adit-core";
+import { endSession, mergeSessionMetadata } from "@varveai/adit-core";
 import { getCurrentBranch, getHeadSha } from "@varveai/adit-engine";
 import { triggerAutoSync, triggerTranscriptUpload } from "@varveai/adit-cloud";
 import type { NormalizedHookInput } from "../adapters/types.js";
 
 const mockEndSession = vi.mocked(endSession);
+const mockMergeSessionMetadata = vi.mocked(mergeSessionMetadata);
 const mockGetCurrentBranch = vi.mocked(getCurrentBranch);
 const mockGetHeadSha = vi.mocked(getHeadSha);
 const mockTriggerAutoSync = vi.mocked(triggerAutoSync);
@@ -155,7 +157,7 @@ describe("dispatchHook", () => {
     expect(mockRecordEvent).not.toHaveBeenCalled();
   });
 
-  it("records task notifications as lightweight notifications without raw prompt text", async () => {
+  it("does not record task notification prompts as events", async () => {
     const prompt = "<task-notification>Task done</task-notification>";
 
     await dispatchHook({
@@ -164,32 +166,13 @@ describe("dispatchHook", () => {
       prompt,
     });
 
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        eventType: "notification",
-        actor: "system",
-        responseText: "task-notification",
-        toolName: "task-notification",
-      }),
-    );
-    const payload = JSON.parse(mockRecordEvent.mock.calls[0][0].toolInputJson);
-    expect(payload).toMatchObject({
-      source: "task-notification",
-      kind: "task-notification",
-      originalLength: prompt.length,
-    });
-    expect(mockRecordEvent.mock.calls[0][0].toolInputJson).not.toContain(prompt);
+    expect(mockRecordEvent).not.toHaveBeenCalled();
   });
 
-  it("skips Claude-Mem observer prompts when the observed user request already exists", async () => {
+  it("marks Claude-Mem observer sessions ignored without recording events", async () => {
     const { initHookContext } = await import("../common/context.js");
     const updateRun = vi.fn();
-    const duplicateGet = vi.fn(() => ({ exists: 1 }));
-    const prepare = vi.fn((sql: string) =>
-      sql.startsWith("UPDATE sessions")
-        ? { run: updateRun }
-        : { get: duplicateGet },
-    );
+    const prepare = vi.fn(() => ({ run: updateRun }));
     vi.mocked(initHookContext).mockResolvedValueOnce({
       db: { close: vi.fn(), prepare } as never,
       config: {
@@ -212,54 +195,9 @@ describe("dispatchHook", () => {
     });
 
     expect(updateRun).toHaveBeenCalled();
-    expect(duplicateGet).toHaveBeenCalledWith("proj-001", "observer-session", "Fix the auth bug");
     expect(mockRecordEvent).not.toHaveBeenCalled();
     expect(mockTriggerAutoSync).not.toHaveBeenCalled();
     expect(mockTriggerTranscriptUpload).not.toHaveBeenCalled();
-  });
-
-  it("salvages a Claude-Mem observed user request as a lightweight notification when unique", async () => {
-    const { initHookContext } = await import("../common/context.js");
-    const prepare = vi.fn((sql: string) =>
-      sql.startsWith("UPDATE sessions")
-        ? { run: vi.fn() }
-        : { get: vi.fn(() => undefined) },
-    );
-    vi.mocked(initHookContext).mockResolvedValueOnce({
-      db: { close: vi.fn(), prepare } as never,
-      config: {
-        projectId: "proj-001",
-        projectRoot: "/test",
-        dataDir: "/tmp/adit-test",
-        clientId: "client-001",
-        dbPath: "/tmp/test.db",
-        captureEnv: false,
-      },
-      session: { id: "observer-session", metadataJson: "{}" } as never,
-    });
-
-    await dispatchHook({
-      cwd: "/test",
-      hookType: "prompt-submit",
-      platformCli: "claude-code",
-      prompt: claudeMemPrompt("A unique user request"),
-    });
-
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        eventType: "notification",
-        actor: "system",
-        responseText: "A unique user request",
-        toolName: "claude-mem-observed-user-request",
-      }),
-    );
-    const payload = JSON.parse(mockRecordEvent.mock.calls[0][0].toolInputJson);
-    expect(payload).toMatchObject({
-      source: "claude-mem-observed-user-request",
-      kind: "claude-mem-observer",
-      observedUserRequestLength: "A unique user request".length,
-    });
-    expect(mockRecordEvent.mock.calls[0][0].toolInputJson).not.toContain("observed_from_primary_session");
   });
 
   it("skips prompt-submit events from official subagents", async () => {
@@ -320,6 +258,25 @@ describe("dispatchHook", () => {
         responseText: "Done fixing the bug.",
       }),
     );
+  });
+
+  it("stores null responseText when no assistant message is recoverable, never stop_reason", async () => {
+    const input: NormalizedHookInput = {
+      cwd: "/test",
+      hookType: "stop",
+      stopReason: "end_turn",
+    };
+
+    await dispatchHook(input);
+
+    expect(mockRecordEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "assistant_response",
+        responseText: null,
+      }),
+    );
+    // The prompt copy was retired: prompts live only on prompt_submit rows.
+    expect(mockRecordEvent.mock.calls[0][0]).not.toHaveProperty("promptText");
   });
 
   it("does not force-sync on stop so threshold and time triggers control pushing", async () => {
@@ -572,6 +529,36 @@ describe("dispatchHook", () => {
     );
   });
 
+  it("persists session-start launch metadata on the session instead of a checkpoint event", async () => {
+    const input: NormalizedHookInput = {
+      cwd: "/test",
+      hookType: "session-start",
+      sessionSource: "startup",
+      model: "claude-fable-5",
+      permissionMode: "default",
+    };
+
+    await dispatchHook(input);
+
+    expect(mockMergeSessionMetadata).toHaveBeenCalledWith(
+      expect.anything(),
+      "sess-001",
+      { model: "claude-fable-5", source: "startup", permissionMode: "default" },
+    );
+    expect(mockRecordEvent).not.toHaveBeenCalled();
+  });
+
+  it("skips the metadata merge when the platform reports nothing", async () => {
+    const input: NormalizedHookInput = {
+      cwd: "/test",
+      hookType: "session-start",
+    };
+
+    await dispatchHook(input);
+
+    expect(mockMergeSessionMetadata).not.toHaveBeenCalled();
+  });
+
   it("triggers cloud auto-sync once on session-start", async () => {
     const input: NormalizedHookInput = {
       cwd: "/test",
@@ -638,43 +625,16 @@ describe("dispatchHook", () => {
     );
   });
 
-  it("routes notification and records event", async () => {
+  // notification and task-completed hooks were retired: stale hook entries
+  // left in user settings by older installs still invoke adit-hook with these
+  // hookTypes, and the dispatcher must ignore them without recording events.
+  it("silently ignores retired notification hookType from stale installs", async () => {
     const input: NormalizedHookInput = {
       cwd: "/test",
       hookType: "notification",
       notificationMessage: "Tool result: file created",
       notificationTitle: "Tool Result",
       notificationType: "tool_result",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: "sess-001",
-        eventType: "notification",
-        actor: "system",
-        responseText: "Tool result: file created",
-        toolName: "tool_result",
-      }),
-    );
-  });
-
-  it("skips empty notification events", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "notification",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockRecordEvent).not.toHaveBeenCalled();
-  });
-
-  it("records tool notification metadata when message fields are missing", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "notification",
       toolName: "Bash",
       toolInput: { command: "git status" },
       toolOutput: { stdout: "clean" },
@@ -682,23 +642,10 @@ describe("dispatchHook", () => {
 
     await dispatchHook(input);
 
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: "sess-001",
-        eventType: "notification",
-        actor: "system",
-        responseText: "Tool Bash completed",
-        toolName: "Bash",
-        toolInputJson: JSON.stringify({
-          toolName: "Bash",
-          toolInput: { command: "git status" },
-        }),
-        toolOutputJson: JSON.stringify({ stdout: "clean" }),
-      }),
-    );
+    expect(mockRecordEvent).not.toHaveBeenCalled();
   });
 
-  it("routes task-completed and records event", async () => {
+  it("silently ignores retired task-completed hookType from stale installs", async () => {
     const input: NormalizedHookInput = {
       cwd: "/test",
       hookType: "task-completed",
@@ -708,14 +655,7 @@ describe("dispatchHook", () => {
 
     await dispatchHook(input);
 
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: "sess-001",
-        eventType: "task_completed",
-        actor: "assistant",
-        responseText: "Implement login page",
-      }),
-    );
+    expect(mockRecordEvent).not.toHaveBeenCalled();
   });
 
   it("routes subagent-start and records event", async () => {

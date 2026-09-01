@@ -21,6 +21,14 @@ export interface GitCommit {
   date: string; // ISO 8601
   message: string;
   branch?: string;
+  /** Changed files (numstat); attached only for recent commits before upload. */
+  files?: GitCommitFileStat[];
+}
+
+export interface GitCommitFileStat {
+  path: string;
+  additions: number;
+  deletions: number;
 }
 
 export interface GitIdentity {
@@ -74,6 +82,12 @@ export interface NegotiateResponse {
   canonicalRepoKey?: string | null;
   status: "confirmed" | "id_mismatch";
   message: string;
+  /**
+   * Present only when this negotiate created a brand-new cloud project and the
+   * user already has projects pointing at the same git remotes (fresh clone /
+   * new machine). Advisory — the server never merges.
+   */
+  similarProjects?: Array<{ name: string | null; lastActivityAt: string }>;
 }
 
 export interface LinkInitResponse {
@@ -253,6 +267,14 @@ export interface LinkOptions {
   skipQualify?: boolean;
   dryRun?: boolean;
   json?: boolean;
+  /**
+   * Suppress the built-in progress output; the caller renders progress and
+   * results itself (used when link runs embedded in `adit init`). Step
+   * failures are wrapped in LinkStepError so the failing step is named.
+   */
+  silent?: boolean;
+  /** Invoked as each link step completes (per repository in workspaces). */
+  onStepComplete?: (step: StepTiming) => void;
 }
 
 export interface IntentOptions {
@@ -310,6 +332,8 @@ export interface LinkResult {
   repositoryResults?: WorkspaceRepositoryResult[];
   /** Per-repository failures for workspace projects. */
   repositoryFailures?: WorkspaceRepositoryFailure[];
+  /** Existing same-remote projects reported by negotiate when this link created a new project. */
+  similarProjects?: Array<{ name: string | null; lastActivityAt: string }>;
 }
 
 export interface WorkspaceRepositoryResult {

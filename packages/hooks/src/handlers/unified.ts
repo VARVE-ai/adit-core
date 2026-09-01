@@ -6,9 +6,9 @@
  */
 
 import {
-  getLatestEnvSnapshot,
   endSession,
   endStaleSessions,
+  mergeSessionMetadata,
   withPerf,
   insertDiff,
   generateId,
@@ -17,7 +17,6 @@ import {
 import {
   createTimelineManager,
   captureEnvironment,
-  diffEnvironments,
   getCurrentBranch,
   getHeadSha,
   type FileChange,
@@ -46,6 +45,7 @@ import {
   extractCursorMutationsFromTranscript,
   buildDiffStat,
   buildBoundedDiffText,
+  normalizeMutationPaths,
   type AgentFileMutation,
 } from "../mutations/index.js";
 
@@ -103,12 +103,6 @@ export async function dispatchHook(
           break;
         case "session-end":
           await handleSessionEnd(ctx, input);
-          break;
-        case "task-completed":
-          await handleTaskCompleted(ctx, input);
-          break;
-        case "notification":
-          await handleNotification(ctx, input);
           break;
         case "subagent-start":
           await handleSubagentStart(ctx, input);
@@ -186,66 +180,12 @@ async function handleClassifiedPromptSubmit(
   _input: NormalizedHookInput,
   classification: PromptSubmitClassification,
 ): Promise<void> {
-  switch (classification.kind) {
-    case "task-notification":
-      await recordLightweightSystemNotification(ctx, {
-        source: "task-notification",
-        responseText: "task-notification",
-        toolName: "task-notification",
-        classification,
-      });
-      return;
-    case "claude-mem-observer": {
-      markIgnoredSystemSession(ctx, classification);
-      const observedUserRequest = classification.observedUserRequest;
-      if (
-        observedUserRequest &&
-        !hasExistingPromptSubmit(ctx, observedUserRequest)
-      ) {
-        await recordLightweightSystemNotification(ctx, {
-          source: "claude-mem-observed-user-request",
-          responseText: observedUserRequest,
-          toolName: "claude-mem-observed-user-request",
-          classification,
-        });
-      }
-      return;
-    }
-    case "subagent-prompt":
-      return;
-    case "user":
-      return;
+  // System-generated prompts are never recorded as events. The only side
+  // effect kept is marking claude-mem observer sessions as ignored so their
+  // synthetic traffic stays out of the timeline entirely.
+  if (classification.kind === "claude-mem-observer") {
+    markIgnoredSystemSession(ctx, classification);
   }
-}
-
-async function recordLightweightSystemNotification(
-  ctx: HookContext,
-  input: {
-    source: string;
-    responseText: string;
-    toolName: string;
-    classification: PromptSubmitClassification;
-  },
-): Promise<void> {
-  const timeline = createTimelineManager(ctx.db, ctx.config);
-  const metadata: Record<string, unknown> = {
-    source: input.source,
-    kind: input.classification.kind,
-    originalLength: input.classification.originalLength,
-    originalHash: input.classification.originalHash,
-  };
-  if (input.classification.observedUserRequest) {
-    metadata.observedUserRequestLength = input.classification.observedUserRequest.length;
-  }
-
-  await timeline.recordEvent({
-    sessionId: ctx.session.id,
-    eventType: "notification",
-    actor: "system",
-    responseText: input.responseText,
-    toolName: input.toolName,
-    toolInputJson: JSON.stringify(metadata),
-  });
 }
 
 function markIgnoredSystemSession(
@@ -263,22 +203,6 @@ function markIgnoredSystemSession(
   const metadataJson = JSON.stringify(metadata);
   ctx.db.prepare("UPDATE sessions SET metadata_json = ? WHERE id = ?").run(metadataJson, ctx.session.id);
   ctx.session.metadataJson = metadataJson;
-}
-
-function hasExistingPromptSubmit(ctx: HookContext, promptText: string): boolean {
-  const row = ctx.db
-    .prepare(
-      `SELECT 1 FROM events e
-       JOIN sessions s ON e.session_id = s.id
-       WHERE s.project_id = ?
-         AND e.session_id != ?
-         AND e.event_type = 'prompt_submit'
-         AND e.prompt_text = ?
-         AND e.deleted_at IS NULL
-       LIMIT 1`,
-    )
-    .get(ctx.config.projectId, ctx.session.id, promptText);
-  return !!row;
 }
 
 function parseSessionMetadata(metadataJson: string | null): IgnoredSessionMetadata & Record<string, unknown> {
@@ -317,34 +241,14 @@ async function handlePromptSubmitUnified(ctx: HookContext, input: NormalizedHook
 async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
   const timeline = createTimelineManager(ctx.db, ctx.config);
 
-  const recentPrompts = await timeline.list({
-    sessionId: ctx.session.id,
-    eventType: "prompt_submit",
-    limit: 1,
-  });
-  const lastPrompt = recentPrompts[0]?.promptText ?? null;
-
   // Use last_assistant_message as the response text (what the model actually said).
   // Cursor sometimes fires stop before transcript text is fully flushed, so
   // we retry transcript extraction briefly when message text is missing.
-  const recoveredAssistantMessage = input.lastAssistantMessage
-    ?? await recoverAssistantMessageFromTranscript(input.transcriptPath);
-  // Fall back to stop_reason for backward compatibility, then to "completed".
-  const responseText = recoveredAssistantMessage ?? input.stopReason ?? "completed";
-
-  // Debug: log response resolution chain to trace why "completed" is recorded
-  debugLog({
-    phase: "stop-response-resolution",
-    hookType: input.hookType,
-    platformCli: input.platformCli,
-    hasLastAssistantMessage: !!input.lastAssistantMessage,
-    hasTranscriptPath: !!input.transcriptPath,
-    transcriptRecoveryResult: recoveredAssistantMessage ? "found" : "not-found",
-    stopReason: input.stopReason,
-    finalResponseText: responseText,
-    rawPlatformDataKeys: input.rawPlatformData ? Object.keys(input.rawPlatformData) : [],
-    rawPlatformData: input.rawPlatformData,
-  });
+  // When no real message can be recovered, store null — never a synthetic
+  // placeholder like stop_reason or "completed" that would pollute analysis.
+  const responseText = input.lastAssistantMessage
+    ?? await recoverAssistantMessageFromTranscript(input.transcriptPath)
+    ?? null;
 
   // Extract file-edit mutations from the platform transcript.
   // Replaces the old git working-tree scan + auto-checkpoint flow.
@@ -370,7 +274,15 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
         });
       }
       if (extracted) {
-        mutations = extracted.mutations;
+        // Normalize every path to project-root-relative before anything is
+        // persisted: raw transcript paths are absolute (Claude/Gemini/Cursor)
+        // or cwd-relative (Codex shell), which produced illegal
+        // `diff --git a//Users/...` headers, leaked the local filesystem
+        // layout to the cloud, and split path-keyed aggregations.
+        mutations = normalizeMutationPaths(extracted.mutations, {
+          projectRoot: ctx.config.projectRoot,
+          cwd: input.cwd,
+        });
         if (mutations.length > 0) {
           mutationStatJson = JSON.stringify(buildDiffStat(mutations));
         }
@@ -386,13 +298,18 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
   }
 
   const changedFiles = changesFromMutations(mutations);
-  const workspaceGitState = await resolveWorkspaceGitState(ctx, input.cwd, changedFiles);
+  // Mutation paths are project-root-relative after normalization, so repo
+  // matching must resolve them against the project root, not the event cwd.
+  const workspaceGitState = await resolveWorkspaceGitState(
+    ctx,
+    ctx.config.projectRoot,
+    changedFiles,
+  );
 
   const event = await timeline.recordEvent({
     sessionId: ctx.session.id,
     eventType: "assistant_response",
     actor: "assistant",
-    promptText: lastPrompt,
     responseText,
     diffStatJson: mutationStatJson,
     ...(workspaceGitState ? {
@@ -426,10 +343,11 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     detectAndRecordCommits(ctx, timeline),
   );
 
+  // Environment snapshots stay local for the TUI env screen and snapshot
+  // commands. They are intentionally excluded from cloud sync; the per-turn
+  // env_drift comparison event was also retired because nothing consumed it.
   if (ctx.config.captureEnv) {
     try {
-      // Get previous snapshot before capturing new one
-      const prevSnapshot = getLatestEnvSnapshot(ctx.db, ctx.session.id);
       // Pass per-turn mutation paths when available. Workspace stop hooks must
       // not scan the whole dirty working tree and accidentally attribute stale
       // edits to this turn.
@@ -443,28 +361,10 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
             : undefined,
         ),
       );
-
-      // Detect env drift if we have a previous snapshot
-      if (prevSnapshot) {
-        const currentSnapshot = getLatestEnvSnapshot(ctx.db, ctx.session.id);
-        if (currentSnapshot) {
-          const diff = diffEnvironments(prevSnapshot, currentSnapshot);
-          if (diff.changes.length > 0) {
-            await timeline.recordEvent({
-              sessionId: ctx.session.id,
-              eventType: "env_drift",
-              actor: "system",
-              responseText: `Environment drift detected: ${diff.changes.length} changes (${diff.severity})`,
-              toolInputJson: JSON.stringify(diff),
-            });
-          }
-        }
-      }
     } catch {
       // Fail-open
     }
   }
-
 }
 
 interface WorkspaceGitState {
@@ -607,10 +507,21 @@ async function recoverAssistantMessageFromTranscript(transcriptPath?: string): P
 /** How long a session may sit with no events before the lazy sweep closes it */
 const STALE_SESSION_MAX_IDLE_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Codex has no SessionEnd hook at all, so every codex session stays active
+ * until the next codex SessionStart sweeps it. With the default 24h window,
+ * "completed" codex sessions were measured lingering for 30+ days locally.
+ * A 2h idle window closes them promptly while still surviving long breaks
+ * within a real working session.
+ */
+const CODEX_STALE_SESSION_MAX_IDLE_MS = 2 * 60 * 60 * 1000;
+
+function staleSessionIdleMsFor(platform: string): number {
+  return platform === "codex" ? CODEX_STALE_SESSION_MAX_IDLE_MS : STALE_SESSION_MAX_IDLE_MS;
+}
+
 /** Handle session start — capture initial env snapshot and record metadata */
 async function handleSessionStart(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  const timeline = createTimelineManager(ctx.db, ctx.config);
-
   // Lazily close zombie sessions for this platform. Codex has no SessionEnd
   // hook event, so its sessions would otherwise stay active forever and
   // become targets for the sessionless getActiveSession fallback.
@@ -619,7 +530,7 @@ async function handleSessionStart(ctx: HookContext, input: NormalizedHookInput):
       endStaleSessions(ctx.db, {
         projectId: ctx.config.projectId,
         platform: input.platformCli,
-        cutoffIso: new Date(Date.now() - STALE_SESSION_MAX_IDLE_MS).toISOString(),
+        cutoffIso: new Date(Date.now() - staleSessionIdleMsFor(input.platformCli)).toISOString(),
         excludeSessionId: ctx.session.id,
       });
     } catch {
@@ -630,20 +541,21 @@ async function handleSessionStart(ctx: HookContext, input: NormalizedHookInput):
   // Seed per-repo HEAD baselines so first-turn commits are attributable.
   await initializeSessionRepoBaselines(ctx);
 
-  // Record session start event with platform metadata
+  // Persist launch context (model, source, permission mode) on the session
+  // record. Replaces the legacy "checkpoint" marker event. Metadata-only
+  // updates on revived sessions reach the cloud when the session next ends
+  // (sync detects modified sessions via ended_at).
   const metadata: Record<string, unknown> = {};
   if (input.model) metadata.model = input.model;
   if (input.sessionSource) metadata.source = input.sessionSource;
   if (input.permissionMode) metadata.permissionMode = input.permissionMode;
 
   if (Object.keys(metadata).length > 0) {
-    await timeline.recordEvent({
-      sessionId: ctx.session.id,
-      eventType: "checkpoint",
-      actor: "system",
-      responseText: `Session started (${input.sessionSource ?? "startup"})`,
-      toolInputJson: JSON.stringify(metadata),
-    });
+    try {
+      mergeSessionMetadata(ctx.db, ctx.session.id, metadata);
+    } catch {
+      // Fail-open
+    }
   }
 
   if (ctx.config.captureEnv) {
@@ -692,77 +604,6 @@ async function handleSessionEnd(ctx: HookContext, input: NormalizedHookInput): P
   // Mark session as completed with end reason
   const status = input.sessionEndReason === "error" ? "error" : "completed";
   endSession(ctx.db, ctx.session.id, status);
-}
-
-/** Handle task completed — record semantic milestone in timeline */
-async function handleTaskCompleted(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  const timeline = createTimelineManager(ctx.db, ctx.config);
-
-  await timeline.recordEvent({
-    sessionId: ctx.session.id,
-    eventType: "task_completed",
-    actor: "assistant",
-    responseText: input.taskSubject ?? "Task completed",
-    toolName: input.taskId ?? null,
-    toolInputJson: JSON.stringify({
-      taskId: input.taskId,
-      taskSubject: input.taskSubject,
-      taskDescription: input.taskDescription,
-      teammateName: input.teammateName,
-      teamName: input.teamName,
-    }),
-  });
-}
-
-/** Handle notification — record notification event (tool results, session diffs, etc.) */
-async function handleNotification(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  const timeline = createTimelineManager(ctx.db, ctx.config);
-
-  const message = nonEmptyString(input.notificationMessage);
-  const title = nonEmptyString(input.notificationTitle);
-  const notificationType = nonEmptyString(input.notificationType);
-  const toolName = nonEmptyString(input.toolName);
-  const hasToolInput = hasObjectContent(input.toolInput);
-  const hasToolOutput = hasObjectContent(input.toolOutput);
-
-  if (!message && !title && !notificationType && !toolName && !hasToolInput && !hasToolOutput) {
-    return;
-  }
-
-  const base: Record<string, unknown> = {
-    message,
-    title,
-    notificationType,
-    toolName,
-    toolInput: hasToolInput ? input.toolInput : undefined,
-  };
-  const responseText =
-    message ??
-    title ??
-    (toolName
-      ? `Tool ${toolName} completed`
-      : notificationType
-        ? `Notification: ${notificationType}`
-        : "Tool notification");
-
-  await timeline.recordEvent({
-    sessionId: ctx.session.id,
-    eventType: "notification",
-    actor: "system",
-    responseText,
-    toolName: notificationType ?? toolName ?? null,
-    toolInputJson: JSON.stringify(base),
-    toolOutputJson: hasToolOutput ? JSON.stringify(input.toolOutput) : null,
-  });
-}
-
-function nonEmptyString(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : undefined;
-}
-
-function hasObjectContent(value: Record<string, unknown> | undefined): boolean {
-  return value != null && Object.keys(value).length > 0;
 }
 
 /** Handle subagent start — record when a subagent is spawned */

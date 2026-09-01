@@ -21,3 +21,5 @@ export { extractCursorMutationsFromTranscript } from "./cursor-extract.js";
 export { buildDiffStat, type DiffStatEntry } from "./diff-stat.js";
 
 export { buildBoundedDiffText } from "./diff-text.js";
+
+export { normalizeMutationPaths } from "./path-normalize.js";

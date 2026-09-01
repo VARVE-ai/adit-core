@@ -18,6 +18,9 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { getCurrentBranch } from "@varveai/adit-engine";
 import type {
+  AppendSessionContextInput,
+  AppendSessionContextResult,
+  AbortCollaborationConsultationInput,
   CliAgentContextUsage,
   CliAgentProvider,
   CliAgentRelayEvent,
@@ -28,8 +31,14 @@ import type {
   CliSlashCommand,
   CliSlashCommandInfo,
   CliRewindResponse,
+  StartCollaborationConsultationInput,
+  StartCollaborationConsultationResult,
 } from "../types.js";
-import { killCliProcessTree, spawnCliProcess } from "../cli-process.js";
+import {
+  killCliProcessTree,
+  spawnCliProcess,
+  stopCliProcessTreeAndWait,
+} from "../cli-process.js";
 import { spawnClaudeCliProcess } from "./cli-process.js";
 import {
   ASK_USER_QUESTION_TOOL,
@@ -84,11 +93,19 @@ import {
 } from "./transcripts.js";
 import type { ClaudeRewindCheckpoint } from "./transcripts.js";
 import { writeCliAgentErrorToTerminal } from "../terminal-error.js";
+import { applyReclaimInput } from "../reclaim-input.js";
 import {
   RECLAIM_COMMAND,
+  beginTerminalReclaimInput,
   createRelayNotices,
+  endTerminalReclaimInput,
   type RelayNotices,
+  writeTerminalReclaimEcho,
 } from "../relay-console.js";
+import {
+  ClaudeProviderCollaboration,
+  type ClaudeCollaborationPromptMarker,
+} from "./provider-collaboration.js";
 export { buildClaudeCloudRelayEnv } from "./capabilities.js";
 export { normalizeClaudeTodoWriteInput } from "./todos.js";
 export type { ClaudeTodoItem, ClaudeTodoPriority, ClaudeTodoStatus } from "./todos.js";
@@ -100,6 +117,8 @@ interface PendingPrompt {
   mode: CliPromptMode;
   pendingSessionId: string | null;
   localMessageId: string | null;
+  targetSessionId: string | null;
+  collaboration: ClaudeCollaborationPromptMarker | null;
   promptEvent: PendingPromptEvent;
   resolve: () => void;
   reject: (error: Error) => void;
@@ -111,6 +130,8 @@ interface QueuedSdkPrompt {
   mode: CliPromptMode;
   pendingSessionId: string | null;
   localMessageId: string | null;
+  targetSessionId: string | null;
+  collaboration: ClaudeCollaborationPromptMarker | null;
   promptEvent: PendingPromptEvent;
   resolve: () => void;
   reject: (error: Error) => void;
@@ -137,6 +158,7 @@ interface ClaudeCodeProviderOptions {
   bin: string;
   args: string[];
   cwd: string;
+  dataDir?: string;
   hookSettingsPath?: string;
   onEvent?: (event: CliAgentRelayEvent) => void;
   notices?: RelayNotices;
@@ -196,6 +218,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private remoteSdkSessionId: string | null = null;
   private remoteSdkSessionIdsByActiveSession = new Map<string, Set<string>>();
   private activeModelId: string | null = null;
+  private reasoningEffortValue: string | null = null;
   private currentBranch: string | null = null;
   private branchRefreshAt = 0;
   private branchRefreshPromise: Promise<void> | null = null;
@@ -216,6 +239,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private activePromptInput: ActiveClaudePromptInput | null = null;
   private activePromptEvent: PendingPromptEvent | null = null;
   private activePromptMode: CliPromptMode | null = null;
+  private readonly collaboration: ClaudeProviderCollaboration;
   private pendingPermissions = new Map<string, {
     request: CliPermissionRequest;
     resolve: (result: PermissionResult) => void;
@@ -248,12 +272,21 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private localSessionAliases = new Map<string, string>();
   private reclaimBuffer = "";
   private reclaimAttached = false;
+  private reclaimManualEcho = false;
+  private takeoverPending = false;
   private suppressNextLocalExit = false;
+  private webOwnsNoticeOnLocalExit = false;
   private readonly notices: RelayNotices;
 
   constructor(private readonly opts: ClaudeCodeProviderOptions) {
     super();
     this.notices = opts.notices ?? createRelayNotices("claude");
+    this.collaboration = new ClaudeProviderCollaboration({
+      cwd: opts.cwd,
+      dataDir: opts.dataDir,
+      emitEvent: (type, payload) => this.pushEvent(type, payload),
+      debug: (message) => this.notices.debug(message),
+    });
     this.startLocal();
   }
 
@@ -267,6 +300,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       resumeSessionId: this.resumeSessionId,
       sdkSessionId: this.sdkSessionId,
       activeModelId: this.activeModelId,
+      reasoningEffort: this.reasoningEffortValue,
       currentBranch: this.currentBranch,
       contextUsage: this.contextUsage,
       lastTokenUsage: null,
@@ -279,6 +313,15 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
   noteModel(modelId: string | null | undefined): void {
     this.setActiveModel(modelId, { emit: true });
+  }
+
+  noteReasoningEffort(effort: string | null | undefined): void {
+    const normalized = typeof effort === "string" && effort.trim()
+      ? effort.trim()
+      : null;
+    if (normalized === this.reasoningEffortValue) return;
+    this.reasoningEffortValue = normalized;
+    this.emitState();
   }
 
   noteLocalSession(id: string): string | null {
@@ -312,6 +355,11 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   }
 
   async takeover(): Promise<void> {
+    if (this.takeoverPending) {
+      throw Object.assign(new Error("Claude takeover is already in progress"), {
+        statusCode: 409,
+      });
+    }
     if (this.ownerValue === "web") {
       this.emitSlashCommands();
       void this.hydrateCapabilities({
@@ -331,28 +379,44 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       });
     }
 
-    this.suppressNextLocalExit = true;
-    const oldLocal = this.local;
-    this.local = null;
-    killCliProcessTree(oldLocal);
+    this.takeoverPending = true;
+    try {
+      const oldLocal = this.local;
+      this.suppressNextLocalExit = Boolean(oldLocal);
+      this.webOwnsNoticeOnLocalExit = Boolean(oldLocal);
+      this.local = null;
+      await stopCliProcessTreeAndWait(oldLocal);
 
-    this.ownerValue = "web";
-    this.reclaimingToLocal = false;
-    this.pendingLocalReclaimSessionId = null;
-    this.localSessionAliases.clear();
-    this.emitState();
-    this.notices.takenOverByWeb();
-    this.attachReclaimInput();
-    const generation = ++this.remoteLoopGeneration;
-    void this.runRemoteLoop(generation);
-    // Publish whatever we already know right away so the web slash-command
-    // popup is usable while the probe spawns; the probe result replaces it.
-    if (this.slashCommandsByName.size === 0) {
-      this.applyClaudeCapabilitySnapshot({ commands: [] });
-    } else {
-      this.emitSlashCommands();
+      if (this.ownerValue !== "local" || this.local !== null) {
+        throw Object.assign(new Error("Claude takeover was interrupted"), {
+          statusCode: 409,
+        });
+      }
+
+      this.reclaimingToLocal = false;
+      this.pendingLocalReclaimSessionId = null;
+      this.localSessionAliases.clear();
+      // Local hooks can arrive while the old TUI is exiting. That process is
+      // now gone, so none of its busy/thinking state may leak into Web mode.
+      this.busyValue = false;
+      this.thinkingValue = false;
+      this.ownerValue = "web";
+      this.emitState();
+      this.notices.takenOverByWeb();
+      this.attachReclaimInput();
+      const generation = ++this.remoteLoopGeneration;
+      void this.runRemoteLoop(generation);
+      // Publish whatever we already know right away so the web slash-command
+      // popup is usable while the probe spawns; the probe result replaces it.
+      if (this.slashCommandsByName.size === 0) {
+        this.applyClaudeCapabilitySnapshot({ commands: [] });
+      } else {
+        this.emitSlashCommands();
+      }
+      void this.hydrateCapabilities({ owner: "web", generation });
+    } finally {
+      this.takeoverPending = false;
     }
-    void this.hydrateCapabilities({ owner: "web", generation });
   }
 
   async releaseToLocal(): Promise<void> {
@@ -366,6 +430,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     await this.finishActiveRunAsAborted({
       errorMessage: "Web control released to local CLI",
       eventMessage: "Web control released to local CLI.",
+      collaborationErrorCode: "LOCAL_TAKEOVER_DURING_RUN",
       interruptRemote: true,
     });
     this.mergeRemoteTranscriptsIntoActive();
@@ -472,6 +537,12 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     }
   }
 
+  async appendSessionContext(
+    input: AppendSessionContextInput,
+  ): Promise<AppendSessionContextResult> {
+    return this.collaboration.appendContext(input);
+  }
+
   async sendPrompt(
     prompt: string,
     opts: {
@@ -496,6 +567,10 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         mode: opts.mode === "plan" ? "plan" : "build",
         pendingSessionId: opts.pendingSessionId ?? null,
         localMessageId: opts.localMessageId ?? null,
+        targetSessionId: opts.pendingSessionId
+          ? null
+          : this.activeSessionId ?? this.resumeSessionId,
+        collaboration: null,
         promptEvent: {
           text: trimmed,
           attachments,
@@ -508,6 +583,59 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       });
       this.drainPromptResolvers();
     });
+  }
+
+  async startCollaborationConsultation(
+    input: StartCollaborationConsultationInput,
+  ): Promise<StartCollaborationConsultationResult> {
+    if (this.ownerValue !== "web") {
+      throw Object.assign(new Error("Web has not taken over this Claude session"), {
+        statusCode: 409,
+      });
+    }
+    if (
+      this.collaboration.active
+      || this.hasActiveWebRun()
+      || this.promptQueue.length > 0
+    ) {
+      throw Object.assign(new Error("Claude is currently running another task"), {
+        statusCode: 409,
+      });
+    }
+    const sessionId = this.activeSessionId ?? this.resumeSessionId;
+    if (!sessionId || !isUuid(sessionId) || sessionId !== input.targetSessionId) {
+      throw Object.assign(new Error("Claude collaboration requires an active Session"), {
+        statusCode: 409,
+      });
+    }
+
+    const providerRunId = randomUUID();
+    return this.collaboration.start(
+      input,
+      sessionId,
+      providerRunId,
+      (question, collaboration) => new Promise<void>((resolve, reject) => {
+        this.promptQueue.push({
+          message: question,
+          attachments: [],
+          mode: "plan",
+          pendingSessionId: null,
+          localMessageId: `collaboration_${input.runId}`,
+          targetSessionId: sessionId,
+          collaboration,
+          promptEvent: {
+            text: question,
+            attachments: [],
+            messageId: `collaboration_${input.runId}`,
+            mode: "plan",
+            createdAt: Date.now(),
+          },
+          resolve,
+          reject,
+        });
+        this.drainPromptResolvers();
+      }),
+    );
   }
 
   async steerPrompt(
@@ -835,6 +963,8 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     await this.finishActiveRunAsAborted({
       errorMessage: "Claude run aborted",
       eventMessage: "Claude run aborted.",
+      collaborationErrorMessage: "Collaboration stopped by user",
+      collaborationErrorCode: "USER_STOPPED",
       interruptRemote: true,
     });
   }
@@ -843,6 +973,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.finishActiveRunAsAborted({
       errorMessage: "Claude provider stopped",
       eventMessage: "Claude provider stopped.",
+      collaborationErrorCode: "EXECUTION_ABORTED",
       interruptRemote: false,
     });
     this.stopCapabilityProbe();
@@ -850,7 +981,9 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.detachReclaimInput();
     this.pendingLocalReclaimSessionId = null;
     this.localSessionAliases.clear();
+    this.webOwnsNoticeOnLocalExit = false;
     killCliProcessTree(this.local);
+    this.collaboration.close();
     this.local = null;
     this.ownerValue = "stopped";
     this.setThinking(false);
@@ -862,6 +995,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.detachReclaimInput();
     this.stopCapabilityProbe();
     this.reclaimingToLocal = false;
+    this.webOwnsNoticeOnLocalExit = false;
     this.finishWebPrompts(new Error("local mode active"));
     this.remoteQuery = null;
     this.remoteAbortController = null;
@@ -904,6 +1038,16 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     child.on("exit", (code, signal) => {
       if (this.suppressNextLocalExit) {
         this.suppressNextLocalExit = false;
+        if (this.webOwnsNoticeOnLocalExit) {
+          this.webOwnsNoticeOnLocalExit = false;
+          if (this.ownerValue === "web") {
+            // A child that outlives the bounded takeover wait may reset the
+            // console while exiting. Reapply reclaim input after it is quiet.
+            this.detachReclaimInput();
+            this.notices.webOwnsReminder();
+            this.attachReclaimInput();
+          }
+        }
         return;
       }
       if (this.local === child) {
@@ -1036,8 +1180,30 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       const explicitSessionId = !resumeId && canonicalSessionId && isUuid(canonicalSessionId)
         ? canonicalSessionId
         : undefined;
+      const contextSessionId = first.targetSessionId ?? canonicalSessionId ?? resumeId;
+      let contextClaim: Awaited<ReturnType<ClaudeProviderCollaboration["claimContext"]>>["claim"] = null;
+      let contextText: string | null = null;
+      try {
+        const context = contextSessionId && !first.collaboration
+          ? await this.collaboration.claimContext(contextSessionId, false)
+          : { claim: null, text: null };
+        contextClaim = context.claim;
+        contextText = context.text;
+      } catch (error) {
+        this.rejectStartingPrompt(first, error instanceof Error ? error : new Error(String(error)));
+        this.collaboration.failQueued(first.collaboration, error);
+        if (this.activePromptEvent === first.promptEvent) this.activePromptEvent = null;
+        if (this.activePromptMode === first.mode) this.activePromptMode = null;
+        this.remoteAbortController = null;
+        continue;
+      }
+      const modelPrompt = this.collaboration.modelPrompt(first.message, first.collaboration);
       const promptInput = new PushableSdkPromptStream(
-        toUserMessage(first.message, first.attachments, pendingClaudeSessionId ?? undefined),
+        toUserMessage(
+          contextText ? `${contextText}\n\n${modelPrompt}` : modelPrompt,
+          first.attachments,
+          pendingClaudeSessionId ?? undefined,
+        ),
       );
       this.activePromptInput = {
         generation,
@@ -1076,17 +1242,26 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         abortController,
         includePartialMessages: true,
         forwardSubagentText: true,
-        ...(permissionMode === "bypassPermissions"
-          ? {}
-          : {
+        ...(first.collaboration
+          ? {
               canUseTool: (toolName, input, requestOptions) =>
-                this.handleToolPermission(
+                this.collaboration.toolPermission(
                   toolName,
                   input,
                   requestOptions.toolUseID,
-                  requestOptions.signal,
                 ),
-            }),
+            }
+          : permissionMode === "bypassPermissions"
+            ? {}
+            : {
+                canUseTool: (toolName, input, requestOptions) =>
+                  this.handleToolPermission(
+                    toolName,
+                    input,
+                    requestOptions.toolUseID,
+                    requestOptions.signal,
+                  ),
+              }),
       };
 
       try {
@@ -1098,13 +1273,25 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         this.setThinking(true);
         this.emitState();
         this.scheduleContextUsageRefresh(true);
+        await this.collaboration.commitContext(contextClaim);
+        if (first.collaboration) {
+          this.collaboration.markStarted(first.collaboration.runId);
+        }
         this.resolveStartingPrompt(first);
       } catch (error) {
+        await this.collaboration.releaseContext(contextClaim);
+        abortController.abort();
+        try {
+          this.remoteQuery?.close?.();
+        } catch {}
         promptInput.fail(error instanceof Error ? error : new Error(String(error)));
         if (this.activePromptInput?.stream === promptInput) {
           this.activePromptInput = null;
         }
         this.rejectStartingPrompt(first, error instanceof Error ? error : new Error(String(error)));
+        this.collaboration.failQueued(first.collaboration, error);
+        if (this.activePromptEvent === first.promptEvent) this.activePromptEvent = null;
+        if (this.activePromptMode === first.mode) this.activePromptMode = null;
         if (!(error instanceof AbortError)) {
           const messageText = error instanceof Error ? error.message : String(error);
           this.pushEvent("error", {
@@ -1174,6 +1361,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
             });
           }
         }
+        this.collaboration.failQueued(first.collaboration, error);
       } finally {
         if (
           !sawResult &&
@@ -1190,6 +1378,10 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
             mode: this.activePromptMode ?? first.mode,
             createdAt: Date.now(),
           });
+          this.collaboration.failQueued(
+            first.collaboration,
+            "Claude consultation ended before reporting a result",
+          );
         }
         const normalizeRelatedTranscripts = () => {
           const sessionIds = new Set(
@@ -1274,6 +1466,8 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         mode: item.mode,
         pendingSessionId: item.pendingSessionId,
         localMessageId: item.localMessageId,
+        targetSessionId: item.targetSessionId,
+        collaboration: item.collaboration,
         promptEvent: item.promptEvent,
         resolve: item.resolve,
         reject: item.reject,
@@ -1295,6 +1489,8 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
         mode: item.mode,
         pendingSessionId: item.pendingSessionId,
         localMessageId: item.localMessageId,
+        targetSessionId: item.targetSessionId,
+        collaboration: item.collaboration,
         promptEvent: item.promptEvent,
         resolve: item.resolve,
         reject: item.reject,
@@ -1412,16 +1608,22 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
   private finishActiveRunAsAborted(input: {
     errorMessage: string;
     eventMessage: string;
+    collaborationErrorMessage?: string;
+    collaborationErrorCode?: string;
     interruptRemote: false;
   }): void;
   private finishActiveRunAsAborted(input: {
     errorMessage: string;
     eventMessage: string;
+    collaborationErrorMessage?: string;
+    collaborationErrorCode?: string;
     interruptRemote: true;
   }): Promise<void>;
   private finishActiveRunAsAborted(input: {
     errorMessage: string;
     eventMessage: string;
+    collaborationErrorMessage?: string;
+    collaborationErrorCode?: string;
     interruptRemote: boolean;
   }): void | Promise<void> {
     const sessionId = this.currentRunSessionId();
@@ -1431,6 +1633,10 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
     this.finishWebPrompts(error);
     this.rejectPendingRequests(error);
+    this.collaboration.fail(
+      input.collaborationErrorMessage ?? input.errorMessage,
+      input.collaborationErrorCode ?? "EXECUTION_ABORTED",
+    );
     this.remoteAbortController?.abort();
     this.remoteQuery = null;
     this.remoteAbortController = null;
@@ -1463,6 +1669,41 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       } catch {}
       emitAbortEvent();
     })();
+  }
+
+  async abortCollaborationConsultation(
+    input: AbortCollaborationConsultationInput,
+  ): Promise<void> {
+    const active = this.collaboration.assertAbortTarget(input.requestId, input.runId);
+    if (active) {
+      await this.finishActiveRunAsAborted({
+        errorMessage: input.message,
+        eventMessage: input.message,
+        collaborationErrorMessage: input.message,
+        collaborationErrorCode: input.code,
+        interruptRemote: true,
+      });
+      return;
+    }
+    this.collaboration.emitAbort({
+      requestId: input.requestId,
+      attemptId: input.attemptId,
+      runId: input.runId,
+      message: input.message,
+      code: input.code,
+    });
+  }
+
+  async abortCollaborationOnRelayDisconnect(): Promise<void> {
+    const active = this.collaboration.active;
+    if (!active) return;
+    await this.abortCollaborationConsultation({
+      requestId: active.requestId,
+      attemptId: active.attemptId,
+      runId: active.runId,
+      code: "EXECUTION_ABORTED",
+      message: "Collaboration interrupted because the Relay connection closed",
+    });
   }
 
   private acceptsSteerSessionId(
@@ -1553,6 +1794,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     if (message.type === "assistant") {
       this.noteAssistantTailKind(message as SDKAssistantMessage);
       await this.emitAssistantMessage(message as SDKAssistantMessage, sessionId);
+      this.collaboration.captureAssistant(message as SDKAssistantMessage, sessionId);
       return sdkSessionId;
     }
 
@@ -1570,6 +1812,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       this.emitResultUsage(message, sessionId);
       this.emitResultError(message, sessionId);
       this.emitTruncatedTurnWarning(message, sessionId);
+      this.collaboration.complete(message, sessionId);
       this.lastAssistantTailKind = null;
     }
     return sdkSessionId;
@@ -1966,11 +2209,14 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.reclaimAttached = true;
     this.reclaimBuffer = "";
     try {
+      this.reclaimManualEcho = beginTerminalReclaimInput();
       process.stdin.setEncoding("utf8");
       process.stdin.resume();
       process.stdin.on("data", this.onReclaimInput);
     } catch {
       this.reclaimAttached = false;
+      this.reclaimManualEcho = false;
+      endTerminalReclaimInput();
     }
   }
 
@@ -1979,31 +2225,29 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
     this.reclaimAttached = false;
     process.stdin.off("data", this.onReclaimInput);
     this.reclaimBuffer = "";
+    this.reclaimManualEcho = false;
     try {
       process.stdin.pause();
-      if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
-        process.stdin.setRawMode(false);
-      }
+      endTerminalReclaimInput();
     } catch {}
   }
 
   private onReclaimInput = (chunk: string | Buffer) => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    if (text.includes("\u0003")) {
+    const update = applyReclaimInput(this.reclaimBuffer, text);
+    if (this.reclaimManualEcho) writeTerminalReclaimEcho(update.echo);
+    this.reclaimBuffer = update.buffer.slice(-200);
+    if (update.interrupted) {
       this.stop();
       this.emit("exit", { code: null, signal: "SIGINT" });
       return;
     }
-    this.reclaimBuffer += text;
-    if (this.reclaimBuffer.length > 200) {
-      this.reclaimBuffer = this.reclaimBuffer.slice(-200);
-    }
-    if (this.reclaimBuffer.includes(RECLAIM_COMMAND)) {
+    if (update.submittedLines.some((line) => line.trim() === RECLAIM_COMMAND)) {
       this.reclaimBuffer = "";
       void this.releaseToLocal();
       return;
     }
-    if (text.includes("\n") || text.includes("\r")) {
+    if (update.submittedLines.length > 0) {
       this.notices.webOwnsReminder();
     }
   };
@@ -2124,6 +2368,7 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
       resumeSessionId: this.resumeSessionId,
       sdkSessionId: this.sdkSessionId,
       activeModelId: this.activeModelId,
+      reasoningEffort: this.reasoningEffortValue,
       currentBranch: this.currentBranch,
       contextUsage: this.contextUsage,
       lastTokenUsage: null,

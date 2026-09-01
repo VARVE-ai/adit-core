@@ -1,5 +1,12 @@
 packages:
   - "packages/*"
 allowBuilds:
-  better-sqlite3: set this to true or false
-  esbuild: set this to true or false
+  better-sqlite3: false
+  esbuild: true
+onlyBuiltDependencies:
+  - esbuild
+# better-sqlite3 v13 ships prebuilt binaries inside the npm package; its
+# binding.gyp exists only as a fallback for unsupported platforms and must
+# not run on install (it requires a native toolchain).
+neverBuiltDependencies:
+  - better-sqlite3

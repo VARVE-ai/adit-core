@@ -11,6 +11,7 @@ const mockCollectDefaultBranch = vi.fn();
 const mockCollectGitIdentity = vi.fn();
 const mockCollectCommitLogs = vi.fn();
 const mockCollectCommitCount = vi.fn();
+const mockCollectCommitFileStats = vi.fn();
 const mockResolveCommitBranches = vi.fn();
 const mockCollectGitRefsFingerprint = vi.fn();
 const mockDiscoverDocuments = vi.fn();
@@ -53,6 +54,7 @@ vi.mock("./git-collector.js", () => ({
   collectGitIdentity: (...args: unknown[]) => mockCollectGitIdentity(...args),
   collectCommitLogs: (...args: unknown[]) => mockCollectCommitLogs(...args),
   collectCommitCount: (...args: unknown[]) => mockCollectCommitCount(...args),
+  collectCommitFileStats: (...args: unknown[]) => mockCollectCommitFileStats(...args),
   resolveCommitBranches: (...args: unknown[]) => mockResolveCommitBranches(...args),
   projectNameFromRemoteUrl: vi.fn(() => "repo-name"),
 }));
@@ -153,6 +155,7 @@ function setupWorkspaceLinkTest(repositories: TestRepository[], commitsByPath: R
   mockCollectGitIdentity.mockResolvedValue({ authorName: null, authorEmail: null });
   mockCollectCommitLogs.mockImplementation((repoPath: string) => Promise.resolve(commitsByPath[repoPath] ?? []));
   mockCollectCommitCount.mockImplementation((repoPath: string) => Promise.resolve(commitsByPath[repoPath]?.length ?? 0));
+  mockCollectCommitFileStats.mockResolvedValue(new Map());
   mockResolveCommitBranches.mockResolvedValue(undefined);
   mockCollectGitRefsFingerprint.mockResolvedValue(null);
   mockDiscoverDocuments.mockReturnValue([]);
@@ -262,6 +265,7 @@ describe("linkCommand workspace repository requests", () => {
     mockCollectGitIdentity.mockResolvedValue({ authorName: null, authorEmail: null });
     mockCollectCommitLogs.mockResolvedValue([]);
     mockCollectCommitCount.mockResolvedValue(0);
+    mockCollectCommitFileStats.mockResolvedValue(new Map());
     mockResolveCommitBranches.mockResolvedValue(undefined);
     mockCollectGitRefsFingerprint.mockResolvedValue(null);
     mockDiscoverDocuments.mockReturnValue([{
@@ -311,6 +315,101 @@ describe("linkCommand workspace repository requests", () => {
       expect(output).not.toContain("Workspace link complete!");
       expect(output).not.toContain("Quality feedback:");
       expect(output).not.toContain("Repository  Quality");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("re-uploads branches inside the cooldown window only when git refs changed", async () => {
+    const makeClient = () => ({
+      post: vi.fn(async (path: string) => {
+        if (path === "/api/project-link/negotiate") {
+          return {
+            confirmedProjectId: "server-project",
+            projectName: "repo-name",
+            status: "confirmed",
+          };
+        }
+        if (path === "/api/project-link/init") {
+          return { projectLink: { branchCount: 1 } };
+        }
+        throw new Error(`Unexpected path: ${path}`);
+      }),
+      get: vi.fn(),
+      delete: vi.fn(),
+    });
+    const freshCache = () => ({
+      projectId: "repo-id",
+      repositoryId: "repo-id",
+      serverUrl: "https://cloud.example.com",
+      confirmedProjectId: "server-project",
+      lastCommitSha: null,
+      lastBranchSyncAt: new Date().toISOString(),
+      lastDocSyncAt: null,
+      docHashes: { __refs_fingerprint: "fingerprint-old" },
+      qualified: true,
+      initializedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    mockLoadConfig.mockReturnValue({ projectRoot: "/repo" });
+    mockResolveCloudProjectContext.mockResolvedValue({
+      projectType: "repo",
+      localProjectId: "repo-id",
+      projectRoot: "/repo",
+      projectName: "repo-name",
+      remoteUrl: "git@github.com:VARVE-ai/adit-core.git",
+      canonicalRepoKey: "github:varve-ai/adit-core",
+      repositories: [{
+        localRepositoryId: "repo-id",
+        relativePath: ".",
+        displayName: "repo-name",
+        path: "/repo",
+        repositoryUrl: "git@github.com:VARVE-ai/adit-core.git",
+        canonicalRepoKey: "github:varve-ai/adit-core",
+      }],
+    });
+    mockCollectBranches.mockResolvedValue([{ name: "main", headSha: "abc", isDefault: true }]);
+    mockCollectDefaultBranch.mockResolvedValue("main");
+    mockCollectGitIdentity.mockResolvedValue({ authorName: null, authorEmail: null });
+    const options = { skipCommits: true, skipDocs: true, skipQualify: true };
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    try {
+      // Same fingerprint inside the cooldown window → branch upload skipped.
+      mockGetProjectLinkCache.mockReturnValue(freshCache());
+      mockCollectGitRefsFingerprint.mockResolvedValue("fingerprint-old");
+      const unchangedClient = makeClient();
+      await linkCommand(
+        {} as never,
+        unchangedClient as never,
+        "/repo",
+        "repo-id",
+        "https://cloud.example.com",
+        options,
+      );
+      expect(unchangedClient.post).not.toHaveBeenCalledWith(
+        "/api/project-link/init",
+        expect.anything(),
+      );
+
+      // Changed fingerprint bypasses the cooldown → branches upload again.
+      mockGetProjectLinkCache.mockReturnValue(freshCache());
+      mockCollectGitRefsFingerprint.mockResolvedValue("fingerprint-new");
+      const changedClient = makeClient();
+      await linkCommand(
+        {} as never,
+        changedClient as never,
+        "/repo",
+        "repo-id",
+        "https://cloud.example.com",
+        options,
+      );
+      expect(changedClient.post).toHaveBeenCalledWith(
+        "/api/project-link/init",
+        expect.objectContaining({
+          branches: [{ name: "main", headSha: "abc" }],
+        }),
+      );
     } finally {
       log.mockRestore();
     }
@@ -684,6 +783,7 @@ describe("linkCommand workspace repository requests", () => {
     mockCollectGitIdentity.mockResolvedValue({ authorName: null, authorEmail: null });
     mockCollectCommitLogs.mockResolvedValue([]);
     mockCollectCommitCount.mockResolvedValue(0);
+    mockCollectCommitFileStats.mockResolvedValue(new Map());
     mockResolveCommitBranches.mockResolvedValue(undefined);
     mockCollectGitRefsFingerprint.mockResolvedValue(null);
     mockDiscoverDocuments.mockReturnValue([]);
@@ -799,6 +899,7 @@ describe("linkCommand workspace repository requests", () => {
     mockCollectGitIdentity.mockResolvedValue({ authorName: null, authorEmail: null });
     mockCollectCommitLogs.mockResolvedValue([]);
     mockCollectCommitCount.mockResolvedValue(0);
+    mockCollectCommitFileStats.mockResolvedValue(new Map());
     mockResolveCommitBranches.mockResolvedValue(undefined);
     mockCollectGitRefsFingerprint.mockResolvedValue(null);
     mockDiscoverDocuments.mockReturnValue([{

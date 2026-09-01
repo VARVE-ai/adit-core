@@ -88,9 +88,8 @@ adit hook list
 
 ### npm
 
-ADIT installs without native build tools on Node.js 22, 24, 25, and 26.
-Node.js 20 and 23 require a local native build toolchain; switching to one of
-the prebuilt-supported versions is recommended for the simplest installation.
+ADIT requires Node.js 22 or newer and installs without native build tools:
+prebuilt SQLite binaries for all supported platforms ship inside the package.
 
 ```bash
 npm install -g @varveai/adit-cli
@@ -138,13 +137,40 @@ adit tui
 adit cloud login --server <url>
 ```
 
+## Projects & Initialization
+
+`adit init` is the only command that decides what a project is. It writes
+`.adit/project.json` — the project identity, the project type, and the explicit
+repository member list. Every other command (status, doctor, link, sync, hooks)
+only reads this manifest and never changes the project structure.
+
+- **Single-repo project** — a normal Git repository. `adit init` sets it up
+  without questions.
+- **Multi-repo project** — a directory containing several Git repositories one
+  level below (with or without a top-level `.git`). `adit init` lists the
+  repositories and asks how to manage them. Non-interactive environments use
+  `adit init --multi-repo` / `adit init --single-repo` explicitly.
+- **Recording boundary** — for a multi-repo project, start your coding tools
+  from the project root: work across all member repositories is recorded there.
+  Sessions started inside a member repository are not recorded. To record a
+  member repository on its own, run `adit init` inside it — it becomes an
+  independent project and the parent project is not affected.
+- **Adding / removing repositories** — nothing changes automatically. Re-run
+  `adit init` in the project root and confirm the updated list; `adit status`
+  and `adit doctor` point out unregistered or missing repositories.
+- **Upgrading from an older adit** — projects initialized before the manifest
+  existed show a one-time migration prompt. Run `adit init` once in each
+  project: the project identity is carried over, so the cloud project, local
+  history, team links and sync progress all stay attached. Recording is paused
+  until the migration runs.
+
 ## CLI Commands
 
 ### Core
 
 | Command | Description |
 | --- | --- |
-| `adit init` | Initialize ADIT in the current project (`--platform`, `--force`) |
+| `adit init` | Initialize ADIT in the current project (`--platform`, `--force`, `--single-repo`, `--multi-repo`) |
 | `adit uninstall` | Remove ADIT from the current project (`--yes`, `--json`) |
 | `adit status` | Show session, Git, sync, and hook status (`--json`) |
 | `adit config` | Show resolved ADIT configuration (`--json`) |
@@ -217,6 +243,15 @@ Common timeline options include `--limit`, `--actor`, `--type`,
 flows are also exposed as `/adit link` and `/adit intent` in supported
 platform integrations.
 
+Link only connects an already initialized project: it reads the repository
+list from `.adit/project.json`, validates every repository and its `origin`
+remote locally **before** any authentication or network call, and never
+modifies the project structure. Structural problems (missing repositories,
+new unregistered repositories) are fixed by re-running `adit init`, not by
+link. When a link would create a brand-new cloud project while the account
+already has projects pointing at the same git remotes (typical after a fresh
+clone or on a new machine), link prints a notice — nothing is merged.
+
 ### Export, Docs, Debug, Maintenance
 
 | Command | Description |
@@ -247,15 +282,16 @@ search, `f` filter, `s` cycle sort, `Esc`/`b` back, and `q` quit.
 ## Cloud Sync
 
 Cloud sync is optional. After `adit cloud login`, ADIT automatically pushes
-local events, sessions, diffs, environment snapshots, sync cursors,
-transcripts, Git metadata, and project documents to adit-cloud — being logged
-in is the opt-in. The login command prints exactly what is uploaded and how to
-disable each channel; `adit status` surfaces sync health warnings.
+local events, sessions, diffs, sync cursors, transcripts, Git metadata, and
+project documents to adit-cloud — being logged in is the opt-in. Environment
+snapshots remain local and are not included in Cloud sync payloads. The login
+command prints exactly what is uploaded and how to disable each channel;
+`adit status` surfaces sync health warnings.
 
 - Auto-sync runs after stable hook events when credentials are available.
 - `prompt-submit` is skipped so cloud does not receive a half-finished turn.
 - Each project tracks its own cursor with legacy global-cursor fallback.
-- Count-based auto-sync defaults to 20 unsynced records.
+- Count-based auto-sync defaults to 10 unsynced events.
 - Time-based auto-sync defaults to 2 hours since the last successful sync.
 - Transcript upload supports polling, concurrency limits, retry limits, and
   incremental byte thresholds.
@@ -323,7 +359,7 @@ Files larger than 500 KB are skipped with a warning.
 | `ADIT_CLOUD_ENABLED` | Set to `false` to disable cloud features | `true` |
 | `ADIT_CLOUD_AUTO_SYNC` | Set to `false` to disable auto-sync | `true` |
 | `ADIT_CLOUD_BATCH_SIZE` | Max records per sync batch; capped at 500 | `500` |
-| `ADIT_CLOUD_SYNC_THRESHOLD` | Unsynced record count that triggers auto-sync | `20` |
+| `ADIT_CLOUD_SYNC_THRESHOLD` | Unsynced event count that triggers auto-sync | `10` |
 | `ADIT_CLOUD_SYNC_TIMEOUT_HOURS` | Hours after last sync that trigger auto-sync | `2` |
 | `ADIT_AUTH_TOKEN` | Static JWT token for CI/CD or non-interactive auth | unset |
 | `ADIT_TRANSCRIPT_UPLOAD` | Set to `false` to disable transcript upload | `true` |
@@ -364,13 +400,13 @@ pnpm test -- packages/core/src/db/events.test.ts
 
 ## Requirements
 
-- Node.js >= 20.0.0
-- pnpm >= 9.0.0
+- Node.js >= 22.0.0
+- pnpm >= 11.0.0
 - Git
 
-`@varveai/adit-core` depends on `better-sqlite3`. The package includes a native
-preflight check so unsupported Node/platform combinations fail with guidance
-instead of silently falling through to a long `node-gyp` build.
+`@varveai/adit-core` depends on `better-sqlite3` v13, which bundles prebuilt
+binaries for all supported platforms inside the npm package, so no native
+build toolchain or install-time binary download is needed.
 
 ## License
 

@@ -14,10 +14,18 @@ import {
   getAdapter,
   listAdapters,
   detectPlatforms,
+  detectInstalledPlatforms,
   resolveAditHookBinary,
   type PlatformAdapter,
 } from "@varveai/adit-hooks/adapters";
 import type { Platform } from "@varveai/adit-core";
+import {
+  addConnectedPlatforms,
+  removeConnectedPlatform,
+  writeConnectedPlatforms,
+} from "./connected-platforms.js";
+import pc from "picocolors";
+import { marks, sectionTitle } from "./cli-style.js";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 export interface UninstallHooksResult {
@@ -40,7 +48,6 @@ export async function pluginInstallCommand(
 ): Promise<void> {
   const config = loadInitializedProjectConfig("adit hook install");
   if (!config) return;
-  const projectRoot = resolveProjectRoot(config);
   const aditBinaryPath = resolveAditHookBinary();
 
   // If explicit platform, install just that one
@@ -52,33 +59,26 @@ export async function pluginInstallCommand(
     return;
   }
 
-  // Auto-detect all platforms present in the project
-  const platforms = detectPlatforms(projectRoot);
+  // Auto-detect AI CLIs installed on this machine
+  const platforms = detectInstalledPlatforms();
 
   if (platforms.length === 0) {
     if (opts?.json) {
       console.log(JSON.stringify({
         ok: false,
         action: "install",
-        error: "No AI platforms detected",
+        error: "No AI CLIs found on PATH",
         platforms: [],
       }));
     } else {
       console.log();
-      console.log("  No AI platforms detected in this project.");
-      console.log();
-      console.log("  ADIT looks for platform config directories:");
-      console.log("    Claude Code           →  .claude/");
-      console.log("    Claude Code (VS Code) →  .claude/  (shared with CLI)");
-      console.log("    OpenCode              →  .opencode/  or  opencode.json");
-      console.log("    Cursor                →  .cursor/");
-      console.log("    Codex CLI             →  .codex/");
-      console.log("    Gemini CLI            →  .gemini/");
+      console.log("  No AI CLIs found on PATH.");
+      console.log("  Supported CLIs: claude, codex, gemini, opencode");
       console.log();
       console.log("  To install for a specific platform:");
       console.log("    adit hook install claude-code");
-      console.log("    adit hook install claude-vscode");
-      console.log("    adit hook install opencode");
+      console.log("    adit hook install codex");
+      console.log("    adit hook install cursor");
       console.log();
     }
     return;
@@ -86,6 +86,7 @@ export async function pluginInstallCommand(
 
   // Install for all detected platforms
   const installed: string[] = [];
+  const installedPlatforms: Platform[] = [];
   const errors: string[] = [];
 
   if (!opts?.json) {
@@ -100,7 +101,7 @@ export async function pluginInstallCommand(
 
     if (adapter.hookMappings.length === 0) {
       if (!opts?.json) {
-        console.log(`  [-] ${adapter.displayName} — detected but not yet supported`);
+        console.log(pc.dim(`  [-] ${adapter.displayName} — detected but not yet supported`));
       }
       continue;
     }
@@ -108,23 +109,28 @@ export async function pluginInstallCommand(
     try {
       await adapter.installHooks(config.projectRoot, aditBinaryPath);
       installed.push(adapter.displayName);
+      installedPlatforms.push(adapter.platform);
 
       if (!opts?.json) {
-        console.log(`  [+] ${adapter.displayName} — ${adapter.hookMappings.length} hook events`);
+        console.log(`  ${marks.ok} ${adapter.displayName} ${pc.dim(`— ${adapter.hookMappings.length} hook events`)}`);
 
         // Show validation checks
         const result = await adapter.validateInstallation(config.projectRoot);
         for (const check of result.checks) {
-          const symbol = check.ok ? "+" : "x";
-          console.log(`      [${symbol}] ${check.name}`);
+          const mark = check.ok ? marks.ok : marks.fail;
+          console.log(`      ${mark} ${check.ok ? pc.dim(check.name) : check.name}`);
         }
       }
     } catch (err) {
       errors.push(`${adapter.displayName}: ${(err as Error).message}`);
       if (!opts?.json) {
-        console.log(`  [x] ${adapter.displayName} — ${(err as Error).message}`);
+        console.log(`  ${marks.fail} ${adapter.displayName} — ${(err as Error).message}`);
       }
     }
+  }
+
+  if (installedPlatforms.length > 0) {
+    await addConnectedPlatforms(config.projectRoot, installedPlatforms);
   }
 
   if (opts?.json) {
@@ -137,13 +143,13 @@ export async function pluginInstallCommand(
   } else {
     console.log();
     if (installed.length > 0) {
-      console.log(`  Done! Installed for: ${installed.join(", ")}`);
+      console.log(`  ${pc.bold(pc.green("Done!"))} Installed for: ${installed.join(", ")}`);
     } else {
       console.log("  No hooks were installed.");
     }
     if (errors.length > 0) {
       for (const err of errors) {
-        console.log(`  Error: ${err}`);
+        console.log(`  ${marks.fail} ${err}`);
       }
     }
     console.log();
@@ -159,6 +165,7 @@ async function installSinglePlatform(
 ): Promise<void> {
   try {
     await adapter.installHooks(projectRoot, aditBinaryPath);
+    await addConnectedPlatforms(projectRoot, [adapter.platform]);
 
     if (opts?.json) {
       console.log(JSON.stringify({
@@ -168,14 +175,14 @@ async function installSinglePlatform(
       }));
     } else {
       console.log();
-      console.log(`  [+] Installed ADIT hooks for ${adapter.displayName}`);
+      console.log(`  ${marks.ok} Installed ADIT hooks for ${adapter.displayName}`);
       console.log();
 
       // Validate after install
       const result = await adapter.validateInstallation(projectRoot);
       for (const check of result.checks) {
-        const symbol = check.ok ? "+" : "x";
-        console.log(`      [${symbol}] ${check.name}: ${check.detail}`);
+        const mark = check.ok ? marks.ok : marks.fail;
+        console.log(`      ${mark} ${check.name}: ${check.ok ? pc.dim(check.detail) : check.detail}`);
       }
       console.log();
     }
@@ -188,7 +195,7 @@ async function installSinglePlatform(
         error: (err as Error).message,
       }));
     } else {
-      console.error(`  [x] Failed to install hooks for ${adapter.displayName}: ${(err as Error).message}`);
+      console.error(`  ${marks.fail} Failed to install hooks for ${adapter.displayName}: ${(err as Error).message}`);
     }
     process.exit(1);
   }
@@ -219,6 +226,7 @@ export async function pluginUninstallCommand(
   }
 
   const result = await uninstallInstalledPlatformHooks(config.projectRoot);
+  writeConnectedPlatforms(config.projectRoot, []);
   const errors = [...result.errors];
 
   // Optionally remove .adit/ data directory
@@ -328,6 +336,7 @@ async function uninstallAll(
       errors.push(`${adapter.platform}: ${(err as Error).message}`);
     }
   }
+  writeConnectedPlatforms(projectRoot, []);
 
   // Optionally remove .adit/ data directory
   let dataRemoved = false;
@@ -363,14 +372,14 @@ function printUninstallResult(
       console.log("  No ADIT hooks found to remove.");
     } else {
       for (const displayName of result.uninstalled) {
-        console.log(`  [~] Removed ${displayName} hooks`);
+        console.log(`  ${marks.change} Removed ${displayName} hooks`);
       }
     }
     if (dataRemoved) {
-      console.log(`  [~] Removed data directory: ${dataDir}`);
+      console.log(`  ${marks.change} Removed data directory: ${dataDir}`);
     }
     for (const err of result.errors) {
-      console.error(`  [x] ${err}`);
+      console.error(`  ${marks.fail} ${err}`);
     }
     console.log();
   }
@@ -385,6 +394,7 @@ async function uninstallSinglePlatform(
 ): Promise<void> {
   try {
     await adapter.uninstallHooks(projectRoot);
+    await removeConnectedPlatform(projectRoot, adapter.platform);
 
     // Optionally remove .adit/ data directory
     let dataRemoved = false;
@@ -402,9 +412,9 @@ async function uninstallSinglePlatform(
       }));
     } else {
       console.log();
-      console.log(`  [~] Removed ${adapter.displayName} hooks`);
+      console.log(`  ${marks.change} Removed ${adapter.displayName} hooks`);
       if (dataRemoved) {
-        console.log(`  [~] Removed data directory: ${dataDir}`);
+        console.log(`  ${marks.change} Removed data directory: ${dataDir}`);
       }
       console.log();
     }
@@ -458,8 +468,7 @@ export async function pluginListCommand(
   }
 
   console.log();
-  console.log("  Available Platforms");
-  console.log("  ------------------");
+  console.log(sectionTitle("  Available Platforms"));
   console.log();
 
   for (const adapter of adapters) {
@@ -475,20 +484,20 @@ export async function pluginListCommand(
       }
     }
 
-    const statusIcon =
-      status === "installed" ? "+" :
-      status === "available" ? " " : "-";
+    const mark =
+      status === "installed" ? marks.ok :
+      status === "available" ? pc.dim("[ ]") : pc.dim("[-]");
 
-    console.log(`  [${statusIcon}] ${adapter.displayName} (${adapter.platform})`);
+    console.log(`  ${mark} ${adapter.displayName} ${pc.dim(`(${adapter.platform})`)}`);
     if (isImplemented) {
-      console.log(`      ${adapter.hookMappings.length} hook events: ${adapter.hookMappings.map((m) => m.platformEvent).join(", ")}`);
+      console.log(pc.dim(`      ${adapter.hookMappings.length} hook events: ${adapter.hookMappings.map((m) => m.platformEvent).join(", ")}`));
     } else {
-      console.log(`      Stub — contributions welcome`);
+      console.log(pc.dim("      Stub — contributions welcome"));
     }
   }
 
   console.log();
-  console.log("  [+] installed  [ ] available  [-] not yet supported");
+  console.log(pc.dim(`  ${pc.green("[+]")} installed  [ ] available  [-] not yet supported`));
   console.log();
 }
 

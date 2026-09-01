@@ -30,6 +30,7 @@ export interface CliAgentState {
   resumeSessionId: string | null;
   sdkSessionId: string | null;
   activeModelId: string | null;
+  reasoningEffort?: string | null;
   currentBranch: string | null;
   contextUsage: CliAgentContextUsage | null;
   lastTokenUsage: CliAgentTokenUsage | null;
@@ -82,6 +83,51 @@ export interface PromptImageAttachment {
   sizeBytes: number;
 }
 
+export type CliSessionContextKind =
+  | "collaboration_request"
+  | "collaboration_result";
+
+export interface AppendSessionContextInput {
+  sessionId: string;
+  contextEntryId: string;
+  requestId: string;
+  kind: CliSessionContextKind;
+  content: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AppendSessionContextResult {
+  provider: CliAgentProviderName;
+  sessionId: string;
+  contextEntryId: string;
+  persisted: true;
+  appended: boolean;
+  alreadyApplied?: boolean;
+}
+
+export interface StartCollaborationConsultationInput {
+  requestId: string;
+  attemptId: string;
+  runId: string;
+  protocolVersion: "v1";
+  mode: "consultation";
+  targetSessionId: string;
+  question: string;
+}
+
+export interface StartCollaborationConsultationResult {
+  sessionId: string;
+  providerRunId: string;
+}
+
+export interface AbortCollaborationConsultationInput {
+  requestId: string;
+  attemptId: string;
+  runId: string;
+  code: "RUN_TIMEOUT" | "EXECUTION_ABORTED";
+  message: string;
+}
+
 export interface CliAgentProvider {
   readonly provider: CliAgentProviderName;
   readonly state: CliAgentState;
@@ -90,6 +136,16 @@ export interface CliAgentProvider {
   releaseToLocal(): Promise<void>;
   startNewSession?(pendingSessionId?: string | null): Promise<void>;
   switchSession(sessionId: string): Promise<void>;
+  appendSessionContext?(
+    input: AppendSessionContextInput,
+  ): Promise<AppendSessionContextResult>;
+  startCollaborationConsultation?(
+    input: StartCollaborationConsultationInput,
+  ): Promise<StartCollaborationConsultationResult>;
+  abortCollaborationConsultation?(
+    input: AbortCollaborationConsultationInput,
+  ): Promise<void>;
+  abortCollaborationOnRelayDisconnect?(): Promise<void>;
   sendPrompt(prompt: string, opts?: {
     mode?: "build" | "plan";
     pendingSessionId?: string | null;
@@ -115,6 +171,7 @@ export interface CliAgentProvider {
 }
 
 export interface CliAgentRelayEvent {
+  eventId?: string;
   type: string;
   payload: Record<string, unknown>;
 }
@@ -131,7 +188,9 @@ export interface RelayCommand {
     | "new-session"
     | "switch-session"
     | "slash-command"
-    | "rewind";
+    | "rewind"
+    | "append-session-context"
+    | "collaboration-prompt";
   payload: Record<string, unknown>;
   createdAt: number;
 }
@@ -144,6 +203,7 @@ export interface CliAgentConnectionState {
   resumeSessionId: string | null;
   sdkSessionId: string | null;
   activeModelId: string | null;
+  reasoningEffort?: string | null;
   currentBranch: string | null;
   contextUsage: CliAgentContextUsage | null;
   lastTokenUsage: CliAgentTokenUsage | null;

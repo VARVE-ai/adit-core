@@ -6,6 +6,7 @@
  * work in cmd.exe, PowerShell, Git Bash, and Unix shells.
  */
 
+import { existsSync } from "node:fs";
 import type { Platform } from "@varveai/adit-core";
 import type { AditHookType } from "./types.js";
 
@@ -90,13 +91,26 @@ export function encodeProjectRoot(projectRoot: string): string {
   return Buffer.from(projectRoot, "utf8").toString("base64url");
 }
 
+/**
+ * Extract the script file path from a `node "<path>"` hook command — the form
+ * resolveAditHookBinary() emits for repo and npm installs. PATH-based forms
+ * (`adit-hook`, `npx adit-hook`) carry no checkable file path and return null.
+ */
+export function extractHookScriptPath(command: string): string | null {
+  const match = command.match(
+    /^\s*node\s+(?:"([^"]+)"|'([^']+)'|(\S+\.(?:cjs|mjs|js)))(?=\s|$)/u,
+  );
+  if (!match) return null;
+  return match[1] ?? match[2] ?? match[3] ?? null;
+}
+
 /** Decode the pinned project root out of a hook command string, if any. */
 export function extractPinnedProjectRoot(command: string): string | null {
   const match = command.match(/--project-root-b64[= ]([A-Za-z0-9_-]+)/u);
   return match ? decodeProjectRoot(match[1]) : null;
 }
 
-export type HookEntryRootStatus = "ok" | "stale" | "absent";
+export type HookEntryRootStatus = "ok" | "broken" | "stale" | "absent";
 
 interface HookEntryLike {
   command?: unknown;
@@ -106,52 +120,78 @@ interface HookEntryLike {
 /**
  * Classify a platform hook entry list against the expected project root.
  *
- * - "ok"     — at least one ADIT command pinned to this project root
+ * - "ok"     — at least one ADIT command pinned to this project root whose
+ *              hook script still exists (or is a PATH-based command we
+ *              cannot check)
+ * - "broken" — commands are pinned to this root, but every one points at a
+ *              hook script file that no longer exists (the adit install they
+ *              reference was removed or replaced). They fail silently at
+ *              runtime and need `adit init`.
  * - "stale"  — ADIT commands exist, but none carries this root (pre-pin
  *              install, or the project directory moved after install).
  *              These commands no-op at runtime and need `adit init`.
  * - "absent" — no ADIT commands at all
  *
  * Also collects the roots stale commands are pinned to (empty string for
- * commands with no pin), so callers can hint at a moved project.
+ * commands with no pin), so callers can hint at a moved project, and the
+ * missing script paths of broken commands.
  */
 export function classifyAditHookEntries(
   entries: unknown[],
   projectRoot: string,
-): { status: HookEntryRootStatus; stalePinnedRoots: string[] } {
+  opts?: { scriptExists?: (scriptPath: string) => boolean },
+): { status: HookEntryRootStatus; stalePinnedRoots: string[]; brokenScriptPaths: string[] } {
+  const scriptExists = opts?.scriptExists ?? existsSync;
   let sawAdit = false;
   const stalePinnedRoots = new Set<string>();
+  const brokenScriptPaths = new Set<string>();
 
-  const inspect = (command: unknown): boolean => {
-    if (typeof command !== "string" || !isAditHookCommand(command)) return false;
-    if (isFixedProjectRootHookCommand(command, projectRoot)) return true;
+  const inspect = (command: unknown): "ok" | null => {
+    if (typeof command !== "string" || !isAditHookCommand(command)) return null;
+    if (isFixedProjectRootHookCommand(command, projectRoot)) {
+      const scriptPath = extractHookScriptPath(command);
+      if (scriptPath && !scriptExists(scriptPath)) {
+        brokenScriptPaths.add(scriptPath);
+        return null;
+      }
+      return "ok";
+    }
     sawAdit = true;
     stalePinnedRoots.add(extractPinnedProjectRoot(command) ?? "");
-    return false;
+    return null;
   };
 
   for (const raw of entries) {
     const entry = raw as HookEntryLike;
-    if (inspect(entry.command)) return { status: "ok", stalePinnedRoots: [] };
+    if (inspect(entry.command) === "ok") {
+      return { status: "ok", stalePinnedRoots: [], brokenScriptPaths: [] };
+    }
     if (Array.isArray(entry.hooks)) {
       for (const nested of entry.hooks) {
-        if (inspect((nested as HookEntryLike).command)) {
-          return { status: "ok", stalePinnedRoots: [] };
+        if (inspect((nested as HookEntryLike).command) === "ok") {
+          return { status: "ok", stalePinnedRoots: [], brokenScriptPaths: [] };
         }
       }
     }
   }
 
+  const status: HookEntryRootStatus = brokenScriptPaths.size > 0
+    ? "broken"
+    : sawAdit
+      ? "stale"
+      : "absent";
   return {
-    status: sawAdit ? "stale" : "absent",
+    status,
     stalePinnedRoots: Array.from(stalePinnedRoots),
+    brokenScriptPaths: Array.from(brokenScriptPaths),
   };
 }
 
 /**
  * Build the "Hook configuration" check detail shared by platform adapters.
- * Distinguishes hooks that are missing entirely from stale ADIT hooks whose
- * pinned project root is absent or points elsewhere.
+ * Distinguishes hooks that are missing entirely, stale ADIT hooks whose
+ * pinned project root is absent or points elsewhere, and broken ADIT hooks
+ * whose script file no longer exists.
  */
 export function describeHookValidation(input: {
   configPath: string;
@@ -159,13 +199,25 @@ export function describeHookValidation(input: {
   missingHooks: string[];
   staleHooks: string[];
   stalePinnedRoots: string[];
+  brokenHooks?: string[];
+  brokenScriptPaths?: string[];
 }): { ok: boolean; detail: string } {
   const { configPath, projectRoot, missingHooks, staleHooks, stalePinnedRoots } = input;
-  if (missingHooks.length === 0 && staleHooks.length === 0) {
+  const brokenHooks = input.brokenHooks ?? [];
+  const brokenScriptPaths = input.brokenScriptPaths ?? [];
+  if (missingHooks.length === 0 && staleHooks.length === 0 && brokenHooks.length === 0) {
     return { ok: true, detail: `All hooks registered in ${configPath}` };
   }
 
   const parts: string[] = [];
+  if (brokenHooks.length > 0) {
+    const pathHint = brokenScriptPaths.length > 0
+      ? ` (script not found: ${brokenScriptPaths.join(", ")})`
+      : "";
+    parts.push(
+      `Broken ADIT hooks: ${brokenHooks.join(", ")}${pathHint} — the adit install they point at was removed; these fail silently at runtime; re-run \`adit init\` to reinstall`,
+    );
+  }
   if (staleHooks.length > 0) {
     const otherRoots = stalePinnedRoots.filter((root) => root && root !== projectRoot);
     const movedHint = otherRoots.length > 0

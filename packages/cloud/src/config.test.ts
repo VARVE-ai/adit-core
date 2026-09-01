@@ -30,7 +30,7 @@ describe("loadCloudConfig", () => {
     expect(config.enabled).toBe(true);
     expect(config.autoSync).toBe(true);
     expect(config.batchSize).toBe(500);
-    expect(config.syncThreshold).toBe(20);
+    expect(config.syncThreshold).toBe(10);
     expect(config.syncTimeoutHours).toBe(2);
   });
 
@@ -46,10 +46,10 @@ describe("loadCloudConfig", () => {
     expect(config.syncThreshold).toBe(1);
   });
 
-  it("falls back to 20 for invalid syncThreshold", () => {
+  it("falls back to 10 for invalid syncThreshold", () => {
     process.env.ADIT_CLOUD_SYNC_THRESHOLD = "not-a-number";
     const config = loadCloudConfig();
-    expect(config.syncThreshold).toBe(20);
+    expect(config.syncThreshold).toBe(10);
   });
 
   it("enables cloud when server URL is set", () => {
