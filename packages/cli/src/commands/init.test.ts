@@ -2,7 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { computeRepoProjectId, readProjectManifest } from "@varveai/adit-core";
+import {
+  computeRepoProjectId,
+  readProjectManifest,
+  writeProjectManifest,
+} from "@varveai/adit-core";
 
 const mocks = vi.hoisted(() => ({
   getHeadSha: vi.fn(async () => null as string | null),
@@ -75,6 +79,16 @@ describe("initCommand", () => {
     expect(existsSync(join(root, ".adit", "adit.sqlite"))).toBe(true);
     expect(existsSync(join(root, ".adit", "workspace.json"))).toBe(false);
     expect(existsSync(join(root, "api", ".adit"))).toBe(false);
+  });
+
+  it("uses a singular repository label for a one-member Workspace", async () => {
+    mkdirSync(join(root, "api", ".git"), { recursive: true });
+
+    await initCommand({ cwd: root, multiRepo: true });
+
+    const output = vi.mocked(console.log).mock.calls.flat().join("\n");
+    expect(output).toContain("work across the repository is recorded");
+    expect(output).not.toContain("all 1 repositories");
   });
 
   it("fails non-interactively when the layout is ambiguous and no mode flag is given", async () => {
@@ -161,6 +175,59 @@ describe("initCommand", () => {
     expect(after.projectId).toBe(before.projectId);
     expect(after.createdAt).toBe(before.createdAt);
     expect(after.repositories).toEqual(before.repositories);
+  });
+
+  it("preserves init selection and Cloud deletion tombstones on non-interactive re-init", async () => {
+    mkdirSync(join(root, "api", ".git"), { recursive: true });
+    mkdirSync(join(root, "web", ".git"), { recursive: true });
+    await initCommand({ cwd: root, multiRepo: true });
+    const before = readProjectManifest(root)!;
+    writeProjectManifest(root, {
+      ...before,
+      repositories: before.repositories.map((repository) =>
+        repository.relativePath === "api"
+          ? { ...repository, syncEnabled: false }
+          : {
+              ...repository,
+              cloudDeletedAt: "2026-09-01T00:00:00.000Z",
+              cloudDeletionOperationId: "operation-web",
+            },
+      ),
+    });
+
+    await initCommand({ cwd: root, multiRepo: true });
+
+    expect(readProjectManifest(root)!.repositories).toEqual([
+      expect.objectContaining({ relativePath: "api", syncEnabled: false }),
+      expect.objectContaining({
+        relativePath: "web",
+        cloudDeletedAt: "2026-09-01T00:00:00.000Z",
+        cloudDeletionOperationId: "operation-web",
+      }),
+    ]);
+  });
+
+  it("stops init after retaining a Cloud-deleted project identity", async () => {
+    mkdirSync(join(root, "api", ".git"), { recursive: true });
+    await initCommand({ cwd: root, multiRepo: true });
+    const before = readProjectManifest(root)!;
+    const deleted = {
+      ...before,
+      cloudDeletedAt: "2026-09-01T00:00:00.000Z",
+      cloudDeletionOperationId: "operation-workspace",
+    };
+    writeProjectManifest(root, deleted);
+    mkdirSync(join(root, "new-service", ".git"), { recursive: true });
+    vi.mocked(console.log).mockClear();
+
+    await initCommand({ cwd: root, multiRepo: true });
+
+    expect(readProjectManifest(root)).toEqual(deleted);
+    const output = vi.mocked(console.log).mock.calls.flat().join("\n");
+    expect(output).toContain("This project was deleted in ADIT Cloud.");
+    expect(output).not.toContain("Setup");
+    expect(output).not.toContain("Platforms");
+    expect(output).not.toContain("Done! ADIT is ready.");
   });
 
   it("updates the repository list on re-init with --multi-repo after a new repo appears", async () => {

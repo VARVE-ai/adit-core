@@ -17,6 +17,10 @@ import type { CloudClient } from "../http/client.js";
 import { CloudApiError } from "../http/errors.js";
 import type { CloudRepository } from "../project-context.js";
 import { repositoryPayloads, resolveCloudProjectContext } from "../project-context.js";
+import {
+  CloudProjectDeletedError,
+  refreshProjectDeletionPolicy,
+} from "../project-deletion-policy.js";
 import type {
   GitCommit,
   LinkOptions,
@@ -263,7 +267,13 @@ export async function linkCommand(
   serverUrl: string,
   options: LinkOptions = {},
 ): Promise<LinkResult> {
+  if (!options.deletionPolicyRefreshed) {
+    await refreshProjectDeletionPolicy(client, projectRoot, projectId);
+  }
   const projectConfig = loadConfig(projectRoot);
+  if (projectConfig.cloudDeletedAt) {
+    throw new CloudProjectDeletedError(projectConfig.cloudDeletedAt);
+  }
   const projectContext = await resolveCloudProjectContext(projectConfig);
 
   if (projectContext.projectType === "workspace") {

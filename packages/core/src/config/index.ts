@@ -13,7 +13,7 @@ import {
   findProjectManifestRoot,
   hasLegacyProjectTraces,
   readProjectManifest,
-  resolveManifestRepositories,
+  resolveActiveManifestRepositories,
   type LocalRepository,
   type ProjectType,
 } from "./project.js";
@@ -43,6 +43,8 @@ export interface AditConfig {
   projectType: ProjectType;
   /** Git repositories that belong to this local project (empty when not initialized) */
   repositories: LocalRepository[];
+  /** Whole-project Cloud deletion tombstone mirrored into the manifest. */
+  cloudDeletedAt: string | null;
   /** Whether a project manifest was found at the resolved root */
   initialization: ProjectInitializationState;
   /** Whether to capture environment snapshots */
@@ -156,12 +158,14 @@ export function loadConfig(cwd?: string): AditConfig {
   let projectType: ProjectType;
   let projectId: string;
   let repositories: LocalRepository[];
+  let cloudDeletedAt: string | null;
 
   if (manifest) {
     initialization = "initialized";
     projectType = manifest.projectType;
     projectId = manifest.projectId;
-    repositories = resolveManifestRepositories(projectRoot, manifest);
+    repositories = resolveActiveManifestRepositories(projectRoot, manifest);
+    cloudDeletedAt = manifest.cloudDeletedAt ?? null;
     const remoteUrl = process.env.ADIT_REMOTE_URL;
     if (remoteUrl && projectType === "repo" && repositories[0]) {
       repositories[0] = { ...repositories[0], repositoryUrl: remoteUrl };
@@ -171,6 +175,7 @@ export function loadConfig(cwd?: string): AditConfig {
     projectType = "repo";
     projectId = "";
     repositories = [];
+    cloudDeletedAt = null;
   }
 
   // Load file-based settings (lowest priority — env vars override)
@@ -184,6 +189,7 @@ export function loadConfig(cwd?: string): AditConfig {
     projectId,
     projectType,
     repositories,
+    cloudDeletedAt,
     initialization,
     captureEnv: process.env.ADIT_CAPTURE_ENV !== undefined
       ? process.env.ADIT_CAPTURE_ENV !== "false"

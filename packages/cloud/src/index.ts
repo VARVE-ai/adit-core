@@ -14,6 +14,13 @@ export {
   type CloudProjectContext,
   type CloudRepository,
 } from "./project-context.js";
+export {
+  applyProjectDeletionPolicy,
+  refreshProjectDeletionPolicy,
+  CloudProjectDeletedError,
+  type DeletedRepositoryPolicy,
+  type ProjectDeletionPolicy,
+} from "./project-deletion-policy.js";
 
 // Auth
 export {

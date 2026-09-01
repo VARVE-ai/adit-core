@@ -88,6 +88,9 @@ export async function initCommand(opts: {
   }
 
   const manifest = plan.manifest;
+  if (manifest.cloudDeletedAt) {
+    return;
+  }
   const migratedFrom = plan.status === "written" ? plan.migratedFrom : null;
   const config = loadConfig(projectRoot);
   const setupRoot = config.projectRoot;
@@ -127,7 +130,12 @@ export async function initCommand(opts: {
   if (manifest.projectType === "workspace") {
     console.log(`  ${ok} Repositories: ${manifest.repositories.length}`);
     for (const repo of manifest.repositories) {
-      console.log(pc.dim(`        - ${repo.relativePath}`));
+      const state = repo.cloudDeletedAt
+        ? " (deleted in Cloud)"
+        : repo.syncEnabled === false
+          ? " (not synced)"
+          : "";
+      console.log(pc.dim(`        - ${repo.relativePath}${state}`));
     }
   }
   if (migratedFrom) {
@@ -307,7 +315,10 @@ export async function initCommand(opts: {
     console.log(`  ${pc.yellow("Skipped:")} ${skipped.join(", ")}`);
   }
   if (manifest.projectType === "workspace") {
-    console.log(pc.dim(`  Tip: start Claude Code / Codex from this directory — work across all ${manifest.repositories.length} repositories is recorded;`));
+    const repositoryScope = manifest.repositories.length === 1
+      ? "the repository"
+      : `all ${manifest.repositories.length} repositories`;
+    console.log(pc.dim(`  Tip: start Claude Code / Codex from this directory — work across ${repositoryScope} is recorded;`));
     console.log(pc.dim("       sessions started inside a member repository are not."));
   }
   if (!cloudResult.linked) {

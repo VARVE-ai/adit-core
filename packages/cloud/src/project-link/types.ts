@@ -288,6 +288,8 @@ export interface LinkOptions {
    * failures are wrapped in LinkStepError so the failing step is named.
    */
   silent?: boolean;
+  /** Internal: the CLI already refreshed deletion policy before local prechecks. */
+  deletionPolicyRefreshed?: boolean;
   /** Invoked as each link step completes (per repository in workspaces). */
   onStepComplete?: (step: StepTiming) => void;
 }

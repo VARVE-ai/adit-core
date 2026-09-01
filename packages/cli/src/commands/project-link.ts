@@ -26,8 +26,15 @@ import {
   formatIntentList,
   formatIntentDetail,
   DEFAULT_SERVER_URL,
+  CloudProjectDeletedError,
+  refreshProjectDeletionPolicy,
 } from "@varveai/adit-cloud";
-import type { LinkOptions, LinkResult, IntentOptions } from "@varveai/adit-cloud";
+import type {
+  LinkOptions,
+  LinkResult,
+  IntentOptions,
+  ProjectDeletionPolicy,
+} from "@varveai/adit-cloud";
 import { getRemoteUrl } from "@varveai/adit-engine";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
 
@@ -77,23 +84,8 @@ function reportPrecheckIssues(issues: RepositoryPrecheckIssue[]): void {
  * (adit init) can render their own summary; null on any failure.
  */
 export async function projectLinkCliHandler(opts: LinkOptions): Promise<LinkResult | null> {
-  const config = loadInitializedProjectConfig("adit cloud link");
+  let config = loadInitializedProjectConfig("adit cloud link");
   if (!config) return null;
-
-  // Local validation first — all problems reported before auth or network.
-  const issues = await precheckManifestRepositories(config);
-  if (issues.length > 0) {
-    reportPrecheckIssues(issues);
-    process.exitCode = 1;
-    return null;
-  }
-  if (!opts.json && !opts.silent) {
-    console.log("Checking project repositories...");
-    for (const repository of config.repositories) {
-      const label = repository.relativePath === "." ? repository.displayName : repository.relativePath;
-      console.log(`  [+] ${label}`);
-    }
-  }
 
   // Prerequisite: credentials
   const credentials = loadCredentials();
@@ -118,8 +110,14 @@ export async function projectLinkCliHandler(opts: LinkOptions): Promise<LinkResu
 
   // Verify connectivity
   const client = new CloudClient(serverUrl, credentials);
+  let deletionPolicy: ProjectDeletionPolicy | null = null;
   try {
     await client.get("/api/sync/health");
+    deletionPolicy = await refreshProjectDeletionPolicy(
+      client,
+      config.projectRoot,
+      config.projectId,
+    );
   } catch (error) {
     if (error instanceof CloudNetworkError) {
       console.error(
@@ -137,6 +135,37 @@ export async function projectLinkCliHandler(opts: LinkOptions): Promise<LinkResu
     return null;
   }
 
+  config = loadInitializedProjectConfig("adit cloud link", config.projectRoot);
+  if (!config) return null;
+  if (config.cloudDeletedAt) {
+    console.error("This project identity was deleted from ADIT Cloud.");
+    console.error("Run 'adit init' to create a new project identity before linking again.");
+    process.exitCode = 1;
+    return null;
+  }
+
+  const issues = await precheckManifestRepositories(config);
+  if (issues.length > 0) {
+    reportPrecheckIssues(issues);
+    process.exitCode = 1;
+    return null;
+  }
+  if (!opts.json && !opts.silent) {
+    console.log("Checking project repositories...");
+    const activePaths = new Set(
+      config.repositories.map((repository) => repository.relativePath),
+    );
+    for (const repository of deletionPolicy?.deletedRepositories ?? []) {
+      if (!activePaths.has(repository.relativePath)) {
+        console.log(`  [-] ${repository.relativePath} (deleted in Cloud)`);
+      }
+    }
+    for (const repository of config.repositories) {
+      const label = repository.relativePath === "." ? repository.displayName : repository.relativePath;
+      console.log(`  [+] ${label}`);
+    }
+  }
+
   // Suppress non-JSON output in JSON/silent mode
   if (!opts.json && !opts.silent) {
     console.log(`Authenticated on ${serverUrl}`);
@@ -151,14 +180,17 @@ export async function projectLinkCliHandler(opts: LinkOptions): Promise<LinkResu
       config.projectRoot,
       config.projectId,
       serverUrl,
-      opts,
+      { ...opts, deletionPolicyRefreshed: true },
     );
     if (opts.json) {
       console.log(JSON.stringify(result, null, 2));
     }
     return result;
   } catch (error) {
-    if (error instanceof WorkspaceLinkPartialFailureError) {
+    if (error instanceof CloudProjectDeletedError) {
+      console.error(error.message);
+      process.exitCode = 1;
+    } else if (error instanceof WorkspaceLinkPartialFailureError) {
       if (opts.json) {
         console.log(JSON.stringify(error.result, null, 2));
       }

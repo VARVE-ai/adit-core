@@ -11,6 +11,7 @@ import {
   generateProjectId,
   projectManifestPath,
   readProjectManifest,
+  resolveActiveManifestRepositories,
   resolveManifestRepositories,
   withProjectInitLock,
   writeProjectManifest,
@@ -105,6 +106,29 @@ describe("project manifest", () => {
     });
     writeProjectManifest(root, manifest);
     expect(readProjectManifest(root)).toEqual(manifest);
+  });
+
+  it("filters local-only and Cloud-deleted repositories without removing manifest entries", () => {
+    const manifest = manifestFor({
+      projectType: "workspace",
+      repositories: [
+        { relativePath: "api", repositoryId: "id-api", syncEnabled: false },
+        {
+          relativePath: "web",
+          repositoryId: "id-web",
+          cloudDeletedAt: "2026-08-31T10:00:00.000Z",
+          cloudDeletionOperationId: "operation-1",
+        },
+        { relativePath: "worker", repositoryId: "id-worker" },
+      ],
+    });
+    writeProjectManifest(root, manifest);
+
+    const read = readProjectManifest(root)!;
+    expect(read.repositories).toHaveLength(3);
+    expect(resolveActiveManifestRepositories(root, read).map((repo) => repo.relativePath)).toEqual([
+      "worker",
+    ]);
   });
 
   it("rejects duplicate repositoryIds", () => {
@@ -278,6 +302,17 @@ describe("loadConfig project resolution", () => {
     expect(config.repositories).toMatchObject([
       { localRepositoryId: manifest.projectId, relativePath: "." },
     ]);
+  });
+
+  it("exposes a whole-project Cloud tombstone and no upload repositories", () => {
+    writeProjectManifest(root, manifestFor({
+      cloudDeletedAt: "2026-08-31T12:00:00.000Z",
+      cloudDeletionOperationId: "operation-2",
+    }));
+
+    const config = loadConfig(root);
+    expect(config.cloudDeletedAt).toBe("2026-08-31T12:00:00.000Z");
+    expect(config.repositories).toEqual([]);
   });
 
   it("resolves a plain subdirectory of a container to the container manifest", () => {

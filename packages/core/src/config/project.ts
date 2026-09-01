@@ -1,10 +1,9 @@
 /**
  * Local project manifest and repository resolution.
  *
- * A local ADIT project is defined by `.adit/project.json`, written only by
- * `adit init`. It records the project identity, the project type (single
- * repo or multi-repo workspace) and the explicit repository member list.
- * Every other command reads this manifest; nothing else may write it.
+ * A local ADIT project is defined by `.adit/project.json`. `adit init` owns
+ * project identity, membership, and sync selection. `adit cloud link` may
+ * append Cloud deletion tombstones without changing those decisions.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -28,6 +27,11 @@ export type ProjectType = "repo" | "workspace";
 
 export interface ProjectManifestRepository {
   relativePath: string;
+  /** Local upload selection. Omitted means enabled for backward compatibility. */
+  syncEnabled?: boolean;
+  /** Append-only Cloud deletion tombstone mirrored locally. */
+  cloudDeletedAt?: string;
+  cloudDeletionOperationId?: string;
   /**
    * Persisted member-repository identity (workspace projects). Minted once
    * when the repository is registered and carried across directory renames —
@@ -50,6 +54,9 @@ export interface ProjectManifest {
   projectId: string;
   projectType: ProjectType;
   repositories: ProjectManifestRepository[];
+  /** Whole-project Cloud deletion tombstone. */
+  cloudDeletedAt?: string;
+  cloudDeletionOperationId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -100,6 +107,11 @@ export function projectManifestPath(projectRoot: string): string {
 
 /** Generate a fresh project ID for a brand-new project. */
 export function generateProjectId(): string {
+  return randomUUID();
+}
+
+/** Generate a fresh identity when a deleted repository is recreated. */
+export function generateRepositoryId(): string {
   return randomUUID();
 }
 
@@ -157,7 +169,7 @@ export function validateProjectManifest(manifest: ProjectManifest, projectRoot: 
   return validateManifest(manifest, projectManifestPath(projectRoot));
 }
 
-/** Atomically write the project manifest. Only `adit init` may call this. */
+/** Atomically write a fully validated project manifest. */
 export function writeProjectManifest(projectRoot: string, manifest: ProjectManifest): void {
   const manifestPath = projectManifestPath(projectRoot);
   validateManifest(manifest, manifestPath);
@@ -238,6 +250,22 @@ export function resolveManifestRepositories(
       path,
     };
   });
+}
+
+/** Resolve only repositories currently eligible for Cloud upload. */
+export function resolveActiveManifestRepositories(
+  projectRoot: string,
+  manifest: ProjectManifest,
+): LocalRepository[] {
+  if (manifest.cloudDeletedAt) return [];
+  const activePaths = new Set(
+    manifest.repositories
+      .filter((entry) => entry.syncEnabled !== false && !entry.cloudDeletedAt)
+      .map((entry) => entry.relativePath),
+  );
+  return resolveManifestRepositories(projectRoot, manifest).filter((repository) =>
+    activePaths.has(repository.relativePath),
+  );
 }
 
 /**
@@ -373,9 +401,24 @@ function validateManifest(parsed: unknown, manifestPath: string): ProjectManifes
       typeof record.repositoryUrl === "string" && record.repositoryUrl.trim()
         ? record.repositoryUrl.trim()
         : null;
+    if (record.syncEnabled !== undefined && typeof record.syncEnabled !== "boolean") {
+      throw new ProjectManifestError(
+        `Repository '${relativePath}' has invalid syncEnabled.`,
+        manifestPath,
+      );
+    }
+    const cloudDeletedAt = optionalNonEmptyString(record.cloudDeletedAt, "cloudDeletedAt", manifestPath);
+    const cloudDeletionOperationId = optionalNonEmptyString(
+      record.cloudDeletionOperationId,
+      "cloudDeletionOperationId",
+      manifestPath,
+    );
 
     return {
       relativePath,
+      ...(typeof record.syncEnabled === "boolean" ? { syncEnabled: record.syncEnabled } : {}),
+      ...(cloudDeletedAt ? { cloudDeletedAt } : {}),
+      ...(cloudDeletionOperationId ? { cloudDeletionOperationId } : {}),
       ...(repositoryId ? { repositoryId } : {}),
       ...(repositoryUrl ? { repositoryUrl } : {}),
     };
@@ -399,15 +442,39 @@ function validateManifest(parsed: unknown, manifestPath: string): ProjectManifes
   if (!createdAt || !updatedAt) {
     throw new ProjectManifestError("Project manifest is missing createdAt/updatedAt.", manifestPath);
   }
+  const cloudDeletedAt = optionalNonEmptyString(
+    manifest.cloudDeletedAt,
+    "cloudDeletedAt",
+    manifestPath,
+  );
+  const cloudDeletionOperationId = optionalNonEmptyString(
+    manifest.cloudDeletionOperationId,
+    "cloudDeletionOperationId",
+    manifestPath,
+  );
 
   return {
     schemaVersion: MANIFEST_SCHEMA_VERSION,
     projectId,
     projectType,
     repositories,
+    ...(cloudDeletedAt ? { cloudDeletedAt } : {}),
+    ...(cloudDeletionOperationId ? { cloudDeletionOperationId } : {}),
     createdAt,
     updatedAt,
   };
+}
+
+function optionalNonEmptyString(
+  value: unknown,
+  field: string,
+  manifestPath: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new ProjectManifestError(`Project manifest has invalid ${field}.`, manifestPath);
+  }
+  return value.trim();
 }
 
 function assertSafeRelativePath(relativePath: string, manifestPath: string): void {

@@ -29,6 +29,7 @@ import {
 } from "@varveai/adit-core";
 import type { ProjectLayoutAnalysis } from "./project-layout.js";
 import { getAditProjectInitializationPaths } from "./project-initialization.js";
+import { promptRepositorySelection } from "./init-repository-select.js";
 
 export interface InitModeFlags {
   singleRepo?: boolean;
@@ -80,6 +81,10 @@ async function reinitExistingManifest(
 ): Promise<ManifestPlanResult> {
   const targetType: ProjectType | null = flags.singleRepo ? "repo" : flags.multiRepo ? "workspace" : null;
 
+  if (existing.cloudDeletedAt) {
+    return reinitializeCloudDeletedProject(root, existing, analysis, targetType);
+  }
+
   if (targetType && targetType !== existing.projectType) {
     return convertManifestType(root, existing, analysis, targetType);
   }
@@ -90,56 +95,138 @@ async function reinitExistingManifest(
   }
 
   const plan = planWorkspaceRepositories(existing, analysis);
+  let target = plan.target;
 
-  if (!plan.hasStructuralChanges) {
-    if (plan.needsRewrite) {
-      const manifest: ProjectManifest = {
-        ...existing,
-        repositories: plan.target,
-        updatedAt: new Date().toISOString(),
-      };
-      await withProjectInitLock(root, async () => writeProjectManifest(root, manifest));
-      console.log("  [+] Recorded repository identities in the manifest.");
-      return { status: "written", manifest, migratedFrom: null };
+  if (plan.hasStructuralChanges) {
+    console.log("  Repository changes detected:");
+    for (const rename of plan.renames) {
+      console.log(`    ~ ${rename.fromPath} → ${rename.toPath} (renamed, same remote — identity preserved)`);
     }
-    console.log(`  [=] Repository list unchanged (${existing.repositories.length} repositories).`);
-    return { status: "unchanged", manifest: existing };
+    for (const path of plan.addedPaths) console.log(`    + ${path}`);
+    for (const path of plan.removedPaths) console.log(`    - ${path} (no longer a Git repository here)`);
+    console.log();
+
+    const apply = flags.multiRepo
+      ? true
+      : isInteractive()
+        ? await askYesNo("  Update the registered repository list?")
+        : null;
+    if (apply === null) {
+      console.log("  [!] Keeping the current repository list. Re-run 'adit init' in an interactive terminal (or with --multi-repo) to update it.");
+      target = existing.repositories;
+    } else if (!apply) {
+      console.log("  [=] Keeping the current repository list.");
+      target = existing.repositories;
+    } else if (target.length === 0) {
+      console.error("  [x] No child Git repositories left — a multi-repo project needs at least one.");
+      return { status: "failed" };
+    }
   }
 
-  console.log("  Repository changes detected:");
-  for (const rename of plan.renames) {
-    console.log(`    ~ ${rename.fromPath} → ${rename.toPath} (renamed, same remote — identity preserved)`);
+  if (isInteractive()) {
+    console.log();
+    target = await promptRepositorySelection(target);
   }
-  for (const path of plan.addedPaths) console.log(`    + ${path}`);
-  for (const path of plan.removedPaths) console.log(`    - ${path} (no longer a Git repository here)`);
-  console.log();
 
-  const apply = flags.multiRepo
-    ? true
-    : isInteractive()
-      ? await askYesNo("  Update the registered repository list?")
-      : null;
-  if (apply === null) {
-    console.log("  [!] Keeping the current repository list. Re-run 'adit init' in an interactive terminal (or with --multi-repo) to update it.");
+  if (JSON.stringify(target) === JSON.stringify(existing.repositories)) {
+    console.log(`  [=] Repository settings unchanged (${existing.repositories.length} repositories).`);
     return { status: "unchanged", manifest: existing };
-  }
-  if (!apply) {
-    console.log("  [=] Keeping the current repository list.");
-    return { status: "unchanged", manifest: existing };
-  }
-  if (plan.target.length === 0) {
-    console.error("  [x] No child Git repositories left — a multi-repo project needs at least one.");
-    return { status: "failed" };
   }
 
   const manifest: ProjectManifest = {
     ...existing,
-    repositories: plan.target,
+    repositories: target,
     updatedAt: new Date().toISOString(),
   };
   await withProjectInitLock(root, async () => writeProjectManifest(root, manifest));
-  console.log("  [+] Updated project manifest.");
+  console.log(plan.needsRewrite && !plan.hasStructuralChanges
+    ? "  [+] Recorded repository identities in the manifest."
+    : "  [+] Updated project manifest.");
   return { status: "written", manifest, migratedFrom: null };
+}
+
+async function reinitializeCloudDeletedProject(
+  root: string,
+  existing: ProjectManifest,
+  analysis: ProjectLayoutAnalysis,
+  targetType: ProjectType | null,
+): Promise<ManifestPlanResult> {
+  const replacementType = targetType ?? existing.projectType;
+  console.log("  [!] This project was deleted in ADIT Cloud.");
+  if (!isInteractive()) {
+    console.log("      Re-run 'adit init' in an interactive terminal to create it as a new project.");
+    return { status: "unchanged", manifest: existing };
+  }
+
+  const confirmed = await askYesNo(
+    "  Create a new project identity and allow it to sync again?",
+  );
+  if (!confirmed) {
+    console.log("  [=] Keeping the deleted project identity.");
+    return { status: "unchanged", manifest: existing };
+  }
+
+  const replacement = createReplacementProjectManifest(
+    existing,
+    analysis,
+    replacementType,
+  );
+  if (!replacement) {
+    console.error(
+      replacementType === "repo"
+        ? "  [x] A single-repo project requires a Git repository at the project root."
+        : "  [x] A multi-repo project requires at least one child Git repository.",
+    );
+    return { status: "failed" };
+  }
+
+  let repositories = replacement.repositories;
+  if (replacement.projectType === "workspace") {
+    console.log();
+    repositories = await promptRepositorySelection(repositories);
+  }
+  const manifest = { ...replacement, repositories };
+  await withProjectInitLock(root, async () => writeProjectManifest(root, manifest));
+  console.log(`  [+] Created a new project identity: ${manifest.projectId}`);
+  return { status: "written", manifest, migratedFrom: null };
+}
+
+export function createReplacementProjectManifest(
+  existing: ProjectManifest,
+  analysis: ProjectLayoutAnalysis,
+  projectType: ProjectType,
+  projectId = generateProjectId(),
+  now = new Date().toISOString(),
+): ProjectManifest | null {
+  if (projectType === "repo" && !analysis.root.isGitRepository) return null;
+  if (projectType === "workspace" && analysis.childRepositories.length === 0) return null;
+
+  const previousByPath = new Map(
+    existing.repositories.map((repository) => [repository.relativePath, repository]),
+  );
+  const repositories: ProjectManifestRepository[] =
+    projectType === "repo"
+      ? [{ relativePath: "." }]
+      : analysis.childRepositories.map((repository) => {
+          const previous = previousByPath.get(repository.relativePath);
+          return {
+            relativePath: repository.relativePath,
+            repositoryId: computeLocalRepositoryId(projectId, repository.relativePath),
+            ...(typeof previous?.syncEnabled === "boolean"
+              ? { syncEnabled: previous.syncEnabled }
+              : {}),
+            ...(repository.originUrl ? { repositoryUrl: repository.originUrl } : {}),
+          };
+        });
+
+  return {
+    schemaVersion: 1,
+    projectId,
+    projectType,
+    repositories,
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 interface WorkspaceRepositoryPlan {
@@ -190,6 +277,7 @@ function planWorkspaceRepositories(
   const target: ProjectManifestRepository[] = discovered.map((child) => {
     const existingEntry = registeredByPath.get(child.relativePath);
     const renamedFrom = renamePairs.get(child.relativePath);
+    const previousEntry = existingEntry ?? renamedFrom;
     const repositoryId =
       existingEntry?.repositoryId ??
       renamedFrom?.repositoryId ??
@@ -200,6 +288,15 @@ function planWorkspaceRepositories(
     return {
       relativePath: child.relativePath,
       repositoryId,
+      ...(typeof previousEntry?.syncEnabled === "boolean"
+        ? { syncEnabled: previousEntry.syncEnabled }
+        : {}),
+      ...(previousEntry?.cloudDeletedAt
+        ? { cloudDeletedAt: previousEntry.cloudDeletedAt }
+        : {}),
+      ...(previousEntry?.cloudDeletionOperationId
+        ? { cloudDeletionOperationId: previousEntry.cloudDeletionOperationId }
+        : {}),
       ...(child.originUrl ? { repositoryUrl: child.originUrl } : {}),
     };
   });
@@ -246,17 +343,23 @@ async function convertManifestType(
     if (!confirmed) return { status: "cancelled" };
   }
 
+  let repositories: ProjectManifestRepository[] =
+    targetType === "repo"
+      ? [{ relativePath: "." }]
+      : analysis.childRepositories.map((repo) => ({
+          relativePath: repo.relativePath,
+          repositoryId: computeLocalRepositoryId(existing.projectId, repo.relativePath),
+          ...(repo.originUrl ? { repositoryUrl: repo.originUrl } : {}),
+        }));
+  if (targetType === "workspace" && isInteractive()) {
+    console.log();
+    repositories = await promptRepositorySelection(repositories);
+  }
+
   const manifest: ProjectManifest = {
     ...existing,
     projectType: targetType,
-    repositories:
-      targetType === "repo"
-        ? [{ relativePath: "." }]
-        : analysis.childRepositories.map((repo) => ({
-            relativePath: repo.relativePath,
-            repositoryId: computeLocalRepositoryId(existing.projectId, repo.relativePath),
-            ...(repo.originUrl ? { repositoryUrl: repo.originUrl } : {}),
-          })),
+    repositories,
     updatedAt: new Date().toISOString(),
   };
   await withProjectInitLock(root, async () => writeProjectManifest(root, manifest));
@@ -282,18 +385,23 @@ async function initFreshManifest(
   const recovered = recoverLegacyProjectId(root);
   const projectId = recovered?.projectId ?? generateProjectId();
   const now = new Date().toISOString();
+  let repositories: ProjectManifestRepository[] =
+    mode.projectType === "repo"
+      ? [{ relativePath: "." }]
+      : analysis.childRepositories.map((repo) => ({
+          relativePath: repo.relativePath,
+          repositoryId: computeLocalRepositoryId(projectId, repo.relativePath),
+          ...(repo.originUrl ? { repositoryUrl: repo.originUrl } : {}),
+        }));
+  if (mode.projectType === "workspace" && isInteractive()) {
+    console.log();
+    repositories = await promptRepositorySelection(repositories);
+  }
   const manifest: ProjectManifest = {
     schemaVersion: 1,
     projectId,
     projectType: mode.projectType,
-    repositories:
-      mode.projectType === "repo"
-        ? [{ relativePath: "." }]
-        : analysis.childRepositories.map((repo) => ({
-            relativePath: repo.relativePath,
-            repositoryId: computeLocalRepositoryId(projectId, repo.relativePath),
-            ...(repo.originUrl ? { repositoryUrl: repo.originUrl } : {}),
-          })),
+    repositories,
     createdAt: now,
     updatedAt: now,
   };

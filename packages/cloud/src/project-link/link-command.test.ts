@@ -42,6 +42,11 @@ vi.mock("../project-context.js", () => ({
   })),
 }));
 
+vi.mock("../project-deletion-policy.js", () => ({
+  refreshProjectDeletionPolicy: vi.fn(async () => null),
+  CloudProjectDeletedError: class CloudProjectDeletedError extends Error {},
+}));
+
 vi.mock("./cache.js", () => ({
   getProjectLinkCache: (...args: unknown[]) => mockGetProjectLinkCache(...args),
   upsertProjectLinkCache: (...args: unknown[]) => mockUpsertProjectLinkCache(...args),

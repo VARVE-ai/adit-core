@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   isTokenExpired: vi.fn(() => false),
   linkCommand: vi.fn(),
   healthGet: vi.fn(async () => ({ ok: true })),
+  refreshDeletionPolicy: vi.fn(async () => null),
   getRemoteUrl: vi.fn(async () => "https://example.com/repo.git" as string | null),
   WorkspaceLinkPartialFailureError: class WorkspaceLinkPartialFailureError extends Error {
     readonly result: LinkResult;
@@ -76,6 +77,8 @@ vi.mock("@varveai/adit-cloud", async (importOriginal) => {
       };
     }),
     WorkspaceLinkPartialFailureError: mocks.WorkspaceLinkPartialFailureError,
+    refreshProjectDeletionPolicy: (...args: unknown[]) =>
+      mocks.refreshDeletionPolicy(...args),
     linkCommand: (...args: unknown[]) => mocks.linkCommand(...args),
     DEFAULT_SERVER_URL: "https://default.example.com",
   };
@@ -230,7 +233,7 @@ describe("projectLinkCliHandler", () => {
     expect(mocks.linkCommand).not.toHaveBeenCalled();
   });
 
-  it("lists every repository missing an origin before any auth or network call", async () => {
+  it("lists every active repository missing an origin after refreshing deletion policy", async () => {
     mocks.getRemoteUrl.mockResolvedValue(null);
 
     await projectLinkCliHandler({});
@@ -239,13 +242,16 @@ describe("projectLinkCliHandler", () => {
     const errors = vi.mocked(console.error).mock.calls.map((call) => String(call[0]));
     expect(errors.some((line) => line.includes("a: no git remote 'origin'"))).toBe(true);
     expect(errors.some((line) => line.includes("b: no git remote 'origin'"))).toBe(true);
-    expect(mocks.loadCredentials).not.toHaveBeenCalled();
-    expect(mocks.healthGet).not.toHaveBeenCalled();
+    expect(mocks.loadCredentials).toHaveBeenCalled();
+    expect(mocks.healthGet).toHaveBeenCalled();
+    expect(mocks.refreshDeletionPolicy).toHaveBeenCalled();
     expect(mocks.linkCommand).not.toHaveBeenCalled();
   });
 
-  it("stops before auth and points at re-running init when a registered repository is missing", async () => {
-    mocks.existsSync.mockImplementation((path: unknown) => !String(path).includes("/workspace/a"));
+  it("points at re-running init when an active registered repository is missing", async () => {
+    mocks.existsSync.mockImplementation(
+      (path: unknown) => !String(path).replace(/\\/gu, "/").includes("/workspace/a"),
+    );
 
     await projectLinkCliHandler({});
 
@@ -253,7 +259,34 @@ describe("projectLinkCliHandler", () => {
     const errors = vi.mocked(console.error).mock.calls.map((call) => String(call[0]));
     expect(errors.some((line) => line.includes("a: repository is missing"))).toBe(true);
     expect(errors.some((line) => line.includes("re-run 'adit init'"))).toBe(true);
-    expect(mocks.loadCredentials).not.toHaveBeenCalled();
+    expect(mocks.loadCredentials).toHaveBeenCalled();
     expect(mocks.linkCommand).not.toHaveBeenCalled();
+  });
+
+  it("shows repositories that link marked as deleted in Cloud", async () => {
+    const before = workspaceConfig();
+    const after = {
+      ...before,
+      repositories: before.repositories.filter((repository) => repository.relativePath === "b"),
+    };
+    mocks.loadConfig.mockReturnValueOnce(before).mockReturnValue(after);
+    mocks.refreshDeletionPolicy.mockResolvedValue({
+      localProjectId: "workspace-id",
+      projectDeleted: false,
+      deletionOperationId: null,
+      deletedAt: null,
+      deletedRepositories: [{
+        deletionOperationId: "operation-a",
+        localRepositoryId: "repo-a",
+        relativePath: "a",
+        deletedAt: "2026-09-01T00:00:00.000Z",
+      }],
+    });
+    mocks.linkCommand.mockResolvedValue(makeWorkspaceResult());
+
+    await projectLinkCliHandler({});
+
+    expect(console.log).toHaveBeenCalledWith("  [-] a (deleted in Cloud)");
+    expect(mocks.getRemoteUrl).toHaveBeenCalledTimes(1);
   });
 });
