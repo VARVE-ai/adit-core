@@ -152,8 +152,14 @@ function splitShellSegments(command: string): string[] {
   for (let index = 0; index < command.length; index++) {
     const char = command[index];
     if (escaped) {
-      current += char;
       escaped = false;
+      // Backslash-newline is a line continuation: the shell drops both
+      // characters, so the next line joins this segment instead of ending it.
+      if (char === "\n") {
+        current = current.slice(0, -1);
+        continue;
+      }
+      current += char;
       continue;
     }
     if (char === "\\" && quote !== "'") {
@@ -200,8 +206,10 @@ function tokenizeShellWords(segment: string): string[] {
 
   for (const char of segment) {
     if (escaped) {
-      current += char;
       escaped = false;
+      // Line continuation (see splitShellSegments): contributes no character.
+      if (char === "\n") continue;
+      current += char;
       continue;
     }
     if (char === "\\" && quote !== "'") {

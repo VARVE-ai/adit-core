@@ -31,6 +31,20 @@ describe("parseGitCommands", () => {
       .toEqual([{ operation: "status", cwd: "/work/packages/cloud" }]);
   });
 
+  it("treats backslash-newline as a line continuation", () => {
+    expect(parseGitCommands(
+      "git add src/a.ts && \\\ngit commit -q -m \"fix: a\" && \\\ngit push origin main",
+      "/repo",
+    )).toEqual([
+      { operation: "add", cwd: "/repo" },
+      { operation: "commit", cwd: "/repo", commitMessage: "fix: a" },
+      { operation: "push", cwd: "/repo" },
+    ]);
+    expect(parseGitCommands("git \\\ncommit -m 'fix: joined'", "/repo"))
+      .toEqual([{ operation: "commit", cwd: "/repo", commitMessage: "fix: joined" }]);
+    expect(parseGitCommands("echo 'not \\\ngit commit'", "/repo")).toEqual([]);
+  });
+
   it("ignores commands that merely contain the word git", () => {
     expect(parseGitCommands("printf git && npm run git:check", "/repo")).toEqual([]);
   });
