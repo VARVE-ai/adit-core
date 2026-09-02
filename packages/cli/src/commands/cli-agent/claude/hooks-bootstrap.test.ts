@@ -310,20 +310,17 @@ describe("ensurePersistentClaudeHooksInstalled", () => {
       const settings = readFileSync(join(dir, ".claude", "settings.local.json"), "utf8");
       const fixedRootArg = `--project-root-b64 ${encodeProjectRoot(dir)}`;
 
-      for (const hookType of [
-        "prompt-submit",
-        "stop",
-        "subagent-start",
-        "subagent-stop",
-      ]) {
+      for (const hookType of ["prompt-submit", "stop"]) {
         expect(settings).toContain(
           `node /tmp/adit-hook --platform claude ${fixedRootArg} ${hookType}`,
         );
       }
       expect(settings).not.toContain(` ${fixedRootArg} session-end`);
-      // notification / task-completed collection was retired
+      // notification / task-completed / subagent collection was retired
       expect(settings).not.toContain(` ${fixedRootArg} task-completed`);
       expect(settings).not.toContain(` ${fixedRootArg} notification`);
+      expect(settings).not.toContain(` ${fixedRootArg} subagent-start`);
+      expect(settings).not.toContain(` ${fixedRootArg} subagent-stop`);
       expect(existsSync(join(dir, ".claude", "commands", "adit.md"))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -344,9 +341,8 @@ describe("ensurePersistentClaudeHooksInstalled", () => {
 
       const settings = readFileSync(join(dir, ".claude", "settings.local.json"), "utf8");
       expect(installedAgain).toBe(false);
-      // 5 hook mappings: prompt-submit, stop (Stop + StopFailure),
-      // subagent-start, subagent-stop
-      expect((settings.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(5);
+      // 3 hook mappings: prompt-submit, stop (Stop + StopFailure)
+      expect((settings.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(3);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
