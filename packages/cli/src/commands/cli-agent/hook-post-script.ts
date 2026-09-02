@@ -18,11 +18,11 @@
  * fail-open catch — silently killed all codex→web sync on Windows.)
  *
  * WARNING: Codex's hook trust hash covers the full command string. Any byte
- * change here invalidates existing [hooks.state] trust entries — they
- * self-heal on the next installCodexHooks run, but Codex silently skips the
- * hooks until then. The golden test in hook-post-script.test.ts pins the
- * exact output; update it only together with a conscious trust-migration
- * decision.
+ * change here invalidates the [hooks.state] approvals users granted inside
+ * Codex — Codex then silently skips the hooks until the user re-approves
+ * them via /hooks (ADIT never writes that config). The golden test in
+ * hook-post-script.test.ts pins the exact output; update it only together
+ * with a conscious trust-migration decision.
  */
 export const HOOK_POST_SCRIPT = [
   "try{",

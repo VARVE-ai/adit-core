@@ -1,10 +1,16 @@
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, rmdirSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+/**
+ * Read-only view of Codex's hook trust state.
+ *
+ * Codex only runs project-scoped hooks the user has approved inside Codex
+ * (via /hooks). Approvals are recorded as `[hooks.state."<key>"]` tables in
+ * $CODEX_HOME/config.toml. ADIT reads that file to report whether its hooks
+ * are approved yet; it never writes to it — the user-level Codex config is
+ * the user's alone.
+ */
 
-export const ADIT_CODEX_HOOK_TRUST_BLOCK = "adit-codex-hooks";
-export const ADIT_CLOUD_CODEX_HOOK_TRUST_BLOCK = "adit-cloud-codex";
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 
 export interface CodexHookState {
   key: string;
@@ -23,15 +29,15 @@ const CODEX_HOOK_DEFINITIONS: CodexHookDefinition[] = [
   { eventName: "Stop", keyLabel: "stop" },
 ];
 
-export function codexHookTrustMarkerForPath(hooksPath: string): string {
-  const digest = createHash("sha256").update(resolve(hooksPath)).digest("hex").slice(0, 16);
-  return `project=${digest}`;
-}
-
 export function resolveCodexHookTrustConfigPath(codexHome?: string): string {
   return join(codexHome ?? process.env.CODEX_HOME ?? join(homedir(), ".codex"), "config.toml");
 }
 
+/**
+ * Compute the trust keys and hashes Codex would record for the matching
+ * hook entries, mirroring Codex's own key/hash scheme so the entries can be
+ * looked up in config.toml.
+ */
 export function buildCodexHookStatesForEntries(input: {
   hooksPath: string;
   hooks: Record<string, unknown>;
@@ -66,88 +72,7 @@ export function buildCodexHookStatesForEntries(input: {
   });
 }
 
-export function upsertCodexHookTrustConfig(input: {
-  codexHome?: string;
-  blockName: string;
-  marker: string;
-  states: CodexHookState[];
-}): void {
-  const configPath = resolveCodexHookTrustConfigPath(input.codexHome);
-  mkdirSync(dirname(configPath), { recursive: true });
-  const current = readFile(configPath) ?? "";
-  writeFileSync(
-    configPath,
-    appendCodexHookTrustBlock(current, input.marker, input.states, input.blockName),
-  );
-}
-
-export function removeCodexHookTrustConfig(input: {
-  codexHome?: string;
-  blockName: string;
-  marker?: string;
-  states?: CodexHookState[];
-}): void {
-  const configPath = resolveCodexHookTrustConfigPath(input.codexHome);
-  const current = readFile(configPath);
-  if (current === null) return;
-  const states = input.states ?? [];
-  const cleaned = stripCodexHookTrustBlocks(current, {
-    blockName: input.blockName,
-    marker: input.marker,
-    keys: states.map((state) => state.key),
-    trustedHashes: states.map((state) => state.trustedHash),
-  }).replace(/\s+$/u, "");
-  writeFileSync(configPath, cleaned ? `${cleaned}\n` : "");
-}
-
-export function installCodexHookTrustConfig(input: {
-  codexHome?: string;
-  blockName: string;
-  marker: string;
-  states: CodexHookState[];
-}): () => void {
-  const codexHome = input.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), ".codex");
-  const configPath = join(codexHome, "config.toml");
-  const dirExisted = existsSync(codexHome);
-  const fileExisted = existsSync(configPath);
-  const originalContent = fileExisted ? readFile(configPath) : null;
-
-  try {
-    upsertCodexHookTrustConfig(input);
-  } catch {
-    return () => {};
-  }
-
-  return () => {
-    try {
-      const current = readFile(configPath);
-      if (current === null) return;
-      const cleaned = stripCodexHookTrustBlocks(current, {
-        blockName: input.blockName,
-        marker: input.marker,
-      }).replace(/\s+$/u, "");
-      if (!fileExisted && !cleaned) {
-        try {
-          unlinkSync(configPath);
-        } catch {}
-        if (!dirExisted) {
-          try {
-            rmdirSync(codexHome);
-          } catch {}
-        }
-        return;
-      }
-      writeFileSync(configPath, `${cleaned}\n`);
-    } catch {
-      if (fileExisted && originalContent !== null) {
-        try {
-          writeFileSync(configPath, originalContent);
-        } catch {}
-      }
-    }
-  };
-}
-
+/** Return the states that are not (or no longer) approved in the given config text. */
 export function findUntrustedCodexHookStates(
   configText: string | null,
   states: CodexHookState[],
@@ -158,99 +83,6 @@ export function findUntrustedCodexHookStates(
     const entry = trusted.get(state.key);
     return !entry || entry.enabled !== true || entry.trustedHash !== state.trustedHash;
   });
-}
-
-export function appendCodexHookTrustBlock(
-  text: string,
-  marker: string,
-  states: CodexHookState[],
-  blockName: string,
-): string {
-  const cleaned = stripCodexHookTrustBlocks(text, {
-    blockName,
-    marker,
-    keys: states.map((state) => state.key),
-    trustedHashes: states.map((state) => state.trustedHash),
-  }).replace(/\s+$/u, "");
-  const block = [
-    `# >>> ${blockName} ${marker}`,
-    ...states.flatMap((state) => [
-      `[hooks.state.${JSON.stringify(state.key)}]`,
-      "enabled = true",
-      `trusted_hash = ${JSON.stringify(state.trustedHash)}`,
-      "",
-    ]),
-    `# <<< ${blockName} ${marker}`,
-  ].join("\n").replace(/\n+$/u, "");
-  return `${cleaned ? `${cleaned}\n\n` : ""}${block}\n`;
-}
-
-export function stripCodexHookTrustBlocks(
-  text: string,
-  opts?: { blockName?: string; marker?: string; keys?: string[]; trustedHashes?: string[] },
-): string {
-  const lines = text.split(/\r?\n/u);
-  const kept: string[] = [];
-  const blockName = opts?.blockName ?? ADIT_CODEX_HOOK_TRUST_BLOCK;
-  const startPattern = new RegExp(`^\\s*# >>> ${escapeRegExp(blockName)}\\b`, "u");
-  const endPattern = new RegExp(`^\\s*# <<< ${escapeRegExp(blockName)}\\b`, "u");
-  const keys = opts?.keys ?? [];
-  const trustedHashes = opts?.trustedHashes ?? [];
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index] ?? "";
-    if (!startPattern.test(line)) {
-      const stateKey = parseHookStateTableKey(line);
-      if (stateKey !== null) {
-        const block = [line];
-        while (index + 1 < lines.length) {
-          const nextLine = lines[index + 1] ?? "";
-          if (
-            /^\s*\[[^\]]+\]\s*$/u.test(nextLine) ||
-            startPattern.test(nextLine) ||
-            endPattern.test(nextLine)
-          ) {
-            break;
-          }
-          index++;
-          const blockLine = lines[index] ?? "";
-          block.push(blockLine);
-        }
-        const blockText = block.join("\n");
-        const matchesKey = keys.includes(stateKey);
-        const matchesTrustedHash = trustedHashes.some((hash) =>
-          blockText.includes(`trusted_hash = ${JSON.stringify(hash)}`),
-        );
-        if (matchesKey || matchesTrustedHash) {
-          continue;
-        }
-        kept.push(...block);
-        continue;
-      }
-      if (opts?.marker && endPattern.test(line) && line.includes(opts.marker)) {
-        continue;
-      }
-      kept.push(line);
-      continue;
-    }
-
-    const block = [line];
-    while (index + 1 < lines.length) {
-      index++;
-      const blockLine = lines[index] ?? "";
-      block.push(blockLine);
-      if (endPattern.test(blockLine)) break;
-    }
-
-    const blockText = block.join("\n");
-    const matchesMarker = opts?.marker ? block.some((blockLine) => blockLine.includes(opts.marker ?? "")) : false;
-    const matchesKey = keys.some((key) => blockText.includes(JSON.stringify(key)));
-    const stripBlock = matchesMarker || matchesKey || (!opts?.marker && keys.length === 0);
-    if (stripBlock) {
-      continue;
-    }
-    kept.push(...block);
-  }
-  return kept.join("\n");
 }
 
 function codexHookTrustedHash(input: {
@@ -331,20 +163,8 @@ function canonicalJson(value: unknown): unknown {
   );
 }
 
-function readFile(filePath: string): string | null {
-  try {
-    return readFileSync(filePath, "utf8");
-  } catch {
-    return null;
-  }
-}
-
 function asObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }

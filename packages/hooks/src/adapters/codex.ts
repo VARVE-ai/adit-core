@@ -6,7 +6,9 @@
  * All clients share the same hooks.json format and event schema.
  * Handles installation into .codex/hooks.json.
  *
- * Hooks must be trusted via [hooks.state] entries in $CODEX_HOME/config.toml.
+ * Codex only runs project hooks the user has approved inside Codex (via
+ * /hooks); approvals live in $CODEX_HOME/config.toml. ADIT reads that file
+ * to report approval status but never writes to it.
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -28,13 +30,9 @@ import {
   isFixedProjectRootHookCommand,
 } from "./command.js";
 import {
-  ADIT_CODEX_HOOK_TRUST_BLOCK,
   buildCodexHookStatesForEntries,
-  codexHookTrustMarkerForPath,
   findUntrustedCodexHookStates,
-  removeCodexHookTrustConfig,
   resolveCodexHookTrustConfigPath,
-  upsertCodexHookTrustConfig,
 } from "./codex-trust.js";
 
 /** Timeout for Codex hooks — in SECONDS (not ms like Claude Code) */
@@ -179,14 +177,18 @@ export const codexAdapter: PlatformAdapter = {
       })
       : [];
     const untrustedStates = findUntrustedCodexHookStates(trustConfig, hookStates);
+    // Advisory: ADIT never writes the user-level Codex config, so approval
+    // can only happen inside Codex — reinstalling cannot fix it and it must
+    // not fail `valid`.
     checks.push({
       name: "Codex hook trust",
       ok: hooksFound && hookStates.length > 0 && untrustedStates.length === 0,
+      advisory: true,
       detail: !hooksFound
-        ? "No ADIT Codex hooks found to trust"
+        ? "No ADIT Codex hooks found to approve"
         : untrustedStates.length === 0
-          ? `All ADIT hooks trusted in ${trustConfigPath}`
-          : `${untrustedStates.length} hook(s) need review in Codex. Run 'adit plugin install codex' or open /hooks.`,
+          ? `All ADIT hooks approved in ${trustConfigPath}`
+          : `${untrustedStates.length} hook(s) not yet approved in Codex — open this project in Codex and run /hooks to approve them (Codex skips unapproved hooks silently)`,
     });
 
     // Codex only loads project-scoped hooks in trusted workspaces (>= 0.122).
@@ -269,32 +271,19 @@ export const codexAdapter: PlatformAdapter = {
 
     // The hooks feature is stable and enabled by default on Codex >= 0.124
     // (ADIT's baseline), so no [features] toggle is written here.
-
-    const hookStates = buildCodexHookStatesForEntries({
-      hooksPath,
-      hooks: mergedHooks,
-      matchesEntry: (entry) => entryContainsAditHook(entry),
-    });
-    upsertCodexHookTrustConfig({
-      blockName: ADIT_CODEX_HOOK_TRUST_BLOCK,
-      marker: codexHookTrustMarkerForPath(hooksPath),
-      states: hookStates,
-    });
+    //
+    // The user-level Codex config ($CODEX_HOME/config.toml) is deliberately
+    // left alone: the user approves these hooks inside Codex via /hooks.
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {
-    const hooksPath = join(projectRoot, ".codex", "hooks.json");
-    if (configHasAditHooks(hooksPath)) return true;
-
-    const trustConfig = readTextFile(resolveCodexHookTrustConfigPath());
-    const marker = codexHookTrustMarkerForPath(hooksPath);
-    return trustConfig !== null && trustConfig.includes(`>>> ${ADIT_CODEX_HOOK_TRUST_BLOCK} ${marker}`);
+    // Project files only. Older ADIT versions left trust blocks in the
+    // user-level Codex config; that residue is not evidence of an install
+    // and ADIT no longer touches the file.
+    return configHasAditHooks(join(projectRoot, ".codex", "hooks.json"));
   },
 
   async hasProjectHooks(projectRoot: string): Promise<boolean> {
-    // Project files only: leftover user-level trust config (which survives
-    // deleting the project's .codex/) must not make a fresh project look
-    // connected. hasHooks keeps the looser semantics for uninstall cleanup.
     return configHasAditHooks(join(projectRoot, ".codex", "hooks.json"));
   },
 
@@ -329,11 +318,8 @@ export const codexAdapter: PlatformAdapter = {
         // Ignore parse errors
       }
     }
-
-    removeCodexHookTrustConfig({
-      blockName: ADIT_CODEX_HOOK_TRUST_BLOCK,
-      marker: codexHookTrustMarkerForPath(hooksPath),
-    });
+    // Trust blocks written by older ADIT versions into the user-level Codex
+    // config are left in place on purpose — ADIT no longer edits that file.
   },
 };
 

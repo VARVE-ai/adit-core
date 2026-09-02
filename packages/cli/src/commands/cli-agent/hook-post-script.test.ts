@@ -8,10 +8,10 @@ import { HOOK_POST_SCRIPT, buildCloudHookCommand, quoteHookCommandArg } from "./
  * GOLDEN TEST — do not update casually.
  *
  * Codex's hook trust hash covers the full command string. If this output
- * changes by even one byte, every existing [hooks.state] trust entry for the
+ * changes by even one byte, every existing [hooks.state] approval for the
  * relay hooks flips to "Modified" and Codex silently skips them until the
- * next installCodexHooks run re-trusts. Any intentional change here must be
- * paired with that trust-migration understanding.
+ * user re-approves them inside Codex (/hooks). Any intentional change here
+ * must be paired with that trust-migration understanding.
  *
  * Last migration 2026-07-08: dropped the empty-string endpoint placeholder
  * (Codex's shell-less Windows spawn swallows empty args, shifting argv and

@@ -117,8 +117,13 @@ export async function pluginInstallCommand(
         // Show validation checks
         const result = await adapter.validateInstallation(config.projectRoot);
         for (const check of result.checks) {
-          const mark = check.ok ? marks.ok : marks.fail;
-          console.log(`      ${mark} ${check.ok ? pc.dim(check.name) : check.name}`);
+          if (check.ok) {
+            console.log(`      ${marks.ok} ${pc.dim(check.name)}`);
+          } else if (check.advisory) {
+            console.log(`      ${marks.warn} ${check.name}: ${check.detail}`);
+          } else {
+            console.log(`      ${marks.fail} ${check.name}`);
+          }
         }
       }
     } catch (err) {
@@ -181,7 +186,7 @@ async function installSinglePlatform(
       // Validate after install
       const result = await adapter.validateInstallation(projectRoot);
       for (const check of result.checks) {
-        const mark = check.ok ? marks.ok : marks.fail;
+        const mark = check.ok ? marks.ok : check.advisory ? marks.warn : marks.fail;
         console.log(`      ${mark} ${check.name}: ${check.ok ? pc.dim(check.detail) : check.detail}`);
       }
       console.log();
@@ -560,7 +565,7 @@ export async function pluginValidateCommand(
     if (!opts?.json) {
       console.log(`  ${adapter.displayName}`);
       for (const check of result.checks) {
-        const symbol = check.ok ? "+" : "x";
+        const symbol = check.ok ? "+" : check.advisory ? "!" : "x";
         console.log(`    [${symbol}] ${check.name}: ${check.detail}`);
       }
       console.log(result.valid ? "    All checks passed." : "    Some checks failed.");
@@ -591,7 +596,7 @@ async function validateSinglePlatform(
   console.log(`  Hook validation: ${adapter.displayName}`);
   console.log();
   for (const check of result.checks) {
-    const symbol = check.ok ? "+" : "x";
+    const symbol = check.ok ? "+" : check.advisory ? "!" : "x";
     console.log(`  [${symbol}] ${check.name}: ${check.detail}`);
   }
   console.log(result.valid ? "\n  All checks passed." : "\n  Some checks failed.");

@@ -175,6 +175,7 @@ export async function initCommand(opts: {
       await addConnectedPlatforms(setupRoot, [platform]);
       installed.push(adapter.displayName);
       console.log(`  ${marks.ok} ${adapter.displayName} ${pc.dim(`— ${adapter.hookMappings.length} hook events installed`)}`);
+      await printAdvisoryWarnings(adapter, setupRoot);
     } catch (err) {
       skipped.push(platform);
       console.log(`  ${marks.fail} ${platform} — install failed: ${(err as Error).message}`);
@@ -214,6 +215,7 @@ export async function initCommand(opts: {
         await adapter.installHooks(setupRoot, aditBinaryPath);
         installed.push(adapter.displayName);
         console.log(`  ${marks.ok} ${adapter.displayName} ${pc.dim(`— ${adapter.hookMappings.length} hook events installed`)}`);
+        await printAdvisoryWarnings(adapter, setupRoot);
       } catch (err) {
         skipped.push(platform);
         console.log(`  ${marks.fail} ${platform} — install failed: ${(err as Error).message}`);
@@ -236,6 +238,7 @@ export async function initCommand(opts: {
         if (adapter.hookMappings.length === 0) continue;
         await adapter.installHooks(setupRoot, aditBinaryPath);
         console.log(pc.dim(`  [=] ${adapter.displayName} — connected, hooks refreshed`));
+        await printAdvisoryWarnings(adapter, setupRoot);
       } catch (err) {
         console.log(`  ${marks.fail} ${platform} — refresh failed: ${(err as Error).message}`);
       }
@@ -345,3 +348,23 @@ async function selectPlatforms(choices: PlatformChoice[]): Promise<Set<Platform>
   return promptPlatformSelectionFallback(choices);
 }
 
+/**
+ * Print advisory validation findings after a hook install — things a
+ * reinstall cannot fix, such as Codex hooks still awaiting the user's
+ * approval inside Codex (/hooks). Never fails init.
+ */
+async function printAdvisoryWarnings(
+  adapter: ReturnType<typeof getAdapter>,
+  setupRoot: string,
+): Promise<void> {
+  try {
+    const result = await adapter.validateInstallation(setupRoot);
+    for (const check of result.checks) {
+      if (check.advisory && !check.ok) {
+        console.log(`      ${marks.warn} ${check.detail}`);
+      }
+    }
+  } catch {
+    // advisory only
+  }
+}

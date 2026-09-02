@@ -75,7 +75,7 @@ events to ADIT's normalized hook model.
 | Claude Code VS Code | Supported | Uses the Claude Code hook mechanism with VS Code-aware platform detection |
 | OpenCode | Supported | Generates `.opencode/plugins/adit.ts`, slash commands, and LLM-callable tools `adit_link` and `adit_intent` |
 | Cursor | Supported | Installs hook entries in `.cursor/hooks.json` |
-| Codex | Supported | Installs hook entries in `.codex/hooks.json`, enables Codex hooks, and writes ADIT hook trust config |
+| Codex | Supported | Installs hook entries in `.codex/hooks.json`; approve them once inside Codex via `/hooks` (ADIT never edits the user-level Codex config) |
 | Gemini CLI | Supported | Installs hook entries in `.gemini/settings.json` |
 | GitHub Copilot | Stub | Detected by the registry, but hook install/parse support is not implemented yet |
 | Other | Stub | Placeholder adapter for unknown platforms |
