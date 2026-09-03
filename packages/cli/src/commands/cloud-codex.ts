@@ -400,6 +400,7 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
     projectRoot: config.projectRoot,
     terminalId,
     serverUrl,
+    suppressInteractiveNotices: Boolean(process.stderr.isTTY),
   });
 
   try {

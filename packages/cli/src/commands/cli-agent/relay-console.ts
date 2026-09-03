@@ -190,11 +190,14 @@ export interface RelayStatusReporterOptions {
   terminalId: string;
   serverUrl?: string;
   unreachableDelayMs?: number;
+  /** Avoid writing asynchronous status notices over an interactive agent TUI. */
+  suppressInteractiveNotices?: boolean;
 }
 
 export function createRelayStatusReporter(opts: RelayStatusReporterOptions): RelayStatusReporter {
   const { notices } = opts;
   const unreachableDelayMs = opts.unreachableDelayMs ?? UNREACHABLE_NOTICE_DELAY_MS;
+  const suppressInteractiveNotices = opts.suppressInteractiveNotices ?? false;
   let helloSeen = false;
   let revealTimer: ReturnType<typeof setTimeout> | null = null;
   let outageVisible = false;
@@ -203,7 +206,12 @@ export function createRelayStatusReporter(opts: RelayStatusReporterOptions): Rel
 
   const unreachableNotice = (desc: string): void => {
     printedErrorDescs.add(desc);
-    notices.notice(`Cloud relay unreachable (${desc}) — retrying in background…`);
+    const message = `Cloud relay unreachable (${desc}) — retrying in background…`;
+    if (suppressInteractiveNotices) {
+      notices.debug(`status: ${message}`);
+      return;
+    }
+    notices.notice(message);
   };
 
   const revealOutage = (): void => {
@@ -236,11 +244,15 @@ export function createRelayStatusReporter(opts: RelayStatusReporterOptions): Rel
         if (opts.serverUrl) notices.debug(`server ${opts.serverUrl}`);
         notices.debug(`terminal ${opts.terminalId}`);
       } else if (outageWasVisible) {
-        notices.notice(
+        const message =
           info.owner === "web"
             ? "Cloud relay reconnected — web still owns this session."
-            : "Cloud relay reconnected.",
-        );
+            : "Cloud relay reconnected.";
+        if (suppressInteractiveNotices) {
+          notices.debug(`status: ${message}`);
+        } else {
+          notices.notice(message);
+        }
       }
       notices.debug(`connection ${info.connectionId}`);
       if (info.panelId) {
