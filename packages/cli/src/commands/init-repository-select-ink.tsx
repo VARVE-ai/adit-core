@@ -31,7 +31,7 @@ function RepositoryList({
           <Box key={choice.relativePath}>
             <Text color="cyan">{active ? "  ❯ " : "    "}</Text>
             <Text color={isChecked ? "green" : undefined} dimColor={!isChecked}>
-              {isChecked ? "[x]" : "[ ]"}
+              {isChecked ? "[✓]" : "[ ]"}
             </Text>
             <Text>{" " + choice.relativePath.padEnd(labelWidth)}</Text>
             <Text

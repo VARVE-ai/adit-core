@@ -202,7 +202,7 @@ export function parseSelectionAnswer(
 /** Print the numbered choice list used by the readline fallback. */
 export function printChoiceList(choices: PlatformChoice[]): void {
   choices.forEach((choice, index) => {
-    const box = choice.preChecked ? pc.green("[x]") : pc.dim("[ ]");
+    const box = choice.preChecked ? pc.green("[✓]") : pc.dim("[ ]");
     const binary = choice.cliBinary ? `(${choice.cliBinary})` : "";
     const name = `${choice.displayName} ${binary}`.trim();
     console.log(`    ${index + 1}. ${box} ${name.padEnd(24)} ${pc.dim(`— ${describeChoice(choice)}`)}`);

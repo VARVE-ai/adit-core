@@ -34,7 +34,7 @@ function PlatformList({ choices, cursor, checked, confirmNames }: PlatformListPr
           <Box key={choice.platform}>
             <Text color="cyan">{active ? "  ❯ " : "    "}</Text>
             <Text color={isChecked ? "green" : undefined} dimColor={!isChecked}>
-              {isChecked ? "[x]" : "[ ]"}
+              {isChecked ? "[✓]" : "[ ]"}
             </Text>
             <Text>{` ${`${choice.displayName}${binary}`.padEnd(26)}`}</Text>
             <Text dimColor={!willDisconnect} color={willDisconnect ? "yellow" : undefined}>

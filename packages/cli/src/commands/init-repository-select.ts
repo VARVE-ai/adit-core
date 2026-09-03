@@ -65,7 +65,7 @@ export async function promptRepositorySelection(
   }
 
   for (const [index, choice] of choices.entries()) {
-    const mark = choice.preChecked ? "x" : " ";
+    const mark = choice.preChecked ? "✓" : " ";
     const state = choice.cloudDeleted
       ? "deleted in Cloud; select to recreate"
       : describeRepositoryChoice(choice, choice.preChecked);
