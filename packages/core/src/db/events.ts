@@ -233,6 +233,19 @@ export function getEventsBySession(
   return rows.map(rowToEvent);
 }
 
+/** The most recent (highest sequence) event of a session, if any. */
+export function getLastEventOfSession(
+  db: Database.Database,
+  sessionId: string,
+): AditEvent | null {
+  const row = db
+    .prepare(
+      "SELECT * FROM events WHERE session_id = ? AND deleted_at IS NULL ORDER BY sequence DESC LIMIT 1",
+    )
+    .get(sessionId) as Record<string, unknown> | undefined;
+  return row ? rowToEvent(row) : null;
+}
+
 export function updateEventStatus(
   db: Database.Database,
   id: string,

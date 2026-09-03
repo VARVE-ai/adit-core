@@ -83,7 +83,65 @@ export function getSessionByPlatformSessionId(
        ORDER BY started_at DESC LIMIT 1`,
     )
     .get(platformSessionId) as Record<string, unknown> | undefined;
-  return row ? rowToSession(row) : null;
+  if (row) return rowToSession(row);
+
+  // A platform session id attached later as an alias (client-side fork of an
+  // existing conversation) resolves to the session it was attached to.
+  const aliased = db
+    .prepare(
+      `SELECT s.* FROM session_platform_aliases a
+       JOIN sessions s ON s.id = a.session_id
+       WHERE a.platform_session_id = ? AND s.deleted_at IS NULL
+       LIMIT 1`,
+    )
+    .get(platformSessionId) as Record<string, unknown> | undefined;
+  return aliased ? rowToSession(aliased) : null;
+}
+
+/**
+ * Attach an additional platform session id to an existing local session, so
+ * hooks arriving under that id keep recording into the same conversation.
+ */
+export function insertSessionPlatformAlias(
+  db: Database.Database,
+  input: { platformSessionId: string; sessionId: string; createdAt?: string },
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO session_platform_aliases (platform_session_id, session_id, created_at)
+     VALUES (?, ?, ?)`,
+  ).run(input.platformSessionId, input.sessionId, input.createdAt ?? new Date().toISOString());
+}
+
+/** Platform session ids attached to a session as aliases (oldest first). */
+export function listSessionPlatformAliases(
+  db: Database.Database,
+  sessionId: string,
+): string[] {
+  const rows = db
+    .prepare(
+      "SELECT platform_session_id FROM session_platform_aliases WHERE session_id = ? ORDER BY created_at ASC",
+    )
+    .all(sessionId) as Array<{ platform_session_id: string }>;
+  return rows.map((row) => row.platform_session_id);
+}
+
+/** Sessions of a project started at or after `since`, newest first. */
+export function listRecentSessions(
+  db: Database.Database,
+  input: { projectId: string; platform?: Platform; since: string; limit?: number },
+): AditSession[] {
+  const rows = db
+    .prepare(
+      `SELECT * FROM sessions
+       WHERE project_id = ? AND started_at >= ? AND deleted_at IS NULL${input.platform ? " AND platform = ?" : ""}
+       ORDER BY started_at DESC LIMIT ?`,
+    )
+    .all(
+      ...(input.platform
+        ? [input.projectId, input.since, input.platform, input.limit ?? 50]
+        : [input.projectId, input.since, input.limit ?? 50]),
+    ) as Record<string, unknown>[];
+  return rows.map(rowToSession);
 }
 
 export function listSessions(

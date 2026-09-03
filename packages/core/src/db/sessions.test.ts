@@ -9,6 +9,9 @@ import {
   insertSession,
   getLatestSession,
   getSessionByPlatformSessionId,
+  insertSessionPlatformAlias,
+  listSessionPlatformAliases,
+  listRecentSessions,
 } from "./sessions.js";
 import { insertEvent } from "./events.js";
 
@@ -124,5 +127,72 @@ describe("getSessionByPlatformSessionId", () => {
 
     const found = getSessionByPlatformSessionId(db, "platform-abc");
     expect(found?.id).toBe("ulid-2");
+  });
+});
+
+describe("session platform aliases", () => {
+  let db: Database.Database;
+  let dbPath: string;
+
+  beforeEach(() => {
+    dbPath = tempDbPath();
+    db = openDatabase(dbPath);
+    insertSession(db, {
+      id: "root-session",
+      projectId: PROJECT,
+      clientId: CLIENT,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: isoHoursAgo(3),
+      vclockJson: "{}",
+      platformSessionId: "psid-root",
+    });
+  });
+
+  afterEach(() => {
+    closeDatabase(db);
+    if (existsSync(dbPath)) unlinkSync(dbPath);
+  });
+
+  it("resolves an aliased platform session id to the session it was attached to", () => {
+    expect(getSessionByPlatformSessionId(db, "psid-fork")).toBeNull();
+    insertSessionPlatformAlias(db, { platformSessionId: "psid-fork", sessionId: "root-session" });
+    insertSessionPlatformAlias(db, { platformSessionId: "psid-fork", sessionId: "root-session" });
+
+    expect(getSessionByPlatformSessionId(db, "psid-fork")?.id).toBe("root-session");
+    expect(getSessionByPlatformSessionId(db, "psid-root")?.id).toBe("root-session");
+    expect(listSessionPlatformAliases(db, "root-session")).toEqual(["psid-fork"]);
+  });
+
+  it("lists recent sessions of a project newest first, optionally per platform", () => {
+    insertSession(db, {
+      id: "codex-recent",
+      projectId: PROJECT,
+      clientId: CLIENT,
+      sessionType: "interactive",
+      platform: "codex",
+      startedAt: isoHoursAgo(1),
+      vclockJson: "{}",
+      platformSessionId: "codex-1",
+    });
+    insertSession(db, {
+      id: "claude-old",
+      projectId: PROJECT,
+      clientId: CLIENT,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: isoHoursAgo(24 * 30),
+      vclockJson: "{}",
+      platformSessionId: "psid-old",
+    });
+
+    const since = isoHoursAgo(24 * 7);
+    expect(listRecentSessions(db, { projectId: PROJECT, since }).map((s) => s.id)).toEqual([
+      "codex-recent",
+      "root-session",
+    ]);
+    expect(
+      listRecentSessions(db, { projectId: PROJECT, platform: "claude-code", since }).map((s) => s.id),
+    ).toEqual(["root-session"]);
   });
 });

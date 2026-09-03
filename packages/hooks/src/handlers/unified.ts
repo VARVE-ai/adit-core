@@ -60,7 +60,7 @@ export async function dispatchHook(
     input.cwd,
     input.platformCli ?? "other",
     input.platformSessionId,
-    { projectRoot: options.projectRoot },
+    { projectRoot: options.projectRoot, transcriptPath: input.transcriptPath ?? null },
   );
   if (!ctx) return;
 

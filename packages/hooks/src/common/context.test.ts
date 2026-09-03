@@ -3,7 +3,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -123,6 +123,82 @@ describe("initHookContext", () => {
     const row = ctx!.db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
     expect(row.count).toBe(1);
 
+    closeDatabase(ctx!.db);
+  });
+
+  it("attaches a client-side fork (new platform session id, copied transcript) to the original session", async () => {
+    const originalPsid = "claude-original";
+    const forkPsid = "claude-fork";
+    const transcriptsDir = join(dir, "transcripts");
+    mkdirSync(transcriptsDir, { recursive: true });
+    const line = (type: string, uuid: string, sessionId: string) =>
+      JSON.stringify({ type, uuid, sessionId, message: { role: type, content: [{ type: "text", text: "x" }] } });
+    writeFileSync(
+      join(transcriptsDir, `${originalPsid}.jsonl`),
+      [line("user", "u1", originalPsid), line("assistant", "a1", originalPsid), line("user", "u2", originalPsid)].join("\n") + "\n",
+    );
+    const forkPath = join(transcriptsDir, `${forkPsid}.jsonl`);
+    writeFileSync(
+      forkPath,
+      [line("user", "u1", forkPsid), line("assistant", "a1", forkPsid), line("user", "u2-edited", forkPsid)].join("\n") + "\n",
+    );
+    insertSession(db, {
+      id: "original-session",
+      projectId,
+      clientId,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      vclockJson: serialize(createClock(clientId)),
+      platformSessionId: originalPsid,
+    });
+
+    const { initHookContext } = await loadContextModule();
+    const first = await initHookContext(dir, "claude-code", forkPsid, {
+      projectRoot: dir,
+      transcriptPath: forkPath,
+    });
+    expect(first?.session.id).toBe("original-session");
+    closeDatabase(first!.db);
+
+    // Later hooks for the fork id resolve through the alias — still one session.
+    const again = await initHookContext(dir, "claude-code", forkPsid, { projectRoot: dir });
+    expect(again?.session.id).toBe("original-session");
+    const row = again!.db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
+    expect(row.count).toBe(1);
+    const alias = again!.db
+      .prepare("SELECT session_id FROM session_platform_aliases WHERE platform_session_id = ?")
+      .get(forkPsid) as { session_id: string } | undefined;
+    expect(alias?.session_id).toBe("original-session");
+    closeDatabase(again!.db);
+  });
+
+  it("starts a new session when the transcript does not continue an existing one", async () => {
+    const transcriptsDir = join(dir, "transcripts");
+    mkdirSync(transcriptsDir, { recursive: true });
+    const freshPath = join(transcriptsDir, "claude-fresh.jsonl");
+    writeFileSync(freshPath, JSON.stringify({ type: "user", uuid: "z1", sessionId: "claude-fresh" }) + "\n");
+    insertSession(db, {
+      id: "other-session",
+      projectId,
+      clientId,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: new Date().toISOString(),
+      vclockJson: serialize(createClock(clientId)),
+      platformSessionId: "claude-other",
+    });
+    writeFileSync(join(transcriptsDir, "claude-other.jsonl"), JSON.stringify({ type: "user", uuid: "o1", sessionId: "claude-other" }) + "\n");
+
+    const { initHookContext } = await loadContextModule();
+    const ctx = await initHookContext(dir, "claude-code", "claude-fresh", {
+      projectRoot: dir,
+      transcriptPath: freshPath,
+    });
+    expect(ctx?.session.id).not.toBe("other-session");
+    expect(JSON.parse(ctx!.session.metadataJson ?? "{}").transcriptPath).toBe(freshPath);
+    const row = ctx!.db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
+    expect(row.count).toBe(2);
     closeDatabase(ctx!.db);
   });
 

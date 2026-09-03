@@ -448,4 +448,20 @@ export const migrations: Migration[] = [
         ADD COLUMN last_remote_branch_check_at TEXT;
     `,
   },
+  {
+    id: 21,
+    name: "create_session_platform_aliases",
+    sql: `
+      -- Extra platform session ids that belong to an existing local session.
+      -- Claude Code forks a conversation into a new session id when a
+      -- message is edited and resent; the fork keeps recording here.
+      CREATE TABLE IF NOT EXISTS session_platform_aliases (
+        platform_session_id TEXT PRIMARY KEY,
+        session_id          TEXT NOT NULL REFERENCES sessions(id),
+        created_at          TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_platform_aliases_session
+        ON session_platform_aliases(session_id);
+    `,
+  },
 ];

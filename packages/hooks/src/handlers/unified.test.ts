@@ -106,7 +106,7 @@ describe("dispatchHook", () => {
       "/workspace/packages/api",
       "codex",
       "codex-session",
-      { projectRoot: "/workspace" },
+      { projectRoot: "/workspace", transcriptPath: null },
     );
   });
 

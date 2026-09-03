@@ -6,6 +6,9 @@ export {
   getSessionById,
   getLatestSession,
   getSessionByPlatformSessionId,
+  insertSessionPlatformAlias,
+  listSessionPlatformAliases,
+  listRecentSessions,
   listSessions,
   type CreateSessionInput,
 } from "./sessions.js";
@@ -16,6 +19,7 @@ export {
   getEventById,
   queryEvents,
   getEventsBySession,
+  getLastEventOfSession,
   updateEventStatus,
   updateEventLabels,
   searchEvents,

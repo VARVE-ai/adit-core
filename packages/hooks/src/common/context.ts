@@ -12,6 +12,7 @@ import {
   openDatabase,
   getSessionByPlatformSessionId,
   insertSession,
+  insertSessionPlatformAlias,
   generateId,
   createClock,
   serialize,
@@ -22,6 +23,7 @@ import {
 import type Database from "better-sqlite3";
 import { getCurrentBranch, getRemoteUrl } from "@varveai/adit-engine";
 import { existsSync } from "node:fs";
+import { findForkedSession, markSupersededPrompt } from "./session-fork.js";
 
 export interface HookContext {
   db: Database.Database;
@@ -31,6 +33,8 @@ export interface HookContext {
 
 export interface HookContextOptions {
   projectRoot?: string | null;
+  /** The platform's transcript file for this session, when the hook reports one. */
+  transcriptPath?: string | null;
 }
 
 /** Initialize the hook context (DB + session) */
@@ -63,8 +67,21 @@ export async function initHookContext(
 
   const db = openDatabase(config.dbPath);
 
-  // The same platform session ID always reattaches to the same local row.
+  // The same platform session ID always reattaches to the same local row
+  // (directly, or through an alias recorded for a client-side fork).
   let session: AditSession | null = getSessionByPlatformSessionId(db, platformSessionId);
+  if (!session && options.transcriptPath) {
+    // First sight of this platform session id: is it a fork of a recent
+    // conversation (edited + resent message)? Then keep recording into the
+    // original session instead of starting a new one.
+    session = attachForkedSession(db, {
+      projectId: config.projectId,
+      clientId: config.clientId,
+      platform,
+      platformSessionId,
+      transcriptPath: options.transcriptPath,
+    });
+  }
   if (!session) {
     const id = generateId();
     const now = new Date().toISOString();
@@ -82,6 +99,7 @@ export async function initHookContext(
         gitBranch: branch ?? "unknown",
         gitRemoteUrl: remoteUrl ?? undefined,
         workingDirectory: cwd,
+        transcriptPath: options.transcriptPath ?? undefined,
       }),
       vclockJson: serialize(createClock(config.clientId)),
       platformSessionId,
@@ -91,6 +109,34 @@ export async function initHookContext(
   }
 
   return { db, config, session };
+}
+
+/**
+ * Fork detection + alias registration, fail-open: any problem means the
+ * caller proceeds to create a fresh session as before.
+ */
+function attachForkedSession(
+  db: Database.Database,
+  input: {
+    projectId: string;
+    clientId: string;
+    platform: Platform;
+    platformSessionId: string;
+    transcriptPath: string;
+  },
+): AditSession | null {
+  try {
+    const original = findForkedSession(db, input);
+    if (!original) return null;
+    insertSessionPlatformAlias(db, {
+      platformSessionId: input.platformSessionId,
+      sessionId: original.id,
+    });
+    markSupersededPrompt(db, original, input.clientId);
+    return original;
+  } catch {
+    return null;
+  }
 }
 
 function loadHookConfig(projectRoot: string): AditConfig {
