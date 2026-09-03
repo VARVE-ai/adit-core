@@ -77,6 +77,61 @@ export function isAditHookCommand(command: string): boolean {
   return normalized.includes("adit-hook") || normalized.includes("hooks/dist/index.js");
 }
 
+/** Check whether a platform hook entry (flat or nested) invokes the ADIT hook dispatcher. */
+export function hookEntryContainsAditCommand(entry: unknown): boolean {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  const raw = entry as { command?: unknown; hooks?: unknown };
+  if (typeof raw.command === "string" && isAditHookCommand(raw.command)) return true;
+  return Array.isArray(raw.hooks) &&
+    raw.hooks.some((hook) => {
+      const command = (hook as { command?: unknown } | null)?.command;
+      return typeof command === "string" && isAditHookCommand(command);
+    });
+}
+
+/**
+ * Remove ADIT entries from every event in a platform hooks map, except the
+ * events listed in `keepEvents`. Other tools' entries are preserved, events
+ * left empty are dropped, and non-array values are passed through untouched.
+ */
+export function stripAditHookEntries(
+  hooks: Record<string, unknown>,
+  opts?: { keepEvents?: readonly string[] },
+): Record<string, unknown> {
+  const keep = new Set(opts?.keepEvents ?? []);
+  const result: Record<string, unknown> = {};
+  for (const [eventKey, entries] of Object.entries(hooks)) {
+    if (!Array.isArray(entries) || keep.has(eventKey)) {
+      result[eventKey] = entries;
+      continue;
+    }
+    const nonAditEntries = entries.filter((entry) => !hookEntryContainsAditCommand(entry));
+    if (nonAditEntries.length > 0) result[eventKey] = nonAditEntries;
+  }
+  return result;
+}
+
+/**
+ * Merge this release's ADIT entries into an existing platform hooks map.
+ *
+ * ADIT entries are first removed from EVERY event — including events ADIT
+ * no longer installs — so nothing lingers after an upgrade (the same rule
+ * uninstall applies). Other tools' entries stay where they are. The current
+ * ADIT entries are then appended after other tools' entries under their
+ * events, so no per-platform list of retired events is needed.
+ */
+export function mergeAditHookEntries(
+  existingHooks: Record<string, unknown>,
+  newHooks: Record<string, unknown[]>,
+): Record<string, unknown> {
+  const merged = stripAditHookEntries(existingHooks);
+  for (const [eventKey, aditEntries] of Object.entries(newHooks)) {
+    const existing = merged[eventKey];
+    merged[eventKey] = [...(Array.isArray(existing) ? existing : []), ...aditEntries];
+  }
+  return merged;
+}
+
 /** Check whether an ADIT hook command has been upgraded with a fixed project root. */
 export function isFixedProjectRootHookCommand(command: string, projectRoot: string): boolean {
   const encodedProjectRoot = encodeProjectRoot(projectRoot);

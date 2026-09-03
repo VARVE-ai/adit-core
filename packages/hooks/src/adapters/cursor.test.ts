@@ -183,6 +183,48 @@ describe("Cursor Hook Chaining (install/uninstall)", () => {
     expect(JSON.stringify(hooks.sessionEnd)).toContain("other-tool session-end");
   });
 
+  it("removes ADIT hooks for every retired event on upgrade while preserving other tools", async () => {
+    // Every event ADIT ever installed for this platform, as an old install
+    // left it, plus another tool's hook under one of the retired events.
+    const configPath = join(projectRoot, ".cursor", "hooks.json");
+    mkdirSync(join(configPath, ".."), { recursive: true });
+    writeFileSync(configPath, JSON.stringify({
+      hooks: {
+        beforeSubmitPrompt: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform cursor prompt-submit", timeout: 30 }] }
+        ],
+        stop: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform cursor stop", timeout: 30 }] }
+        ],
+        sessionStart: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform cursor session-start", timeout: 30 }] }
+        ],
+        sessionEnd: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform cursor session-end", timeout: 30 }] }
+        ],
+        afterAgentResponse: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform cursor notification", timeout: 30 }] },
+          { hooks: [{ type: "command", command: "other-tool after-response", timeout: 30 }] }
+        ],
+      },
+    }, null, 2) + "\n");
+
+    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    const hooks = (JSON.parse(readFileSync(configPath, "utf-8")) as { hooks: Record<string, unknown[]> }).hooks;
+    const eventsWithAdit = Object.keys(hooks)
+      .filter((event) => JSON.stringify(hooks[event]).includes("adit-hook"))
+      .sort();
+    // Only this release's events carry ADIT entries — nothing retired lingers.
+    expect(eventsWithAdit).toEqual(["beforeSubmitPrompt", "stop"]);
+    for (const event of eventsWithAdit) {
+      expect(hooks[event].filter((e) => JSON.stringify(e).includes("adit-hook"))).toHaveLength(1);
+    }
+    // The other tool's hook under a retired event is untouched.
+    expect(hooks.afterAgentResponse).toHaveLength(1);
+    expect(JSON.stringify(hooks.afterAgentResponse)).toContain("other-tool after-response");
+  });
+
   it("preserves other tools' hooks when installing ADIT hooks", async () => {
     // Pre-install another tool's hooks in Cursor's flat format
     writeHooks(projectRoot, {

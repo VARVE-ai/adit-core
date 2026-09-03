@@ -83,6 +83,45 @@ describe("Codex CLI Hook Chaining", () => {
     expect(existsSync(join(codexHome, "config.toml"))).toBe(false);
   });
 
+  it("removes ADIT hooks for every retired event on upgrade while preserving other tools", async () => {
+    // Every event ADIT ever installed for this platform, as an old install
+    // left it, plus another tool's hook under one of the retired events.
+    const configPath = join(projectRoot, ".codex", "hooks.json");
+    mkdirSync(join(configPath, ".."), { recursive: true });
+    writeFileSync(configPath, JSON.stringify({
+      hooks: {
+        SessionStart: [
+          { matcher: "startup|resume", hooks: [{ type: "command", command: "npx adit-hook --platform codex session-start", timeout: 30 }] }
+        ],
+        UserPromptSubmit: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform codex prompt-submit", timeout: 30 }] }
+        ],
+        Stop: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform codex stop", timeout: 30 }] }
+        ],
+        PostToolUse: [
+          { matcher: "Bash", hooks: [{ type: "command", command: "npx adit-hook --platform codex notification", timeout: 30 }] },
+          { matcher: "Bash", hooks: [{ type: "command", command: "other-tool after-bash", timeout: 30 }] }
+        ],
+      },
+    }, null, 2) + "\n");
+
+    await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    const hooks = (JSON.parse(readFileSync(configPath, "utf-8")) as { hooks: Record<string, unknown[]> }).hooks;
+    const eventsWithAdit = Object.keys(hooks)
+      .filter((event) => JSON.stringify(hooks[event]).includes("adit-hook"))
+      .sort();
+    // Only this release's events carry ADIT entries — nothing retired lingers.
+    expect(eventsWithAdit).toEqual(["Stop", "UserPromptSubmit"]);
+    for (const event of eventsWithAdit) {
+      expect(hooks[event].filter((e) => JSON.stringify(e).includes("adit-hook"))).toHaveLength(1);
+    }
+    // The other tool's hook under a retired event is untouched.
+    expect(hooks.PostToolUse).toHaveLength(1);
+    expect(JSON.stringify(hooks.PostToolUse)).toContain("other-tool after-bash");
+  });
+
   it("preserves other tools' hooks when installing ADIT hooks", async () => {
     // Pre-install another tool's hooks
     const otherToolHook = {

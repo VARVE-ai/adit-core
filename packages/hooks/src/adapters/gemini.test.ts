@@ -212,6 +212,51 @@ describe("Gemini CLI Hook Chaining", () => {
     expect(JSON.stringify(hooks.SessionEnd)).toContain("other-tool session-end");
   });
 
+  it("removes ADIT hooks for every retired event on upgrade while preserving other tools", async () => {
+    // Every event ADIT ever installed for this platform, as an old install
+    // left it, plus another tool's hook under one of the retired events.
+    const configPath = join(projectRoot, ".gemini", "settings.json");
+    mkdirSync(join(configPath, ".."), { recursive: true });
+    writeFileSync(configPath, JSON.stringify({
+      hooks: {
+        SessionStart: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform gemini session-start", timeout: 30 }] }
+        ],
+        BeforeAgent: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform gemini prompt-submit", timeout: 30 }] }
+        ],
+        AfterAgent: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform gemini stop", timeout: 30 }] }
+        ],
+        SessionEnd: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform gemini session-end", timeout: 30 }] }
+        ],
+        AfterTool: [
+          { matcher: "run_shell_command", hooks: [{ type: "command", command: "npx adit-hook --platform gemini notification", timeout: 30 }] },
+          { matcher: "run_shell_command", hooks: [{ type: "command", command: "other-tool after-shell", timeout: 30 }] }
+        ],
+        Notification: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform gemini notification", timeout: 30 }] }
+        ],
+      },
+    }, null, 2) + "\n");
+
+    await geminiAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    const hooks = (JSON.parse(readFileSync(configPath, "utf-8")) as { hooks: Record<string, unknown[]> }).hooks;
+    const eventsWithAdit = Object.keys(hooks)
+      .filter((event) => JSON.stringify(hooks[event]).includes("adit-hook"))
+      .sort();
+    // Only this release's events carry ADIT entries — nothing retired lingers.
+    expect(eventsWithAdit).toEqual(["AfterAgent", "BeforeAgent"]);
+    for (const event of eventsWithAdit) {
+      expect(hooks[event].filter((e) => JSON.stringify(e).includes("adit-hook"))).toHaveLength(1);
+    }
+    // The other tool's hook under a retired event is untouched.
+    expect(hooks.AfterTool).toHaveLength(1);
+    expect(JSON.stringify(hooks.AfterTool)).toContain("other-tool after-shell");
+  });
+
   it("preserves other tools' hooks when installing ADIT hooks", async () => {
     // Pre-install another tool's hooks (e.g., Entire CLI)
     const otherToolHook = {

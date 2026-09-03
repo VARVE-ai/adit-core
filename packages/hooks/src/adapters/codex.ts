@@ -28,6 +28,7 @@ import {
   describeHookValidation,
   isAditHookCommand,
   isFixedProjectRootHookCommand,
+  mergeAditHookEntries,
 } from "./command.js";
 import {
   buildCodexHookStatesForEntries,
@@ -240,31 +241,10 @@ export const codexAdapter: PlatformAdapter = {
     const existingHooks = (hooksConfig.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 
-    // Merge hook entries per event key: preserve other tools' hooks,
-    // remove stale ADIT entries, then append new ADIT entries.
-    const mergedHooks: Record<string, unknown[]> = { ...existingHooks };
-    for (const [eventKey, aditEntries] of Object.entries(newHooks)) {
-      const existing = Array.isArray(mergedHooks[eventKey]) ? mergedHooks[eventKey] : [];
-
-      // Remove stale ADIT entries (same logic as uninstallHooks)
-      const nonAditEntries = existing.filter(
-        (raw) => {
-          const entry = raw as { command?: string; hooks?: Array<{ command?: string }> };
-          if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return false;
-          if (Array.isArray(entry.hooks)) {
-            return !entry.hooks.some(
-              (h) => typeof h.command === "string" && isAditHookCommand(h.command),
-            );
-          }
-          return true;
-        },
-      );
-
-      // Append new ADIT entries after other tools' hooks
-      mergedHooks[eventKey] = [...nonAditEntries, ...aditEntries];
-    }
-
-    removeAditHookEvent(mergedHooks, "SessionStart");
+    // Merge: strip ADIT entries from every event (including events ADIT no
+    // longer installs, so upgrades leave nothing behind), keep other tools'
+    // entries, then append this release's ADIT entries.
+    const mergedHooks = mergeAditHookEntries(existingHooks, newHooks);
 
     hooksConfig.hooks = mergedHooks;
     writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2) + "\n");
@@ -359,14 +339,6 @@ function entryContainsAditHook(entry: unknown): boolean {
   if (typeof raw.command === "string" && isAditHookCommand(raw.command)) return true;
   return Array.isArray(raw.hooks) &&
     raw.hooks.some((hook) => typeof hook.command === "string" && isAditHookCommand(hook.command));
-}
-
-function removeAditHookEvent(hooks: Record<string, unknown[]>, eventName: string): void {
-  const entries = hooks[eventName];
-  if (!Array.isArray(entries)) return;
-  const filtered = entries.filter((entry) => !entryContainsAditHook(entry));
-  if (filtered.length === 0) delete hooks[eventName];
-  else hooks[eventName] = filtered;
 }
 
 function entryContainsFixedRootAditHook(entry: unknown, projectRoot: string): boolean {

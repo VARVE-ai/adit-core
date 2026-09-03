@@ -21,6 +21,8 @@ import {
   classifyAditHookEntries,
   describeHookValidation,
   isAditHookCommand,
+  mergeAditHookEntries,
+  stripAditHookEntries,
 } from "./command.js";
 
 const HOOK_MAPPINGS: HookMapping[] = [
@@ -287,36 +289,20 @@ export const claudeCodeAdapter: PlatformAdapter = {
     const existingHooks = (settings.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 
-    // Merge hook entries per event key: preserve other tools' hooks,
-    // remove stale ADIT entries, then append new ADIT entries.
-    const mergedHooks: Record<string, unknown[]> = { ...existingHooks };
-    for (const [eventKey, aditEntries] of Object.entries(newHooks)) {
-      const existing = Array.isArray(mergedHooks[eventKey]) ? mergedHooks[eventKey] : [];
-
-      // Remove stale ADIT entries (same logic as uninstallHooks)
-      const nonAditEntries = existing.filter(
-        (raw) => {
-          const entry = raw as { command?: string; hooks?: Array<{ command?: string }> };
-          if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return false;
-          if (Array.isArray(entry.hooks)) {
-            return !entry.hooks.some(
-              (h) => typeof h.command === "string" && isAditHookCommand(h.command),
-            );
-          }
-          return true;
-        },
-      );
-
-      // Append new ADIT entries after other tools' hooks
-      mergedHooks[eventKey] = [...nonAditEntries, ...aditEntries];
-    }
+    // Merge: strip ADIT entries from every event (including events ADIT no
+    // longer installs, so upgrades leave nothing behind), keep other tools'
+    // entries, then append this release's ADIT entries.
+    const mergedHooks = mergeAditHookEntries(existingHooks, newHooks);
 
     settings.hooks = mergedHooks;
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-    for (const retiredEvent of ["SessionStart", "SessionEnd", "SubagentStart", "SubagentStop"]) {
-      removeAditHookEventFromConfig(settingsPath, retiredEvent);
-      removeAditHookEventFromConfig(join(claudeDir, "settings.json"), retiredEvent);
-    }
+    // Older versions installed into the shared settings.json. ADIT does not
+    // write there any more, but its entries for events it no longer installs
+    // are pruned from it so upgrades leave nothing behind.
+    removeRetiredAditHookEventsFromConfig(
+      join(claudeDir, "settings.json"),
+      HOOK_MAPPINGS.map((m) => m.platformEvent),
+    );
 
     // Install slash command
     const commandsDir = join(claudeDir, "commands");
@@ -395,16 +381,24 @@ function entryContainsAditHook(entry: unknown): boolean {
     raw.hooks.some((hook) => typeof hook.command === "string" && isAditHookCommand(hook.command));
 }
 
-function removeAditHookEventFromConfig(settingsPath: string, eventName: string): void {
+/**
+ * Remove ADIT entries for events other than `currentEvents` from a settings
+ * file ADIT does not otherwise write. Leaves the file untouched when there is
+ * nothing to remove.
+ */
+function removeRetiredAditHookEventsFromConfig(
+  settingsPath: string,
+  currentEvents: readonly string[],
+): void {
   if (!existsSync(settingsPath)) return;
   try {
-    const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { hooks?: Record<string, unknown> };
-    const entries = settings.hooks?.[eventName];
-    if (!Array.isArray(entries)) return;
-    const filtered = entries.filter((entry) => !entryContainsAditHook(entry));
-    if (filtered.length === 0) delete settings.hooks![eventName];
-    else settings.hooks![eventName] = filtered;
-    if (Object.keys(settings.hooks!).length === 0) delete settings.hooks;
+    const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { hooks?: unknown };
+    if (!settings.hooks || typeof settings.hooks !== "object" || Array.isArray(settings.hooks)) return;
+    const hooks = settings.hooks as Record<string, unknown>;
+    const pruned = stripAditHookEntries(hooks, { keepEvents: currentEvents });
+    if (JSON.stringify(pruned) === JSON.stringify(hooks)) return;
+    if (Object.keys(pruned).length === 0) delete settings.hooks;
+    else settings.hooks = pruned;
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
   } catch {
     // Preserve invalid or unreadable user settings.

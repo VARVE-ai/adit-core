@@ -110,6 +110,87 @@ describe("Claude Code Hook Chaining", () => {
     expect(JSON.stringify(hooks.SubagentStop)).toContain("other-tool subagent-stop");
   });
 
+  it("removes ADIT hooks for every retired event on upgrade while preserving other tools", async () => {
+    // Every event ADIT ever installed for this platform, as an old install
+    // left it, plus another tool's hook under one of the retired events.
+    const configPath = join(projectRoot, ".claude", "settings.local.json");
+    mkdirSync(join(configPath, ".."), { recursive: true });
+    writeFileSync(configPath, JSON.stringify({
+      hooks: {
+        UserPromptSubmit: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude prompt-submit", timeout: 30 }] }
+        ],
+        Stop: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude stop", timeout: 30 }] }
+        ],
+        SessionStart: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude session-start", timeout: 30 }] }
+        ],
+        SessionEnd: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude session-end", timeout: 30 }] }
+        ],
+        TaskCompleted: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude task-completed", timeout: 30 }] }
+        ],
+        Notification: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude notification", timeout: 30 }] },
+          { hooks: [{ type: "command", command: "other-tool notify", timeout: 30 }] }
+        ],
+        SubagentStart: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude subagent-start", timeout: 30 }] }
+        ],
+        SubagentStop: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude subagent-stop", timeout: 30 }] }
+        ],
+      },
+    }, null, 2) + "\n");
+
+    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    const hooks = (JSON.parse(readFileSync(configPath, "utf-8")) as { hooks: Record<string, unknown[]> }).hooks;
+    const eventsWithAdit = Object.keys(hooks)
+      .filter((event) => JSON.stringify(hooks[event]).includes("adit-hook"))
+      .sort();
+    // Only this release's events carry ADIT entries — nothing retired lingers.
+    expect(eventsWithAdit).toEqual(["Stop", "StopFailure", "UserPromptSubmit"]);
+    for (const event of eventsWithAdit) {
+      expect(hooks[event].filter((e) => JSON.stringify(e).includes("adit-hook"))).toHaveLength(1);
+    }
+    // The other tool's hook under a retired event is untouched.
+    expect(hooks.Notification).toHaveLength(1);
+    expect(JSON.stringify(hooks.Notification)).toContain("other-tool notify");
+  });
+
+  it("prunes retired ADIT events from the shared settings.json but keeps current ones", async () => {
+    const claudeDir = join(projectRoot, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    const sharedPath = join(claudeDir, "settings.json");
+    writeFileSync(sharedPath, JSON.stringify({
+      permissions: { allow: ["Bash(ls)"] },
+      hooks: {
+        Stop: [{ hooks: [{ type: "command", command: "npx adit-hook --platform claude stop" }] }],
+        Notification: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude notification" }] },
+          { hooks: [{ type: "command", command: "other-tool notify" }] },
+        ],
+        SessionStart: [{ hooks: [{ type: "command", command: "npx adit-hook --platform claude session-start" }] }],
+      },
+    }, null, 2) + "\n");
+
+    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    const shared = JSON.parse(readFileSync(sharedPath, "utf-8")) as {
+      permissions?: unknown;
+      hooks?: Record<string, unknown[]>;
+    };
+    expect(shared.permissions).toEqual({ allow: ["Bash(ls)"] });
+    // A current-event ADIT entry in the shared file is the user's choice — kept.
+    expect(JSON.stringify(shared.hooks?.Stop)).toContain("adit-hook");
+    expect(shared.hooks?.SessionStart).toBeUndefined();
+    expect(shared.hooks?.Notification).toHaveLength(1);
+    expect(JSON.stringify(shared.hooks?.Notification)).toContain("other-tool notify");
+  });
+
   it("preserves other tools' hooks when installing ADIT hooks", async () => {
     // Pre-install another tool's hooks (e.g., Entire CLI)
     const otherToolHook = {
