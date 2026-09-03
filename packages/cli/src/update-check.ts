@@ -283,13 +283,36 @@ async function getVersionPolicyDecision(options: {
   }
 }
 
+/**
+ * Latest version published to npm, bypassing the local cache. Used by
+ * `adit upgrade`, which is explicit and can afford a longer timeout than the
+ * passive post-command check. Returns null when the registry is unreachable.
+ */
+export async function fetchLatestPublishedVersion(options: {
+  fetchImpl?: FetchLike;
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+} = {}): Promise<string | null> {
+  try {
+    return await fetchLatestVersion(
+      options.fetchImpl ?? (fetch as unknown as FetchLike),
+      CLI_VERSION,
+      options.env ?? process.env,
+      options.timeoutMs ?? 8000,
+    );
+  } catch {
+    return null;
+  }
+}
+
 async function fetchLatestVersion(
   fetchImpl: FetchLike,
   currentVersion: string,
   env: NodeJS.ProcessEnv,
+  timeoutMs: number = UPDATE_CHECK_TIMEOUT_MS,
 ): Promise<string> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), UPDATE_CHECK_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetchImpl(env.ADIT_UPDATE_CHECK_URL ?? NPM_LATEST_URL, {
