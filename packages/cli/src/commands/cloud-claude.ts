@@ -459,6 +459,7 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
     projectRoot: config.projectRoot,
     terminalId,
     serverUrl,
+    suppressInteractiveNotices: Boolean(process.stderr.isTTY),
   });
 
   try {
