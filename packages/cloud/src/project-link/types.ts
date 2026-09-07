@@ -173,30 +173,6 @@ export interface QualifyResponse {
   } | null;
 }
 
-export interface LinkStatusResponse {
-  projectLink: {
-    id: string;
-    projectId: string;
-    remoteUrl: string;
-    canonicalRepoKey?: string | null;
-    defaultBranch: string | null;
-    qualified: boolean;
-    lastGitSyncAt: string | null;
-    lastDocSyncAt: string | null;
-    createdAt: string;
-  };
-  branchCount: number;
-  commitCount: number;
-  latestCommitSha: string | null;
-  latestCommitDate: string | null;
-  documentCount: number;
-  documents: Array<{
-    fileName: string;
-    contentHash: string;
-    updatedAt: string;
-  }>;
-}
-
 // ─── Intent Types ──────────────────────────────────────────
 
 export interface IntentSummary {

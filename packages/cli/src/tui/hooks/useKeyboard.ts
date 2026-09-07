@@ -11,9 +11,7 @@ export type Screen = "timeline" | "diff" | "search" | "env" | "help";
 export interface KeyboardActions {
   onNavigateUp: () => void;
   onNavigateDown: () => void;
-  onSelect: () => void;
   onShowDiff: () => void;
-  onShowPrompt: () => void;
   onShowEnv: () => void;
   onSearch: () => void;
   onFilter: () => void;
@@ -37,18 +35,10 @@ export function useKeyboard(actions: KeyboardActions, enabled = true): void {
         actions.onNavigateUp();
         return;
       }
-      if (key.return) {
-        actions.onSelect();
-        return;
-      }
 
       // Screen switches
       if (input === "d") {
         actions.onShowDiff();
-        return;
-      }
-      if (input === "p") {
-        actions.onShowPrompt();
         return;
       }
       if (input === "e") {

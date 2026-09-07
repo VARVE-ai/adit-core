@@ -462,11 +462,6 @@ async function linkRepositoryCommand(
     upsertProjectLinkCache(db, cache);
   }
 
-  // At this point cache is guaranteed non-null: either loaded from DB or freshly created.
-  if (!cache) {
-    throw new Error("Internal error: project link cache not initialized after negotiate");
-  }
-
   // Keep using the client-local ID for API requests. The server resolves it
   // with the authenticated user to the cloud project ID.
   const localProjectId = projectId;

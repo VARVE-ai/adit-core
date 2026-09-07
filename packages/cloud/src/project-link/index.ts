@@ -20,15 +20,12 @@ export {
   collectRemoteUrl,
   collectDefaultBranch,
   collectCurrentBranch,
-  collectGitIdentity,
   collectBranches,
-  collectRemoteBranchSnapshot,
   branchHeadMap,
   collectGitRefsFingerprint,
   collectCommitLogs,
   collectCommitsBetweenRefSnapshots,
   collectCommitCount,
-  resolveCommitBranches,
   projectNameFromRemoteUrl,
 } from "./git-collector.js";
 
@@ -41,9 +38,6 @@ export {
   upsertProjectLinkCache,
   clearProjectLinkCache,
   updateCachedGitState,
-  updateCachedRemoteBranchState,
-  updateCachedDocHashes,
-  updateCachedQualified,
 } from "./cache.js";
 
 export {
@@ -58,15 +52,9 @@ export {
 export type {
   GitBranch,
   GitCommit,
-  GitIdentity,
   DiscoveredDocument,
   ProjectLinkCache,
-  NegotiateResponse,
-  LinkInitResponse,
-  CommitUploadResponse,
-  DocumentUploadResponse,
   QualifyResponse,
-  LinkStatusResponse,
   IntentSummary,
   IntentDetail,
   TaskSlice,

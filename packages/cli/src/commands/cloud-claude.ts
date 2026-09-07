@@ -34,7 +34,7 @@ import {
   trimRelayEventQueue,
   type InFlightReliableEventBatch,
 } from "./cli-agent/reliable-event-queue.js";
-import { loadInitializedGitOrWorkspaceProjectConfig } from "./project-initialization.js";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 import type {
   CliAgentRelayEvent,
   PromptImageAttachment,
@@ -427,7 +427,7 @@ async function drainCommandQueue(input: {
 }
 
 export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<void> {
-  const config = loadInitializedGitOrWorkspaceProjectConfig("adit cloud claude");
+  const config = loadInitializedProjectConfig("adit cloud claude");
   if (!config) return;
 
   const credentials = loadCredentials();

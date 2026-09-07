@@ -1,10 +1,5 @@
 import type { ChildProcess } from "node:child_process";
 import { killCliProcessTree } from "../cli-process.js";
-export {
-  decodeCsiUCode,
-  isCsiUCtrlModifier,
-  normalizeReclaimInput as normalizeCodexReclaimInput,
-} from "../reclaim-input.js";
 
 export const LOCAL_CLI_EXIT_WAIT_MS = 750;
 export const LOCAL_CLI_FORCE_EXIT_WAIT_MS = 750;

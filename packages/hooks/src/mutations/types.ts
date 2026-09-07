@@ -9,14 +9,13 @@
 
 export type MutationKind = "add" | "update" | "delete" | "rename";
 
-export type MutationStatus = "running" | "completed" | "failed";
+export type MutationStatus = "completed" | "failed";
 
 export type MutationSource =
   | "claude-write-tool"
   | "claude-edit-tool"
   | "claude-multiedit-tool"
   | "claude-notebookedit-tool"
-  | "codex-filechange"
   | "codex-patch-apply-end"
   | "codex-bash-output"
   | "gemini-write-file"
@@ -33,7 +32,7 @@ export interface MutationOmitted {
 }
 
 export interface AgentFileMutation {
-  provider: "claude-code" | "claude-vscode" | "codex" | "gemini" | "cursor" | "cursor-vscode";
+  provider: "claude-code" | "claude-vscode" | "codex" | "gemini" | "cursor";
   toolUseId: string;
   toolName: string;
   path: string;

@@ -51,7 +51,6 @@ vi.mock("./cache.js", () => ({
   getProjectLinkCache: (...args: unknown[]) => mockGetProjectLinkCache(...args),
   upsertProjectLinkCache: (...args: unknown[]) => mockUpsertProjectLinkCache(...args),
   clearProjectLinkCache: vi.fn(),
-  updateCachedCommitSha: vi.fn(),
   updateCachedDocHashes: vi.fn(),
   updateCachedQualified: vi.fn(),
 }));

@@ -186,10 +186,9 @@ export function createProgram(): Command {
   exportCmd
     .command("event <id>")
     .description("Export a single event bundle")
-    .option("-f, --format <fmt>", "Output format (json)", "json")
     .option("-o, --output <path>", "Output file path")
     .action((id, opts) =>
-      exportCommand(id, { format: opts.format, output: opts.output }),
+      exportCommand(id, { output: opts.output }),
     );
 
   exportCmd
@@ -199,8 +198,8 @@ export function createProgram(): Command {
     .option("-o, --output <path>", "Output file path")
     .option("--from <date>", "Start date filter")
     .option("--to <date>", "End date filter")
-    .option("--include-diffs", "Include full diffs")
-    .option("--include-env", "Include environment snapshots")
+    .option("--include-diffs", "Include full diffs (jsonl format only)")
+    .option("--include-env", "Include environment snapshots (jsonl format only)")
     .option("--gzip", "Compress output with gzip")
     .action((sessionId, opts) =>
       exportSessionCommand(sessionId, {

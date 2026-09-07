@@ -26,7 +26,6 @@ import { getSyncState, loadConfig } from "@varveai/adit-core";
 import { loadCloudConfig, DEFAULT_SERVER_URL } from "../config.js";
 import {
   loadCredentials,
-  isTokenExpired,
   credentialsFromEnvToken,
   incrementSyncErrors,
   clearSyncErrors,
@@ -138,10 +137,6 @@ export async function triggerAutoSync(
 
   // 5. Attempt sync — CloudClient handles token refresh, retries,
   //    and reachability internally. Network errors are caught below.
-  if (isTokenExpired(credentials)) {
-    // Let CloudClient try to refresh — it will throw CloudAuthError if it can't
-  }
-
   try {
     const projectContext = await resolveCloudProjectContext(projectConfig);
     // Tight budget: the hook process is hard-killed after 10s, so a dead

@@ -39,7 +39,7 @@ import {
   trimRelayEventQueue,
   type InFlightReliableEventBatch,
 } from "./cli-agent/reliable-event-queue.js";
-import { loadInitializedGitOrWorkspaceProjectConfig } from "./project-initialization.js";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 import type {
   CliAgentRelayEvent,
   PromptImageAttachment,
@@ -355,7 +355,7 @@ async function drainCommandQueue(input: {
 }
 
 export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void> {
-  const config = loadInitializedGitOrWorkspaceProjectConfig("adit cloud codex");
+  const config = loadInitializedProjectConfig("adit cloud codex");
   if (!config) return;
 
   const credentials = loadCredentials();

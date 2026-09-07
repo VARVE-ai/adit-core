@@ -27,12 +27,6 @@ export type AditProjectGuardState =
   | "uninitialized"
   | "corrupt";
 
-export interface AditProjectInitializationStatus extends AditProjectInitializationPaths {
-  dataDirExists: boolean;
-  dbExists: boolean;
-  initialized: boolean;
-}
-
 export function getAditProjectInitializationPaths(
   projectRoot: string,
   env: NodeJS.ProcessEnv = process.env,
@@ -41,21 +35,6 @@ export function getAditProjectInitializationPaths(
   return {
     dataDir,
     dbPath: env.ADIT_DB_PATH ?? join(dataDir, "adit.sqlite"),
-  };
-}
-
-export function getAditProjectInitializationStatus(
-  projectRoot: string,
-  env: NodeJS.ProcessEnv = process.env,
-): AditProjectInitializationStatus {
-  const paths = getAditProjectInitializationPaths(projectRoot, env);
-  const dataDirExists = existsSync(paths.dataDir);
-  const dbExists = existsSync(paths.dbPath);
-  return {
-    ...paths,
-    dataDirExists,
-    dbExists,
-    initialized: dataDirExists && dbExists,
   };
 }
 
@@ -154,15 +133,4 @@ export function loadInitializedProjectConfig(
   }
   process.exitCode = 1;
   return null;
-}
-
-/**
- * Guard used by cloud agent commands. Same manifest-based rule as
- * loadInitializedProjectConfig — kept as a named entry point for its callers.
- */
-export function loadInitializedGitOrWorkspaceProjectConfig(
-  command: string,
-  cwd?: string,
-): AditConfig | null {
-  return loadInitializedProjectConfig(command, cwd);
 }

@@ -18,9 +18,6 @@ interface CodexRawEntry {
 }
 
 interface CodexExtractResult {
-  sessionId: string | undefined;
-  startedAt: string | undefined;
-  endedAt: string | undefined;
   mutations: AgentFileMutation[];
 }
 
@@ -75,9 +72,6 @@ export function extractCodexMutationsFromTranscript(
   }
 
   return {
-    sessionId: sessionIdFromPath(transcriptPath),
-    startedAt: entries[turnBounds.start]?.timestamp,
-    endedAt: entries[turnBounds.end - 1]?.timestamp,
     mutations,
   };
 }
@@ -445,8 +439,4 @@ function readString(value: unknown): string | null {
 
 function normalizePath(path: string): string {
   return path.replace(/\\/g, "/");
-}
-
-function sessionIdFromPath(transcriptPath: string): string | undefined {
-  return transcriptPath.match(/([0-9a-f-]{36})\.jsonl$/i)?.[1];
 }

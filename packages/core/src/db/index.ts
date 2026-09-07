@@ -1,5 +1,4 @@
 export { openDatabase, closeDatabase } from "./connection.js";
-export { migrations } from "./migrations.js";
 
 export {
   insertSession,

@@ -52,7 +52,7 @@ ADIT is a TypeScript pnpm monorepo with six packages:
 
 | Package | Description |
 | --- | --- |
-| `@varveai/adit-core` | Core types, SQLite database access, config, sync primitives, performance logs, and native install checks |
+| `@varveai/adit-core` | Core types, SQLite database access, config, sync primitives, and performance logs |
 | `@varveai/adit-engine` | Git runner, working tree detection, timeline management, and environment capture/diff |
 | `@varveai/adit-hooks` | Hook dispatcher, fail-open handlers, platform adapter registry, and hook install/validate/uninstall logic |
 | `@varveai/adit-cli` | Commander.js CLI, cloud coding entry points, debug commands, docs commands, and React/Ink TUI |
@@ -361,8 +361,6 @@ Files larger than 500 KB are skipped with a warning.
 | `ADIT_DEBUG` | Enable debug output and the hook debug log (`$TMPDIR/adit-hook-debug.jsonl`, size-capped) | unset |
 | `ADIT_CODEX_BIN` | Override Codex binary used by cloud coding commands | unset |
 | `ADIT_INSTALL_DIR` | Override the upgrade install directory | unset |
-| `ADIT_ALLOW_NATIVE_BUILD` | Allow native better-sqlite3 build when no prebuild is confirmed | unset |
-| `ADIT_SKIP_NATIVE_PREBUILD_CHECK` | Bypass the native prebuild preflight check | unset |
 
 ## Development Commands
 

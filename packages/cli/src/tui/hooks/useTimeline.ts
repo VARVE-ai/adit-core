@@ -12,7 +12,6 @@ import {
   closeDatabase,
   queryEvents,
   getLatestSession,
-  getEventById,
   searchEvents,
   getDiffText,
   getLatestEnvSnapshot,
@@ -27,7 +26,6 @@ import { formatAditProjectNotInitializedMessage } from "../../commands/project-i
 export interface TimelineState {
   events: AditEvent[];
   session: AditSession | null;
-  selectedEvent: AditEvent | null;
   loading: boolean;
   error: string | null;
   totalCount: number;
@@ -43,8 +41,6 @@ export interface UseTimelineResult {
   state: TimelineState;
   filters: TimelineFilters;
   setFilters: (f: TimelineFilters) => void;
-  selectEvent: (id: string | null) => void;
-  refresh: () => void;
   getEventDiff: (eventId: string) => string | null;
   getEnvSnapshot: () => EnvSnapshot | null;
 }
@@ -56,7 +52,6 @@ export function useTimeline(): UseTimelineResult {
   const [state, setState] = useState<TimelineState>({
     events: [],
     session: null,
-    selectedEvent: null,
     loading: true,
     error: null,
     totalCount: 0,
@@ -103,12 +98,6 @@ export function useTimeline(): UseTimelineResult {
         loading: false,
         error: null,
         totalCount: events.length,
-        // Preserve selection if still valid
-        selectedEvent:
-          prev.selectedEvent &&
-          events.some((e) => e.id === prev.selectedEvent!.id)
-            ? prev.selectedEvent
-            : events[0] ?? null,
       }));
     } catch (err) {
       setState((prev) => ({
@@ -118,23 +107,6 @@ export function useTimeline(): UseTimelineResult {
       }));
     }
   }, [getDb, filters]);
-
-  const selectEvent = useCallback(
-    (id: string | null) => {
-      if (!id) {
-        setState((prev) => ({ ...prev, selectedEvent: null }));
-        return;
-      }
-      try {
-        const db = getDb();
-        const event = getEventById(db, id);
-        setState((prev) => ({ ...prev, selectedEvent: event }));
-      } catch {
-        // ignore
-      }
-    },
-    [getDb],
-  );
 
   const getEventDiff = useCallback(
     (eventId: string): string | null => {
@@ -186,8 +158,6 @@ export function useTimeline(): UseTimelineResult {
     state,
     filters,
     setFilters,
-    selectEvent,
-    refresh: fetchData,
     getEventDiff,
     getEnvSnapshot,
   };

@@ -76,7 +76,6 @@ import {
 } from "./usage.js";
 import { emitCodexThreadItem } from "./thread-items.js";
 export { promptInputForCodexMode, codexThreadModeOverrides, codexTurnModeOverrides } from "./input-mode.js";
-export type { CodexPromptMode } from "./input-mode.js";
 export { normalizeReclaimInput as normalizeCodexReclaimInput } from "../reclaim-input.js";
 import { killCliProcessTree, spawnCliProcess } from "../cli-process.js";
 import {

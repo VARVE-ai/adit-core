@@ -41,7 +41,6 @@ describe("extractCodexMutationsFromTranscript", () => {
 
       const result = extractCodexMutationsFromTranscript(transcriptPath);
 
-      expect(result?.sessionId).toBe("019efde3-72c7-7f82-9f7c-5f3d63cee24f");
       expect(result?.mutations).toHaveLength(1);
       expect(result?.mutations[0]).toMatchObject({
         provider: "codex",

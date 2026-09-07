@@ -36,9 +36,6 @@ interface GeminiToolCall {
 }
 
 export interface ExtractResult {
-  sessionId: string | undefined;
-  startedAt: string | undefined;
-  endedAt: string | undefined;
   mutations: AgentFileMutation[];
 }
 
@@ -76,9 +73,6 @@ export function extractGeminiMutationsFromTranscript(
   }
 
   return {
-    sessionId: entries[0]?.sessionId,
-    startedAt: entries[bounds.start]?.timestamp,
-    endedAt: entries[bounds.end - 1]?.timestamp,
     mutations,
   };
 }

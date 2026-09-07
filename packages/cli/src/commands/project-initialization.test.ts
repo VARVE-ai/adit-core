@@ -5,8 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { writeProjectManifest, type ProjectManifest } from "@varveai/adit-core";
 import {
   classifyProjectGuardState,
-  getAditProjectInitializationStatus,
-  loadInitializedGitOrWorkspaceProjectConfig,
   loadInitializedProjectConfig,
 } from "./project-initialization.js";
 
@@ -116,19 +114,9 @@ describe("project initialization guard", () => {
     }
   });
 
-  it("cloud agent guard follows the same manifest rule", () => {
-    writeProjectManifest(projectRoot, manifestFor());
-    writeFileSync(join(projectRoot, ".adit", "adit.sqlite"), "", "utf-8");
-
-    const config = loadInitializedGitOrWorkspaceProjectConfig("adit cloud claude", projectRoot);
-    expect(config).not.toBeNull();
-  });
-
   it("classifies guard states from a loaded config", () => {
     writeProjectManifest(projectRoot, manifestFor());
     writeFileSync(join(projectRoot, ".adit", "adit.sqlite"), "", "utf-8");
-    const status = getAditProjectInitializationStatus(projectRoot);
-    expect(status.initialized).toBe(true);
 
     const config = loadInitializedProjectConfig("adit status", projectRoot);
     expect(classifyProjectGuardState(config!)).toBe("initialized");

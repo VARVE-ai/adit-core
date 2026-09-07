@@ -28,10 +28,7 @@ import { createTimelineManager } from "@varveai/adit-engine";
 export async function exportCommand(
   eventId: string,
   opts: {
-    format?: string;
     output?: string;
-    includeDiffs?: boolean;
-    includeEnv?: boolean;
   },
 ): Promise<void> {
   const config = loadInitializedProjectConfig("adit export");
@@ -115,7 +112,7 @@ export async function exportSessionCommand(
     const format = opts?.format ?? "json";
 
     if (format === "markdown") {
-      const md = generateMarkdownReport(session, events, timeline, db, opts);
+      const md = generateMarkdownReport(session, events);
       await outputResult(md, opts?.output, opts?.gzip);
     } else if (format === "jsonl") {
       const lines: string[] = [];
@@ -216,9 +213,6 @@ function buildEventBundle(
 function generateMarkdownReport(
   session: { id: string; platform: string; startedAt: string },
   events: AditEvent[],
-  _timeline: unknown,
-  _db: unknown,
-  _opts?: { includeDiffs?: boolean; includeEnv?: boolean },
 ): string {
   const lines: string[] = [];
   lines.push(`# ADIT Session Export`);

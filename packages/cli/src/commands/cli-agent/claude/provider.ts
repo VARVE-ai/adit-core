@@ -108,7 +108,6 @@ import {
 } from "./provider-collaboration.js";
 export { buildClaudeCloudRelayEnv } from "./capabilities.js";
 export { normalizeClaudeTodoWriteInput } from "./todos.js";
-export type { ClaudeTodoItem, ClaudeTodoPriority, ClaudeTodoStatus } from "./todos.js";
 export { normalizeClaudeSdkTranscriptEntrypoints } from "./transcripts.js";
 
 interface PendingPrompt {
