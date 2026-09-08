@@ -54,6 +54,9 @@ export async function initCommand(opts: {
   force?: boolean;
   singleRepo?: boolean;
   multiRepo?: boolean;
+  repos?: string[];
+  detach?: boolean;
+  absorb?: boolean;
 }): Promise<void> {
   const cwd = opts.cwd ?? process.cwd();
 
@@ -73,7 +76,18 @@ export async function initCommand(opts: {
   const plan = await prepareProjectManifest(projectRoot, analysis, {
     singleRepo: opts.singleRepo,
     multiRepo: opts.multiRepo,
+    repos: opts.repos,
+    detach: opts.detach,
+    absorb: opts.absorb,
   });
+
+  if (plan.status === "member") {
+    console.log(`  [=] ${basename(projectRoot)} already belongs to the project at ${plan.parentRoot}`);
+    console.log(`      (registered as '${plan.relativePath}'). Run 'adit init' there to change its settings,`);
+    console.log("      or 'adit init --detach' here to split it into a project of its own.");
+    return;
+  }
+  const memberHookRoots = plan.status === "written" ? plan.hookRoots ?? [] : [];
 
   if (plan.status === "cancelled") {
     console.log("  Initialization cancelled. Nothing was changed.");
@@ -81,10 +95,6 @@ export async function initCommand(opts: {
   }
   if (plan.status === "failed") {
     process.exit(1);
-  }
-  if (plan.status === "redirect-child") {
-    await initCommand({ ...opts, cwd: plan.childPath, singleRepo: true, multiRepo: false });
-    return;
   }
 
   const manifest = plan.manifest;
@@ -124,19 +134,17 @@ export async function initCommand(opts: {
   closeDatabase(db);
   console.log(`  ${ok} Database: ${relative(setupRoot, config.dbPath)}`);
 
-  const typeLabel = manifest.projectType === "workspace" ? "multi-repo project" : "single-repo project";
-  console.log(`  ${ok} ${typeLabel[0].toUpperCase()}${typeLabel.slice(1)}: ${pc.bold(basename(setupRoot))}`);
+  console.log(`  ${ok} Project: ${pc.bold(basename(setupRoot))}`);
   console.log(`  ${ok} Project ID: ${manifest.projectId}`);
-  if (manifest.projectType === "workspace") {
-    console.log(`  ${ok} Repositories: ${manifest.repositories.length}`);
-    for (const repo of manifest.repositories) {
-      const state = repo.cloudDeletedAt
-        ? " (deleted in Cloud)"
-        : repo.syncEnabled === false
-          ? " (not synced)"
-          : "";
-      console.log(pc.dim(`        - ${repo.relativePath}${state}`));
-    }
+  console.log(`  ${ok} Repositories: ${manifest.repositories.length}`);
+  for (const repo of manifest.repositories) {
+    const state = repo.cloudDeletedAt
+      ? " (deleted in Cloud)"
+      : repo.syncEnabled === false
+        ? " (not synced)"
+        : "";
+    const label = repo.relativePath === "." ? "./" : repo.relativePath;
+    console.log(pc.dim(`        - ${label}${state}`));
   }
   if (migratedFrom) {
     console.log(`  ${ok} Migrated existing project — identity preserved (from ${migratedFrom}).`);
@@ -247,6 +255,24 @@ export async function initCommand(opts: {
     console.log(pc.dim("  Tip: run 'adit init' any time to change these."));
   }
 
+  // Member directories absorbed into this project keep their own hook
+  // files, so re-point them at this project root.
+  if (memberHookRoots.length > 0) {
+    const platforms = readConnectedPlatforms(setupRoot) ?? [];
+    for (const memberRoot of memberHookRoots) {
+      for (const platform of platforms) {
+        try {
+          const adapter = getAdapter(platform);
+          if (adapter.hookMappings.length === 0) continue;
+          await adapter.installHooks(memberRoot, aditBinaryPath, { hookProjectRoot: setupRoot });
+        } catch (err) {
+          console.log(`  ${marks.fail} ${platform} — could not re-point hooks in ${relative(setupRoot, memberRoot)}: ${(err as Error).message}`);
+        }
+      }
+      console.log(`  ${ok} Hooks in ${relative(setupRoot, memberRoot)}/ now record into this project`);
+    }
+  }
+
   // --- Cloud: optional login + link (skippable, never fails init) ---
   const cloudResult = await runCloudSetupSection({
     interactive,
@@ -317,12 +343,17 @@ export async function initCommand(opts: {
   if (skipped.length > 0) {
     console.log(`  ${pc.yellow("Skipped:")} ${skipped.join(", ")}`);
   }
-  if (manifest.projectType === "workspace") {
+  if (manifest.repositories.some((repo) => repo.relativePath !== ".")) {
     const repositoryScope = manifest.repositories.length === 1
       ? "the repository"
       : `all ${manifest.repositories.length} repositories`;
     console.log(pc.dim(`  Tip: start Claude Code / Codex from this directory — work across ${repositoryScope} is recorded;`));
-    console.log(pc.dim("       sessions started inside a member repository are not."));
+    if (memberHookRoots.length > 0) {
+      const merged = memberHookRoots.map((memberRoot) => relative(setupRoot, memberRoot) || ".").join(", ");
+      console.log(pc.dim(`       sessions started inside ${merged} are recorded here too; other member repositories are not.`));
+    } else {
+      console.log(pc.dim("       sessions started inside a member repository are not."));
+    }
   }
   if (!cloudResult.linked) {
     console.log(`\n  ${pc.cyan("Next step:")} run ${pc.bold("adit cloud link")} to connect this project to the cloud.`);

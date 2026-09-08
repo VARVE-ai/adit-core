@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   queryEvents: vi.fn(),
   listSessions: vi.fn(),
   discoverWorkspaceRepositories: vi.fn(() => [] as Array<{ relativePath: string }>),
+  readProjectManifest: vi.fn((): { repositories: Array<{ relativePath: string; repositoryId?: string }> } | null => null),
   getRemoteUrl: vi.fn(async () => "https://example.com/repo.git" as string | null),
   detectPlatform: vi.fn(),
   detectPlatforms: vi.fn(),
@@ -27,7 +28,33 @@ vi.mock("@varveai/adit-core", () => ({
   queryEvents: mocks.queryEvents,
   listSessions: mocks.listSessions,
   discoverWorkspaceRepositories: mocks.discoverWorkspaceRepositories,
+  readProjectManifest: mocks.readProjectManifest,
   projectManifestPath: (projectRoot: string) => `${projectRoot}/.adit/project.json`,
+  resolveManifestRepositories: (
+    projectRoot: string,
+    manifest: { repositories: Array<{ relativePath: string; repositoryId?: string }> },
+  ) =>
+    manifest.repositories.map((entry) => ({
+      localRepositoryId: entry.repositoryId ?? entry.relativePath,
+      relativePath: entry.relativePath,
+      displayName: entry.relativePath,
+      repositoryUrl: null,
+      canonicalRepoKey: null,
+      path: entry.relativePath === "." ? projectRoot : `${projectRoot}/${entry.relativePath}`,
+    })),
+  computeRepositoryDrift: (
+    projectRoot: string,
+    manifest: { repositories: Array<{ relativePath: string }> },
+  ) => {
+    const registered = manifest.repositories.map((entry) => entry.relativePath);
+    const discovered = mocks.discoverWorkspaceRepositories(projectRoot).map((repo) => repo.relativePath);
+    return {
+      registered,
+      discovered,
+      unregistered: discovered.filter((path) => !registered.includes(path)),
+      missing: registered.filter((path) => !discovered.includes(path)),
+    };
+  },
 }));
 
 vi.mock("@varveai/adit-engine", () => ({
@@ -138,6 +165,9 @@ describe("doctorCommand", () => {
         path: "/workspace/api",
       }],
     });
+    mocks.readProjectManifest.mockReturnValue({
+      repositories: [{ relativePath: "api", repositoryId: "repo-api" }],
+    });
     mocks.discoverWorkspaceRepositories.mockReturnValue([
       { relativePath: "api" },
       { relativePath: "new-service" },
@@ -151,7 +181,7 @@ describe("doctorCommand", () => {
         .join("\n"),
     );
 
-    expect(output).toContain("Project manifest: multi-repo · 1 repositories");
+    expect(output).toContain("Project manifest: 1 repository");
     // /workspace/api does not exist on disk — reported as drift, never auto-fixed
     expect(output).toContain("missing: api — run 'adit init' to update the list");
     expect(output).toContain("Unregistered repositories: new-service — run 'adit init' to add them");

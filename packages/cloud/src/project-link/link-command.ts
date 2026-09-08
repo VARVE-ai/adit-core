@@ -117,7 +117,7 @@ export class WorkspaceLinkPartialFailureError extends Error {
     repositoryResults: WorkspaceRepositoryResult[],
     repositoryFailures: WorkspaceRepositoryFailure[],
   ) {
-    super("Workspace link completed with repository failures.");
+    super("Project link completed with repository failures.");
     this.name = "WorkspaceLinkPartialFailureError";
     this.result = result;
     this.repositoryResults = repositoryResults;
@@ -158,7 +158,7 @@ async function linkWorkspaceProject(
   options: LinkOptions,
 ): Promise<LinkResult> {
   if (repositories.length === 0) {
-    throw new Error("No Git repositories found in this workspace.");
+    throw new Error("No Git repositories found in this project.");
   }
 
   const results: LinkResult[] = [];
@@ -169,7 +169,7 @@ async function linkWorkspaceProject(
   const log = options.json || options.silent ? (() => {}) : console.log.bind(console);
 
   log("");
-  log("Workspace project link");
+  log("Project link");
   log(`Project:      ${projectName}`);
   log(`Server:       ${serverUrl}`);
   log(`Repositories: ${repositories.length}`);
@@ -582,7 +582,7 @@ async function linkRepositoryCommand(
         workspaceCommitDedupeState,
       );
       const skipped = commits.length - commitsToUpload.length;
-      const skippedLabel = skipped > 0 ? `, ${skipped} duplicate in workspace` : "";
+      const skippedLabel = skipped > 0 ? `, ${skipped} already uploaded from another repository` : "";
       log(`  [dry-run] Would upload ${commitsToUpload.length} commits (${totalCommits} total${skippedLabel})`);
       commitCount = totalCommits;
       rememberWorkspaceCommits(commits, workspaceCommitDedupeState);
@@ -594,7 +594,7 @@ async function linkRepositoryCommand(
       // Upload in batches
       let uploaded = 0;
       if (commitsToUpload.length === 0) {
-        log(`  ${commits.length} commits already uploaded by another workspace repository.`);
+        log(`  ${commits.length} commits already uploaded from another repository of this project.`);
       } else {
         // Attach changed-file lists to the newest commits (commits arrive
         // newest-first from git log). Fail-open: an empty map only means
@@ -990,7 +990,7 @@ function logWorkspaceSummary(
 
   log("");
   log("══════════════════════════════════════════");
-  log("Workspace link complete!");
+  log("Link complete!");
   log(`Project:      ${result.projectName}`);
   log(`Server:       ${result.serverUrl}`);
   log(`Repositories: ${successful} succeeded, ${failed} failed`);
@@ -1024,7 +1024,7 @@ function logWorkspaceQualityFeedback(result: LinkResult, log: (message?: unknown
   log("");
   log("  Quality shows the cloud score and pass status for each repository.");
   log("  Needs attention explains why docs still need work: low scores, placeholders, worst file, or missing content.");
-  log("  AI prompt is not a shell command. Enter it in the AI agent opened at the workspace root.");
+  log("  AI prompt is not a shell command. Enter it in the AI agent opened at the project root.");
   log("  Each prompt asks the agent to fill that repository's documents following .adit/prompts/generate-docs.md;");
   log("  generated docs stay in their existing locations.");
   log("  After the docs are updated, re-run adit cloud link.");

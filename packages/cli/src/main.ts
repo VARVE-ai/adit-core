@@ -78,11 +78,23 @@ export function createProgram(): Command {
     )
     .option(
       "--single-repo",
-      "Initialize this Git repository as a single-repo project",
+      "Sync only this Git repository (shortcut for --repos .)",
     )
     .option(
       "--multi-repo",
-      "Initialize this directory as a multi-repo project containing its child Git repositories",
+      "Sync every child Git repository; on re-init also apply repository list changes without asking",
+    )
+    .option(
+      "--repos <paths>",
+      "Comma-separated repository paths to sync (use . for this directory), e.g. --repos .,api,web",
+    )
+    .option(
+      "--detach",
+      "Split this repository out of the parent project that registers it and initialize it on its own",
+    )
+    .option(
+      "--absorb",
+      "When a child directory is already an ADIT project, move that project's root up here without asking",
     )
     .action(withUpdateWarning("init", (opts) =>
       initCommand({
@@ -91,6 +103,11 @@ export function createProgram(): Command {
         force: opts.force,
         singleRepo: opts.singleRepo,
         multiRepo: opts.multiRepo,
+        repos: typeof opts.repos === "string"
+          ? opts.repos.split(",").map((path: string) => path.trim()).filter(Boolean)
+          : undefined,
+        detach: opts.detach,
+        absorb: opts.absorb,
       }),
     ));
 

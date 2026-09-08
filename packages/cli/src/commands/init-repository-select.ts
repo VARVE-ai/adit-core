@@ -9,6 +9,7 @@ import { canUseInkSelect } from "./init-select-ink.js";
 import { runInkRepositorySelect } from "./init-repository-select-ink.js";
 import {
   describeRepositoryChoice,
+  repositoryChoiceLabel,
   type RepositorySyncChoice,
 } from "./init-repository-select-model.js";
 
@@ -69,7 +70,7 @@ export async function promptRepositorySelection(
     const state = choice.cloudDeleted
       ? "deleted in Cloud; select to recreate"
       : describeRepositoryChoice(choice, choice.preChecked);
-    console.log(`    ${index + 1}. [${mark}] ${choice.relativePath} (${state})`);
+    console.log(`    ${index + 1}. [${mark}] ${repositoryChoiceLabel(choice)} (${state})`);
   }
   console.log("  Enter numbers to toggle, 'a' for all, 'n' for none, or Enter to keep.");
 

@@ -212,7 +212,7 @@ describe("linkCommand workspace repository requests", () => {
       );
 
       const output = log.mock.calls.map((call) => String(call[0] ?? "")).join("\n");
-      expect(output.match(/Workspace link complete!/gu)).toHaveLength(1);
+      expect(output.match(/Link complete!/gu)).toHaveLength(1);
       expect(output).not.toContain("Project link complete!");
       expect(output).not.toContain("[Step 1/6]");
       expect(output).toContain("[1/2] a linking...");
@@ -318,7 +318,7 @@ describe("linkCommand workspace repository requests", () => {
       expect(output).toContain("Suggestions:");
       expect(output).toContain("Read .adit/prompts/generate-docs.md, fill the docs, then re-run link.");
       expect(output).toContain("Project link complete!");
-      expect(output).not.toContain("Workspace link complete!");
+      expect(output).not.toContain("Link complete!");
       expect(output).not.toContain("Quality feedback:");
       expect(output).not.toContain("Repository  Quality");
     } finally {
@@ -742,7 +742,7 @@ describe("linkCommand workspace repository requests", () => {
       expect(output).toContain("1 docs below 60%; 1 placeholders; worst README.md…");
       expect(output).toContain("Fill docs for a");
       expect(output).toContain("AI prompt is not a shell command.");
-      expect(output).toContain("Enter it in the AI agent opened at the workspace root.");
+      expect(output).toContain("Enter it in the AI agent opened at the project root.");
       expect(output).toContain("following .adit/prompts/generate-docs.md;");
       expect(output).toContain("generated docs stay in their existing locations.");
       expect(result.repositoryResults?.[0]?.qualityFeedback).toContain("Document scores:");

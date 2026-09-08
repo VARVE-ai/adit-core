@@ -59,7 +59,11 @@ export function createStubAdapter(
       };
     },
 
-    async installHooks(_projectRoot: string, _aditBinaryPath: string): Promise<void> {
+    async installHooks(
+      _projectRoot: string,
+      _aditBinaryPath: string,
+      _options?: { hookProjectRoot?: string },
+    ): Promise<void> {
       notSupported("installHooks");
     },
 

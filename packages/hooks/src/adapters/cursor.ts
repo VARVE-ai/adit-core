@@ -258,7 +258,11 @@ export const cursorAdapter: PlatformAdapter = {
     };
   },
 
-  async installHooks(projectRoot: string, aditBinaryPath: string): Promise<void> {
+  async installHooks(
+    projectRoot: string,
+    aditBinaryPath: string,
+    options?: { hookProjectRoot?: string },
+  ): Promise<void> {
     const cursorDir = join(projectRoot, ".cursor");
     if (!existsSync(cursorDir)) {
       mkdirSync(cursorDir, { recursive: true });
@@ -283,7 +287,7 @@ export const cursorAdapter: PlatformAdapter = {
       }
     }
 
-    const hookConfig = this.generateHookConfig(aditBinaryPath, projectRoot);
+    const hookConfig = this.generateHookConfig(aditBinaryPath, options?.hookProjectRoot ?? projectRoot);
     const existingHooks = (hooksConfig.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 

@@ -53,8 +53,17 @@ export interface PlatformAdapter {
    */
   hasProjectHooks?(projectRoot: string): Promise<boolean>;
 
-  /** Install/register hooks for this platform */
-  installHooks(projectRoot: string, aditBinaryPath: string): Promise<void>;
+  /**
+   * Install/register hooks for this platform into `projectRoot`.
+   * `options.hookProjectRoot` bakes a different ADIT project root into the
+   * hook command — used when a member repository records into its parent
+   * project. Defaults to `projectRoot`.
+   */
+  installHooks(
+    projectRoot: string,
+    aditBinaryPath: string,
+    options?: { hookProjectRoot?: string },
+  ): Promise<void>;
 
   /** Uninstall/deregister hooks */
   uninstallHooks(projectRoot: string): Promise<void>;

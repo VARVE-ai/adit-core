@@ -1,5 +1,6 @@
 import {
   computeLocalRepositoryId,
+  isRootRepositoryPath,
   readProjectManifest,
   withProjectInitLock,
   writeProjectManifest,
@@ -113,7 +114,7 @@ function findRepositoryDeletion(
   entry: ProjectManifestRepository,
   deletions: DeletedRepositoryPolicy[],
 ): DeletedRepositoryPolicy | undefined {
-  const localRepositoryId = manifest.projectType === "repo"
+  const localRepositoryId = isRootRepositoryPath(entry.relativePath)
     ? manifest.projectId
     : entry.repositoryId ?? computeLocalRepositoryId(manifest.projectId, entry.relativePath);
   return deletions.find((deletion) => deletion.localRepositoryId === localRepositoryId);

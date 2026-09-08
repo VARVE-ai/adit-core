@@ -743,13 +743,17 @@ export const opencodeAdapter: PlatformAdapter = {
     };
   },
 
-  async installHooks(projectRoot: string, aditBinaryPath: string): Promise<void> {
+  async installHooks(
+    projectRoot: string,
+    aditBinaryPath: string,
+    options?: { hookProjectRoot?: string },
+  ): Promise<void> {
     // Install the event-hook plugin
     const pluginsDir = join(projectRoot, ".opencode", "plugins");
     mkdirSync(pluginsDir, { recursive: true });
 
     const pluginPath = join(pluginsDir, PLUGIN_FILENAME);
-    const content = generatePluginContent(aditBinaryPath, projectRoot);
+    const content = generatePluginContent(aditBinaryPath, options?.hookProjectRoot ?? projectRoot);
     writeFileSync(pluginPath, content);
 
     // Install slash command

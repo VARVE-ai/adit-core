@@ -4,6 +4,11 @@ export interface RepositorySyncChoice {
   cloudDeleted: boolean;
 }
 
+/** Human label for a choice: the root entry reads "./ (this directory)". */
+export function repositoryChoiceLabel(choice: Pick<RepositorySyncChoice, "relativePath">): string {
+  return choice.relativePath === "." ? "./ (this directory)" : choice.relativePath;
+}
+
 export function describeRepositoryChoice(
   choice: RepositorySyncChoice,
   checked: boolean,

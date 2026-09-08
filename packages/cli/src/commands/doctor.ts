@@ -11,7 +11,9 @@
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
-  discoverWorkspaceRepositories,
+  computeRepositoryDrift,
+  readProjectManifest,
+  resolveManifestRepositories,
   openDatabase,
   closeDatabase,
   projectManifestPath,
@@ -45,16 +47,19 @@ export async function doctorCommand(
   if (!config) return;
 
   // 1. Project manifest — the single authority on identity and members.
-  const typeLabel = config.projectType === "workspace" ? "multi-repo" : "single-repo";
+  const manifest = readProjectManifest(config.projectRoot);
+  const registeredRepositories = manifest
+    ? resolveManifestRepositories(config.projectRoot, manifest)
+    : config.repositories;
   checks.push({
     name: "Project manifest",
     ok: true,
-    detail: `${typeLabel} · ${config.repositories.length} repositories · ${projectManifestPath(config.projectRoot)}`,
+    detail: `${registeredRepositories.length} ${registeredRepositories.length === 1 ? "repository" : "repositories"} · ${projectManifestPath(config.projectRoot)}`,
   });
 
   // 1b. Registered repositories exist and are Git repositories (soft check —
   //     doctor reports drift, only `adit init` may change the list).
-  const missingRepos = config.repositories
+  const missingRepos = registeredRepositories
     .filter((repo) => !existsSync(join(repo.path, ".git")))
     .map((repo) => repo.relativePath);
   checks.push({
@@ -62,13 +67,13 @@ export async function doctorCommand(
     ok: missingRepos.length === 0,
     detail:
       missingRepos.length === 0
-        ? `${config.repositories.length} registered, all present`
+        ? `${registeredRepositories.length} registered, all present`
         : `missing: ${missingRepos.join(", ")} — run 'adit init' to update the list`,
   });
 
   // 1c. Every present repository has a git remote 'origin'.
   const reposWithoutOrigin: string[] = [];
-  for (const repo of config.repositories) {
+  for (const repo of registeredRepositories) {
     if (missingRepos.includes(repo.relativePath)) continue;
     const remoteUrl = await getRemoteUrl(repo.path).catch(() => null);
     if (!remoteUrl) reposWithoutOrigin.push(repo.relativePath === "." ? repo.displayName : repo.relativePath);
@@ -82,12 +87,10 @@ export async function doctorCommand(
         : `no origin: ${reposWithoutOrigin.join(", ")} — add one with 'git remote add origin <url>'`,
   });
 
-  // 1d. Multi-repo drift: repositories on disk that are not registered.
-  if (config.projectType === "workspace") {
-    const registered = config.repositories.map((repo) => repo.relativePath);
-    const unregistered = discoverWorkspaceRepositories(config.projectRoot)
-      .map((repo) => repo.relativePath)
-      .filter((path) => !registered.includes(path));
+  // 1d. Drift for projects with member repositories: repositories on disk
+  //     that are not registered.
+  if (manifest && manifest.repositories.some((repo) => repo.relativePath !== ".")) {
+    const unregistered = computeRepositoryDrift(config.projectRoot, manifest).unregistered;
     checks.push({
       name: "Unregistered repositories",
       ok: unregistered.length === 0,

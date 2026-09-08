@@ -10,7 +10,8 @@ import { existsSync } from "node:fs";
 import pc from "picocolors";
 import {
   ProjectManifestError,
-  discoverWorkspaceRepositories,
+  computeRepositoryDrift,
+  readProjectManifest,
   loadConfig,
   openDatabase,
   closeDatabase,
@@ -186,17 +187,15 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
   }
 
   // 4. Git info
-  if (config.projectType === "workspace") {
-    const registered = config.repositories.map((repo) => repo.relativePath);
-    const discovered = discoverWorkspaceRepositories(config.projectRoot).map(
-      (repo) => repo.relativePath,
-    );
+  const manifest = readProjectManifest(config.projectRoot);
+  if (manifest && manifest.repositories.some((repo) => repo.relativePath !== ".")) {
+    const drift = computeRepositoryDrift(config.projectRoot, manifest);
     status.git = {
       workspace: true,
-      repositories: config.repositories.length,
-      registered,
-      unregistered: discovered.filter((path) => !registered.includes(path)),
-      missingRepositories: registered.filter((path) => !discovered.includes(path)),
+      repositories: manifest.repositories.length,
+      registered: drift.registered,
+      unregistered: drift.unregistered,
+      missingRepositories: drift.missing,
     };
   } else {
     const [branch, headSha, dirty] = await Promise.all([
@@ -262,7 +261,7 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
     ? hooksStatus.installed.join(", ")
     : null;
   const branchLabel = git.workspace
-    ? pc.cyan("multi-repo")
+    ? pc.cyan(`${git.repositories} repositories`)
     : git.branch ? pc.cyan(git.branch) : pc.yellow("detached");
 
   console.log(
@@ -306,8 +305,7 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
 
   if (git.workspace) {
     console.log(joinDim([
-      "multi-repo project",
-      `${git.repositories} repositories`,
+      `${git.repositories} registered repositories`,
     ]));
     for (const path of git.registered) {
       const missing = git.missingRepositories.includes(path);

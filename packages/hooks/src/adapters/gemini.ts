@@ -163,7 +163,11 @@ export const geminiAdapter: PlatformAdapter = {
     };
   },
 
-  async installHooks(projectRoot: string, aditBinaryPath: string): Promise<void> {
+  async installHooks(
+    projectRoot: string,
+    aditBinaryPath: string,
+    options?: { hookProjectRoot?: string },
+  ): Promise<void> {
     const geminiDir = join(projectRoot, ".gemini");
     if (!existsSync(geminiDir)) {
       mkdirSync(geminiDir, { recursive: true });
@@ -188,7 +192,7 @@ export const geminiAdapter: PlatformAdapter = {
       }
     }
 
-    const hookConfig = this.generateHookConfig(aditBinaryPath, projectRoot);
+    const hookConfig = this.generateHookConfig(aditBinaryPath, options?.hookProjectRoot ?? projectRoot);
     const existingHooks = (settings.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 

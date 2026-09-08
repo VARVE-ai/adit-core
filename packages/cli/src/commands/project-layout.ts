@@ -2,8 +2,8 @@
  * Project layout analysis for `adit init`.
  *
  * Answers two questions before anything is written: which directory is this
- * init run about (5.1 in the plan), and what project shape does the layout
- * suggest (the 5.2 recommendation matrix). Only init consumes this — the
+ * init run about, and which Git repositories (the root itself and its
+ * immediate children) it could register. Only init consumes this — the
  * analysis never feeds runtime config.
  */
 
@@ -13,6 +13,8 @@ import {
   discoverWorkspaceRepositories,
   findGitRoot,
   findProjectManifestRoot,
+  findRegisteringParent,
+  readProjectManifest,
 } from "@varveai/adit-core";
 import { getHeadSha, getRemoteUrl } from "@varveai/adit-engine";
 
@@ -23,12 +25,14 @@ export interface InitRootResolution {
   reason: InitRootReason;
 }
 
-export type LayoutRecommendation =
-  | "single-repo"
-  | "multi-repo"
-  | "choose-child"
-  | "choose-explicit"
-  | "cannot-initialize";
+/** A child directory that already carries its own ADIT project. */
+export interface ChildProjectInfo {
+  projectId: string;
+  createdAt: string;
+  /** Present when that project was already merged into some parent. */
+  mergedIntoProjectId: string | null;
+  cloudDeletedAt: string | null;
+}
 
 export interface ProjectLayoutAnalysis {
   root: {
@@ -36,15 +40,16 @@ export interface ProjectLayoutAnalysis {
     isGitRepository: boolean;
     hasHead: boolean;
     originUrl: string | null;
+    /** The parent project that registers this root as one of its repositories. */
+    registeredBy: { root: string; relativePath: string } | null;
   };
   childRepositories: Array<{
     path: string;
     relativePath: string;
     displayName: string;
     originUrl: string | null;
+    existingProject: ChildProjectInfo | null;
   }>;
-  recommendation: LayoutRecommendation;
-  requiresConfirmation: boolean;
 }
 
 /**
@@ -70,7 +75,7 @@ export function resolveInitRoot(cwd: string): InitRootResolution {
   return { root: candidate, reason: "none" };
 }
 
-/** Inspect the init root and its immediate children, then apply the 5.2 matrix. */
+/** Inspect the init root and its immediate child repositories. */
 export async function analyzeProjectLayout(root: string): Promise<ProjectLayoutAnalysis> {
   const isGitRepository = existsSync(join(root, ".git"));
   const hasHead = isGitRepository ? (await getHeadSha(root)) !== null : false;
@@ -80,49 +85,34 @@ export async function analyzeProjectLayout(root: string): Promise<ProjectLayoutA
     discoverWorkspaceRepositories(root).map(async (child) => ({
       ...child,
       originUrl: await getRemoteUrl(child.path),
+      existingProject: readChildProject(child.path),
     })),
   );
-
-  const { recommendation, requiresConfirmation } = recommend({
-    isGitRepository,
-    hasHead,
-    hasOrigin: originUrl !== null,
-    childCount: childRepositories.length,
-  });
+  const parent = isGitRepository ? findRegisteringParent(root) : null;
 
   return {
-    root: { path: root, isGitRepository, hasHead, originUrl },
+    root: {
+      path: root,
+      isGitRepository,
+      hasHead,
+      originUrl,
+      registeredBy: parent ? { root: parent.root, relativePath: parent.relativePath } : null,
+    },
     childRepositories,
-    recommendation,
-    requiresConfirmation,
   };
 }
 
-function recommend(input: {
-  isGitRepository: boolean;
-  hasHead: boolean;
-  hasOrigin: boolean;
-  childCount: number;
-}): { recommendation: LayoutRecommendation; requiresConfirmation: boolean } {
-  const { isGitRepository, hasHead, hasOrigin, childCount } = input;
-
-  if (isGitRepository && hasOrigin) {
-    return { recommendation: "single-repo", requiresConfirmation: childCount > 0 };
+function readChildProject(path: string): ChildProjectInfo | null {
+  try {
+    const manifest = readProjectManifest(path);
+    if (!manifest) return null;
+    return {
+      projectId: manifest.projectId,
+      createdAt: manifest.createdAt,
+      mergedIntoProjectId: manifest.mergedIntoProjectId ?? null,
+      cloudDeletedAt: manifest.cloudDeletedAt ?? null,
+    };
+  } catch {
+    return null; // a damaged child manifest is reported when init runs there
   }
-  if (isGitRepository && hasHead) {
-    // A meta repository: real commits but no remote. With child repositories
-    // present the layout is ambiguous — never pick a default.
-    if (childCount > 0) return { recommendation: "choose-explicit", requiresConfirmation: true };
-    return { recommendation: "single-repo", requiresConfirmation: false };
-  }
-  if (isGitRepository) {
-    // Empty repository (no commits, no remote) — likely a container marker.
-    if (childCount >= 2) return { recommendation: "multi-repo", requiresConfirmation: true };
-    if (childCount === 1) return { recommendation: "choose-child", requiresConfirmation: true };
-    return { recommendation: "single-repo", requiresConfirmation: false };
-  }
-  if (childCount > 0) {
-    return { recommendation: "multi-repo", requiresConfirmation: true };
-  }
-  return { recommendation: "cannot-initialize", requiresConfirmation: false };
 }

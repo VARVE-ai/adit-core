@@ -56,29 +56,27 @@ describe("deleted project reinitialization", () => {
         isGitRepository: false,
         hasHead: false,
         originUrl: null,
+        registeredBy: null,
       },
       childRepositories: [{
         path: "/workspace/api",
         relativePath: "api",
         displayName: "api",
         originUrl: "https://example.com/new.git",
+        existingProject: null,
       }],
-      recommendation: "multi-repo",
-      requiresConfirmation: true,
     };
 
     const replacement = createReplacementProjectManifest(
       existing,
       analysis,
-      "workspace",
       "project-new",
       "2026-09-01T01:00:00.000Z",
     );
 
     expect(replacement).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       projectId: "project-new",
-      projectType: "workspace",
       repositories: [{
         relativePath: "api",
         repositoryId: computeLocalRepositoryId("project-new", "api"),
@@ -126,9 +124,8 @@ describe("deleted project reinitialization", () => {
           relativePath: "api",
           displayName: "api",
           originUrl: null,
+          existingProject: null,
         }],
-        recommendation: "multi-repo",
-        requiresConfirmation: true,
       }, {});
 
       expect(result.status).toBe("written");

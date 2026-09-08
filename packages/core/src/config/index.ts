@@ -10,8 +10,11 @@ import { homedir } from "node:os";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import {
+  deriveProjectType,
   findProjectManifestRoot,
+  findRegisteringParent,
   hasLegacyProjectTraces,
+  isRootRepositoryPath,
   readProjectManifest,
   resolveActiveManifestRepositories,
   type LocalRepository,
@@ -39,7 +42,7 @@ export interface AditConfig {
   clientId: string;
   /** Project identifier from the manifest. Empty when not initialized. */
   projectId: string;
-  /** Local project type */
+  /** Derived project shape (see `deriveProjectType`); never read from disk. */
   projectType: ProjectType;
   /** Git repositories that belong to this local project (empty when not initialized) */
   repositories: LocalRepository[];
@@ -115,17 +118,23 @@ function loadSettingsFile(projectRoot: string): Record<string, unknown> {
 /**
  * Resolve the project root for the current location.
  *
- * The enclosing Git repository wins (a member repository never inherits the
- * parent project's manifest — no pass-through). Only when the location is not
- * inside any Git repository do we walk up looking for the nearest manifest,
- * so plain folders inside a multi-repo container resolve to the container.
+ * Inside a Git repository: its own manifest wins. Without one (or when its
+ * manifest was merged into a parent), a parent project that registers this
+ * repository owns it — commands and hooks route to the parent. An
+ * unregistered repository stays its own (uninitialized) root. Outside any Git
+ * repository we walk up looking for the nearest manifest, so plain folders
+ * inside a project resolve to the project.
  */
 function resolveProjectRoot(cwd?: string): string {
   const envRoot = process.env.ADIT_PROJECT_ROOT;
   if (envRoot) return envRoot;
 
   const gitRoot = findGitRoot(cwd);
-  if (gitRoot) return gitRoot;
+  if (gitRoot) {
+    const own = readProjectManifest(gitRoot);
+    if (own && !own.mergedIntoProjectId) return gitRoot;
+    return findRegisteringParent(gitRoot)?.root ?? gitRoot;
+  }
 
   return findProjectManifestRoot(cwd) ?? resolve(cwd ?? process.cwd());
 }
@@ -162,13 +171,14 @@ export function loadConfig(cwd?: string): AditConfig {
 
   if (manifest) {
     initialization = "initialized";
-    projectType = manifest.projectType;
+    projectType = deriveProjectType(manifest);
     projectId = manifest.projectId;
     repositories = resolveActiveManifestRepositories(projectRoot, manifest);
     cloudDeletedAt = manifest.cloudDeletedAt ?? null;
     const remoteUrl = process.env.ADIT_REMOTE_URL;
-    if (remoteUrl && projectType === "repo" && repositories[0]) {
-      repositories[0] = { ...repositories[0], repositoryUrl: remoteUrl };
+    const rootIndex = repositories.findIndex((repo) => isRootRepositoryPath(repo.relativePath));
+    if (remoteUrl && rootIndex >= 0) {
+      repositories[rootIndex] = { ...repositories[rootIndex], repositoryUrl: remoteUrl };
     }
   } else {
     initialization = hasLegacyProjectTraces(projectRoot, dbPath) ? "legacy" : "uninitialized";

@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  MANIFEST_SCHEMA_VERSION,
   ProjectInitLockError,
   ProjectManifestError,
   computeLocalRepositoryId,
+  deriveProjectType,
   discoverWorkspaceRepositories,
   findProjectManifestRoot,
   generateProjectId,
@@ -23,7 +25,7 @@ const ENV_KEYS = ["ADIT_PROJECT_ROOT", "ADIT_DATA_DIR", "ADIT_DB_PATH", "ADIT_RE
 
 function manifestFor(overrides: Partial<ProjectManifest> = {}): ProjectManifest {
   const now = new Date().toISOString();
-  return {
+  const manifest: ProjectManifest = {
     schemaVersion: 1,
     projectId: "11111111-2222-4333-8444-555555555555",
     projectType: "repo",
@@ -32,6 +34,8 @@ function manifestFor(overrides: Partial<ProjectManifest> = {}): ProjectManifest 
     updatedAt: now,
     ...overrides,
   };
+  if (manifest.projectType === undefined) delete manifest.projectType;
+  return manifest;
 }
 
 describe("project manifest", () => {
@@ -185,26 +189,59 @@ describe("project manifest", () => {
     expect(() => readProjectManifest(root)).toThrow(ProjectManifestError);
   });
 
-  it("rejects a repo manifest that is not exactly ['.']", () => {
-    mkdirSync(join(root, ".adit"), { recursive: true });
-    writeFileSync(
-      projectManifestPath(root),
-      JSON.stringify(manifestFor({ repositories: [{ relativePath: "api" }] })),
-      "utf-8",
-    );
-    expect(() => readProjectManifest(root)).toThrow(ProjectManifestError);
+  it("reads and writes a schema 2 manifest without a project type", () => {
+    const manifest: ProjectManifest = {
+      schemaVersion: MANIFEST_SCHEMA_VERSION,
+      projectId: "11111111-2222-4333-8444-555555555555",
+      repositories: [{ relativePath: "." }, { relativePath: "api", repositoryId: "id-api" }],
+      createdAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:00:00.000Z",
+    };
+    writeProjectManifest(root, manifest);
+
+    const read = readProjectManifest(root)!;
+    expect(read).toEqual(manifest);
+    expect(read.projectType).toBeUndefined();
+    expect(deriveProjectType(read)).toBe("workspace");
   });
 
-  it("rejects a workspace manifest containing '.'", () => {
+  it("identifies the root entry by the project ID and members by their own identity in one manifest", () => {
+    const manifest: ProjectManifest = {
+      schemaVersion: 2,
+      projectId: "11111111-2222-4333-8444-555555555555",
+      repositories: [{ relativePath: "." }, { relativePath: "api" }, { relativePath: "web", repositoryId: "id-web" }],
+      createdAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:00:00.000Z",
+    };
+    writeProjectManifest(root, manifest);
+
+    const repos = resolveManifestRepositories(root, readProjectManifest(root)!);
+    expect(repos.map((repo) => repo.localRepositoryId)).toEqual([
+      manifest.projectId,
+      computeLocalRepositoryId(manifest.projectId, "api"),
+      "id-web",
+    ]);
+  });
+
+  it("still reads a legacy schema 1 manifest and derives its type", () => {
+    const legacy = manifestFor({ projectType: "workspace", repositories: [{ relativePath: "api" }] });
+    writeProjectManifest(root, legacy);
+
+    const read = readProjectManifest(root)!;
+    expect(read.schemaVersion).toBe(1);
+    expect(read.projectType).toBe("workspace");
+    expect(deriveProjectType(read)).toBe("workspace");
+    expect(deriveProjectType(manifestFor())).toBe("repo");
+  });
+
+  it("rejects a legacy manifest with an invalid project type", () => {
     mkdirSync(join(root, ".adit"), { recursive: true });
     writeFileSync(
       projectManifestPath(root),
-      JSON.stringify(
-        manifestFor({ projectType: "workspace", repositories: [{ relativePath: "." }] }),
-      ),
+      JSON.stringify({ ...manifestFor(), projectType: "monorepo" }),
       "utf-8",
     );
-    expect(() => readProjectManifest(root)).toThrow(ProjectManifestError);
+    expect(() => readProjectManifest(root)).toThrow(/projectType/u);
   });
 
   it("rejects a symlinked repository that escapes the project root", () => {
@@ -331,19 +368,55 @@ describe("loadConfig project resolution", () => {
     expect(config.repositories.map((repo) => repo.relativePath)).toEqual(["api"]);
   });
 
-  it("treats a member repository without its own manifest as uninitialized (no pass-through)", () => {
-    writeProjectManifest(
-      root,
-      manifestFor({ projectType: "workspace", repositories: [{ relativePath: "api" }] }),
-    );
-    const child = join(root, "api");
-    mkdirSync(join(child, ".git"), { recursive: true });
+  it("resolves a registered member repository to the parent project", () => {
+    const manifest = manifestFor({
+      schemaVersion: 2,
+      projectType: undefined,
+      repositories: [{ relativePath: "api", repositoryId: "id-api" }],
+    });
+    writeProjectManifest(root, manifest);
+    mkdirSync(join(root, "api", ".git"), { recursive: true });
 
-    const config = loadConfig(child);
-    expect(config.projectRoot).toBe(child);
+    const config = loadConfig(join(root, "api"));
+    expect(config.projectRoot).toBe(root);
+    expect(config.projectId).toBe(manifest.projectId);
+    expect(config.initialization).toBe("initialized");
+  });
+
+  it("leaves an unregistered member repository uninitialized (no pass-through)", () => {
+    const manifest = manifestFor({
+      schemaVersion: 2,
+      projectType: undefined,
+      repositories: [{ relativePath: "api", repositoryId: "id-api" }],
+    });
+    writeProjectManifest(root, manifest);
+    mkdirSync(join(root, "web", ".git"), { recursive: true });
+
+    const config = loadConfig(join(root, "web"));
+    expect(config.projectRoot).toBe(join(root, "web"));
     expect(config.initialization).toBe("uninitialized");
     expect(config.projectId).toBe("");
-    expect(config.repositories).toEqual([]);
+  });
+
+  it("routes a merged member project to the parent that registers it", () => {
+    const parent = manifestFor({
+      schemaVersion: 2,
+      projectType: undefined,
+      projectId: "parent-project",
+      repositories: [{ relativePath: "api", repositoryId: "child-project" }],
+    });
+    writeProjectManifest(root, parent);
+    mkdirSync(join(root, "api", ".git"), { recursive: true });
+    writeProjectManifest(join(root, "api"), manifestFor({
+      schemaVersion: 2,
+      projectType: undefined,
+      projectId: "child-project",
+      mergedIntoProjectId: "parent-project",
+    }));
+
+    const config = loadConfig(join(root, "api"));
+    expect(config.projectRoot).toBe(root);
+    expect(config.projectId).toBe("parent-project");
   });
 
   it("prefers a member repository's own manifest over the parent", () => {

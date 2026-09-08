@@ -2,7 +2,7 @@
  * `adit config` — View and manage ADIT configuration.
  */
 
-import { projectManifestPath, type AditConfig } from "@varveai/adit-core";
+import { projectManifestPath, readProjectManifest, type AditConfig } from "@varveai/adit-core";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 /** `adit config` — show current config */
@@ -17,17 +17,21 @@ export async function configCommand(
     return;
   }
 
-  const typeLabel = config.projectType === "workspace" ? "multi-repo" : "single-repo";
   console.log("ADIT Configuration\n");
   console.log(`  Project root:    ${config.projectRoot}`);
   console.log(`  Manifest:        ${projectManifestPath(config.projectRoot)}`);
   console.log(`  Data directory:  ${config.dataDir}`);
   console.log(`  Database:        ${config.dbPath}`);
   console.log(`  Project ID:      ${config.projectId}`);
-  console.log(`  Project type:    ${typeLabel}`);
-  console.log(`  Repositories:    ${config.repositories.length}`);
-  for (const repo of config.repositories) {
-    console.log(`    - ${repo.relativePath === "." ? repo.displayName : repo.relativePath}`);
+  const entries = readProjectManifest(config.projectRoot)?.repositories ?? [];
+  console.log(`  Repositories:    ${entries.length}`);
+  for (const entry of entries) {
+    const state = entry.cloudDeletedAt
+      ? " (deleted in Cloud)"
+      : entry.syncEnabled === false
+        ? " (not synced)"
+        : "";
+    console.log(`    - ${entry.relativePath === "." ? "./" : entry.relativePath}${state}`);
   }
   console.log(`  Client ID:       ${config.clientId}`);
   console.log(`  Capture env:     ${config.captureEnv}`);

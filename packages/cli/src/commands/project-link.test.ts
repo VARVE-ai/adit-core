@@ -29,7 +29,7 @@ const mocks = vi.hoisted(() => ({
       repositoryResults: LinkResult["repositoryResults"],
       repositoryFailures: LinkResult["repositoryFailures"],
     ) {
-      super("Workspace link completed with repository failures.");
+      super("Project link completed with repository failures.");
       this.name = "WorkspaceLinkPartialFailureError";
       this.result = result;
       this.repositoryResults = repositoryResults;

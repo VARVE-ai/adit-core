@@ -1,9 +1,10 @@
-/** Ink checkbox widget for selecting Workspace repositories during adit init. */
+/** Ink checkbox widget for selecting project repositories during adit init. */
 
 import React from "react";
 import { Box, Text, render } from "ink";
 import {
   describeRepositoryChoice,
+  repositoryChoiceLabel,
   type RepositorySyncChoice,
 } from "./init-repository-select-model.js";
 
@@ -18,7 +19,7 @@ function RepositoryList({
   cursor,
   checked,
 }: RepositoryListProps): React.ReactElement {
-  const labelWidth = Math.max(18, ...choices.map((choice) => choice.relativePath.length + 2));
+  const labelWidth = Math.max(18, ...choices.map((choice) => repositoryChoiceLabel(choice).length + 2));
 
   return (
     <Box flexDirection="column">
@@ -33,7 +34,7 @@ function RepositoryList({
             <Text color={isChecked ? "green" : undefined} dimColor={!isChecked}>
               {isChecked ? "[✓]" : "[ ]"}
             </Text>
-            <Text>{" " + choice.relativePath.padEnd(labelWidth)}</Text>
+            <Text>{" " + repositoryChoiceLabel(choice).padEnd(labelWidth)}</Text>
             <Text
               color={choice.cloudDeleted ? (isChecked ? "green" : "yellow") : undefined}
               dimColor={!choice.cloudDeleted}

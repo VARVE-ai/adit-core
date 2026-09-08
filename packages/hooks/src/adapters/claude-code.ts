@@ -260,7 +260,11 @@ export const claudeCodeAdapter: PlatformAdapter = {
     };
   },
 
-  async installHooks(projectRoot: string, aditBinaryPath: string): Promise<void> {
+  async installHooks(
+    projectRoot: string,
+    aditBinaryPath: string,
+    options?: { hookProjectRoot?: string },
+  ): Promise<void> {
     const claudeDir = join(projectRoot, ".claude");
     if (!existsSync(claudeDir)) {
       mkdirSync(claudeDir, { recursive: true });
@@ -285,7 +289,7 @@ export const claudeCodeAdapter: PlatformAdapter = {
       }
     }
 
-    const hookConfig = this.generateHookConfig(aditBinaryPath, projectRoot);
+    const hookConfig = this.generateHookConfig(aditBinaryPath, options?.hookProjectRoot ?? projectRoot);
     const existingHooks = (settings.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 

@@ -23,6 +23,12 @@ import {
 } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
 
+/**
+ * Derived project shape. Not stored in the manifest any more (schema 2): a
+ * project is "a root + one or more repositories"; the type only summarizes
+ * whether the root repository is the sole member. Kept for Cloud payloads and
+ * hook heuristics until the Cloud drops the field.
+ */
 export type ProjectType = "repo" | "workspace";
 
 export interface ProjectManifestRepository {
@@ -50,13 +56,26 @@ export interface ProjectManifestRepository {
 }
 
 export interface ProjectManifest {
-  schemaVersion: 1;
+  /** 1 = legacy manifest carrying `projectType`; 2 = repositories only. */
+  schemaVersion: 1 | 2;
   projectId: string;
-  projectType: ProjectType;
+  /**
+   * Legacy field, present only on schema 1 manifests. Runtime code must use
+   * `deriveProjectType` instead; `adit init` rewrites such manifests to
+   * schema 2 on the next run.
+   */
+  projectType?: ProjectType;
+  /** Registered repositories: `.` for the root itself plus immediate child directories. */
   repositories: ProjectManifestRepository[];
   /** Whole-project Cloud deletion tombstone. */
   cloudDeletedAt?: string;
   cloudDeletionOperationId?: string;
+  /**
+   * Set when this member repository's former project was merged into the
+   * parent project that registers it: commands and hooks run here route to
+   * the parent, and the local history stays attached to this ID.
+   */
+  mergedIntoProjectId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -98,8 +117,36 @@ export class ProjectInitLockError extends Error {
 export const projectManifestRelativePath = ".adit/project.json";
 export const workspaceManifestRelativePath = ".adit/workspace.json";
 
-const MANIFEST_SCHEMA_VERSION = 1;
+/** Schema written by this version. Schema 1 manifests are still read. */
+export const MANIFEST_SCHEMA_VERSION = 2;
+const SUPPORTED_MANIFEST_SCHEMA_VERSIONS = [1, 2] as const;
 const INIT_LOCK_STALE_MS = 10 * 60 * 1000;
+
+/** True for the manifest entry that denotes the project root directory itself. */
+export function isRootRepositoryPath(relativePath: string): boolean {
+  return relativePath === ".";
+}
+
+/**
+ * Summarize a manifest as the legacy project type: a project whose only
+ * repository is the root directory is a "repo" project; anything else is a
+ * "workspace". Derived on the fly — never persisted.
+ */
+export function deriveProjectType(
+  manifest: Pick<ProjectManifest, "repositories">,
+): ProjectType {
+  const repositories = manifest.repositories;
+  return repositories.length === 1 && isRootRepositoryPath(repositories[0].relativePath)
+    ? "repo"
+    : "workspace";
+}
+
+/** Return a copy of the manifest in the current schema (drops legacy fields). */
+export function toCurrentManifestSchema(manifest: ProjectManifest): ProjectManifest {
+  const { projectType: _legacyType, ...rest } = manifest;
+  void _legacyType;
+  return { ...rest, schemaVersion: MANIFEST_SCHEMA_VERSION };
+}
 
 export function projectManifestPath(projectRoot: string): string {
   return join(projectRoot, projectManifestRelativePath);
@@ -208,6 +255,41 @@ export async function withProjectInitLock<T>(projectRoot: string, fn: () => Prom
   }
 }
 
+export interface RegisteringParent {
+  root: string;
+  manifest: ProjectManifest;
+  /** This member's path as registered in the parent manifest. */
+  relativePath: string;
+}
+
+/**
+ * Find the parent project that registers `memberRoot` as one of its
+ * repositories. Only the nearest ancestor manifest is consulted: a nearer
+ * project that does not register the member ends the search.
+ */
+export function findRegisteringParent(memberRoot: string): RegisteringParent | null {
+  const member = resolve(memberRoot);
+  let dir = member;
+  while (true) {
+    const parent = resolve(dir, "..");
+    if (parent === dir) return null;
+    dir = parent;
+    if (!existsSync(projectManifestPath(dir))) continue;
+    let manifest: ProjectManifest | null;
+    try {
+      manifest = readProjectManifest(dir);
+    } catch {
+      return null; // a damaged parent manifest never claims a member
+    }
+    if (!manifest) continue;
+    const relativePath = relative(dir, member).replace(/\\/gu, "/");
+    if (manifest.repositories.some((entry) => entry.relativePath === relativePath)) {
+      return { root: dir, manifest, relativePath };
+    }
+    return null;
+  }
+}
+
 /** Find the nearest ancestor directory containing a project manifest. */
 export function findProjectManifestRoot(startDir?: string): string | null {
   let dir = resolve(startDir ?? process.cwd());
@@ -236,13 +318,14 @@ export function resolveManifestRepositories(
     const path = relativePath === "." ? resolve(projectRoot) : resolve(projectRoot, relativePath);
     assertInsideProjectRoot(projectRoot, path, relativePath, manifestPath);
     return {
-      // Persistence first: a stored repositoryId survives directory renames.
-      // The derivation formula is only the fallback for entries written
-      // before the field existed (it yields the identical value).
-      localRepositoryId:
-        manifest.projectType === "repo"
-          ? manifest.projectId
-          : entry.repositoryId ?? computeLocalRepositoryId(manifest.projectId, relativePath),
+      // The root repository is identified by the project ID itself; member
+      // repositories use their stored repositoryId (survives directory
+      // renames) or, for entries written before the field existed, the
+      // frozen derivation formula (identical value). The rule depends only
+      // on the path, never on a project type.
+      localRepositoryId: isRootRepositoryPath(relativePath)
+        ? manifest.projectId
+        : entry.repositoryId ?? computeLocalRepositoryId(manifest.projectId, relativePath),
       relativePath,
       displayName: relativePath === "." ? basename(resolve(projectRoot)) : basename(relativePath),
       repositoryUrl: null,
@@ -326,6 +409,29 @@ export function discoverWorkspaceRepositories(projectRoot: string): Array<{
   return repos.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
 }
 
+/**
+ * Compare the manifest's registered repositories with what is on disk: the
+ * root itself (when it is a Git repository) plus immediate child repositories.
+ * Sync-disabled entries count as registered — only `adit init` changes the
+ * list; status/doctor merely report drift.
+ */
+export function computeRepositoryDrift(
+  projectRoot: string,
+  manifest: Pick<ProjectManifest, "repositories">,
+): { registered: string[]; discovered: string[]; unregistered: string[]; missing: string[] } {
+  const registered = manifest.repositories.map((entry) => entry.relativePath);
+  const discovered = [
+    ...(existsSync(join(projectRoot, ".git")) ? ["."] : []),
+    ...discoverWorkspaceRepositories(projectRoot).map((repo) => repo.relativePath),
+  ];
+  return {
+    registered,
+    discovered,
+    unregistered: discovered.filter((path) => !registered.includes(path)),
+    missing: registered.filter((path) => !discovered.includes(path)),
+  };
+}
+
 export function toRepositoryPayload(repository: LocalRepository): {
   localRepositoryId: string;
   relativePath: string;
@@ -348,9 +454,10 @@ function validateManifest(parsed: unknown, manifestPath: string): ProjectManifes
   }
   const manifest = parsed as Record<string, unknown>;
 
-  if (manifest.schemaVersion !== MANIFEST_SCHEMA_VERSION) {
+  const schemaVersion = manifest.schemaVersion;
+  if (!(SUPPORTED_MANIFEST_SCHEMA_VERSIONS as readonly unknown[]).includes(schemaVersion)) {
     throw new ProjectManifestError(
-      `Unsupported project manifest schemaVersion: ${String(manifest.schemaVersion)}. This adit version supports version ${MANIFEST_SCHEMA_VERSION}.`,
+      `Unsupported project manifest schemaVersion: ${String(schemaVersion)}. This adit version supports versions ${SUPPORTED_MANIFEST_SCHEMA_VERSIONS.join(", ")}.`,
       manifestPath,
     );
   }
@@ -358,12 +465,18 @@ function validateManifest(parsed: unknown, manifestPath: string): ProjectManifes
   if (!projectId) {
     throw new ProjectManifestError("Project manifest is missing projectId.", manifestPath);
   }
-  const projectType = manifest.projectType;
-  if (projectType !== "repo" && projectType !== "workspace") {
-    throw new ProjectManifestError(
-      `Project manifest has invalid projectType: ${String(projectType)}.`,
-      manifestPath,
-    );
+  // Schema 1 carried the project type; it must still be well-formed so a
+  // damaged legacy manifest is surfaced instead of silently reinterpreted.
+  let legacyProjectType: ProjectType | undefined;
+  if (schemaVersion === 1) {
+    const projectType = manifest.projectType;
+    if (projectType !== "repo" && projectType !== "workspace") {
+      throw new ProjectManifestError(
+        `Project manifest has invalid projectType: ${String(projectType)}.`,
+        manifestPath,
+      );
+    }
+    legacyProjectType = projectType;
   }
   if (!Array.isArray(manifest.repositories) || manifest.repositories.length === 0) {
     throw new ProjectManifestError("Project manifest must list at least one repository.", manifestPath);
@@ -424,19 +537,6 @@ function validateManifest(parsed: unknown, manifestPath: string): ProjectManifes
     };
   });
 
-  if (projectType === "repo" && (repositories.length !== 1 || repositories[0].relativePath !== ".")) {
-    throw new ProjectManifestError(
-      "A single-repo project manifest must contain exactly one repository with relativePath '.'.",
-      manifestPath,
-    );
-  }
-  if (projectType === "workspace" && repositories.some((repo) => repo.relativePath === ".")) {
-    throw new ProjectManifestError(
-      "A multi-repo project manifest must not contain '.' — only immediate child directories.",
-      manifestPath,
-    );
-  }
-
   const createdAt = typeof manifest.createdAt === "string" ? manifest.createdAt : "";
   const updatedAt = typeof manifest.updatedAt === "string" ? manifest.updatedAt : "";
   if (!createdAt || !updatedAt) {
@@ -452,14 +552,20 @@ function validateManifest(parsed: unknown, manifestPath: string): ProjectManifes
     "cloudDeletionOperationId",
     manifestPath,
   );
+  const mergedIntoProjectId = optionalNonEmptyString(
+    manifest.mergedIntoProjectId,
+    "mergedIntoProjectId",
+    manifestPath,
+  );
 
   return {
-    schemaVersion: MANIFEST_SCHEMA_VERSION,
+    schemaVersion: schemaVersion as 1 | 2,
     projectId,
-    projectType,
+    ...(legacyProjectType ? { projectType: legacyProjectType } : {}),
     repositories,
     ...(cloudDeletedAt ? { cloudDeletedAt } : {}),
     ...(cloudDeletionOperationId ? { cloudDeletionOperationId } : {}),
+    ...(mergedIntoProjectId ? { mergedIntoProjectId } : {}),
     createdAt,
     updatedAt,
   };
