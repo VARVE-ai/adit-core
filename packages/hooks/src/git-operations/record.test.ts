@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -26,6 +26,69 @@ afterEach(() => {
 });
 
 describe("recordGitCommits", () => {
+  it("records desktop loop commits in three repositories once, excluding a failed execution", async () => {
+    const root = mkdtempSync(join(tmpdir(), "adit-desktop-loop-"));
+    tempDirs.push(root);
+    const names = ["cloud", "core", "docker"];
+    const results: Array<Record<string, unknown>> = [];
+    const shas: string[] = [];
+    const repositories = names.map((repo) => {
+      const path = join(root, repo);
+      mkdirSync(path);
+      const git = (args: string[]) => execFileSync("git", args, { cwd: path, encoding: "utf8" }).trim();
+      git(["init", "-b", "main"]);
+      git(["config", "user.name", "Test"]);
+      git(["config", "user.email", "test@example.com"]);
+      const output = git(["commit", "--allow-empty", "-m", `fix: ${repo}`]);
+      shas.push(git(["rev-parse", "HEAD"]));
+      results.push({ repo, chunk_id: repo, wall_time_seconds: 0.01, exit_code: 0, output });
+      return { localRepositoryId: repo, relativePath: repo, displayName: repo,
+        repositoryUrl: null, canonicalRepoKey: null, path };
+    });
+    const transcriptPath = join(root, "turn.jsonl");
+    const source = `
+      const repos = ["cloud", "core", "docker", "cloud"];
+      for (const repo of repos) {
+        const r = await tools.exec_command({cmd:"git commit -m 'fix: " + repo + "'",workdir:${JSON.stringify(root + "/")} + repo});
+        text({repo,...r});
+        if (r.exit_code !== 0) break;
+      }`;
+    writeFileSync(transcriptPath, [
+      { payload: { type: "message", role: "user", content: "commit all" } },
+      { payload: { type: "custom_tool_call", call_id: "batch", name: "exec", status: "completed", input: source } },
+      { payload: { type: "custom_tool_call_output", call_id: "batch", output: [
+        { type: "input_text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" },
+        ...[...results, {repo: "cloud", wall_time_seconds: 0, exit_code: 1, output: "nothing to commit"}]
+          .map((result) => ({type: "input_text", text: JSON.stringify(result)})),
+      ] } },
+    ].map((entry) => JSON.stringify(entry)).join("\n"));
+    const dbPath = join(root, ".adit", "adit.sqlite");
+    const db = openDatabase(dbPath);
+    try {
+      const config: AditConfig = { projectRoot: root, dataDir: join(root, ".adit"), dbPath,
+        clientId: "client", projectId: "project", projectType: "workspace", repositories,
+        initialization: "initialized", captureEnv: false };
+      const session = { id: "session", projectId: "project", clientId: "client",
+        sessionType: "interactive" as const, platform: "codex" as const,
+        startedAt: new Date().toISOString(), vclockJson: "{}", platformSessionId: "desktop",
+        metadataJson: null, deletedAt: null };
+      insertSession(db, session);
+      const input = { cwd: root, hookType: "stop" as const, platformCli: "codex" as const,
+        platformSessionId: "desktop", transcriptPath };
+      const timeline = createTimelineManager(db, config);
+      for (let attempt = 0; attempt < 2; attempt++) await recordGitCommits({ db, config, session }, input, timeline);
+      const events = queryEvents(db, { eventType: "git_commit", limit: 10 });
+      expect(events).toHaveLength(3);
+      names.forEach((repo, index) => {
+        const event = events.find((event) => event.gitHeadSha === shas[index]);
+        expect(event?.responseText).toBe(`fix: ${repo}`);
+        expect(JSON.parse(event?.toolInputJson ?? "{}")).toMatchObject({
+          toolCallId: `batch:exec:${index}`, operationIndex: 0, localRepositoryId: repo, relativePath: repo,
+        });
+      });
+    } finally { closeDatabase(db); }
+  });
+
   it("records only a successful git commit once and resolves its printed SHA", async () => {
     const root = mkdtempSync(join(tmpdir(), "adit-git-commit-record-"));
     tempDirs.push(root);

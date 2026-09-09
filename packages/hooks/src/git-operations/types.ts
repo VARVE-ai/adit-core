@@ -1,5 +1,16 @@
 import type { Platform } from "@varveai/adit-core";
 
+/** Provider adapters normalize their transcript format before shared Git parsing. */
+export interface TranscriptShellCall {
+  id: string;
+  /** Stable ordinal for multiple executions inside a single provider call. */
+  executionIndex?: number;
+  command: string;
+  cwd?: string;
+  output?: string | null;
+  success: boolean;
+}
+
 export interface AgentGitOperation {
   provider: Platform;
   toolCallId: string;

@@ -1,11 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { Platform } from "@varveai/adit-core";
-import {
-  codexShellCalls,
-  type TranscriptShellCall,
-} from "./codex-shell-calls.js";
+import { codexShellCalls } from "./codex-shell-calls.js";
 import { parseGitCommands } from "./command-parser.js";
-import type { AgentGitOperation, ExtractGitOperationsInput } from "./types.js";
+import type { AgentGitOperation, ExtractGitOperationsInput, TranscriptShellCall } from "./types.js";
 
 interface RawEntry {
   type?: string;
@@ -38,7 +35,9 @@ export function extractGitOperations(input: ExtractGitOperationsInput): AgentGit
     parsed.forEach((operation, operationIndex) => {
       operations.push({
         provider: input.platform,
-        toolCallId: call.id,
+        // Keep single-call identities compatible; batch executions each own
+        // their output and the existing recorder's dedup/commit ordinals.
+        toolCallId: call.executionIndex === undefined ? call.id : `${call.id}:exec:${call.executionIndex}`,
         operationIndex,
         operation: operation.operation,
         status: call.success ? "success" : "error",

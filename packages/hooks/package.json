@@ -29,9 +29,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@varveai/adit-core": "workspace:*",
     "@varveai/adit-cloud": "workspace:*",
-    "@varveai/adit-engine": "workspace:*"
+    "@varveai/adit-core": "workspace:*",
+    "@varveai/adit-engine": "workspace:*",
+    "acorn": "^8.18.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

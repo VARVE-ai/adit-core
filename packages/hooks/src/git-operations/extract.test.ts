@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { extractGitOperations } from "./extract.js";
+import { codexShellCalls } from "./codex-shell-calls.js";
 
 const tempDirs: string[] = [];
 
@@ -19,6 +20,20 @@ function transcript(lines: unknown[]): string {
 }
 
 describe("extractGitOperations", () => {
+  it("does not mistake outer completion for a successful inner command", () => {
+    const calls = codexShellCalls([
+      { payload: { type: "exec_command_end", call_id: "native", command: "git commit -m fix", status: "completed", exit_code: 1 } },
+      { payload: { type: "custom_tool_call", call_id: "desktop", name: "exec", status: "completed",
+        input: 'const r=await tools.exec_command({cmd:"git commit -m fix"}); text(r);' } },
+      { payload: { type: "custom_tool_call_output", call_id: "desktop", output: [
+        { text: "Script completed\nOutput:\n" },
+        { text: JSON.stringify({wall_time_seconds: 0, exit_code: 1, output: "nothing to commit"}) },
+      ] } },
+    ], 0);
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => !call.success)).toBe(true);
+  });
+
   it("extracts only Codex Git commands from the latest turn", () => {
     const path = transcript([
       { payload: { type: "message", role: "user", content: "old" } },
