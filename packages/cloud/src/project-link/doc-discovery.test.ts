@@ -53,6 +53,15 @@ describe("discoverDocuments", () => {
     expect(docs[0].sourcePath).toBe("docs/architecture.md");
   });
 
+  it("keeps nested repository documents out of the root repository even with broad includes", () => {
+    mkdirSync(join(projectRoot, "test4", ".git"), { recursive: true });
+    writeFileSync(join(projectRoot, "README.md"), "# Root");
+    writeFileSync(join(projectRoot, "test4", "README.md"), "# Child");
+    const rootDocs = discoverDocuments(projectRoot, {}, { include: ["**/*.md"] });
+    expect(rootDocs.map((d) => d.sourcePath)).toEqual(["README.md"]);
+    expect(discoverDocuments(join(projectRoot, "test4"), {}).map((d) => d.content)).toEqual(["# Child"]);
+  });
+
   it("classifies unchanged documents based on cached hash", () => {
     const content = "# My Project\n";
     writeFileSync(join(projectRoot, "README.md"), content);

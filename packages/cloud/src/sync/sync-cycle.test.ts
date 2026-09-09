@@ -34,6 +34,17 @@ describe("runSyncCycle", () => {
     vi.clearAllMocks();
   });
 
+  it("sends an empty saved selection even when there are no event batches or repositories", async () => {
+    engineSync.mockResolvedValue({ accepted: 0, duplicates: 0, conflicts: [], newSyncCursor: null, batches: 0, totalRecords: 0 });
+    const post = vi.fn(async () => ({ status: "updated" }));
+    const registration = { localProjectId: "project-1", projectName: "repo", updatedAt: "2026-09-09T01:00:00.000Z", repositories: [] };
+    await runSyncCycle({ db: {} as never, client: { post } as never,
+      projectContext: { ...projectContext, registration }, batchSize: 500,
+      serverUrl: "https://cloud.example.com", cloudClientId: "client-1" });
+    expect(post).toHaveBeenCalledWith("/api/project-link/registration", registration);
+    expect(engineSync).toHaveBeenCalledOnce();
+  });
+
   it("does not inspect Git when no Event batch was uploaded", async () => {
     engineSync.mockResolvedValue({
       accepted: 0,

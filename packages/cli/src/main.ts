@@ -78,23 +78,23 @@ export function createProgram(): Command {
     )
     .option(
       "--single-repo",
-      "Sync only this Git repository (shortcut for --repos .)",
+      "Include only this Git repository (shortcut for --repos .)",
     )
     .option(
       "--multi-repo",
-      "Sync every child Git repository; on re-init also apply repository list changes without asking",
+      "Include every child Git repository; on re-init also apply repository list changes without asking",
     )
     .option(
       "--repos <paths>",
-      "Comma-separated repository paths to sync (use . for this directory), e.g. --repos .,api,web",
+      "Comma-separated repository paths to include (use . for this directory), e.g. --repos .,api,web",
     )
     .option(
       "--detach",
-      "Split this repository out of the parent project that registers it and initialize it on its own",
+      "Deprecated alias: init always creates an independent project without changing its parent",
     )
     .option(
       "--absorb",
-      "When a child directory is already an ADIT project, move that project's root up here without asking",
+      "Unsupported legacy option; parent and child projects now remain independent",
     )
     .action(withUpdateWarning("init", (opts) =>
       initCommand({

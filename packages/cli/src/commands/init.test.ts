@@ -75,7 +75,7 @@ describe("initCommand", () => {
     await initCommand({ cwd: root, multiRepo: true });
 
     const manifest = readProjectManifest(root)!;
-    expect(manifest.schemaVersion).toBe(2);
+    expect(manifest.schemaVersion).toBe(3);
     expect(manifest.projectType).toBeUndefined();
     expect(deriveProjectType(manifest)).toBe("workspace");
     // The empty root repository is registered but not synced; --multi-repo syncs the children.
@@ -164,7 +164,7 @@ describe("initCommand", () => {
     await initCommand({ cwd: root });
 
     const manifest = readProjectManifest(root)!;
-    expect(manifest.schemaVersion).toBe(2);
+    expect(manifest.schemaVersion).toBe(3);
     expect(deriveProjectType(manifest)).toBe("repo");
     expect(manifest.repositories).toEqual([{ relativePath: "." }]);
     expect(manifest.projectId).toMatch(/^[0-9a-f-]{36}$/u);
@@ -175,112 +175,101 @@ describe("initCommand", () => {
     expect(existsSync(join(root, ".adit"))).toBe(false);
   });
 
-  it("does not initialize a repository that a parent project already registers", async () => {
+  it("initializes a child independently while retaining its parent registration", async () => {
     mkdirSync(join(root, "api", ".git"), { recursive: true });
     mkdirSync(join(root, "web", ".git"), { recursive: true });
     await initCommand({ cwd: root, multiRepo: true });
     const parentBefore = readFileSync(join(root, ".adit", "project.json"), "utf-8");
-    vi.mocked(console.log).mockClear();
-
-    await initCommand({ cwd: join(root, "api"), singleRepo: true });
-
-    expect(readProjectManifest(join(root, "api"))).toBeNull();
-    expect(existsSync(join(root, "api", ".adit"))).toBe(false);
+    await initCommand({ cwd: join(root, "api") });
+    const child = readProjectManifest(join(root, "api"))!;
+    expect(child.projectId).not.toBe(readProjectManifest(root)!.projectId);
+    expect(child.repositories).toEqual([{ relativePath: "." }]);
     expect(readFileSync(join(root, ".adit", "project.json"), "utf-8")).toBe(parentBefore);
-    const output = vi.mocked(console.log).mock.calls.flat().join("\n");
-    expect(output).toContain("already belongs to the project at");
-    expect(output).toContain("--detach");
+    await initCommand({ cwd: join(root, "api"), detach: true });
+    expect(readProjectManifest(join(root, "api"))!.projectId).toBe(child.projectId);
+    expect(readFileSync(join(root, ".adit", "project.json"), "utf-8")).toBe(parentBefore);
   });
 
-  it("--detach splits a registered member repository into its own project", async () => {
+  it("registers root and independent children without moving data or sharing identities", async () => {
+    mkdirSync(join(root, ".git"), { recursive: true });
     mkdirSync(join(root, "api", ".git"), { recursive: true });
     mkdirSync(join(root, "web", ".git"), { recursive: true });
-    await initCommand({ cwd: root, multiRepo: true });
-    const parentBefore = readProjectManifest(root)!;
-
-    await initCommand({ cwd: join(root, "api"), singleRepo: true, detach: true });
-
-    const child = readProjectManifest(join(root, "api"))!;
-    expect(deriveProjectType(child)).toBe("repo");
-    expect(child.projectId).not.toBe(parentBefore.projectId);
-    const parentAfter = readProjectManifest(root)!;
-    expect(parentAfter.projectId).toBe(parentBefore.projectId);
-    expect(parentAfter.repositories.map((repo) => repo.relativePath)).toEqual(["web"]);
-  });
-
-  it("moves an already initialized child project up with --absorb, keeping its identity", async () => {
-    mkdirSync(join(root, "api", ".git"), { recursive: true });
-    mkdirSync(join(root, "web", ".git"), { recursive: true });
-    mocks.getHeadSha.mockResolvedValue("abc123");
-    mocks.getRemoteUrl.mockImplementation(async (path: string) =>
-      path === join(root, "api") ? "https://example.com/api.git" : null,
-    );
     await initCommand({ cwd: join(root, "api") });
-    const child = readProjectManifest(join(root, "api"))!;
-    expect(existsSync(join(root, "api", ".adit", "adit.sqlite"))).toBe(true);
-
-    await initCommand({ cwd: root, absorb: true });
-
+    const childPath = join(root, "api", ".adit");
+    const childBefore = readFileSync(join(childPath, "project.json"), "utf-8");
+    writeFileSync(join(childPath, "history-sentinel"), "preserve child history");
+    await initCommand({ cwd: root, repos: [".", "api", "web"] });
     const parent = readProjectManifest(root)!;
-    expect(parent.projectId).toBe(child.projectId);
-    expect(parent.createdAt).toBe(child.createdAt);
-    expect(parent.repositories).toEqual([
-      { relativePath: "api", repositoryId: child.projectId, repositoryUrl: "https://example.com/api.git" },
-      expect.objectContaining({ relativePath: "web" }),
-    ]);
-    // The data directory moved up; the child no longer carries a manifest.
-    expect(existsSync(join(root, ".adit", "adit.sqlite"))).toBe(true);
-    expect(existsSync(join(root, "api", ".adit"))).toBe(false);
-    expect(readProjectManifest(join(root, "api"))).toBeNull();
-  });
-
-  it("keeps a child project independent and unsynced when not absorbed non-interactively", async () => {
-    mkdirSync(join(root, "api", ".git"), { recursive: true });
-    mkdirSync(join(root, "web", ".git"), { recursive: true });
-    mocks.getHeadSha.mockResolvedValue("abc123");
-    mocks.getRemoteUrl.mockImplementation(async (path: string) =>
-      path === join(root, "api") ? "https://example.com/api.git" : null,
-    );
-    await initCommand({ cwd: join(root, "api") });
     const child = readProjectManifest(join(root, "api"))!;
-    const childBefore = readFileSync(join(root, "api", ".adit", "project.json"), "utf-8");
-
-    await initCommand({ cwd: root });
-
-    const parent = readProjectManifest(root)!;
+    const { resolveManifestRepositories } = await import("@varveai/adit-core");
+    const ids = resolveManifestRepositories(root, parent).map((r) => r.localRepositoryId);
+    expect(new Set(ids).size).toBe(3);
+    expect(ids).not.toContain(child.projectId);
     expect(parent.projectId).not.toBe(child.projectId);
-    expect(parent.repositories).toEqual([
-      expect.objectContaining({ relativePath: "api", repositoryId: child.projectId, syncEnabled: false }),
-      expect.objectContaining({ relativePath: "web" }),
-    ]);
-    expect(readFileSync(join(root, "api", ".adit", "project.json"), "utf-8")).toBe(childBefore);
+    expect(readFileSync(join(childPath, "project.json"), "utf-8")).toBe(childBefore);
+    expect(readFileSync(join(childPath, "history-sentinel"), "utf-8")).toBe("preserve child history");
+    expect(existsSync(join(childPath, "adit.sqlite"))).toBe(true);
+    await initCommand({ cwd: root, repos: [".", "api", "web"] });
+    expect(resolveManifestRepositories(root, readProjectManifest(root)!).map((r) => r.localRepositoryId)).toEqual(ids);
   });
 
-  it("marks further child projects as merged when one of them moves up", async () => {
+  it("does not reuse a parent's inherited hook environment when explicitly initializing a child", async () => {
+    mkdirSync(join(root, "test4", ".git"), { recursive: true });
+    await initCommand({ cwd: root, multiRepo: true });
+    const keys = ["ADIT_PROJECT_ROOT", "ADIT_DATA_DIR", "ADIT_DB_PATH"] as const;
+    const previous = keys.map((key) => process.env[key]);
+    process.env.ADIT_PROJECT_ROOT = root;
+    process.env.ADIT_DATA_DIR = join(root, ".adit");
+    process.env.ADIT_DB_PATH = join(root, ".adit", "adit.sqlite");
+    try {
+      await initCommand({ cwd: join(root, "test4") });
+      expect(existsSync(join(root, "test4", ".adit", "adit.sqlite"))).toBe(true);
+      expect(readProjectManifest(join(root, "test4"))!.projectId).not.toBe(readProjectManifest(root)!.projectId);
+      expect(process.env.ADIT_PROJECT_ROOT).toBe(root);
+    } finally {
+      keys.forEach((key, i) => { if (previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; });
+    }
+  });
+
+  it("offers newly added repositories, preserves excluded identities and independent children", async () => {
     mkdirSync(join(root, "api", ".git"), { recursive: true });
-    mkdirSync(join(root, "web", ".git"), { recursive: true });
-    mocks.getHeadSha.mockResolvedValue("abc123");
-    mocks.getRemoteUrl.mockResolvedValue("https://example.com/repo.git");
-    await initCommand({ cwd: join(root, "api") });
-    await initCommand({ cwd: join(root, "web") });
-    const api = readProjectManifest(join(root, "api"))!;
-    const web = readProjectManifest(join(root, "web"))!;
-
-    await initCommand({ cwd: root, absorb: true });
-
-    const parent = readProjectManifest(root)!;
-    // Equal session counts: the earlier created project (api) wins.
-    expect(parent.projectId).toBe(api.projectId);
-    expect(parent.repositories).toEqual([
-      expect.objectContaining({ relativePath: "api", repositoryId: api.projectId }),
-      expect.objectContaining({ relativePath: "web", repositoryId: web.projectId }),
-    ]);
-    // A merged member follows the normal selection, so it syncs by default.
-    expect(parent.repositories.find((repo) => repo.relativePath === "web")?.syncEnabled).not.toBe(false);
-    expect(readProjectManifest(join(root, "web"))!.mergedIntoProjectId).toBe(api.projectId);
-    // A merged member routes to the parent project.
+    await initCommand({ cwd: root, multiRepo: true });
+    mkdirSync(join(root, "test4", ".git"), { recursive: true });
+    await initCommand({ cwd: join(root, "test4") });
+    const childBefore = readFileSync(join(root, "test4", ".adit", "project.json"), "utf-8");
+    await initCommand({ cwd: root, repos: ["api", "test4"] });
+    const added = readProjectManifest(root)!.repositories.find((r) => r.relativePath === "test4")!;
+    await initCommand({ cwd: root, repos: ["api"] });
+    expect(readProjectManifest(root)!.repositories.find((r) => r.relativePath === "test4")).toMatchObject({ repositoryId: added.repositoryId, syncEnabled: false });
     const { loadConfig } = await import("@varveai/adit-core");
-    expect(loadConfig(join(root, "web")).projectId).toBe(api.projectId);
+    expect(loadConfig(root).repositories.map((r) => r.relativePath)).toEqual(["api"]);
+    await initCommand({ cwd: root, repos: ["api", "test4"] });
+    expect(readProjectManifest(root)!.repositories.find((r) => r.relativePath === "test4")).toMatchObject({ repositoryId: added.repositoryId, syncEnabled: true });
+    expect(readFileSync(join(root, "test4", ".adit", "project.json"), "utf-8")).toBe(childBefore);
+  });
+
+  it("rejects legacy absorption before changing child data", async () => {
+    mkdirSync(join(root, "api", ".git"), { recursive: true });
+    await initCommand({ cwd: join(root, "api") });
+    const before = readFileSync(join(root, "api", ".adit", "project.json"), "utf-8");
+    await expect(initCommand({ cwd: root, absorb: true })).rejects.toThrow("process.exit:1");
+    expect(readProjectManifest(root)).toBeNull();
+    expect(readFileSync(join(root, "api", ".adit", "project.json"), "utf-8")).toBe(before);
+  });
+
+  it("restores a legacy merged child only on explicit init and leaves its parent alone", async () => {
+    mkdirSync(join(root, "api", ".git"), { recursive: true });
+    await initCommand({ cwd: root, multiRepo: true });
+    const parentBefore = readFileSync(join(root, ".adit", "project.json"), "utf-8");
+    const now = new Date().toISOString();
+    writeProjectManifest(join(root, "api"), {
+      schemaVersion: 2, projectId: "legacy-child", repositories: [{ relativePath: "." }],
+      mergedIntoProjectId: readProjectManifest(root)!.projectId, createdAt: now, updatedAt: now,
+    });
+    await initCommand({ cwd: join(root, "api") });
+    expect(readProjectManifest(join(root, "api"))!).toMatchObject({ projectId: "legacy-child", schemaVersion: 3 });
+    expect(readProjectManifest(join(root, "api"))!.mergedIntoProjectId).toBeUndefined();
+    expect(readFileSync(join(root, ".adit", "project.json"), "utf-8")).toBe(parentBefore);
   });
 
   it("migrates a legacy workspace project keeping its identity", async () => {
@@ -418,7 +407,7 @@ describe("initCommand", () => {
     await initCommand({ cwd: root });
 
     const manifest = readProjectManifest(root)!;
-    expect(manifest.schemaVersion).toBe(2);
+    expect(manifest.schemaVersion).toBe(3);
     expect(manifest.projectType).toBeUndefined();
     expect(manifest.projectId).toBe("legacy-project");
     expect(manifest.repositories).toEqual([{ relativePath: "api", repositoryId: "id-api" }]);

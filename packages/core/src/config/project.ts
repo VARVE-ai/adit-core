@@ -33,7 +33,7 @@ export type ProjectType = "repo" | "workspace";
 
 export interface ProjectManifestRepository {
   relativePath: string;
-  /** Local upload selection. Omitted means enabled for backward compatibility. */
+  /** Included in this project. False retains only identity/history; never routes or syncs. */
   syncEnabled?: boolean;
   /** Append-only Cloud deletion tombstone mirrored locally. */
   cloudDeletedAt?: string;
@@ -56,13 +56,13 @@ export interface ProjectManifestRepository {
 }
 
 export interface ProjectManifest {
-  /** 1 = legacy manifest carrying `projectType`; 2 = repositories only. */
-  schemaVersion: 1 | 2;
+  /** 1 = legacy type; 2 = legacy absorption; 3 = independent projects and explicit selection. */
+  schemaVersion: 1 | 2 | 3;
   projectId: string;
   /**
    * Legacy field, present only on schema 1 manifests. Runtime code must use
    * `deriveProjectType` instead; `adit init` rewrites such manifests to
-   * schema 2 on the next run.
+   * schema 3 on the next run.
    */
   projectType?: ProjectType;
   /** Registered repositories: `.` for the root itself plus immediate child directories. */
@@ -118,8 +118,8 @@ export const projectManifestRelativePath = ".adit/project.json";
 export const workspaceManifestRelativePath = ".adit/workspace.json";
 
 /** Schema written by this version. Schema 1 manifests are still read. */
-export const MANIFEST_SCHEMA_VERSION = 2;
-const SUPPORTED_MANIFEST_SCHEMA_VERSIONS = [1, 2] as const;
+export const MANIFEST_SCHEMA_VERSION = 3;
+const SUPPORTED_MANIFEST_SCHEMA_VERSIONS = [1, 2, 3] as const;
 const INIT_LOCK_STALE_MS = 10 * 60 * 1000;
 
 /** True for the manifest entry that denotes the project root directory itself. */
@@ -237,8 +237,8 @@ export function writeProjectManifest(projectRoot: string, manifest: ProjectManif
  * Run `fn` while holding the exclusive init lock for this project.
  *
  * A concurrent init fails fast with ProjectInitLockError instead of racing
- * on the manifest. A stale lock (older than 10 minutes, e.g. after a crash)
- * is removed and re-acquired.
+ * on the manifest. Dead-process locks are recovered immediately; malformed
+ * locks expire after 10 minutes. A live interactive init never loses its lock.
  */
 export async function withProjectInitLock<T>(projectRoot: string, fn: () => Promise<T>): Promise<T> {
   const lockPath = join(projectRoot, ".adit", "init.lock");
@@ -265,7 +265,7 @@ export interface RegisteringParent {
 /**
  * Find the parent project that registers `memberRoot` as one of its
  * repositories. Only the nearest ancestor manifest is consulted: a nearer
- * project that does not register the member ends the search.
+ * project that does not include the member ends the search.
  */
 export function findRegisteringParent(memberRoot: string): RegisteringParent | null {
   const member = resolve(memberRoot);
@@ -283,7 +283,7 @@ export function findRegisteringParent(memberRoot: string): RegisteringParent | n
     }
     if (!manifest) continue;
     const relativePath = relative(dir, member).replace(/\\/gu, "/");
-    if (manifest.repositories.some((entry) => entry.relativePath === relativePath)) {
+    if (manifest.repositories.some((entry) => entry.relativePath === relativePath && entry.syncEnabled !== false && !entry.cloudDeletedAt)) {
       return { root: dir, manifest, relativePath };
     }
     return null;
@@ -318,14 +318,11 @@ export function resolveManifestRepositories(
     const path = relativePath === "." ? resolve(projectRoot) : resolve(projectRoot, relativePath);
     assertInsideProjectRoot(projectRoot, path, relativePath, manifestPath);
     return {
-      // The root repository is identified by the project ID itself; member
-      // repositories use their stored repositoryId (survives directory
-      // renames) or, for entries written before the field existed, the
-      // frozen derivation formula (identical value). The rule depends only
-      // on the path, never on a project type.
-      localRepositoryId: isRootRepositoryPath(relativePath)
+      // A persisted identity always wins, including recreated roots. Legacy
+      // roots use the project ID; member fallback uses the frozen path formula.
+      localRepositoryId: entry.repositoryId ?? (isRootRepositoryPath(relativePath)
         ? manifest.projectId
-        : entry.repositoryId ?? computeLocalRepositoryId(manifest.projectId, relativePath),
+        : computeLocalRepositoryId(manifest.projectId, relativePath)),
       relativePath,
       displayName: relativePath === "." ? basename(resolve(projectRoot)) : basename(relativePath),
       repositoryUrl: null,
@@ -412,14 +409,15 @@ export function discoverWorkspaceRepositories(projectRoot: string): Array<{
 /**
  * Compare the manifest's registered repositories with what is on disk: the
  * root itself (when it is a Git repository) plus immediate child repositories.
- * Sync-disabled entries count as registered — only `adit init` changes the
- * list; status/doctor merely report drift.
+ * Excluded entries retain identity but do not count as current members or
+ * missing repositories. They are known exclusions, not newly discovered repos.
  */
 export function computeRepositoryDrift(
   projectRoot: string,
   manifest: Pick<ProjectManifest, "repositories">,
 ): { registered: string[]; discovered: string[]; unregistered: string[]; missing: string[] } {
-  const registered = manifest.repositories.map((entry) => entry.relativePath);
+  const known = manifest.repositories.map((entry) => entry.relativePath);
+  const registered = manifest.repositories.filter((entry) => entry.syncEnabled !== false && !entry.cloudDeletedAt).map((entry) => entry.relativePath);
   const discovered = [
     ...(existsSync(join(projectRoot, ".git")) ? ["."] : []),
     ...discoverWorkspaceRepositories(projectRoot).map((repo) => repo.relativePath),
@@ -427,7 +425,7 @@ export function computeRepositoryDrift(
   return {
     registered,
     discovered,
-    unregistered: discovered.filter((path) => !registered.includes(path)),
+    unregistered: discovered.filter((path) => !known.includes(path)),
     missing: registered.filter((path) => !discovered.includes(path)),
   };
 }
@@ -501,14 +499,17 @@ function validateManifest(parsed: unknown, manifestPath: string): ProjectManifes
       typeof record.repositoryId === "string" && record.repositoryId.trim()
         ? record.repositoryId.trim()
         : undefined;
-    if (repositoryId) {
-      if (seenRepositoryIds.has(repositoryId)) {
+    const effectiveId = schemaVersion === 3
+      ? repositoryId ?? (relativePath === "." ? projectId : computeLocalRepositoryId(projectId, relativePath))
+      : repositoryId;
+    if (effectiveId) {
+      if (seenRepositoryIds.has(effectiveId)) {
         throw new ProjectManifestError(
-          `Project manifest lists repositoryId '${repositoryId}' more than once.`,
+          `Project manifest lists repositoryId '${effectiveId}' more than once.`,
           manifestPath,
         );
       }
-      seenRepositoryIds.add(repositoryId);
+      seenRepositoryIds.add(effectiveId);
     }
     const repositoryUrl =
       typeof record.repositoryUrl === "string" && record.repositoryUrl.trim()
@@ -559,7 +560,7 @@ function validateManifest(parsed: unknown, manifestPath: string): ProjectManifes
   );
 
   return {
-    schemaVersion: schemaVersion as 1 | 2,
+    schemaVersion: schemaVersion as 1 | 2 | 3,
     projectId,
     ...(legacyProjectType ? { projectType: legacyProjectType } : {}),
     repositories,
@@ -651,7 +652,8 @@ function acquireInitLock(lockPath: string): void {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       const age = lockAgeMs(lockPath);
-      if (age !== null && age > INIT_LOCK_STALE_MS) {
+      const ownerAlive = initLockOwnerAlive(lockPath);
+      if (ownerAlive === false || (ownerAlive === null && age !== null && age > INIT_LOCK_STALE_MS)) {
         rmSync(lockPath, { force: true });
         continue;
       }
@@ -659,6 +661,16 @@ function acquireInitLock(lockPath: string): void {
     }
   }
   throw new ProjectInitLockError(lockPath);
+}
+
+function initLockOwnerAlive(lockPath: string): boolean | null {
+  try {
+    const pid = Number(readFileSync(lockPath, "utf8").trim());
+    if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+    try { process.kill(pid, 0); return true; } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ESRCH" ? false : true;
+    }
+  } catch { return null; }
 }
 
 function lockAgeMs(lockPath: string): number | null {

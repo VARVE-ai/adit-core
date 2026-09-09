@@ -122,20 +122,21 @@ function escapeRegex(s: string): string {
  * stable since Node 18.17.
  */
 function listAllFiles(projectRoot: string): string[] {
-  try {
-    const entries = readdirSync(projectRoot, { recursive: true, withFileTypes: true });
-    const files: string[] = [];
-    for (const entry of entries) {
-      if (!entry.isFile()) continue;
-      // Build relative path from the dirent. parentPath is stable since Node 20.12.
-      const fullPath = join(entry.parentPath, entry.name);
-      const rel = relative(projectRoot, fullPath).split("\\").join("/");
-      files.push(rel);
+  const files: string[] = [];
+  const walk = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        // Nested repositories have their own document scope, even when not
+        // selected in the parent. Do not upload their files as root documents.
+        if (entry.name !== ".git" && !existsSync(join(path, ".git"))) walk(path);
+      } else if (entry.isFile()) {
+        files.push(relative(projectRoot, path).split("\\").join("/"));
+      }
     }
-    return files;
-  } catch {
-    return [];
-  }
+  };
+  try { walk(projectRoot); } catch { /* missing/unreadable directories are skipped */ }
+  return files;
 }
 
 /**

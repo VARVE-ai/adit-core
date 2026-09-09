@@ -28,6 +28,12 @@ async function loadContextModule(): Promise<typeof import("./context.js")> {
   return import("./context.js");
 }
 
+const testHome = vi.hoisted(() => ({ path: "" }));
+vi.mock("node:os", async (importOriginal) => ({
+  ...await importOriginal<typeof import("node:os")>(),
+  homedir: () => testHome.path,
+}));
+
 function tempDir(): string {
   const dir = join(tmpdir(), `adit-hook-context-${randomBytes(8).toString("hex")}`);
   mkdirSync(dir, { recursive: true });
@@ -43,6 +49,7 @@ describe("initHookContext", () => {
 
   beforeEach(() => {
     dir = tempDir();
+    testHome.path = dir;
     mkdirSync(join(dir, ".adit"), { recursive: true });
     dbPath = join(dir, ".adit", "adit.sqlite");
     const now = new Date().toISOString();
@@ -126,7 +133,7 @@ describe("initHookContext", () => {
     closeDatabase(ctx!.db);
   });
 
-  it("attaches a client-side fork (new platform session id, copied transcript) to the original session", async () => {
+  it("attaches a client-side fork to the original project even after entering an independent child", async () => {
     const originalPsid = "claude-original";
     const forkPsid = "claude-fork";
     const transcriptsDir = join(dir, "transcripts");
@@ -153,9 +160,14 @@ describe("initHookContext", () => {
       platformSessionId: originalPsid,
     });
 
+    const child = join(dir, "test4");
+    mkdirSync(join(child, ".git"), { recursive: true });
+    const now = new Date().toISOString();
+    writeProjectManifest(child, { schemaVersion: 3, projectId: "child", repositories: [{ relativePath: "." }], createdAt: now, updatedAt: now });
+    closeDatabase(openDatabase(join(child, ".adit", "adit.sqlite")));
     const { initHookContext } = await loadContextModule();
-    const first = await initHookContext(dir, "claude-code", forkPsid, {
-      projectRoot: dir,
+    const first = await initHookContext(child, "claude-code", forkPsid, {
+      projectRoot: child,
       transcriptPath: forkPath,
     });
     expect(first?.session.id).toBe("original-session");
@@ -219,6 +231,55 @@ describe("initHookContext", () => {
     expect(ctx).toBeNull();
     const row = db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
     expect(row.count).toBe(1);
+  });
+
+  it("binds a conversation once across parent/child hooks, cwd changes and module reloads", async () => {
+    const child = join(dir, "test4");
+    mkdirSync(join(child, ".git"), { recursive: true });
+    const now = new Date().toISOString();
+    writeProjectManifest(child, {
+      schemaVersion: 3, projectId: "test4-independent", repositories: [{ relativePath: "." }],
+      createdAt: now, updatedAt: now,
+    });
+    closeDatabase(openDatabase(join(child, ".adit", "adit.sqlite")));
+    const firstModule = await loadContextModule();
+    const parent = await firstModule.initHookContext(dir, "codex", "parent-session", { projectRoot: dir });
+    const parentSessionId = parent!.session.id;
+    closeDatabase(parent!.db);
+    const reloaded = await loadContextModule();
+    const continued = await reloaded.initHookContext(child, "codex", "parent-session", { projectRoot: child });
+    expect(continued!.session.id).toBe(parentSessionId);
+    expect(continued!.config.projectRoot).toBe(dir);
+    closeDatabase(continued!.db);
+    // A fresh conversation launched from the child picks the child even if
+    // the platform also invokes the inherited parent hook.
+    const own = await reloaded.initHookContext(child, "codex", "child-session", { projectRoot: dir });
+    expect(own!.session.projectId).toBe("test4-independent");
+    const childSessionId = own!.session.id;
+    closeDatabase(own!.db);
+    const ownContinued = await reloaded.initHookContext(dir, "codex", "child-session", { projectRoot: child });
+    expect(ownContinued!.session.id).toBe(childSessionId);
+    expect(ownContinued!.config.projectRoot).toBe(child);
+    closeDatabase(ownContinued!.db);
+    expect((db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number }).count).toBe(1);
+  });
+
+  it("keeps pre-upgrade parent history when a child installs its own hooks", async () => {
+    insertSession(db, {
+      id: "before-upgrade", projectId, clientId, sessionType: "interactive", platform: "codex",
+      startedAt: new Date().toISOString(), vclockJson: serialize(createClock(clientId)),
+      platformSessionId: "legacy-parent-session",
+    });
+    const child = join(dir, "test4");
+    mkdirSync(join(child, ".git"), { recursive: true });
+    const now = new Date().toISOString();
+    writeProjectManifest(child, { schemaVersion: 3, projectId: "test4", repositories: [{ relativePath: "." }], createdAt: now, updatedAt: now });
+    closeDatabase(openDatabase(join(child, ".adit", "adit.sqlite")));
+    const { initHookContext } = await loadContextModule();
+    const result = await initHookContext(child, "codex", "legacy-parent-session", { projectRoot: child });
+    expect(result!.session.id).toBe("before-upgrade");
+    expect(result!.config.projectRoot).toBe(dir);
+    closeDatabase(result!.db);
   });
 
   it("uses fixed project root for config and DB while preserving runtime cwd metadata", async () => {

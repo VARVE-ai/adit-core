@@ -1,4 +1,4 @@
-/** Repository upload selection used exclusively by `adit init`. */
+/** Repository membership selection used exclusively by `adit init`. */
 
 import { createInterface } from "node:readline/promises";
 import {
@@ -54,7 +54,7 @@ export async function promptRepositorySelection(
   repositories: ProjectManifestRepository[],
 ): Promise<ProjectManifestRepository[]> {
   const choices = buildRepositorySyncChoices(repositories);
-  console.log("  Select repositories to sync to ADIT Cloud:");
+  console.log("  Select repositories to include in this project (excluded history is kept):");
 
   if (canUseInkSelect()) {
     try {

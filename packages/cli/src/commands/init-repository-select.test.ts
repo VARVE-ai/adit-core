@@ -27,8 +27,8 @@ describe("init repository sync selection", () => {
   });
 
   it("describes checkbox states without requiring numbered-input knowledge", () => {
-    expect(describeRepositoryChoice(choices[0], true)).toBe("sync");
-    expect(describeRepositoryChoice(choices[1], false)).toBe("not synced");
+    expect(describeRepositoryChoice(choices[0], true)).toBe("included");
+    expect(describeRepositoryChoice(choices[1], false)).toBe("excluded (history kept)");
     expect(describeRepositoryChoice(choices[2], false)).toBe("deleted in Cloud");
     expect(describeRepositoryChoice(choices[2], true)).toBe("recreate as new");
   });

@@ -30,7 +30,7 @@ vi.mock("@varveai/adit-core", () => ({
   discoverWorkspaceRepositories: mocks.discoverWorkspaceRepositories,
   readProjectManifest: mocks.readProjectManifest,
   projectManifestPath: (projectRoot: string) => `${projectRoot}/.adit/project.json`,
-  resolveManifestRepositories: (
+  resolveActiveManifestRepositories: (
     projectRoot: string,
     manifest: { repositories: Array<{ relativePath: string; repositoryId?: string }> },
   ) =>

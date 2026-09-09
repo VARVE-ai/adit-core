@@ -27,6 +27,11 @@ export async function runSyncCycle(options: {
   forceRemoteBranchCheck?: boolean;
 }): Promise<SyncCycleResult> {
   const serverUrl = normalizeServerUrl(options.serverUrl);
+  // Init changes must reach Cloud even when there are no new events or no
+  // selected repositories. The server applies each saved revision once.
+  if (options.projectContext.registration) {
+    await options.client.post("/api/project-link/registration", options.projectContext.registration);
+  }
   const engine = new SyncEngine(options.db, options.client, {
     projectId: options.projectContext.localProjectId,
     projectName: options.projectContext.projectName,

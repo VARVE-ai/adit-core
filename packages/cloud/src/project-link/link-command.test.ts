@@ -176,6 +176,21 @@ function setupWorkspaceLinkTest(repositories: TestRepository[], commitsByPath: R
 }
 
 describe("linkCommand workspace repository requests", () => {
+  it("registers an empty selection and keeps the returned Cloud project identity", async () => {
+    mockLoadConfig.mockReturnValue({ projectRoot: "/workspace" });
+    const registration = { localProjectId: "local-parent", projectName: "parent", updatedAt: "2026-09-09T01:00:00.000Z", repositories: [] };
+    mockResolveCloudProjectContext.mockResolvedValue({ projectType: "workspace", projectRoot: "/workspace", localProjectId: "local-parent",
+      projectName: "parent", repositories: [], registration, remoteUrl: null, canonicalRepoKey: null });
+    const post = vi.fn(async () => ({ status: "updated", projectId: "cloud-parent" }));
+    const { linkCommand } = await import("./link-command.js");
+    const result = await linkCommand({} as never, { post } as never, "/workspace", "local-parent", "https://cloud.example.com", { json: true, deletionPolicyRefreshed: true });
+    expect(post).toHaveBeenCalledExactlyOnceWith("/api/project-link/registration", registration);
+    expect(result.localProjectId).toBe("local-parent");
+    expect(result.serverProjectId).toBe("cloud-parent");
+    expect(result.projectId).toBe("cloud-parent");
+    expect(result.repositoryResults).toEqual([]);
+  });
+
   it("prints compact workspace output instead of per-repository summaries", async () => {
     const repositories = [
       {
@@ -313,6 +328,10 @@ describe("linkCommand workspace repository requests", () => {
 
       const output = log.mock.calls.map((call) => String(call[0] ?? "")).join("\n");
       expect(output).toContain("[Step 1/6] Negotiating project ID with server...");
+      expect(client.post).toHaveBeenCalledWith("/api/project-link/negotiate", expect.objectContaining({
+        projectName: "repo-name",
+        remoteUrl: "git@github.com:VARVE-ai/adit-core.git",
+      }));
       expect(output).toContain("Document scores:");
       expect(output).toContain("Missing:");
       expect(output).toContain("Suggestions:");

@@ -10,6 +10,7 @@ import {
   ProjectManifestError,
   loadConfig,
   openDatabase,
+  closeDatabase,
   getSessionByPlatformSessionId,
   insertSession,
   insertSessionPlatformAlias,
@@ -23,7 +24,9 @@ import {
 import type Database from "better-sqlite3";
 import { getCurrentBranch, getRemoteUrl } from "@varveai/adit-engine";
 import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { findForkedSession, markSupersededPrompt } from "./session-fork.js";
+import { bindSessionProject, readSessionProject } from "./session-project.js";
 
 export interface HookContext {
   db: Database.Database;
@@ -45,14 +48,60 @@ export async function initHookContext(
   options: HookContextOptions = {},
 ): Promise<HookContext | null> {
   const projectRoot = options.projectRoot ?? null;
-  if (!projectRoot) return null;
+  if (!projectRoot || !platformSessionId) return null;
 
   // Only a project with a valid manifest records events. Legacy projects
   // (awaiting `adit init` migration) and damaged manifests skip silently —
   // hooks must never mint an identity or block the agent.
   let config: AditConfig;
   try {
-    config = loadHookConfig(projectRoot);
+    const binding = readSessionProject(platform, platformSessionId);
+    if (binding) {
+      config = loadHookConfig(binding.projectRoot);
+      if (config.projectId !== binding.projectId) return null;
+    } else {
+      config = loadHookConfig(projectRoot);
+      if (config.initialization !== "initialized" || !existsSync(config.dbPath)) return null;
+      const initial = loadHookConfig(cwd, false);
+      const candidates = new Map<string, AditConfig>([[config.projectRoot, config]]);
+      if (initial.initialization === "initialized") candidates.set(initial.projectRoot, initial);
+      // Upgrade continuity: an existing session may already be in a parent's
+      // database before this version introduced bindings or hooks were refreshed.
+      for (let dir = dirname(resolve(cwd)); ; dir = dirname(dir)) {
+        if (existsSync(`${dir}/.adit/project.json`)) {
+          const ancestor = loadHookConfig(dir);
+          candidates.set(ancestor.projectRoot, ancestor);
+        }
+        if (dirname(dir) === dir) break;
+      }
+      let owner: AditConfig | undefined;
+      for (const candidate of candidates.values()) {
+        if (!existsSync(candidate.dbPath)) continue;
+        const candidateDb = openDatabase(candidate.dbPath);
+        try {
+          let previous = getSessionByPlatformSessionId(candidateDb, platformSessionId);
+          if (!previous && options.transcriptPath) {
+            try {
+              previous = findForkedSession(candidateDb, {
+                projectId: candidate.projectId, platform,
+                platformSessionId, transcriptPath: options.transcriptPath,
+              });
+            } catch { /* failed fork detection must not prevent a new session */ }
+          }
+          if (previous) {
+            owner = candidate;
+            break;
+          }
+        } finally {
+          closeDatabase(candidateDb);
+        }
+      }
+      config = owner ?? initial;
+      if (config.initialization !== "initialized" || !existsSync(config.dbPath)) return null;
+      const saved = bindSessionProject(platform, platformSessionId, config);
+      config = loadHookConfig(saved.projectRoot);
+      if (config.projectId !== saved.projectId) return null;
+    }
   } catch (err) {
     if (err instanceof ProjectManifestError) return null;
     throw err;
@@ -88,7 +137,10 @@ export async function initHookContext(
     const branch = await safeGetCurrentBranch(cwd);
     const remoteUrl = await safeGetRemoteUrl(cwd);
 
-    insertSession(db, {
+    session = db.transaction(() => {
+      const existing = getSessionByPlatformSessionId(db, platformSessionId);
+      if (existing) return existing;
+      insertSession(db, {
       id,
       projectId: config.projectId,
       clientId: config.clientId,
@@ -105,7 +157,8 @@ export async function initHookContext(
       platformSessionId,
     });
 
-    session = getSessionByPlatformSessionId(db, platformSessionId)!;
+      return getSessionByPlatformSessionId(db, platformSessionId)!;
+    })();
   }
 
   return { db, config, session };
@@ -139,11 +192,12 @@ function attachForkedSession(
   }
 }
 
-function loadHookConfig(projectRoot: string): AditConfig {
+function loadHookConfig(projectRoot: string, fixed = true): AditConfig {
   const originalProjectRoot = process.env.ADIT_PROJECT_ROOT;
   const originalDataDir = process.env.ADIT_DATA_DIR;
   const originalDbPath = process.env.ADIT_DB_PATH;
-  process.env.ADIT_PROJECT_ROOT = projectRoot;
+  if (fixed) process.env.ADIT_PROJECT_ROOT = projectRoot;
+  else delete process.env.ADIT_PROJECT_ROOT;
   delete process.env.ADIT_DATA_DIR;
   delete process.env.ADIT_DB_PATH;
 

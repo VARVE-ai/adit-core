@@ -157,10 +157,6 @@ async function linkWorkspaceProject(
   serverUrl: string,
   options: LinkOptions,
 ): Promise<LinkResult> {
-  if (repositories.length === 0) {
-    throw new Error("No Git repositories found in this project.");
-  }
-
   const results: LinkResult[] = [];
   const failures: WorkspaceLinkFailure[] = [];
   const repositorySet = repositoryPayloads(repositories);
@@ -275,9 +271,12 @@ export async function linkCommand(
     throw new CloudProjectDeletedError(projectConfig.cloudDeletedAt);
   }
   const projectContext = await resolveCloudProjectContext(projectConfig);
+  const registration = projectContext.registration
+    ? await client.post<{ projectId: string }>("/api/project-link/registration", projectContext.registration)
+    : null;
 
-  if (projectContext.projectType === "workspace") {
-    return linkWorkspaceProject(
+  if (projectContext.projectType === "workspace" || projectContext.repositories.length === 0) {
+    const result = await linkWorkspaceProject(
       db,
       client,
       projectContext.repositories,
@@ -287,6 +286,10 @@ export async function linkCommand(
       serverUrl,
       options,
     );
+    if (projectContext.repositories.length === 0 && registration?.projectId) {
+      return { ...result, projectId: registration.projectId, serverProjectId: registration.projectId };
+    }
+    return result;
   }
 
   const repository = projectContext.repositories[0];
@@ -384,7 +387,7 @@ async function linkRepositoryCommand(
   }
   const canonicalRepoKey = repository.canonicalRepoKey ?? normalizeGitHubRepoKey(remoteUrl);
   const remoteProjectName = projectNameFromRemoteUrl(remoteUrl);
-  const cloudProjectName = projectType === "workspace" ? projectName : remoteProjectName;
+  const cloudProjectName = projectName;
   const repositoryDisplayName = repository.displayName || remoteProjectName;
   const cachedServerProjectId = cache?.confirmedProjectId ?? null;
 

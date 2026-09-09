@@ -48,7 +48,7 @@ import {
 import { analyzeProjectLayout, resolveInitRoot } from "./project-layout.js";
 import { prepareProjectManifest } from "./init-manifest.js";
 
-export async function initCommand(opts: {
+interface InitOptions {
   cwd?: string;
   platform?: string;
   force?: boolean;
@@ -57,7 +57,30 @@ export async function initCommand(opts: {
   repos?: string[];
   detach?: boolean;
   absorb?: boolean;
-}): Promise<void> {
+}
+
+export async function initCommand(opts: InitOptions): Promise<void> {
+  const keys = ["ADIT_PROJECT_ROOT", "ADIT_DATA_DIR", "ADIT_DB_PATH"] as const;
+  const previous = keys.map((key) => process.env[key]);
+  const root = resolveInitRoot(opts.cwd ?? process.cwd()).root;
+  process.env.ADIT_PROJECT_ROOT = root;
+  // A tool may have inherited the parent's fixed hook environment. Explicit
+  // init in a child must also initialize/link the child's own database.
+  if (previous[0] && previous[0] !== root) {
+    delete process.env.ADIT_DATA_DIR;
+    delete process.env.ADIT_DB_PATH;
+  }
+  try {
+    await initializeProject(opts);
+  } finally {
+    keys.forEach((key, index) => {
+      if (previous[index] === undefined) delete process.env[key];
+      else process.env[key] = previous[index];
+    });
+  }
+}
+
+async function initializeProject(opts: InitOptions): Promise<void> {
   const cwd = opts.cwd ?? process.cwd();
 
   console.log();
@@ -80,14 +103,6 @@ export async function initCommand(opts: {
     detach: opts.detach,
     absorb: opts.absorb,
   });
-
-  if (plan.status === "member") {
-    console.log(`  [=] ${basename(projectRoot)} already belongs to the project at ${plan.parentRoot}`);
-    console.log(`      (registered as '${plan.relativePath}'). Run 'adit init' there to change its settings,`);
-    console.log("      or 'adit init --detach' here to split it into a project of its own.");
-    return;
-  }
-  const memberHookRoots = plan.status === "written" ? plan.hookRoots ?? [] : [];
 
   if (plan.status === "cancelled") {
     console.log("  Initialization cancelled. Nothing was changed.");
@@ -141,7 +156,7 @@ export async function initCommand(opts: {
     const state = repo.cloudDeletedAt
       ? " (deleted in Cloud)"
       : repo.syncEnabled === false
-        ? " (not synced)"
+        ? " (excluded; history kept)"
         : "";
     const label = repo.relativePath === "." ? "./" : repo.relativePath;
     console.log(pc.dim(`        - ${label}${state}`));
@@ -255,24 +270,6 @@ export async function initCommand(opts: {
     console.log(pc.dim("  Tip: run 'adit init' any time to change these."));
   }
 
-  // Member directories absorbed into this project keep their own hook
-  // files, so re-point them at this project root.
-  if (memberHookRoots.length > 0) {
-    const platforms = readConnectedPlatforms(setupRoot) ?? [];
-    for (const memberRoot of memberHookRoots) {
-      for (const platform of platforms) {
-        try {
-          const adapter = getAdapter(platform);
-          if (adapter.hookMappings.length === 0) continue;
-          await adapter.installHooks(memberRoot, aditBinaryPath, { hookProjectRoot: setupRoot });
-        } catch (err) {
-          console.log(`  ${marks.fail} ${platform} — could not re-point hooks in ${relative(setupRoot, memberRoot)}: ${(err as Error).message}`);
-        }
-      }
-      console.log(`  ${ok} Hooks in ${relative(setupRoot, memberRoot)}/ now record into this project`);
-    }
-  }
-
   // --- Cloud: optional login + link (skippable, never fails init) ---
   const cloudResult = await runCloudSetupSection({
     interactive,
@@ -348,12 +345,7 @@ export async function initCommand(opts: {
       ? "the repository"
       : `all ${manifest.repositories.length} repositories`;
     console.log(pc.dim(`  Tip: start Claude Code / Codex from this directory — work across ${repositoryScope} is recorded;`));
-    if (memberHookRoots.length > 0) {
-      const merged = memberHookRoots.map((memberRoot) => relative(setupRoot, memberRoot) || ".").join(", ");
-      console.log(pc.dim(`       sessions started inside ${merged} are recorded here too; other member repositories are not.`));
-    } else {
-      console.log(pc.dim("       sessions started inside a member repository are not."));
-    }
+    console.log(pc.dim("       sessions started in an independently initialized child are recorded in that child project."));
   }
   if (!cloudResult.linked) {
     console.log(`\n  ${pc.cyan("Next step:")} run ${pc.bold("adit cloud link")} to connect this project to the cloud.`);

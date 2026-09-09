@@ -305,6 +305,18 @@ describe("project manifest", () => {
     const entries = readFileSync(projectManifestPath(root), "utf-8");
     expect(JSON.parse(entries).schemaVersion).toBe(1);
   });
+
+  it("recovers dead-process locks immediately and never steals a live long-running init", async () => {
+    const lock = join(root, ".adit", "init.lock");
+    mkdirSync(join(root, ".adit"), { recursive: true });
+    writeFileSync(lock, "2147483647");
+    await withProjectInitLock(root, async () => {});
+    expect(existsSync(lock)).toBe(false);
+    writeFileSync(lock, String(process.pid));
+    utimesSync(lock, new Date(0), new Date(0));
+    await expect(withProjectInitLock(root, async () => {})).rejects.toThrow(ProjectInitLockError);
+    expect(readFileSync(lock, "utf8")).toBe(String(process.pid));
+  });
 });
 
 describe("loadConfig project resolution", () => {
@@ -432,6 +444,20 @@ describe("loadConfig project resolution", () => {
     const config = loadConfig(child);
     expect(config.projectRoot).toBe(child);
     expect(config.projectId).toBe(childManifest.projectId);
+  });
+
+  it("does not route an excluded child to the parent", () => {
+    writeProjectManifest(root, manifestFor({ repositories: [{ relativePath: "api", syncEnabled: false }] }));
+    const child = join(root, "api");
+    mkdirSync(join(child, ".git"), { recursive: true });
+    expect(loadConfig(child).initialization).toBe("uninitialized");
+    expect(loadConfig(child).projectRoot).toBe(child);
+  });
+
+  it("rejects a schema 3 child identity that collides with the implicit root identity", () => {
+    expect(() => writeProjectManifest(root, manifestFor({ schemaVersion: 3,
+      repositories: [{ relativePath: "." }, { relativePath: "api", repositoryId: manifestFor().projectId }],
+    }))).toThrow(/more than once/);
   });
 
   it("flags legacy traces as needing migration", () => {

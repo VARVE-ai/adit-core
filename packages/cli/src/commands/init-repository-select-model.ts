@@ -16,5 +16,5 @@ export function describeRepositoryChoice(
   if (choice.cloudDeleted) {
     return checked ? "recreate as new" : "deleted in Cloud";
   }
-  return checked ? "sync" : "not synced";
+  return checked ? "included" : "excluded (history kept)";
 }

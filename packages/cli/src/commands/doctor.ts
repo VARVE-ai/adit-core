@@ -13,7 +13,7 @@ import { join } from "node:path";
 import {
   computeRepositoryDrift,
   readProjectManifest,
-  resolveManifestRepositories,
+  resolveActiveManifestRepositories,
   openDatabase,
   closeDatabase,
   projectManifestPath,
@@ -49,7 +49,7 @@ export async function doctorCommand(
   // 1. Project manifest — the single authority on identity and members.
   const manifest = readProjectManifest(config.projectRoot);
   const registeredRepositories = manifest
-    ? resolveManifestRepositories(config.projectRoot, manifest)
+    ? resolveActiveManifestRepositories(config.projectRoot, manifest)
     : config.repositories;
   checks.push({
     name: "Project manifest",

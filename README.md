@@ -141,30 +141,37 @@ adit cloud login --server <url>
 
 ## Projects & Initialization
 
-`adit init` is the only command that decides what a project is. It writes
-`.adit/project.json` — the project identity, the project type, and the explicit
-repository member list. Every other command (status, doctor, link, sync, hooks)
-only reads this manifest and never changes the project structure.
+Every project represents a workspace directory, even when it contains only a
+root Git repository. Project-level Git address and identity fields stay empty;
+the root (`.`) and child repositories keep their own addresses and identities.
+Cloud project names use the workspace directory name.
 
-- **Single-repo project** — a normal Git repository. `adit init` sets it up
-  without questions.
-- **Multi-repo project** — a directory containing several Git repositories one
-  level below (with or without a top-level `.git`). `adit init` lists the
-  repositories and asks how to manage them. Non-interactive environments use
-  `adit init --multi-repo` / `adit init --single-repo` explicitly.
-- **Recording boundary** — for a multi-repo project, start your coding tools
-  from the project root: work across all member repositories is recorded there.
-  Sessions started inside a member repository are not recorded. To record a
-  member repository on its own, run `adit init` inside it — it becomes an
-  independent project and the parent project is not affected.
-- **Adding / removing repositories** — nothing changes automatically. Re-run
-  `adit init` in the project root and confirm the updated list; `adit status`
-  and `adit doctor` point out unregistered or missing repositories.
-- **Upgrading from an older adit** — projects initialized before the manifest
-  existed show a one-time migration prompt. Run `adit init` once in each
-  project: the project identity is carried over, so the cloud project, local
-  history, team links and sync progress all stay attached. Recording is paused
-  until the migration runs.
+`adit init` writes `.adit/project.json`: a stable project identity and the
+repositories included in that project. The root Git repository (`.`) and
+immediate child repositories can be selected together, for example
+`adit init --repos .,test2,test3`. There is no stored project type.
+
+- **Parent and child projects coexist.** Running init in `test4/` creates or
+  reuses its own project, whether or not the parent also includes that repository.
+  Including a child never moves its data, changes its hooks, or hides its project.
+- **Adding and excluding repositories.** Re-run init at the parent and select
+  the current members. Exclusion stops repository uploads and removes this
+  source's team mounts on the next successful link/sync. Historical records and
+  the repository identity remain; re-inclusion reuses the identity but requires
+  manual team mounting. Other projects and members are unaffected.
+- **Sessions and documents.** A session stays with the project where it begins,
+  including after working-directory changes or hook refreshes. Historical data
+  stays in its original project. Documents synced from the same repository by
+  two projects have independent versions. Root document discovery excludes
+  nested Git repositories; each selected repository uploads its own documents.
+- **Recovery.** Init saves the complete selection atomically. Interrupted runs
+  can be retried without moving child data. Cloud applies saved revisions once
+  and ignores stale retries. `--absorb` is no longer supported; `--detach` is a
+  compatibility alias for ordinary independent initialization.
+- **Older projects.** Explicit init upgrades the local manifest to schema 3 and
+  restores a legacy merged child without changing its parent or moving history.
+  Ordinary uploads never hide or restore projects. Install the matching Cloud
+  version and apply its registration migration before using schema 3 clients.
 
 ## CLI Commands
 

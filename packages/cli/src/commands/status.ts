@@ -192,7 +192,7 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
     const drift = computeRepositoryDrift(config.projectRoot, manifest);
     status.git = {
       workspace: true,
-      repositories: manifest.repositories.length,
+      repositories: drift.registered.length,
       registered: drift.registered,
       unregistered: drift.unregistered,
       missingRepositories: drift.missing,
