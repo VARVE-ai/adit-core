@@ -172,6 +172,15 @@ describe("projectLinkCliHandler", () => {
     process.exitCode = undefined;
   });
 
+  it("does not refresh or apply Cloud deletion policy during a dry run", async () => {
+    mocks.linkCommand.mockResolvedValue(makeWorkspaceResult());
+    await projectLinkCliHandler({ dryRun: true, force: true, silent: true });
+    expect(mocks.refreshDeletionPolicy).not.toHaveBeenCalled();
+    expect(mocks.linkCommand).toHaveBeenCalledWith(expect.anything(), expect.anything(), "/workspace", "workspace-id",
+      "https://cloud.example.com", expect.objectContaining({ dryRun: true, force: true }));
+    expect(process.exitCode).toBeUndefined();
+  });
+
   it("sets a failing exit code without duplicate error output for workspace partial failure", async () => {
     const result = makeWorkspaceResult();
     mocks.linkCommand.mockRejectedValue(

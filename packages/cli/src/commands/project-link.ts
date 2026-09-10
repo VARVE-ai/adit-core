@@ -113,11 +113,13 @@ export async function projectLinkCliHandler(opts: LinkOptions): Promise<LinkResu
   let deletionPolicy: ProjectDeletionPolicy | null = null;
   try {
     await client.get("/api/sync/health");
-    deletionPolicy = await refreshProjectDeletionPolicy(
-      client,
-      config.projectRoot,
-      config.projectId,
-    );
+    if (!opts.dryRun) {
+      deletionPolicy = await refreshProjectDeletionPolicy(
+        client,
+        config.projectRoot,
+        config.projectId,
+      );
+    }
   } catch (error) {
     if (error instanceof CloudNetworkError) {
       console.error(

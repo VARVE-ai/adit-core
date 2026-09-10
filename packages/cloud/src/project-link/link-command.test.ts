@@ -84,6 +84,8 @@ vi.mock("./qualify.js", async (importOriginal) => {
 });
 
 import { linkCommand, WorkspaceLinkPartialFailureError } from "./link-command.js";
+import { clearProjectLinkCache, updateCachedDocHashes, updateCachedQualified } from "./cache.js";
+import { refreshProjectDeletionPolicy } from "../project-deletion-policy.js";
 
 interface TestRepository {
   localRepositoryId: string;
@@ -176,6 +178,36 @@ function setupWorkspaceLinkTest(repositories: TestRepository[], commitsByPath: R
 }
 
 describe("linkCommand workspace repository requests", () => {
+  it.each(["empty", "fresh", "cached", "force"])("keeps %s dry-run previews free of Cloud and sync-cache writes", async (scenario) => {
+    vi.clearAllMocks();
+    const repositories = scenario === "empty" ? [] : ["a", "b"].map((name) => ({
+      localRepositoryId: name, relativePath: name, displayName: name, path: `/workspace/${name}`,
+      repositoryUrl: `https://github.com/test/${name}.git`, canonicalRepoKey: `github:test/${name}`,
+    }));
+    const { client } = setupWorkspaceLinkTest(repositories, { "/workspace/a": [makeCommit("a")], "/workspace/b": [makeCommit("b")] });
+    mockResolveCloudProjectContext.mockResolvedValue({ projectType: "workspace", projectRoot: "/workspace",
+      localProjectId: "workspace-id", projectName: "workspace-root", repositories,
+      registration: { localProjectId: "workspace-id", repositories },
+    });
+    const cache = { confirmedProjectId: "server-project", lastBranchSyncAt: new Date().toISOString(),
+      remoteRefsFingerprint: "remote-main", docHashes: {}, qualified: false, branchHeads: {} };
+    if (scenario === "cached" || scenario === "force") mockGetProjectLinkCache.mockReturnValue(cache);
+    const before = structuredClone(cache);
+    mockDiscoverDocuments.mockReturnValue([{ fileName: "README.md", sourcePath: "README.md", content: "# Test", contentHash: "hash", sizeBytes: 6, status: "new" }]);
+    await linkCommand({} as never, client as never, "/workspace", "workspace-id", "https://cloud.example.com", {
+      dryRun: true, force: scenario === "force", silent: true,
+    });
+    expect(client.post).not.toHaveBeenCalled();
+    expect(client.delete).not.toHaveBeenCalled();
+    expect(refreshProjectDeletionPolicy).not.toHaveBeenCalled();
+    expect(mockUpsertProjectLinkCache).not.toHaveBeenCalled();
+    expect(clearProjectLinkCache).not.toHaveBeenCalled();
+    expect(updateCachedDocHashes).not.toHaveBeenCalled();
+    expect(updateCachedQualified).not.toHaveBeenCalled();
+    expect(mockCheckQuality).not.toHaveBeenCalled();
+    expect(cache).toEqual(before);
+  });
+
   it("registers an empty selection and keeps the returned Cloud project identity", async () => {
     mockLoadConfig.mockReturnValue({ projectRoot: "/workspace" });
     const registration = { localProjectId: "local-parent", projectName: "parent", updatedAt: "2026-09-09T01:00:00.000Z", repositories: [] };

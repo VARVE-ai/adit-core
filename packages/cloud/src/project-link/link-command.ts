@@ -263,7 +263,7 @@ export async function linkCommand(
   serverUrl: string,
   options: LinkOptions = {},
 ): Promise<LinkResult> {
-  if (!options.deletionPolicyRefreshed) {
+  if (!options.dryRun && !options.deletionPolicyRefreshed) {
     await refreshProjectDeletionPolicy(client, projectRoot, projectId);
   }
   const projectConfig = loadConfig(projectRoot);
@@ -271,7 +271,7 @@ export async function linkCommand(
     throw new CloudProjectDeletedError(projectConfig.cloudDeletedAt);
   }
   const projectContext = await resolveCloudProjectContext(projectConfig);
-  const registration = projectContext.registration
+  const registration = !options.dryRun && projectContext.registration
     ? await client.post<{ projectId: string }>("/api/project-link/registration", projectContext.registration)
     : null;
 
@@ -354,7 +354,7 @@ async function linkRepositoryCommand(
   }
 
   // Handle --force: clear local cache and server data
-  if (options.force) {
+  if (options.force && !options.dryRun) {
     log("Clearing cached link data...");
     clearProjectLinkCache(db, projectId, serverUrl, repositoryId);
     try {
@@ -372,13 +372,14 @@ async function linkRepositoryCommand(
 
   // Load or initialize cache
   let cache = getProjectLinkCache(db, projectId, serverUrl, repositoryId);
+  if (options.dryRun) cache = options.force ? null : cache ? structuredClone(cache) : null;
 
   // ──────────────────────────────────────────────────────────
   // Step 2: Negotiate project ID
   // ──────────────────────────────────────────────────────────
 
   currentStep = "Negotiate project ID";
-  log("\n[Step 1/6] Negotiating project ID with server...");
+  log(options.dryRun ? "\n[Step 1/6] Previewing local project (no server registration)..." : "\n[Step 1/6] Negotiating project ID with server...");
   const step1Start = startStep();
 
   const remoteUrl = repository.repositoryUrl?.trim() ?? "";
@@ -391,7 +392,11 @@ async function linkRepositoryCommand(
   const repositoryDisplayName = repository.displayName || remoteProjectName;
   const cachedServerProjectId = cache?.confirmedProjectId ?? null;
 
-  const negotiate = await runStep(currentStep, () =>
+  const negotiate: NegotiateResponse = options.dryRun
+    ? { localProjectId: projectId, serverProjectId: cachedServerProjectId ?? projectId,
+      confirmedProjectId: cachedServerProjectId ?? projectId, projectName: cloudProjectName,
+      status: "confirmed", message: "Local preview; no server registration performed" }
+    : await runStep(currentStep, () =>
     client.post<NegotiateResponse>(
       "/api/project-link/negotiate",
       {
@@ -416,7 +421,7 @@ async function linkRepositoryCommand(
     log(`  Server found existing project with different ID. Adopting: ${confirmedProjectId}`);
   }
 
-  log(`  Project confirmed: ${negotiate.projectName} (${confirmedProjectId.slice(0, 12)}...)`);
+  log(`  Project ${options.dryRun ? "preview" : "confirmed"}: ${negotiate.projectName} (${confirmedProjectId.slice(0, 12)}...)`);
 
   if (negotiate.similarProjects && negotiate.similarProjects.length > 0) {
     log("  Note: your cloud account already has projects pointing at the same git remote:");
@@ -447,7 +452,7 @@ async function linkRepositoryCommand(
       initializedAt: now,
       updatedAt: now,
     };
-    upsertProjectLinkCache(db, cache);
+    if (!options.dryRun) upsertProjectLinkCache(db, cache);
   } else {
     cache.confirmedProjectId = confirmedProjectId;
     if (serverProjectChanged) {
@@ -462,7 +467,7 @@ async function linkRepositoryCommand(
       cache.qualified = false;
     }
     cache.updatedAt = now;
-    upsertProjectLinkCache(db, cache);
+    if (!options.dryRun) upsertProjectLinkCache(db, cache);
   }
 
   // Keep using the client-local ID for API requests. The server resolves it
@@ -553,7 +558,7 @@ async function linkRepositoryCommand(
     }
   } else {
     log("  Branches up to date (refs unchanged, synced < 1 hour ago)");
-    if (remoteSnapshot) {
+    if (remoteSnapshot && !options.dryRun) {
       cache.lastRemoteBranchCheckAt = new Date().toISOString();
       upsertProjectLinkCache(db, cache);
     }
