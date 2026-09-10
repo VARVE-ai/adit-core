@@ -86,6 +86,23 @@ Registered adapters can be listed with:
 adit hook list
 ```
 
+### Cursor hooks on Windows
+
+ADIT accepts UTF-8 BOM-prefixed hook input. Some Cursor versions also read their
+UTF-8 hook payload files through Windows PowerShell 5.1 without specifying the
+input encoding, corrupting non-ASCII text before ADIT receives it. For these
+invocations, ADIT reads Cursor's still-live UTF-8 payload file from the current
+user's temporary directory, matching the conversation, generation, hook event,
+Cursor version, and session ID. This also covers Cursor loading Claude hooks.
+No PowerShell upgrade, system locale change, or hook path change is required.
+
+Recovery is limited to recent `cursor-hook-payload-*.json` files with bounded
+file counts and sizes. ADIT never picks the newest conversation or guesses a
+reverse encoding. If no unique matching payload is available, it falls back to
+stdin; a future Cursor transport change may therefore require an adapter update.
+Payload files remain owned and cleaned up by Cursor. Existing stored events are
+not rewritten.
+
 ## Installation
 
 ### npm

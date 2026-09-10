@@ -24,6 +24,7 @@ import type Database from "better-sqlite3";
 import { getCurrentBranch, getRemoteUrl } from "@varveai/adit-engine";
 import { existsSync } from "node:fs";
 import { findForkedSession, markSupersededPrompt } from "./session-fork.js";
+import { parseHookStdin } from "./hook-stdin.js";
 
 export interface HookContext {
   db: Database.Database;
@@ -202,7 +203,7 @@ export async function readStdin(): Promise<Record<string, unknown>> {
     });
     process.stdin.on("end", () => {
       try {
-        finish(resolve, JSON.parse(data));
+        finish(resolve, parseHookStdin(data));
       } catch {
         finish(reject, new Error("Invalid JSON on stdin"));
       }
@@ -216,7 +217,7 @@ export async function readStdin(): Promise<Record<string, unknown>> {
     setTimeout(() => {
       if (data) {
         try {
-          finish(resolve, JSON.parse(data));
+          finish(resolve, parseHookStdin(data));
         } catch {
           finish(reject, new Error("Stdin timeout: incomplete JSON"));
         }
