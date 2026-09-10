@@ -57,6 +57,7 @@ import {
   buildQuestionResponse,
 } from "./requests.js";
 import { stopLocalCodexProcess } from "./terminal.js";
+import { hasCodexRolloutHistory } from "./local-rollout.js";
 import { applyReclaimInput } from "../reclaim-input.js";
 import {
   RECLAIM_COMMAND,
@@ -167,6 +168,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private codexSkills: Array<Record<string, unknown>> = [];
   private codexMcpServers: Array<Record<string, unknown>> = [];
   private localResumeLogWatcher: CodexResumeLogWatcher | null = null;
+  private localRelease: Promise<void> | null = null;
   private localModelConfigWatcher: CodexModelConfigWatcher | null = null;
   private readonly notices: RelayNotices;
 
@@ -271,6 +273,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   }
 
   async takeover(): Promise<void> {
+    this.assertNoLocalHandoff();
     if (this.ownerValue === "web") {
       await this.hydrateAppServerCapabilities();
       return;
@@ -358,36 +361,56 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.attachReclaimInput();
   }
 
-  async releaseToLocal(): Promise<void> {
-    if (this.ownerValue !== "web") return;
+  releaseToLocal(): Promise<void> {
+    if (this.localRelease) return this.localRelease;
+    if (this.ownerValue !== "web") return Promise.resolve();
+    this.localRelease = this.releaseWebControlToLocal().finally(() => {
+      this.localRelease = null;
+    });
+    return this.localRelease;
+  }
+
+  private async releaseWebControlToLocal(): Promise<void> {
     this.detachReclaimInput();
     this.notices.releasingToLocal();
-    await this.finishActiveRunAsAborted({
-      errorMessage: "Web control released to local CLI",
-      eventMessage: "Web control released to local CLI.",
-      collaborationErrorCode: "LOCAL_TAKEOVER_DURING_RUN",
-      interruptTurn: true,
-    });
-    this.appServer?.stop();
-    this.appServer = null;
-    this.loadedThreadIds = new Set<string>();
-    this.emptyThreadIds = new Set<string>();
-    const resumeId = this.pickLocalResumeSessionId();
-    if (resumeId) {
+    const currentSessionId = this.activeSessionId ?? this.resumeSessionId ?? this.sdkSessionId;
+    try {
+      await this.finishActiveRunAsAborted({
+        errorMessage: "Web control released to local CLI",
+        eventMessage: "Web control released to local CLI.",
+        collaborationErrorCode: "LOCAL_TAKEOVER_DURING_RUN",
+        interruptTurn: true,
+      });
+      const resumeId = await this.pickLocalResumeSessionId(currentSessionId);
+      if (this.ownerValue !== "web") return;
+      this.notices.debug(`Local handoff: session=${currentSessionId ?? "none"}, resume=${resumeId ?? "empty"}`);
+      await this.appServer?.stopAndWait();
+      if (this.ownerValue !== "web") return;
+      this.appServer = null;
+      this.loadedThreadIds = new Set<string>();
+      this.emptyThreadIds = new Set<string>();
       this.activeSessionId = resumeId;
       this.resumeSessionId = resumeId;
       this.sdkSessionId = resumeId;
       this.applyStoredUsageForSession(resumeId);
-    } else {
-      this.activeSessionId = null;
-      this.resumeSessionId = null;
-      this.sdkSessionId = null;
-      this.applyStoredUsageForSession(null);
+      this.notices.debug(`Local handoff: app-server exited; launching ${resumeId ? `resume ${resumeId}` : "empty session"}`);
+      this.startLocal(resumeId ? ["resume", resumeId] : []);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.notices.debug(`Local handoff failed: session=${currentSessionId ?? "none"}: ${message}`);
+      this.pushEvent("error", {
+        title: "Could not return Codex to local control",
+        message,
+        sessionId: currentSessionId ?? undefined,
+        createdAt: Date.now(),
+      });
+      if (this.ownerValue === "web") this.attachReclaimInput();
+      throw error;
     }
-    this.startLocal(resumeId ? ["resume", resumeId] : []);
   }
 
   async startNewSession(pendingSessionId?: string | null): Promise<void> {
+    this.assertNoLocalHandoff();
     if (this.ownerValue !== "web") {
       throw Object.assign(new Error("Web has not taken over this Codex session"), {
         statusCode: 409,
@@ -411,6 +434,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   }
 
   async switchSession(sessionId: string): Promise<void> {
+    this.assertNoLocalHandoff();
     if (!sessionId.trim()) {
       throw Object.assign(new Error("Codex session not found for this project"), {
         statusCode: 404,
@@ -444,7 +468,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       });
       await this.ensureAppServer();
       if (this.loadedThreadIds.has(sessionId)) {
-        this.noteThread({ id: sessionId }, null);
+        this.noteThread({ id: sessionId }, null, { markLocalResumable: true });
       } else {
         await this.resumeThread(sessionId);
       }
@@ -470,6 +494,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       sessionId?: string | null;
     } = {},
   ): Promise<void> {
+    this.assertNoLocalHandoff();
     if (this.ownerValue !== "web") {
       throw Object.assign(new Error("Web has not taken over this Codex session"), {
         statusCode: 409,
@@ -594,6 +619,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   }
 
   async handleSlashCommand(command: CliSlashCommand): Promise<void> {
+    this.assertNoLocalHandoff();
     const name = command.name.trim().replace(/^\//, "").toLowerCase();
     if (!name) return;
     const pendingSessionId =
@@ -938,6 +964,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     afterLogId = readMaxCodexLogId(),
   ): void {
     this.localResumeLogWatcher = startCodexResumeLogWatcher({
+      processId: child.pid,
       cwd: this.opts.cwd,
       afterLogId,
       onResume: (threadId) => {
@@ -1808,17 +1835,27 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     return this.activeSessionId ?? this.resumeSessionId ?? this.sdkSessionId;
   }
 
-  private pickLocalResumeSessionId(): string | null {
-    const seen = new Set<string>();
-    for (const id of [this.resumeSessionId, this.activeSessionId, this.sdkSessionId]) {
-      const sessionId = readString(id);
-      if (!sessionId || seen.has(sessionId)) continue;
-      seen.add(sessionId);
-      if (isCodexThreadSavedForCwd({ cwd: this.opts.cwd, threadId: sessionId })) {
-        return sessionId;
-      }
+  private async pickLocalResumeSessionId(sessionId: string | null): Promise<string | null> {
+    if (!sessionId) return null;
+    // The live Web thread is authoritative; an auxiliary index cannot replace it.
+    if (this.loadedThreadIds.has(sessionId) && !this.emptyThreadIds.has(sessionId)) {
+      return sessionId;
     }
-    return null;
+    if (isCodexThreadSavedForCwd({
+      cwd: this.opts.cwd,
+      threadId: sessionId,
+      onDiagnostic: (message) => this.notices.debug(`Local handoff ${sessionId}: ${message}`),
+    }) || await hasCodexRolloutHistory(this.opts.cwd, sessionId)) return sessionId;
+    if (this.emptyThreadIds.has(sessionId)) return null;
+    throw new Error(`Cannot verify history for Codex session ${sessionId}. The session ID was preserved; retry /local after restoring its rollout.`);
+  }
+
+  private assertNoLocalHandoff(): void {
+    if (this.localRelease) {
+      throw Object.assign(new Error("Codex is returning to local control. Retry after the handoff completes."), {
+        statusCode: 409,
+      });
+    }
   }
 
   private applyStoredUsageForSession(sessionId: string | null): void {
@@ -2121,7 +2158,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     }
     if (update.submittedLines.some((line) => line.trim() === RECLAIM_COMMAND)) {
       this.reclaimBuffer = "";
-      void this.releaseToLocal();
+      void this.releaseToLocal().catch(() => {});
       return;
     }
     if (update.submittedLines.length > 0) {

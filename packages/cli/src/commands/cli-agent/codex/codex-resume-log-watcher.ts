@@ -2,6 +2,8 @@ import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 export interface CodexResumeLogWatcher {
   claimProcessForThread(threadId: string): void;
@@ -24,9 +26,11 @@ export interface CodexSavedThreadLookupOptions {
   cwd: string;
   threadId: string;
   codexHome?: string;
+  onDiagnostic?: (message: string) => void;
 }
 
 export interface StartCodexResumeLogWatcherOptions {
+  processId?: number;
   cwd: string;
   onResume: (threadId: string) => void;
   codexHome?: string;
@@ -56,6 +60,8 @@ export function startCodexResumeLogWatcher(
   const startedAfterLogId = lastLogId;
   let claimedThreadId: string | null = null;
   let processUuid: string | null = null;
+  let claimingProcess = false;
+  let nextProcessClaimAt = 0;
 
   const poll = () => {
     if (stopped) return;
@@ -66,7 +72,22 @@ export function startCodexResumeLogWatcher(
         codexHome: opts.codexHome,
       });
     }
-    if (!processUuid) return;
+    if (!processUuid) {
+      if (opts.processId && !claimingProcess && Date.now() >= nextProcessClaimAt) {
+        claimingProcess = true;
+        void readCodexProcessUuidForProcess(opts.processId, startedAfterLogId, opts.codexHome)
+          .then((id) => {
+            if (stopped || processUuid || !id) return;
+            processUuid = id;
+            poll();
+          })
+          .finally(() => {
+            claimingProcess = false;
+            nextProcessClaimAt = Date.now() + 1000;
+          });
+      }
+      return;
+    }
     const result = readCodexResumeLogEvents({
       cwd: opts.cwd,
       codexHome: opts.codexHome,
@@ -192,11 +213,71 @@ function readCodexProcessUuidForThread(opts: {
   }
 }
 
+async function readCodexProcessUuidForProcess(
+  rootPid: number,
+  afterLogId: number,
+  codexHome?: string,
+): Promise<string | null> {
+  let db: Database.Database | null = null;
+  try {
+    db = openReadonlyDatabase(join(resolveCodexHome(codexHome), "logs_2.sqlite"));
+    const rows = db.prepare(`
+      SELECT DISTINCT process_uuid FROM logs
+      WHERE id > ? AND process_uuid IS NOT NULL AND feedback_log_body LIKE ?
+    `).all(afterLogId, CODEX_TUI_MARKER) as Array<{ process_uuid: string }>;
+    db.close();
+    db = null;
+    if (!rows.length) return null;
+    const candidates = rows.map((row) => ({
+      uuid: row.process_uuid,
+      pid: Number(/^pid:(\d+):/.exec(row.process_uuid)?.[1]),
+    }));
+    const direct = candidates.find((item) => item.pid === rootPid);
+    if (direct) return direct.uuid;
+
+    // npm/cmd launchers own the child handle; the native Codex writer is a descendant.
+    const run = promisify(execFile);
+    const parents = new Map<number, number>();
+    if (process.platform === "win32") {
+      const { stdout } = await run("powershell.exe", [
+        "-NoProfile", "-NonInteractive", "-Command",
+        "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress",
+      ], { windowsHide: true, timeout: 5000 });
+      const parsed = JSON.parse(stdout);
+      for (const row of Array.isArray(parsed) ? parsed : [parsed]) {
+        parents.set(row.ProcessId, row.ParentProcessId);
+      }
+    } else {
+      const { stdout } = await run("ps", ["-A", "-o", "pid=,ppid="], { timeout: 5000 });
+      for (const line of stdout.trim().split("\n")) {
+        const [pid, parent] = line.trim().split(/\s+/).map(Number);
+        parents.set(pid, parent);
+      }
+    }
+    return candidates.find(({ pid }) => {
+      const seen = new Set<number>();
+      while (pid && !seen.has(pid)) {
+        if (pid === rootPid) return true;
+        seen.add(pid);
+        pid = parents.get(pid) ?? 0;
+      }
+      return false;
+    })?.uuid ?? null;
+  } catch {
+    return null;
+  } finally {
+    db?.close();
+  }
+}
+
 export function isCodexThreadSavedForCwd(opts: CodexSavedThreadLookupOptions): boolean {
   const threadId = readString(opts.threadId);
   if (!threadId) return false;
   const statePath = join(resolveCodexHome(opts.codexHome), "state_5.sqlite");
-  if (!existsSync(statePath)) return false;
+  if (!existsSync(statePath)) {
+    opts.onDiagnostic?.("thread index: database missing");
+    return false;
+  }
 
   let db: Database.Database | null = null;
   try {
@@ -205,8 +286,11 @@ export function isCodexThreadSavedForCwd(opts: CodexSavedThreadLookupOptions): b
       | ThreadCwdRow
       | undefined;
     const threadCwd = readString(row?.cwd);
-    return Boolean(threadCwd && normalizePath(threadCwd) === normalizePath(opts.cwd));
-  } catch {
+    const saved = Boolean(threadCwd && normalizePath(threadCwd) === normalizePath(opts.cwd));
+    opts.onDiagnostic?.(`thread index: ${saved ? "matched" : threadCwd ? "cwd mismatch" : "missing row"}`);
+    return saved;
+  } catch (error) {
+    opts.onDiagnostic?.(`thread index read failed: ${error instanceof Error ? error.message : String(error)}`);
     return false;
   } finally {
     try {

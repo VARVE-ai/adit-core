@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import { stripVTControlCharacters } from "node:util";
 import { killCliProcessTree, spawnCliProcess } from "../cli-process.js";
+import { stopLocalCodexProcess } from "./terminal.js";
 
 export interface CodexJsonRpcMessage {
   id?: string | number;
@@ -103,7 +104,8 @@ export class CodexAppServerClient extends EventEmitter {
   }
 
   get isRunning(): boolean {
-    return Boolean(this.child && !this.child.killed);
+    // A kill signal does not mean the writer has exited yet.
+    return Boolean(this.child);
   }
 
   async start(): Promise<void> {
@@ -191,6 +193,19 @@ export class CodexAppServerClient extends EventEmitter {
       child?.stdin?.end();
     } catch {}
     killCliProcessTree(child);
+  }
+
+  async stopAndWait(): Promise<void> {
+    this.stopped = true;
+    const child = this.child;
+    this.rejectAll(new Error("Codex app-server stopped"));
+    try {
+      child?.stdin?.end();
+    } catch {}
+    if (!await stopLocalCodexProcess(child)) {
+      throw new Error("Codex app-server did not exit; local handoff cancelled. Retry /local.");
+    }
+    if (this.child === child) this.child = null;
   }
 
   private send(message: Record<string, unknown>): void {

@@ -29,6 +29,43 @@ afterEach(() => {
 });
 
 describe("CodexAppServerClient", () => {
+  it("waits for the app-server exit event before completing local handoff", async () => {
+    const child = mockAppServerProcess();
+    child.kill.mockImplementation(() => { child.killed = true; return true; });
+    mocks.spawnCliProcess.mockReturnValue(child);
+    const onError = vi.fn();
+    const client = new CodexAppServerClient({ bin: "codex", cwd: "/tmp/project", onError });
+    await client.start();
+    let stopped = false;
+    const stopping = client.stopAndWait().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    child.emit("exit", 0, null);
+    await stopping;
+    expect(stopped).toBe(true);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("reports an exit timeout and retains the child so local handoff can be retried", async () => {
+    vi.useFakeTimers();
+    const child = mockAppServerProcess();
+    child.kill.mockImplementation(() => { child.killed = true; return true; });
+    mocks.spawnCliProcess.mockReturnValue(child);
+    const client = new CodexAppServerClient({ bin: "codex", cwd: "/tmp/project" });
+    try {
+      await client.start();
+      const rejected = expect(client.stopAndWait()).rejects.toThrow("did not exit");
+      await vi.advanceTimersByTimeAsync(1500);
+      await rejected;
+      const stopping = client.stopAndWait();
+      child.emit("exit", 0, null);
+      await stopping;
+    } finally {
+      client.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it("starts app-server with request_user_input enabled for Default mode", async () => {
     mocks.spawnCliProcess.mockReturnValue(mockAppServerProcess());
     const client = new CodexAppServerClient({ bin: "codex", cwd: "/tmp/project" });
