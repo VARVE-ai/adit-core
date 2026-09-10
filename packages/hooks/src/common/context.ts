@@ -27,6 +27,7 @@ import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { findForkedSession, markSupersededPrompt } from "./session-fork.js";
 import { bindSessionProject, readSessionProject } from "./session-project.js";
+import { parseHookStdin } from "./hook-stdin.js";
 
 export interface HookContext {
   db: Database.Database;
@@ -256,7 +257,7 @@ export async function readStdin(): Promise<Record<string, unknown>> {
     });
     process.stdin.on("end", () => {
       try {
-        finish(resolve, JSON.parse(data));
+        finish(resolve, parseHookStdin(data));
       } catch {
         finish(reject, new Error("Invalid JSON on stdin"));
       }
@@ -270,7 +271,7 @@ export async function readStdin(): Promise<Record<string, unknown>> {
     setTimeout(() => {
       if (data) {
         try {
-          finish(resolve, JSON.parse(data));
+          finish(resolve, parseHookStdin(data));
         } catch {
           finish(reject, new Error("Stdin timeout: incomplete JSON"));
         }
