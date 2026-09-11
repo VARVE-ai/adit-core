@@ -36,6 +36,8 @@ vi.mock("../auth/credentials.js", () => ({
 
 vi.mock("@varveai/adit-core", () => ({
   getSyncState: vi.fn(),
+  // These trigger tests use the repositories supplied by loadConfig.
+  readProjectManifest: vi.fn(() => null),
   // Must return a full AditConfig shape: resolveCloudProjectContext (real,
   // unmocked) maps over config.repositories, so a partial config makes
   // triggerAutoSync throw inside its fail-open catch and sync never runs.
@@ -187,7 +189,7 @@ describe("triggerAutoSync", () => {
     );
   });
 
-  it("passes normalized repository identity when syncing", async () => {
+  it("keeps Git identity on repositories and leaves workspace Git identity empty", async () => {
     mockCountUnsyncedEvents.mockReturnValue(20);
 
     await triggerAutoSync(fakeDb, PROJECT_ID, {
@@ -197,8 +199,14 @@ describe("triggerAutoSync", () => {
     expect(runSyncCycleFn).toHaveBeenCalledWith(
       expect.objectContaining({
         projectContext: expect.objectContaining({
-          remoteUrl: "git@github.com:VARVE-ai/adit-cloud.git",
-          canonicalRepoKey: "github:varve-ai/adit-cloud",
+          remoteUrl: null,
+          canonicalRepoKey: null,
+          repositories: [expect.objectContaining({
+            localRepositoryId: "proj-local-1",
+            relativePath: ".",
+            repositoryUrl: "git@github.com:VARVE-ai/adit-cloud.git",
+            canonicalRepoKey: "github:varve-ai/adit-cloud",
+          })],
         }),
       }),
     );

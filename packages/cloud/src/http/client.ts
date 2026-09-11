@@ -307,13 +307,11 @@ export class CloudClient {
           const responseBody = await readResponseBody(response);
 
           if (response.status === 401 || response.status === 403) {
-            this.recordRequestAuthFailure(
-              response.status,
-              response.statusText,
-              readBodyCode(responseBody),
-            );
-            throw new CloudAuthError(
-              `Authentication failed: ${response.status} ${response.statusText}`,
+            const code = readBodyCode(responseBody);
+            this.recordRequestAuthFailure(response.status, response.statusText, code);
+            throw new CloudAuthError(code === "client_deleted"
+              ? "Device has been unlinked. Please run 'adit cloud login' to connect again."
+              : `Authentication failed: ${response.status} ${response.statusText}`,
             );
           }
 
@@ -389,7 +387,9 @@ export class CloudClient {
         const data = await readResponseBody(response);
         if (!response.ok) {
           const code = readBodyCode(data);
-          const message = `Token refresh failed: ${response.status}. Please re-authenticate with 'adit cloud login'.`;
+          const message = code === "client_deleted"
+            ? "Device has been unlinked. Please run 'adit cloud login' to connect again."
+            : `Token refresh failed: ${response.status}. Please re-authenticate with 'adit cloud login'.`;
           // Unlocked: we are already inside the credentials refresh lock.
           recordAuthFailureUnlocked({
             stage: "refresh",

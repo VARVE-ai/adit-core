@@ -147,32 +147,37 @@ export async function cloudLogoutCommand(): Promise<void> {
     return;
   }
 
-  // Try to revoke the refresh token on the server
   try {
-    const client = new CloudClient(credentials.serverUrl, credentials);
-    await client.post("/api/auth/token/revoke", {
-      refreshToken: credentials.refreshToken,
-    });
-  } catch {
-    // Best-effort revocation — don't block logout on network errors
-  }
-
-  // Clear local sync state
-  const config = loadConfig();
-  try {
-    if (!existsSync(config.dbPath)) return;
-    const db = openDatabase(config.dbPath);
-    try {
-      const { clearSyncState } = await import("@varveai/adit-core");
-      clearSyncState(db, credentials.serverUrl);
-    } finally {
-      closeDatabase(db);
+    // Revoke directly: refreshing here would rotate the token before revoking the old value.
+    if (credentials.authType !== "token" && credentials.refreshToken) {
+      try {
+        await fetch(normalizeServerUrl(credentials.serverUrl) + "/api/auth/token/revoke", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refreshToken: credentials.refreshToken }),
+          signal: AbortSignal.timeout(5000),
+        });
+      } catch {
+        // Remote availability must never prevent local logout.
+      }
     }
-  } catch {
-    // Database may not exist
+    try {
+      const config = loadConfig();
+      if (existsSync(config.dbPath)) {
+        const db = openDatabase(config.dbPath);
+        try {
+          const { clearSyncState } = await import("@varveai/adit-core");
+          clearSyncState(db, credentials.serverUrl);
+        } finally {
+          closeDatabase(db);
+        }
+      }
+    } catch {
+      // Missing or corrupt projects do not prevent local logout.
+    }
+  } finally {
+    clearCredentials();
   }
-
-  clearCredentials();
   console.log("Logged out. Credentials cleared.");
 }
 

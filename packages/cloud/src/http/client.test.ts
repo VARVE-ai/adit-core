@@ -136,4 +136,23 @@ describe("CloudClient token refresh", () => {
     expect(String(call[0])).toBe("http://cloud.test/api/test");
     expect((call[1]?.headers as Record<string, string>).Authorization).toBe("Bearer fresh-access");
   });
+  for (const authType of ["device", "token"] as const) {
+    it("explains device deletion for " + authType + " uploads", async () => {
+      const credentials = makeCreds({ authType, expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      saveCredentials(credentials);
+      vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ code: "client_deleted" }, 403));
+      const client = new CloudClient("http://cloud.test", credentials);
+      await expect(client.post("/api/sync/push", {})).rejects.toThrow("Device has been unlinked");
+      expect(vi.mocked(fetch)).toHaveBeenCalledOnce();
+      expect(loadCredentials()?.lastAuthFailure?.code).toBe("client_deleted");
+    });
+  }
+  it("explains device deletion when its access token has already expired", async () => {
+    const credentials = makeCreds();
+    saveCredentials(credentials);
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ error: "client_deleted" }, 403));
+    await expect(new CloudClient("http://cloud.test", credentials).post("/api/sync/push", {})).rejects.toThrow("Device has been unlinked");
+    expect(vi.mocked(fetch)).toHaveBeenCalledOnce();
+  });
+
 });
