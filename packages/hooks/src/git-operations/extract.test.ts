@@ -19,37 +19,36 @@ function transcript(lines: unknown[]): string {
   return path;
 }
 
+
+/** The `item_completed` record Codex writes for every shell command it ran. */
+function commandExecution(item: Record<string, unknown>) {
+  return { type: "event_msg", payload: { type: "item_completed", item: { type: "CommandExecution", ...item } } };
+}
+
 describe("extractGitOperations", () => {
-  it("does not mistake outer completion for a successful inner command", () => {
+  it("does not mistake a completed Codex item for a successful command", () => {
     const calls = codexShellCalls([
-      { payload: { type: "exec_command_end", call_id: "native", command: "git commit -m fix", status: "completed", exit_code: 1 } },
-      { payload: { type: "custom_tool_call", call_id: "desktop", name: "exec", status: "completed",
-        input: 'const r=await tools.exec_command({cmd:"git commit -m fix"}); text(r);' } },
-      { payload: { type: "custom_tool_call_output", call_id: "desktop", output: [
-        { text: "Script completed\nOutput:\n" },
-        { text: JSON.stringify({wall_time_seconds: 0, exit_code: 1, output: "nothing to commit"}) },
-      ] } },
+      commandExecution({ id: "exec-fail", command: "git commit -m fix", status: "completed", exit_code: 1, aggregated_output: "nothing to commit" }),
+      commandExecution({ id: "exec-string-code", command: "git commit -m fix", status: "completed", exit_code: "1" }),
+      commandExecution({ id: "exec-no-code", command: "git status", status: "failed" }),
     ], 0);
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(3);
     expect(calls.every((call) => !call.success)).toBe(true);
   });
 
   it("extracts only Codex Git commands from the latest turn", () => {
     const path = transcript([
       { payload: { type: "message", role: "user", content: "old" } },
-      { payload: { type: "exec_command_end", call_id: "old-call", command: "git status", cwd: "/repo", status: "completed" } },
+      commandExecution({ id: "exec-old", command: ["/bin/zsh", "-lc", "git status"], cwd: "file:///repo", status: "completed", exit_code: 0 }),
       { payload: { type: "message", role: "user", content: "new" } },
-      {
-        payload: {
-          type: "exec_command_end",
-          call_id: "new-call",
-          command: ["/bin/zsh", "-lc", "git add a.ts && git commit -m fix"],
-          cwd: "/repo",
-          status: "completed",
-          exit_code: 0,
-          aggregated_output: "[main abc1234] fix",
-        },
-      },
+      commandExecution({
+        id: "exec-new",
+        command: ["/bin/zsh", "-lc", "git add a.ts && git commit -m fix"],
+        cwd: "file:///repo",
+        status: "completed",
+        exit_code: 0,
+        aggregated_output: "[main abc1234] fix",
+      }),
     ]);
 
     expect(extractGitOperations({
@@ -57,36 +56,45 @@ describe("extractGitOperations", () => {
       transcriptPath: path,
       defaultCwd: "/fallback",
     })).toEqual([
-      expect.objectContaining({ toolCallId: "new-call", operationIndex: 0, operation: "add", cwd: "/repo" }),
-      expect.objectContaining({ toolCallId: "new-call", operationIndex: 1, operation: "commit", cwd: "/repo" }),
+      expect.objectContaining({ toolCallId: "exec-new", operationIndex: 0, operation: "add", cwd: "/repo" }),
+      expect.objectContaining({ toolCallId: "exec-new", operationIndex: 1, operation: "commit", cwd: "/repo", output: "[main abc1234] fix", commitMessage: "fix" }),
     ]);
   });
 
-  it("extracts Codex desktop exec custom tool calls and pairs their output", () => {
+  it("reads each Codex command execution with its own directory and output", () => {
+    // One exec script that commits in two repositories produces two
+    // CommandExecution records; the script text itself is never inspected.
     const path = transcript([
       { type: "session_meta", payload: { session_id: "codex-desktop-1" } },
-      { type: "response_item", payload: { type: "message", role: "user", content: "commit it" } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "commit both" }] } },
       {
         type: "response_item",
         payload: {
           type: "custom_tool_call",
           status: "completed",
-          call_id: "call-commit",
+          call_id: "call-batch",
           name: "exec",
-          input: 'const r = await tools.exec_command({cmd:"git commit -m \\"fix: save work\\"",workdir:"/repo",yield_time_ms:30000,max_output_tokens:6000}); text(r.output);',
+          input: 'for (const repo of ["cloud", "core"]) text(await tools.shell({ command: "git commit -m fix", cwd: repo }));',
         },
       },
-      {
-        type: "response_item",
-        payload: {
-          type: "custom_tool_call_output",
-          call_id: "call-commit",
-          output: [
-            { type: "input_text", text: "Script completed\nWall time 0.3 seconds\nOutput:\n" },
-            { type: "input_text", text: "[main abc1234] fix: save work\n" },
-          ],
-        },
-      },
+      commandExecution({
+        id: "exec-cloud",
+        command: ["/bin/zsh", "-lc", "git commit -m \"fix: cloud\""],
+        cwd: "file:///work/cloud",
+        status: "completed",
+        exit_code: 0,
+        aggregated_output: "[main 1111111] fix: cloud\n 1 file changed\n",
+      }),
+      commandExecution({
+        id: "exec-core",
+        command: ["/bin/zsh", "-lc", "git commit -m \"fix: core\""],
+        cwd: "file:///work/core",
+        status: "completed",
+        exit_code: 0,
+        stdout: "[main 2222222] fix: core\n",
+        stderr: "",
+      }),
+      { type: "response_item", payload: { type: "custom_tool_call_output", call_id: "call-batch", output: [{ type: "input_text", text: "Script completed\nOutput:\n" }] } },
     ]);
 
     expect(extractGitOperations({
@@ -96,95 +104,30 @@ describe("extractGitOperations", () => {
       defaultCwd: "/fallback",
     })).toEqual([
       expect.objectContaining({
-        toolCallId: "call-commit",
+        toolCallId: "exec-cloud",
         operation: "commit",
         status: "success",
-        cwd: "/repo",
-        output: "[main abc1234] fix: save work",
-        commitMessage: "fix: save work",
+        cwd: "/work/cloud",
+        output: "[main 1111111] fix: cloud\n 1 file changed\n",
+        commitMessage: "fix: cloud",
+      }),
+      expect.objectContaining({
+        toolCallId: "exec-core",
+        operation: "commit",
+        status: "success",
+        cwd: "/work/core",
+        output: "[main 2222222] fix: core\n",
+        commitMessage: "fix: core",
       }),
     ]);
   });
 
-  it("unwraps yielded Codex desktop exec command results", () => {
-    const path = transcript([
-      { type: "session_meta", payload: { session_id: "codex-desktop-1" } },
-      { type: "response_item", payload: { type: "message", role: "user", content: "commit it" } },
-      {
-        type: "response_item",
-        payload: {
-          type: "custom_tool_call",
-          status: "completed",
-          call_id: "call-commit",
-          name: "exec",
-          input: 'const r = await tools.exec_command({cmd:"git commit -m \\"Improve comparison\\" && git push",workdir:"/repo",yield_time_ms:1000,max_output_tokens:6000}); text(JSON.stringify(r));',
-        },
-      },
-      {
-        type: "response_item",
-        payload: {
-          type: "custom_tool_call_output",
-          call_id: "call-commit",
-          output: [
-            { type: "input_text", text: "Script completed\nWall time 1.2 seconds\nOutput:\n" },
-            {
-              type: "input_text",
-              text: JSON.stringify({
-                chunk_id: "chunk-1",
-                wall_time_seconds: 1.002,
-                session_id: 123,
-                output: "[bugfix/adit-core-bugs 7282e07] Improve comparison\n 2 files changed\n",
-              }),
-            },
-          ],
-        },
-      },
-    ]);
-
-    expect(extractGitOperations({
-      platform: "codex",
-      transcriptPath: path,
-      expectedSessionId: "codex-desktop-1",
-      defaultCwd: "/fallback",
-    })).toEqual([
-      expect.objectContaining({
-        toolCallId: "call-commit",
-        operation: "commit",
-        status: "success",
-        cwd: "/repo",
-        output: "[bugfix/adit-core-bugs 7282e07] Improve comparison\n 2 files changed",
-        commitMessage: "Improve comparison",
-      }),
-      expect.objectContaining({
-        toolCallId: "call-commit",
-        operation: "push",
-        status: "success",
-        cwd: "/repo",
-      }),
-    ]);
-  });
-
-  it("ignores ambiguous Codex desktop programs with multiple shell calls", () => {
+  it("ignores Codex items that are not command executions and retired native records", () => {
     const path = transcript([
       { payload: { type: "message", role: "user", content: "inspect" } },
-      {
-        type: "response_item",
-        payload: {
-          type: "custom_tool_call",
-          status: "completed",
-          call_id: "call-many",
-          name: "exec",
-          input: 'const r = await Promise.all([tools.exec_command({cmd:"git status",workdir:"/repo"}),tools.exec_command({cmd:"git log -1",workdir:"/repo"})]);',
-        },
-      },
-      {
-        type: "response_item",
-        payload: {
-          type: "custom_tool_call_output",
-          call_id: "call-many",
-          output: [{ type: "input_text", text: "Script completed\nWall time 0.2 seconds\nOutput:\nclean" }],
-        },
-      },
+      { payload: { type: "exec_command_end", call_id: "legacy", command: "git commit -m legacy", status: "completed", exit_code: 0 } },
+      { type: "event_msg", payload: { type: "item_completed", item: { type: "FileChange", id: "patch-1", status: "completed", changes: {} } } },
+      { type: "event_msg", payload: { type: "item_completed", item: { type: "Reasoning", id: "reasoning-1" } } },
     ]);
 
     expect(extractGitOperations({

@@ -2,9 +2,9 @@
  * Agent file mutation types.
  *
  * A mutation is a single file change explicitly performed by the agent via a
- * file-editing tool (Write/Edit/MultiEdit/NotebookEdit for Claude; fileChange
- * for Codex). Shell-driven indirect changes are only represented when the
- * transcript exposes a concrete written path.
+ * file-editing tool (Write/Edit/MultiEdit/NotebookEdit for Claude; the
+ * FileChange item Codex records for apply_patch). Shell-driven indirect
+ * changes are not represented.
  */
 
 export type MutationKind = "add" | "update" | "delete" | "rename";
@@ -16,8 +16,7 @@ export type MutationSource =
   | "claude-edit-tool"
   | "claude-multiedit-tool"
   | "claude-notebookedit-tool"
-  | "codex-patch-apply-end"
-  | "codex-bash-output"
+  | "codex-file-change"
   | "gemini-write-file"
   | "gemini-replace"
   | "gemini-edit"

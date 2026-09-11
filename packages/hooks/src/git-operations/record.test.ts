@@ -46,21 +46,23 @@ describe("recordGitCommits", () => {
         repositoryUrl: null, canonicalRepoKey: null, path };
     });
     const transcriptPath = join(root, "turn.jsonl");
-    const source = `
-      const repos = ["cloud", "core", "docker", "cloud"];
-      for (const repo of repos) {
-        const r = await tools.exec_command({cmd:"git commit -m 'fix: " + repo + "'",workdir:${JSON.stringify(root + "/")} + repo});
-        text({repo,...r});
-        if (r.exit_code !== 0) break;
-      }`;
+    // One exec script committed in every repository; Codex records each
+    // shell command as its own CommandExecution item with cwd and output.
+    const executions = [...names, "cloud"].map((repo, index) => ({
+      type: "event_msg",
+      payload: { type: "item_completed", item: {
+        type: "CommandExecution", id: `exec-${index}-${repo}`,
+        command: ["/bin/zsh", "-lc", `git commit -m 'fix: ${repo}'`],
+        cwd: `file://${join(root, repo)}`, status: "completed",
+        exit_code: index < names.length ? 0 : 1,
+        aggregated_output: index < names.length ? results[index].output : "nothing to commit",
+      } },
+    }));
     writeFileSync(transcriptPath, [
       { payload: { type: "message", role: "user", content: "commit all" } },
-      { payload: { type: "custom_tool_call", call_id: "batch", name: "exec", status: "completed", input: source } },
-      { payload: { type: "custom_tool_call_output", call_id: "batch", output: [
-        { type: "input_text", text: "Script completed\nWall time 0.1 seconds\nOutput:\n" },
-        ...[...results, {repo: "cloud", wall_time_seconds: 0, exit_code: 1, output: "nothing to commit"}]
-          .map((result) => ({type: "input_text", text: JSON.stringify(result)})),
-      ] } },
+      { payload: { type: "custom_tool_call", call_id: "batch", name: "exec", status: "completed", input: "for (const repo of repos) text(await tools.shell({ command: `git commit -m 'fix: ${repo}'`, cwd: repo }));" } },
+      ...executions,
+      { payload: { type: "custom_tool_call_output", call_id: "batch", output: [{ type: "input_text", text: "Script completed\nOutput:\n" }] } },
     ].map((entry) => JSON.stringify(entry)).join("\n"));
     const dbPath = join(root, ".adit", "adit.sqlite");
     const db = openDatabase(dbPath);
@@ -83,7 +85,7 @@ describe("recordGitCommits", () => {
         const event = events.find((event) => event.gitHeadSha === shas[index]);
         expect(event?.responseText).toBe(`fix: ${repo}`);
         expect(JSON.parse(event?.toolInputJson ?? "{}")).toMatchObject({
-          toolCallId: `batch:exec:${index}`, operationIndex: 0, localRepositoryId: repo, relativePath: repo,
+          toolCallId: `exec-${index}-${repo}`, operationIndex: 0, localRepositoryId: repo, relativePath: repo,
         });
       });
     } finally { closeDatabase(db); }
@@ -104,26 +106,28 @@ describe("recordGitCommits", () => {
     writeFileSync(transcriptPath, [
       JSON.stringify({ payload: { type: "message", role: "user", content: "commit" } }),
       JSON.stringify({
-        payload: {
-          type: "exec_command_end",
-          call_id: "call-1",
-          command: "git status && git commit -m initial",
+        type: "event_msg",
+        payload: { type: "item_completed", item: {
+          type: "CommandExecution",
+          id: "call-1",
+          command: ["/bin/zsh", "-lc", "git status && git commit -m initial"],
           cwd: root,
           status: "completed",
           exit_code: 0,
           aggregated_output: `[main ${sha.slice(0, 7)}] initial`,
-        },
+        } },
       }),
       JSON.stringify({
-        payload: {
-          type: "exec_command_end",
-          call_id: "call-2",
-          command: "git commit -m failed",
+        type: "event_msg",
+        payload: { type: "item_completed", item: {
+          type: "CommandExecution",
+          id: "call-2",
+          command: ["/bin/zsh", "-lc", "git commit -m failed"],
           cwd: root,
           status: "failed",
           exit_code: 1,
           aggregated_output: "nothing to commit",
-        },
+        } },
       }),
     ].join("\n"));
 
