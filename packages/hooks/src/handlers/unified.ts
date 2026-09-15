@@ -38,6 +38,21 @@ import {
   normalizeMutationPaths,
   type AgentFileMutation,
 } from "../mutations/index.js";
+import {
+  appendPendingInferred,
+  captureWorkingTree,
+  diffWorkingTreesWithPatch,
+  mergeInferredFiles,
+  pendingToMutations,
+  takePendingInferred,
+  takeToolSnapshot,
+  toProjectRelativeChanges,
+  writeToolSnapshot,
+  inferredSourceFor,
+  type InferredFileChange,
+  type RepositoryTreeSnapshot,
+  type SnapshotProvider,
+} from "../bash-snapshot/index.js";
 
 /**
  * Dispatch a normalized hook input to the appropriate handler.
@@ -88,6 +103,12 @@ export async function dispatchHook(
         case "stop":
           await handleStopUnified(ctx, input);
           break;
+        case "pre-tool-use":
+          await handlePreToolUse(ctx, input);
+          break;
+        case "post-tool-use":
+          await handlePostToolUse(ctx, input);
+          break;
       }
     });
 
@@ -124,7 +145,9 @@ export async function dispatchHook(
 
 function isHandledHookType(hookType: string): boolean {
   return hookType === "prompt-submit"
-    || hookType === "stop";
+    || hookType === "stop"
+    || hookType === "pre-tool-use"
+    || hookType === "post-tool-use";
 }
 
 interface IgnoredSessionMetadata {
@@ -190,6 +213,10 @@ function shouldTriggerCloudAutoSync(hookType: NormalizedHookInput["hookType"]): 
 
 /** Handle prompt submission (kept lightweight — no git operations) */
 async function handlePromptSubmitUnified(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
+  // Bash snapshots queued since the last Stop are deliberately kept: a prompt
+  // appended while the agent is still working joins the running turn (no Stop
+  // fires in between), so clearing here would drop the files it changed so
+  // far. They all land on the next assistant_response.
   if (!input.prompt) return;
 
   const timeline = createTimelineManager(ctx.db, ctx.config);
@@ -264,6 +291,31 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     }
   }
 
+  // Files changed by Bash commands during this turn (working-tree snapshot
+  // diffs). They join the editing-tool mutations — same diff_stat/diff_text
+  // pipeline, tagged source "claude-bash-snapshot" — and additionally land
+  // as a complete path-only list in inferred_files_json for commit matching
+  // (diff bodies can be omitted for size; the path list never is).
+  let inferredFilesJson: string | null = null;
+  const snapshotProvider = bashSnapshotProvider(input.platformCli);
+  if (snapshotProvider) {
+    try {
+      const pending = takePendingInferred(ctx.config.dataDir, ctx.session.id);
+      const inferred = mergeInferredFiles(pending, {
+        exclude: mutations.map((m) => m.path),
+        source: inferredSourceFor(snapshotProvider),
+      });
+      if (inferred.length > 0) inferredFilesJson = JSON.stringify(inferred);
+      const bashMutations = pendingToMutations(pending, snapshotProvider);
+      if (bashMutations.length > 0) {
+        mutations = [...mutations, ...bashMutations];
+        mutationStatJson = JSON.stringify(buildDiffStat(mutations));
+      }
+    } catch (err) {
+      debugLog({ phase: "inferred-files-merge-failed", error: String(err) });
+    }
+  }
+
   const changedFiles = changesFromMutations(mutations);
 
   const event = await timeline.recordEvent({
@@ -272,6 +324,7 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     actor: "assistant",
     responseText,
     diffStatJson: mutationStatJson,
+    inferredFilesJson,
   });
 
   // Persist bounded diff_text from mutations (replaces old git checkpoint path)
@@ -320,6 +373,108 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     } catch {
       // Fail-open
     }
+  }
+}
+
+/** Platforms whose shell tool calls are snapshotted (hook tool_name "Bash"). */
+function bashSnapshotProvider(platformCli: NormalizedHookInput["platformCli"]): SnapshotProvider | null {
+  if (platformCli === "claude-code" || platformCli === "claude-vscode" || platformCli === "codex") {
+    return platformCli;
+  }
+  return null;
+}
+
+/**
+ * Only the shell tool is snapshotted. Background commands (Claude) are
+ * skipped: their PostToolUse fires when the command is dispatched, not when
+ * it finishes, so there is no window to diff.
+ */
+function isBashSnapshotCandidate(input: NormalizedHookInput): boolean {
+  if (!bashSnapshotProvider(input.platformCli)) return false;
+  if (input.toolName !== "Bash" || !input.toolUseId) return false;
+  return input.toolInput?.run_in_background !== true;
+}
+
+/** PreToolUse(Bash): record the working tree of every project repository. */
+async function handlePreToolUse(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
+  if (!isBashSnapshotCandidate(input) || !input.toolUseId) return;
+  const repositories = ctx.config.repositories;
+  if (repositories.length === 0) return;
+  const startedAt = new Date().toISOString();
+
+  const captured = await Promise.all(
+    repositories.map(async (repository): Promise<RepositoryTreeSnapshot | null> => {
+      try {
+        const capture = await captureWorkingTree(repository.path);
+        if (!capture) return null;
+        return {
+          localRepositoryId: repository.localRepositoryId,
+          relativePath: repository.relativePath,
+          path: repository.path,
+          tree: capture.tree,
+          head: capture.head,
+        };
+      } catch (err) {
+        debugLog({ phase: "bash-snapshot-capture-failed", error: String(err) });
+        return null;
+      }
+    }),
+  );
+  const snapshots = captured.filter((s): s is RepositoryTreeSnapshot => s !== null);
+  if (snapshots.length === 0) return;
+
+  try {
+    writeToolSnapshot(ctx.config.dataDir, ctx.session.id, {
+      toolUseId: input.toolUseId,
+      promptId: input.promptId ?? input.turnId ?? null,
+      startedAt,
+      repositories: snapshots,
+    });
+  } catch (err) {
+    debugLog({ phase: "bash-snapshot-write-failed", error: String(err) });
+  }
+}
+
+/** PostToolUse(Bash): diff against the PreToolUse snapshot and queue the changed files. */
+async function handlePostToolUse(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
+  if (!isBashSnapshotCandidate(input) || !input.toolUseId) return;
+  const snapshot = takeToolSnapshot(ctx.config.dataDir, ctx.session.id, input.toolUseId);
+  if (!snapshot) return;
+
+  const files: InferredFileChange[] = [];
+  await Promise.all(
+    snapshot.repositories.map(async (repository) => {
+      try {
+        const after = await captureWorkingTree(repository.path);
+        if (!after || after.tree === repository.tree) return;
+        // HEAD moved: the command was a checkout/pull/reset, and the files it
+        // touched are history moving, not the agent's edits.
+        if (after.head !== repository.head) {
+          debugLog({ phase: "bash-snapshot-head-moved", toolUseId: input.toolUseId });
+          return;
+        }
+        const changes = await diffWorkingTreesWithPatch(repository.path, repository.tree, after.tree);
+        files.push(...toProjectRelativeChanges(changes, {
+          repositoryRelativePath: repository.relativePath,
+          projectRoot: ctx.config.projectRoot,
+          dataDir: ctx.config.dataDir,
+        }));
+      } catch (err) {
+        debugLog({ phase: "bash-snapshot-diff-failed", error: String(err) });
+      }
+    }),
+  );
+  if (files.length === 0) return;
+
+  try {
+    appendPendingInferred(ctx.config.dataDir, ctx.session.id, {
+      toolUseId: input.toolUseId,
+      promptId: input.promptId ?? input.turnId ?? snapshot.promptId,
+      recordedAt: new Date().toISOString(),
+      files,
+    });
+  } catch (err) {
+    debugLog({ phase: "bash-snapshot-append-failed", error: String(err) });
   }
 }
 

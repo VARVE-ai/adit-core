@@ -3,8 +3,10 @@
  *
  * A mutation is a single file change explicitly performed by the agent via a
  * file-editing tool (Write/Edit/MultiEdit/NotebookEdit for Claude; the
- * FileChange item Codex records for apply_patch). Shell-driven indirect
- * changes are not represented.
+ * FileChange item Codex records for apply_patch), or — for a shell command
+ * (Claude's Bash tool, Codex's exec_command) — a change inferred from
+ * working-tree snapshots taken around the command (source
+ * "<platform>-bash-snapshot").
  */
 
 export type MutationKind = "add" | "update" | "delete" | "rename";
@@ -16,6 +18,8 @@ export type MutationSource =
   | "claude-edit-tool"
   | "claude-multiedit-tool"
   | "claude-notebookedit-tool"
+  | "claude-bash-snapshot"
+  | "codex-bash-snapshot"
   | "codex-file-change"
   | "gemini-write-file"
   | "gemini-replace"

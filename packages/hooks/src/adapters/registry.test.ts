@@ -142,12 +142,18 @@ describe("detectInstalledPlatforms", () => {
 
 describe("Claude Code Adapter", () => {
   it("has correct hook mappings", () => {
-    expect(claudeCodeAdapter.hookMappings).toHaveLength(3);
+    expect(claudeCodeAdapter.hookMappings).toHaveLength(5);
 
     const mappings = claudeCodeAdapter.hookMappings.map((m) => m.platformEvent);
     expect(mappings).toContain("UserPromptSubmit");
     expect(mappings).toContain("Stop");
     expect(mappings).toContain("StopFailure");
+    // Bash working-tree snapshots: only the Bash tool is matched.
+    const toolMappings = claudeCodeAdapter.hookMappings.filter(
+      (m) => m.platformEvent === "PreToolUse" || m.platformEvent === "PostToolUse",
+    );
+    expect(toolMappings.map((m) => m.matcher)).toEqual(["Bash", "Bash"]);
+    expect(toolMappings.map((m) => m.aditHandler)).toEqual(["pre-tool-use", "post-tool-use"]);
     expect(mappings).not.toContain("SessionStart");
     expect(mappings).not.toContain("SessionEnd");
     // notification / task-completed / subagent collection was retired
@@ -155,7 +161,6 @@ describe("Claude Code Adapter", () => {
     expect(mappings).not.toContain("Notification");
     expect(mappings).not.toContain("SubagentStart");
     expect(mappings).not.toContain("SubagentStop");
-    expect(mappings).not.toContain("PostToolUse");
   });
 
   it("parseInput normalizes prompt-submit", () => {
@@ -483,7 +488,7 @@ describe("Claude Code VS Code Adapter", () => {
 
   it("shares hook mappings with claude-code adapter", () => {
     expect(claudeVscodeAdapter.hookMappings).toBe(claudeCodeAdapter.hookMappings);
-    expect(claudeVscodeAdapter.hookMappings).toHaveLength(3);
+    expect(claudeVscodeAdapter.hookMappings).toHaveLength(5);
   });
 
   it("parseInput overrides platformCli to claude-vscode", () => {

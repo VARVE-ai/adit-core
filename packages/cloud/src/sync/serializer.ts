@@ -59,6 +59,7 @@ export interface SyncEvent {
   tool_input_json: string | null;
   tool_output_json: string | null;
   diff_stat_json: string | null;
+  inferred_files_json: string | null;
   git_branch: string | null;
   git_head_sha: string | null;
   env_snapshot_id: string | null;
@@ -383,6 +384,7 @@ function queryEvents(
     tool_input_json: (r.tool_input_json as string) ?? null,
     tool_output_json: (r.tool_output_json as string) ?? null,
     diff_stat_json: (r.diff_stat_json as string) ?? null,
+    inferred_files_json: (r.inferred_files_json as string) ?? null,
     git_branch: (r.git_branch as string) ?? null,
     git_head_sha: (r.git_head_sha as string) ?? null,
     env_snapshot_id: (r.env_snapshot_id as string) ?? null,

@@ -32,6 +32,10 @@ const HOOK_MAPPINGS: HookMapping[] = [
   // Route it through the stop handler so edits made before the failure are
   // still extracted from the transcript.
   { platformEvent: "StopFailure", aditHandler: "stop" },
+  // Working-tree snapshots around Bash calls: the only way to learn which
+  // files a shell command rewrote (python heredocs, sed -i, cat > ...).
+  { platformEvent: "PreToolUse", aditHandler: "pre-tool-use", matcher: "Bash" },
+  { platformEvent: "PostToolUse", aditHandler: "post-tool-use", matcher: "Bash" },
 ];
 
 /** Slash command installed into .claude/commands/ */
@@ -117,10 +121,12 @@ export const claudeCodeAdapter: PlatformAdapter = {
       platformCli: "claude-code",
       platformSessionId: raw.session_id as string | undefined,
       transcriptPath: raw.transcript_path as string | undefined,
+      promptId: raw.prompt_id as string | undefined,
       // Prompt
       prompt: raw.prompt as string | undefined,
       // Tool use fields (Claude Code sends tool_response for tool results)
       toolName: raw.tool_name as string | undefined,
+      toolUseId: raw.tool_use_id as string | undefined,
       toolInput: raw.tool_input as Record<string, unknown> | undefined,
       toolOutput: (raw.tool_response ?? raw.tool_output) as Record<string, unknown> | undefined,
       // Stop / StopFailure (StopFailure carries `error` instead of stop_reason)
@@ -146,8 +152,9 @@ export const claudeCodeAdapter: PlatformAdapter = {
   },
 
   generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
-    const makeHookEntry = (hookType: AditHookType) => [
+    const makeHookEntry = (hookType: AditHookType, matcher?: string) => [
       {
+        ...(matcher ? { matcher } : {}),
         hooks: [{
           type: "command",
           command: buildAditHookCommand(aditBinaryPath, "claude", hookType, projectRoot),
@@ -165,6 +172,8 @@ export const claudeCodeAdapter: PlatformAdapter = {
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
           StopFailure: makeHookEntry("stop"),
+          PreToolUse: makeHookEntry("pre-tool-use", "Bash"),
+          PostToolUse: makeHookEntry("post-tool-use", "Bash"),
         },
       },
     };

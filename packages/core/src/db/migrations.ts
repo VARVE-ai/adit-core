@@ -464,4 +464,14 @@ export const migrations: Migration[] = [
         ON session_platform_aliases(session_id);
     `,
   },
+  {
+    id: 22,
+    name: "add_event_inferred_files",
+    sql: `
+      -- Files a turn changed without a file-editing tool (e.g. Claude's Bash
+      -- writes), inferred from working-tree snapshots taken around each tool
+      -- call. Path-only evidence for commit matching; never a diff.
+      ALTER TABLE events ADD COLUMN inferred_files_json TEXT;
+    `,
+  },
 ];

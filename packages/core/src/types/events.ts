@@ -92,6 +92,12 @@ export interface AditEvent {
 
   /** Per-file change stats */
   diffStatJson: string | null;
+  /**
+   * Files this turn changed that no file-editing tool reported (e.g. Bash
+   * writes), inferred from working-tree snapshots around each tool call.
+   * Path-only evidence used for commit matching; never rendered as a diff.
+   */
+  inferredFilesJson: string | null;
 
   // -- Environment context --
   /** Active git branch at time of event */
