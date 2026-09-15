@@ -22,6 +22,7 @@ import {
 } from "../common/transcript-entry.js";
 import { recordGitCommits } from "../git-operations/index.js";
 import { debugLog } from "../common/debug-log.js";
+import { captureTokenUsage } from "../common/token-usage.js";
 import {
   classifyPromptSubmit,
   type PromptSubmitClassification,
@@ -196,17 +197,27 @@ async function handlePromptSubmitUnified(ctx: HookContext, input: NormalizedHook
 
   // Only record the prompt text. Per-turn file mutation extraction is deferred
   // to handleStopUnified so this blocking UserPromptSubmit hook stays fast.
-  await timeline.recordEvent({
+  const promptEvent = await timeline.recordEvent({
     sessionId: ctx.session.id,
     eventType: "prompt_submit",
     actor: "user",
     promptText: input.prompt,
   });
+  try {
+    captureTokenUsage(ctx, input.transcriptPath, "prompt", promptEvent.id);
+  } catch {
+    debugLog({ phase: "token-usage-capture-failed", boundary: "prompt" });
+  }
 }
 
 /** Handle stop (assistant response complete) */
 async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
   const timeline = createTimelineManager(ctx.db, ctx.config);
+  try {
+    captureTokenUsage(ctx, input.transcriptPath, "stop");
+  } catch {
+    debugLog({ phase: "token-usage-capture-failed", boundary: "stop" });
+  }
 
   // Use last_assistant_message as the response text (what the model actually said).
   // Cursor sometimes fires stop before transcript text is fully flushed, so

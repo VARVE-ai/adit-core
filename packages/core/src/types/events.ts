@@ -7,6 +7,7 @@
 
 /** All possible event types in the timeline */
 export type EventType =
+  | "token_usage"
   | "prompt_submit" // User submits a prompt
   | "assistant_response" // AI responds with code/text
   | "user_edit" // Manual edit between prompts
