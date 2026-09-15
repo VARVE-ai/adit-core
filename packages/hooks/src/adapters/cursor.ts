@@ -2,27 +2,19 @@
  * Cursor IDE platform adapter.
  *
  * Maps Cursor's hook events to ADIT's internal model.
- * Handles installation into .cursor/hooks.json.
+ * Shares Claude-compatible hook installation and parses Cursor payloads.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, openSync, readSync, closeSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import type { Platform } from "@varveai/adit-core";
 import type {
   PlatformAdapter,
-  HookMapping,
   NormalizedHookInput,
   PlatformHookConfig,
-  ValidationResult,
   AditHookType,
 } from "./types.js";
-import {
-  buildAditHookCommand,
-  classifyAditHookEntries,
-  describeHookValidation,
-  isAditHookCommand,
-  mergeAditHookEntries,
-} from "./command.js";
+import { claudeCodeAdapter } from "./claude-code.js";
+import { prepareLegacyCursorHooksRemoval } from "./cursor-legacy.js";
 import {
   assistantTextFromTranscriptEntry,
   type TranscriptEntryLike,
@@ -106,18 +98,10 @@ export function extractLastAssistantMessage(transcriptPath: string): string | un
   }
 }
 
-const HOOK_MAPPINGS: HookMapping[] = [
-  { platformEvent: "beforeSubmitPrompt", aditHandler: "prompt-submit" },
-  { platformEvent: "stop", aditHandler: "stop" },
-  // afterAgentResponse is deliberately NOT registered: it fires once per
-  // assistant message segment and its text duplicates what the stop handler
-  // already extracts from the transcript.
-];
-
 export const cursorAdapter: PlatformAdapter = {
   platform: "cursor" as Platform,
   displayName: "Cursor",
-  hookMappings: HOOK_MAPPINGS,
+  hookMappings: claudeCodeAdapter.hookMappings,
 
   parseInput(raw: Record<string, unknown>, hookType: string): NormalizedHookInput {
     const aditHookType = hookType as AditHookType;
@@ -139,11 +123,17 @@ export const cursorAdapter: PlatformAdapter = {
       ?? undefined;
 
     return {
-      cwd,
+      cwd: cwd.replace(/^\/(?=[A-Za-z]:[\\/])/u, ""),
       hookType: aditHookType,
       platformCli: "cursor",
       platformSessionId,
       transcriptPath,
+      promptId: (raw.prompt_id ?? raw.generation_id) as string | undefined,
+      turnId: raw.generation_id as string | undefined,
+      toolName: raw.tool_name === "Shell" ? "Bash" : raw.tool_name as string | undefined,
+      toolUseId: (raw.tool_use_id ?? raw.tool_call_id) as string | undefined,
+      toolInput: raw.tool_input as Record<string, unknown> | undefined,
+      toolOutput: (raw.tool_response ?? raw.tool_output) as Record<string, unknown> | undefined,
       // Prompt (from beforeSubmitPrompt)
       prompt: raw.prompt as string | undefined,
       // Stop (from stop event — Cursor sends status, not stop_reason;
@@ -157,105 +147,34 @@ export const cursorAdapter: PlatformAdapter = {
   },
 
   generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
-    // Cursor uses flat format: { command, type, timeout }
-    // Timeout is in SECONDS (not milliseconds like Claude Code)
-    const makeHookEntry = (hookType: AditHookType) => [
-      {
-        command: buildAditHookCommand(aditBinaryPath, "cursor", hookType, projectRoot),
-        type: "command",
-        timeout: 10,
-      },
-    ];
-
-    return {
-      configPath: ".cursor/hooks.json",
-      content: {
-        // Cursor requires a top-level numeric `version` field. Without it,
-        // Cursor rejects the config with "Config version must be a number".
-        version: 1,
-        hooks: {
-          beforeSubmitPrompt: makeHookEntry("prompt-submit"),
-          stop: makeHookEntry("stop"),
-        },
-      },
-    };
+    return claudeCodeAdapter.generateHookConfig(aditBinaryPath, projectRoot);
   },
 
-  async validateInstallation(projectRoot: string): Promise<ValidationResult> {
-    const checks = [];
-
-    // Check .cursor directory exists
-    const cursorDir = join(projectRoot, ".cursor");
-    const cursorDirExists = existsSync(cursorDir);
-    checks.push({
-      name: ".cursor directory",
-      ok: cursorDirExists,
-      detail: cursorDirExists ? cursorDir : "Not found",
-    });
-
-    // Check hooks file for hook configuration
-    const hooksPath = join(projectRoot, ".cursor", "hooks.json");
-    let hooksFound = false;
-    let hooksDetail = "No hook configuration found";
-    const requiredHooks = HOOK_MAPPINGS.map((m) => m.platformEvent);
-    const missingHooks: string[] = [];
-    const staleHooks: string[] = [];
-    const stalePinnedRoots = new Set<string>();
-    const brokenHooks: string[] = [];
-    const brokenScriptPaths = new Set<string>();
-
-    if (existsSync(hooksPath)) {
-      try {
-        const hooksConfig = JSON.parse(readFileSync(hooksPath, "utf-8"));
-        if (!hooksConfig.hooks) {
-          hooksDetail = "No hooks section found in hooks.json";
-        } else {
-          for (const hookName of requiredHooks) {
-            const entries = hooksConfig.hooks[hookName];
-            if (!Array.isArray(entries)) {
-              missingHooks.push(hookName);
-              continue;
-            }
-            const { status, stalePinnedRoots: roots, brokenScriptPaths: missingScripts } =
-              classifyAditHookEntries(entries, projectRoot);
-            if (status === "absent") missingHooks.push(hookName);
-            if (status === "stale") {
-              staleHooks.push(hookName);
-              roots.forEach((root) => stalePinnedRoots.add(root));
-            }
-            if (status === "broken") {
-              brokenHooks.push(hookName);
-              missingScripts.forEach((scriptPath) => brokenScriptPaths.add(scriptPath));
-            }
-          }
-
-          hooksFound = missingHooks.length === 0 && staleHooks.length === 0 &&
-            brokenHooks.length === 0;
-          hooksDetail = describeHookValidation({
-            configPath: hooksPath,
-            projectRoot,
-            missingHooks,
-            staleHooks,
-            stalePinnedRoots: Array.from(stalePinnedRoots),
-            brokenHooks,
-            brokenScriptPaths: Array.from(brokenScriptPaths),
-          }).detail;
-        }
-      } catch {
-        hooksDetail = `Failed to parse ${hooksPath}`;
-      }
+  async validateInstallation(projectRoot: string) {
+    const result = await claudeCodeAdapter.validateInstallation(projectRoot);
+    try {
+      const legacy = prepareLegacyCursorHooksRemoval(projectRoot);
+      result.checks.push({
+        name: "Cursor shared hooks",
+        ok: !legacy.hasHooks,
+        detail: legacy.hasHooks
+          ? "Legacy Cursor hooks remain; run adit init to migrate to shared Claude/Cursor hooks."
+          : "Cursor uses the shared Claude hook configuration.",
+      });
+    } catch (error) {
+      result.checks.push({ name: "Cursor shared hooks", ok: false, detail: String(error) });
     }
+    result.valid = result.checks.filter((check) => !check.advisory).every((check) => check.ok);
+    return result;
+  },
 
-    checks.push({
-      name: "Hook configuration",
-      ok: hooksFound,
-      detail: hooksDetail,
-    });
-
-    return {
-      valid: checks.every((c) => c.ok),
-      checks,
-    };
+  async hasHooks(projectRoot: string): Promise<boolean> {
+    if (await claudeCodeAdapter.hasHooks?.(projectRoot)) return true;
+    try {
+      return prepareLegacyCursorHooksRemoval(projectRoot).hasHooks;
+    } catch {
+      return false;
+    }
   },
 
   async installHooks(
@@ -263,105 +182,10 @@ export const cursorAdapter: PlatformAdapter = {
     aditBinaryPath: string,
     options?: { hookProjectRoot?: string },
   ): Promise<void> {
-    const cursorDir = join(projectRoot, ".cursor");
-    if (!existsSync(cursorDir)) {
-      mkdirSync(cursorDir, { recursive: true });
-    }
-
-    const hooksPath = join(cursorDir, "hooks.json");
-    let hooksConfig: Record<string, unknown> = {};
-
-    if (existsSync(hooksPath)) {
-      const raw = readFileSync(hooksPath, "utf-8");
-      // An empty file has no user data to protect — treat it as a fresh
-      // install. Anything else must parse; refuse to overwrite a file we
-      // cannot parse, as it may hold other tools' hook config.
-      if (raw.trim().length > 0) {
-        try {
-          hooksConfig = JSON.parse(raw);
-        } catch {
-          throw new Error(
-            `${hooksPath} contains invalid JSON. Fix or remove it, then re-run the install.`,
-          );
-        }
-      }
-    }
-
-    const hookConfig = this.generateHookConfig(aditBinaryPath, options?.hookProjectRoot ?? projectRoot);
-    const existingHooks = (hooksConfig.hooks as Record<string, unknown[]>) ?? {};
-    const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
-
-    // Merge: strip ADIT entries from every event (including events ADIT no
-    // longer installs, so upgrades leave nothing behind), keep other tools'
-    // entries, then append this release's ADIT entries.
-    const mergedHooks = mergeAditHookEntries(existingHooks, newHooks);
-
-    hooksConfig.hooks = mergedHooks;
-    writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2) + "\n");
-  },
-
-  async hasHooks(projectRoot: string): Promise<boolean> {
-    const hooksPath = join(projectRoot, ".cursor", "hooks.json");
-    if (!existsSync(hooksPath)) return false;
-
-    try {
-      const hooksConfig = JSON.parse(readFileSync(hooksPath, "utf-8")) as { hooks?: unknown };
-      if (!hooksConfig.hooks || typeof hooksConfig.hooks !== "object" || Array.isArray(hooksConfig.hooks)) {
-        return false;
-      }
-      return Object.values(hooksConfig.hooks).some((entries) =>
-        Array.isArray(entries) && entries.some(entryContainsAditHook),
-      );
-    } catch {
-      return false;
-    }
+    await claudeCodeAdapter.installHooks(projectRoot, aditBinaryPath, options);
   },
 
   async uninstallHooks(projectRoot: string): Promise<void> {
-    const hooksPath = join(projectRoot, ".cursor", "hooks.json");
-    if (!existsSync(hooksPath)) return;
-
-    try {
-      const hooksConfig = JSON.parse(readFileSync(hooksPath, "utf-8"));
-      if (!hooksConfig.hooks) return;
-
-      // Remove ADIT hook entries
-      for (const hookName of Object.keys(hooksConfig.hooks)) {
-        const entries = hooksConfig.hooks[hookName];
-        if (!Array.isArray(entries)) continue;
-
-        hooksConfig.hooks[hookName] = entries.filter(
-          (entry: { command?: string; hooks?: Array<{ command?: string }> }) => {
-            if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return false;
-            if (Array.isArray(entry.hooks)) {
-              return !entry.hooks.some((h) => typeof h.command === "string" && isAditHookCommand(h.command));
-            }
-            return true;
-          },
-        );
-
-        // Clean up empty arrays
-        if (hooksConfig.hooks[hookName].length === 0) {
-          delete hooksConfig.hooks[hookName];
-        }
-      }
-
-      // Clean up empty hooks object
-      if (Object.keys(hooksConfig.hooks).length === 0) {
-        delete hooksConfig.hooks;
-      }
-
-      writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2) + "\n");
-    } catch {
-      // Ignore parse errors
-    }
+    await claudeCodeAdapter.uninstallHooks(projectRoot);
   },
 };
-
-function entryContainsAditHook(entry: unknown): boolean {
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
-  const raw = entry as { command?: string; hooks?: Array<{ command?: string }> };
-  if (typeof raw.command === "string" && isAditHookCommand(raw.command)) return true;
-  return Array.isArray(raw.hooks) &&
-    raw.hooks.some((hook) => typeof hook.command === "string" && isAditHookCommand(hook.command));
-}

@@ -378,7 +378,7 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
 
 /** Platforms whose shell tool calls are snapshotted (hook tool_name "Bash"). */
 function bashSnapshotProvider(platformCli: NormalizedHookInput["platformCli"]): SnapshotProvider | null {
-  if (platformCli === "claude-code" || platformCli === "claude-vscode" || platformCli === "codex") {
+  if (platformCli === "claude-code" || platformCli === "claude-vscode" || platformCli === "codex" || platformCli === "cursor") {
     return platformCli;
   }
   return null;

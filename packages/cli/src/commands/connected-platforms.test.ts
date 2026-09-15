@@ -135,4 +135,15 @@ describe("connected platforms record", () => {
     expect(raw.connected).toEqual(["codex"]);
     expect(typeof raw.updatedAt).toBe("string");
   });
+
+  it.each(["claude-code", "claude-vscode", "cursor"] as const)("records all shared platforms when connecting %s", async (platform) => {
+    await addConnectedPlatforms(root, [platform]);
+    expect(readConnectedPlatforms(root)).toEqual(["claude-code", "claude-vscode", "cursor"]);
+  });
+
+  it.each(["claude-code", "claude-vscode", "cursor"] as const)("removes all shared platforms when disconnecting %s", async (platform) => {
+    writeConnectedPlatforms(root, ["claude-code", "claude-vscode", "cursor", "codex"]);
+    await removeConnectedPlatform(root, platform);
+    expect(readConnectedPlatforms(root)).toEqual(["codex"]);
+  });
 });

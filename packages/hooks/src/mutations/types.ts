@@ -20,6 +20,7 @@ export type MutationSource =
   | "claude-notebookedit-tool"
   | "claude-bash-snapshot"
   | "codex-bash-snapshot"
+  | "cursor-bash-snapshot"
   | "codex-file-change"
   | "gemini-write-file"
   | "gemini-replace"

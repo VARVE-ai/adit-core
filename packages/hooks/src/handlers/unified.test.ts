@@ -486,14 +486,14 @@ describe("dispatchHook", () => {
       expect(snapshotMocks.writeToolSnapshot).not.toHaveBeenCalled();
     });
 
-    it("snapshots Codex shell commands too, binding them to the turn id", async () => {
+    it.each(["codex", "cursor"] as const)("snapshots %s shell commands, binding them to the turn id", async (platform) => {
       await withRepositories();
       snapshotMocks.captureWorkingTree.mockResolvedValueOnce({ tree: "tree-a", head: "head-1" });
 
       await dispatchHook({
         cwd: "/test",
         hookType: "pre-tool-use",
-        platformCli: "codex",
+        platformCli: platform,
         turnId: "turn-1",
         toolName: "Bash",
         toolUseId: "exec-0c80cc67",
@@ -507,7 +507,7 @@ describe("dispatchHook", () => {
       );
     });
 
-    it("stop tags Codex shell changes with the codex source marker", async () => {
+    it.each(["codex", "cursor"] as const)("stop tags %s shell changes with its own source marker", async (platform) => {
       snapshotMocks.takePendingInferred.mockReturnValueOnce([
         {
           toolUseId: "exec-0c80cc67",
@@ -522,17 +522,17 @@ describe("dispatchHook", () => {
       await dispatchHook({
         cwd: "/test",
         hookType: "stop",
-        platformCli: "codex",
+        platformCli: platform,
         stopReason: "completed",
         lastAssistantMessage: "done",
       });
 
       const response = mockRecordEvent.mock.calls[0]?.[0] as Record<string, unknown>;
       expect(JSON.parse(response.inferredFilesJson as string)).toEqual([
-        { path: "probe/two.txt", status: "A", source: "codex-bash-snapshot", toolUseId: "exec-0c80cc67" },
+        { path: "probe/two.txt", status: "A", source: `${platform}-bash-snapshot`, toolUseId: "exec-0c80cc67" },
       ]);
       expect(JSON.parse(response.diffStatJson as string)).toEqual([
-        { path: "probe/two.txt", status: "A", additions: 1, deletions: 0, toolName: "Bash", source: "codex-bash-snapshot" },
+        { path: "probe/two.txt", status: "A", additions: 1, deletions: 0, toolName: "Bash", source: `${platform}-bash-snapshot` },
       ]);
     });
 

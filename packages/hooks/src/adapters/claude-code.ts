@@ -6,6 +6,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
+import { prepareLegacyCursorHooksRemoval } from "./cursor-legacy.js";
 import { join } from "node:path";
 import type { Platform } from "@varveai/adit-core";
 import type {
@@ -274,6 +275,7 @@ export const claudeCodeAdapter: PlatformAdapter = {
     aditBinaryPath: string,
     options?: { hookProjectRoot?: string },
   ): Promise<void> {
+    const legacyCursor = prepareLegacyCursorHooksRemoval(projectRoot);
     const claudeDir = join(projectRoot, ".claude");
     if (!existsSync(claudeDir)) {
       mkdirSync(claudeDir, { recursive: true });
@@ -321,6 +323,7 @@ export const claudeCodeAdapter: PlatformAdapter = {
     const commandsDir = join(claudeDir, "commands");
     mkdirSync(commandsDir, { recursive: true });
     writeFileSync(join(commandsDir, ADIT_COMMAND.filename), ADIT_COMMAND.content);
+    legacyCursor.remove();
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {
@@ -330,12 +333,14 @@ export const claudeCodeAdapter: PlatformAdapter = {
   },
 
   async uninstallHooks(projectRoot: string): Promise<void> {
+    const legacyCursor = prepareLegacyCursorHooksRemoval(projectRoot);
     removeAditHooksFromConfig(join(projectRoot, ".claude", "settings.local.json"));
     removeAditHooksFromConfig(join(projectRoot, ".claude", "settings.json"));
 
     // Remove slash command
     const commandsDir = join(projectRoot, ".claude", "commands");
     try { unlinkSync(join(commandsDir, ADIT_COMMAND.filename)); } catch { /* best-effort */ }
+    legacyCursor.remove();
   },
 };
 

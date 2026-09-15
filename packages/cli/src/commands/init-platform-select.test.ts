@@ -11,7 +11,7 @@ import type { Platform } from "@varveai/adit-core";
 describe("selectablePlatforms", () => {
   it("lists implemented platforms, hides bundled companions, cursor last", () => {
     const platforms = selectablePlatforms();
-    expect(platforms).toEqual(["claude-code", "codex", "gemini", "opencode", "cursor"]);
+    expect(platforms).toEqual(["claude-code", "codex", "gemini", "opencode"]);
     expect(platforms).not.toContain("claude-vscode");
   });
 });
@@ -27,8 +27,8 @@ describe("buildPlatformChoices", () => {
     expect(byPlatform["claude-code"].preChecked).toBe(true);
     expect(byPlatform["codex"].preChecked).toBe(true);
     expect(byPlatform["gemini"].preChecked).toBe(false);
-    expect(byPlatform["cursor"].preChecked).toBe(false);
-    expect(byPlatform["cursor"].manual).toBe(true);
+    expect(byPlatform["cursor"]).toBeUndefined();
+    expect(byPlatform["claude-code"].displayName).toBe("Claude Code / Cursor");
   });
 
   it("pre-checks by record on a re-run; detection is annotation only", () => {
@@ -66,13 +66,13 @@ describe("buildPlatformChoices", () => {
     expect(choices.find((c) => c.platform === "claude-code")?.connected).toBe(true);
   });
 
-  it("pre-checks cursor only when it is recorded", () => {
+  it("pre-checks shared Claude hooks for a legacy Cursor-only record", () => {
     const choices = buildPlatformChoices({
       connected: ["cursor"],
       detected: [],
       hasRecord: true,
     });
-    expect(choices.find((c) => c.platform === "cursor")?.preChecked).toBe(true);
+    expect(choices.find((c) => c.platform === "claude-code")?.preChecked).toBe(true);
   });
 });
 
@@ -88,20 +88,20 @@ describe("diffSelection", () => {
     const plan = diffSelection(choices, new Set<Platform>(["claude-code", "gemini"]));
     expect(plan.toConnect).toEqual(["gemini"]);
     expect(plan.toDisconnect).toEqual(["codex"]);
-    expect(plan.toRefresh).toEqual(["claude-code", "claude-vscode"]);
-    expect(plan.finalRecord.sort()).toEqual(["claude-code", "claude-vscode", "gemini"]);
+    expect(plan.toRefresh).toEqual(["claude-code", "claude-vscode", "cursor"]);
+    expect(plan.finalRecord.sort()).toEqual(["claude-code", "claude-vscode", "cursor", "gemini"]);
   });
 
   it("disconnecting claude also disconnects the bundled vscode companion", () => {
     const plan = diffSelection(choices, new Set<Platform>(["codex"]));
-    expect(plan.toDisconnect).toEqual(["claude-code", "claude-vscode"]);
+    expect(plan.toDisconnect).toEqual(["claude-code", "claude-vscode", "cursor"]);
   });
 
   it("plain keep-as-shown produces refresh only", () => {
     const plan = diffSelection(choices, new Set<Platform>(["claude-code", "codex"]));
     expect(plan.toConnect).toEqual([]);
     expect(plan.toDisconnect).toEqual([]);
-    expect(plan.toRefresh.sort()).toEqual(["claude-code", "claude-vscode", "codex"]);
+    expect(plan.toRefresh.sort()).toEqual(["claude-code", "claude-vscode", "codex", "cursor"]);
   });
 });
 
@@ -124,7 +124,7 @@ describe("parseSelectionAnswer", () => {
     detected: ["claude-code", "codex"],
     hasRecord: true,
   });
-  // list order: claude-code(1, checked), codex(2), gemini(3), opencode(4), cursor(5)
+  // list order: claude-code(1, checked), codex(2), gemini(3), opencode(4)
 
   it("Enter keeps the pre-checked state", () => {
     expect(parseSelectionAnswer("", choices)).toEqual(new Set(["claude-code"]));

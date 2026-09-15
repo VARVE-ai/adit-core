@@ -87,10 +87,10 @@ export interface PendingInferredEntry {
 }
 
 /** Platforms whose shell tool calls are snapshotted. */
-export type SnapshotProvider = "claude-code" | "claude-vscode" | "codex";
+export type SnapshotProvider = "claude-code" | "claude-vscode" | "codex" | "cursor";
 
 /** Source marker carried by every inferred entry, per platform. */
-export type InferredFileSource = "claude-bash-snapshot" | "codex-bash-snapshot";
+export type InferredFileSource = "claude-bash-snapshot" | "codex-bash-snapshot" | "cursor-bash-snapshot";
 
 /** One entry of events.inferred_files_json. */
 export interface InferredFileRecord {
@@ -104,6 +104,7 @@ export interface InferredFileRecord {
 export const INFERRED_FILE_SOURCE = "claude-bash-snapshot" as const;
 
 export function inferredSourceFor(provider: SnapshotProvider): InferredFileSource {
+  if (provider === "cursor") return "cursor-bash-snapshot";
   return provider === "codex" ? "codex-bash-snapshot" : INFERRED_FILE_SOURCE;
 }
 
