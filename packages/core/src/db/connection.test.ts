@@ -45,6 +45,8 @@ describe("Database", () => {
     expect(tables).not.toContain("transcript_uploads");
     expect(tables).toContain("diffs");
     expect(tables).toContain("_migrations");
+    expect(tables).toContain("token_usage_cursors");
+    expect(tables).toContain("token_usage_records");
 
     const eventColumns = db
       .prepare("PRAGMA table_info(events)")
@@ -90,6 +92,47 @@ describe("Database", () => {
       .get() as { count: number };
     expect(migrationCount.count).toBeGreaterThan(0);
     closeDatabase(db2);
+  });
+
+  it.each(["add_event_inferred_files", "token_usage_ledger"])("upgrades migration 22 from %s without losing data", (legacyName) => {
+    const path = tempDbPath();
+    paths.push(path);
+    const legacyDb = openDatabase(path);
+    legacyDb.exec("DELETE FROM _migrations WHERE id >= 22");
+    legacyDb.prepare("INSERT INTO _migrations (id, name) VALUES (22, ?)").run(legacyName);
+    legacyDb.prepare(`INSERT INTO sessions (id, project_id, client_id, platform, started_at, vclock_json)
+      VALUES ('retained-session', 'project', 'client', 'codex', '2026-09-15T00:00:00.000Z', '{}')`).run();
+    if (legacyName === "add_event_inferred_files") {
+      legacyDb.exec(`DROP TABLE token_usage_cursors;
+        DROP TABLE token_usage_records;
+        ALTER TABLE events ADD COLUMN inferred_files_json TEXT;`);
+    } else {
+      legacyDb.prepare(`INSERT INTO token_usage_records (id, session_id, turn_id, revision, record_json)
+        VALUES ('retained-usage', 'retained-session', NULL, 1, '{}')`).run();
+      legacyDb.prepare(`INSERT INTO token_usage_cursors (source_key, session_id, state_json)
+        VALUES ('retained-cursor', 'retained-session', '{"offset":123}')`).run();
+    }
+    closeDatabase(legacyDb);
+
+    for (const attempt of [1, 2]) {
+      const db = openDatabase(path);
+      try {
+        expect(db.prepare("SELECT name FROM _migrations WHERE id = 22").get()).toEqual({ name: legacyName });
+        expect(db.prepare("SELECT name FROM _migrations WHERE id = 23").get(), `open ${attempt}`).toEqual({ name: "token_usage_ledger" });
+        expect(db.prepare("SELECT id FROM sessions").all()).toEqual([{ id: "retained-session" }]);
+        expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+        if (legacyName === "token_usage_ledger") {
+          expect(db.prepare("SELECT id, record_json FROM token_usage_records").all()).toEqual([{ id: "retained-usage", record_json: "{}" }]);
+          expect(db.prepare("SELECT state_json FROM token_usage_cursors").all()).toEqual([{ state_json: '{"offset":123}' }]);
+        } else {
+          expect(db.prepare("SELECT * FROM token_usage_records").all()).toEqual([]);
+          expect(db.prepare("SELECT * FROM token_usage_cursors").all()).toEqual([]);
+          expect(db.prepare("PRAGMA table_info(events)").all()).toEqual(expect.arrayContaining([expect.objectContaining({ name: "inferred_files_json" })]));
+        }
+      } finally {
+        closeDatabase(db);
+      }
+    }
   });
 
   it("normalizes and merges legacy cloud server URL keys", () => {

@@ -465,22 +465,22 @@ export const migrations: Migration[] = [
     `,
   },
   {
-    id: 22,
+    id: 23,
     name: "token_usage_ledger",
     sql: `
-      CREATE TABLE token_usage_cursors (
+      CREATE TABLE IF NOT EXISTS token_usage_cursors (
         source_key TEXT PRIMARY KEY,
         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         state_json TEXT NOT NULL
       );
-      CREATE TABLE token_usage_records (
+      CREATE TABLE IF NOT EXISTS token_usage_records (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         turn_id TEXT,
         revision INTEGER NOT NULL,
         record_json TEXT NOT NULL
       );
-      CREATE INDEX idx_token_usage_session ON token_usage_records(session_id, turn_id);
+      CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage_records(session_id, turn_id);
     `,
   },
 ];

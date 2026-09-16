@@ -20,6 +20,8 @@ Codex 协议结构已对照官方源码中的 `RolloutItemWire::TokenUsageRecord
 
 ## 部署顺序
 
+本地 SQLite 的 Token 迁移使用编号 `23`，避开 shell-file-snapshot 分支已使用的 `22`。从该分支切回或升级旧版 Token 分支时，首次打开本地数据库会幂等创建用量表，保留已有迁移记录、会话及用量。此升级不会补采升级前漏掉的数据。
+
 1. 先部署配套 Cloud：迁移数据库、生成 Prisma Client、构建并重启服务。
 2. 再发布或安装本分支构建的 Core CLI，确认 Hook 使用的是新版本。
 3. 从新一轮提问开始检查用量；不回填旧会话。
