@@ -78,7 +78,7 @@ export async function pluginInstallCommand(
       console.log("  To install for a specific platform:");
       console.log("    adit hook install claude-code");
       console.log("    adit hook install codex");
-      console.log("    adit hook install cursor");
+      console.log("    Cursor uses the claude-code hooks above.");
       console.log();
     }
     return;

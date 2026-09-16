@@ -89,8 +89,14 @@ export interface NormalizedHookInput {
   platformSessionId?: string;
   /** Path to the session transcript file (JSONL) */
   transcriptPath?: string;
+  /** Platform id of the user prompt this hook belongs to (Claude Code >= 2.1.196) */
+  promptId?: string;
+  /** Platform id of the running turn (Codex); binds tool calls to their turn like promptId */
+  turnId?: string;
   prompt?: string;
   toolName?: string;
+  /** Platform id of the tool call (PreToolUse / PostToolUse) */
+  toolUseId?: string;
   toolInput?: Record<string, unknown>;
   toolOutput?: Record<string, unknown>;
   stopReason?: string;
@@ -144,6 +150,8 @@ export interface ValidationCheck {
 export type AditHookType =
   | "prompt-submit"
   | "stop"
+  | "pre-tool-use"
+  | "post-tool-use"
   | "task-completed"
   | "notification"
   | "subagent-start"

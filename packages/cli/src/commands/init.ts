@@ -191,7 +191,7 @@ async function initializeProject(opts: InitOptions): Promise<void> {
 
   if (opts.platform) {
     // Explicit platform specified — install exactly that one and record it.
-    const platform = opts.platform as Platform;
+    const platform = (opts.platform === "cursor" ? "claude-code" : opts.platform) as Platform;
     try {
       const adapter = getAdapter(platform);
       await adapter.installHooks(setupRoot, aditBinaryPath);
@@ -214,6 +214,7 @@ async function initializeProject(opts: InitOptions): Promise<void> {
     const choices = buildPlatformChoices({ connected, detected, hasRecord });
 
     console.log("  Select the AI tools to record in this project:");
+    console.log(pc.dim("  Claude Code / Cursor shares one hook configuration; Cursor does not require the Claude CLI."));
     let finalChecked: Set<Platform>;
     if (!interactive) {
       // Non-interactive runs never disconnect anything: keep the current

@@ -4,6 +4,7 @@
 
 import type Database from "better-sqlite3";
 import type { AditSession, Platform, SessionType } from "../types/index.js";
+import { deserialize, serialize, tick } from "../sync/vclock.js";
 
 export interface CreateSessionInput {
   id: string;
@@ -125,7 +126,17 @@ export function listSessionPlatformAliases(
   return rows.map((row) => row.platform_session_id);
 }
 
-/** Sessions of a project started at or after `since`, newest first. */
+/** Latest event time of a session, else its start time. */
+const LAST_ACTIVITY_SQL = `COALESCE(
+  (SELECT MAX(e.started_at) FROM events e WHERE e.session_id = sessions.id AND e.deleted_at IS NULL),
+  sessions.started_at
+)`;
+
+/**
+ * Sessions of a project active at or after `since`, most recently active
+ * first. Activity is the latest event (else the start time), so a long-lived
+ * conversation keeps qualifying for as long as it is still in use.
+ */
 export function listRecentSessions(
   db: Database.Database,
   input: { projectId: string; platform?: Platform; since: string; limit?: number },
@@ -133,15 +144,63 @@ export function listRecentSessions(
   const rows = db
     .prepare(
       `SELECT * FROM sessions
-       WHERE project_id = ? AND started_at >= ? AND deleted_at IS NULL${input.platform ? " AND platform = ?" : ""}
-       ORDER BY started_at DESC LIMIT ?`,
+       WHERE project_id = ? AND deleted_at IS NULL${input.platform ? " AND platform = ?" : ""}
+         AND ${LAST_ACTIVITY_SQL} >= ?
+       ORDER BY ${LAST_ACTIVITY_SQL} DESC, started_at DESC LIMIT ?`,
     )
     .all(
       ...(input.platform
-        ? [input.projectId, input.since, input.platform, input.limit ?? 50]
+        ? [input.projectId, input.platform, input.since, input.limit ?? 50]
         : [input.projectId, input.since, input.limit ?? 50]),
     ) as Record<string, unknown>[];
   return rows.map(rowToSession);
+}
+
+/**
+ * Fold `sourceSessionId` into `targetSessionId`: its events continue the
+ * target's sequence in their original order, its environment snapshots move
+ * with them, and the source row is soft-deleted. Every moved or deleted row
+ * gets a clock tick so a peer that already saw it picks up the change. One
+ * transaction; used when a session created for a platform session id turns
+ * out to be a client-side fork of `targetSessionId`.
+ */
+export function mergeSessionInto(
+  db: Database.Database,
+  input: { sourceSessionId: string; targetSessionId: string; clientId: string; now?: string },
+): { movedEvents: number } {
+  return db.transaction(() => {
+    const { max } = db
+      .prepare("SELECT COALESCE(MAX(sequence), 0) AS max FROM events WHERE session_id = ?")
+      .get(input.targetSessionId) as { max: number };
+    const rows = db
+      .prepare("SELECT id, vclock_json FROM events WHERE session_id = ? ORDER BY sequence ASC")
+      .all(input.sourceSessionId) as Array<{ id: string; vclock_json: string }>;
+    const move = db.prepare(
+      "UPDATE events SET session_id = ?, sequence = ?, vclock_json = ? WHERE id = ?",
+    );
+    rows.forEach((row, index) => {
+      move.run(input.targetSessionId, max + index + 1, tickClock(row.vclock_json, input.clientId), row.id);
+    });
+    db.prepare("UPDATE env_snapshots SET session_id = ? WHERE session_id = ?").run(
+      input.targetSessionId,
+      input.sourceSessionId,
+    );
+    const source = db
+      .prepare("SELECT vclock_json FROM sessions WHERE id = ?")
+      .get(input.sourceSessionId) as { vclock_json: string } | undefined;
+    if (source) {
+      db.prepare("UPDATE sessions SET deleted_at = ?, vclock_json = ? WHERE id = ?").run(
+        input.now ?? new Date().toISOString(),
+        tickClock(source.vclock_json, input.clientId),
+        input.sourceSessionId,
+      );
+    }
+    return { movedEvents: rows.length };
+  })();
+}
+
+function tickClock(vclockJson: string, clientId: string): string {
+  return serialize(tick(deserialize(vclockJson), clientId));
 }
 
 export function listSessions(

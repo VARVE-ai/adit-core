@@ -74,7 +74,7 @@ events to ADIT's normalized hook model.
 | Claude Code | Supported | Installs hook entries in `.claude/settings.local.json` and slash command files under `.claude/commands/` |
 | Claude Code VS Code | Supported | Uses the Claude Code hook mechanism with VS Code-aware platform detection |
 | OpenCode | Supported | Generates `.opencode/plugins/adit.ts`, slash commands, and LLM-callable tools `adit_link` and `adit_intent` |
-| Cursor | Supported | Installs hook entries in `.cursor/hooks.json` |
+| Cursor | Supported | Shares `.claude/settings.local.json`; platform is identified from Cursor payloads, not the model |
 | Codex | Supported | Installs hook entries in `.codex/hooks.json`; approve them once inside Codex via `/hooks` (ADIT never edits the user-level Codex config) |
 | Gemini CLI | Supported | Installs hook entries in `.gemini/settings.json` |
 | GitHub Copilot | Stub | Detected by the registry, but hook install/parse support is not implemented yet |
@@ -85,6 +85,20 @@ Registered adapters can be listed with:
 ```bash
 adit hook list
 ```
+
+### Shared Claude / Cursor hooks
+
+`adit init` offers one **Claude Code / Cursor** option, including the Claude VS Code
+extension. ADIT identifies `cursor_version` in each incoming payload and keeps
+Cursor sessions and transcript parsing separate from Claude. Running Claude from
+a Cursor terminal still records Claude.
+
+Re-running `adit init` migrates project-local ADIT entries in `.cursor/hooks.json`
+to the shared configuration, preserving other tools' hooks and settings. Legacy
+`adit init --platform cursor` and `adit hook install cursor` use the shared installer.
+Installing or removing any member affects the shared integration. Restart the AI
+tool or open a new conversation after upgrading; stored session labels are not
+rewritten. Cursor releases that do not load Claude-compatible hooks need upgrading.
 
 ### Cursor hooks on Windows
 

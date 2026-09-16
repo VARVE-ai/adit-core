@@ -55,6 +55,7 @@ export interface RecordEventParams {
   toolOutputJson?: string | null;
   errorJson?: string | null;
   diffStatJson?: string | null;
+  inferredFilesJson?: string | null;
   gitBranch?: string | null;
   gitHeadSha?: string | null;
   status?: "success" | "error";
@@ -100,6 +101,7 @@ export function createTimelineManager(
         endedAt: now,
         errorJson: params.errorJson ?? null,
         diffStatJson: params.diffStatJson ?? null,
+        inferredFilesJson: params.inferredFilesJson ?? null,
         clientId: config.clientId,
         vclockJson: vclock,
       });

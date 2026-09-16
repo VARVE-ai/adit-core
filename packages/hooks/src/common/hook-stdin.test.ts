@@ -241,6 +241,8 @@ Get-Content -LiteralPath ${quote(originalPath)} -Raw | & { $input | & ${quote(pr
       }
       const db = openDatabase(dbPath);
       try {
+        const sessions = db.prepare("SELECT platform, platform_session_id FROM sessions").all();
+        expect(sessions).toEqual([{ platform: "cursor", platform_session_id: payload.conversation_id }]);
         const events = db.prepare("SELECT event_type, prompt_text, response_text FROM events ORDER BY sequence").all();
         expect(events).toEqual([
           { event_type: "prompt_submit", prompt_text: payload.prompt, response_text: null },

@@ -7,6 +7,7 @@
  */
 
 import type Database from "better-sqlite3";
+import type { TokenUsageRecord } from "@varveai/adit-core";
 
 /** Total diff_text byte cap per push payload. Mirrors agent-file-mutation-capture-plan.md. */
 const MAX_SYNC_DIFF_BYTES = 2 * 1024 * 1024;
@@ -59,6 +60,7 @@ export interface SyncEvent {
   tool_input_json: string | null;
   tool_output_json: string | null;
   diff_stat_json: string | null;
+  inferred_files_json: string | null;
   git_branch: string | null;
   git_head_sha: string | null;
   env_snapshot_id: string | null;
@@ -103,6 +105,7 @@ export interface SyncDiff {
 }
 
 export interface SyncBatch {
+  tokenUsageRecords?: TokenUsageRecord[];
   sessions: SyncSession[];
   events: SyncEvent[];
   /** Kept in the wire shape for server compatibility; local snapshots are never uploaded. */
@@ -301,7 +304,8 @@ export function batchRecordCount(batch: SyncBatch): number {
   return (
     batch.sessions.length +
     batch.events.length +
-    batch.envSnapshots.length
+    batch.envSnapshots.length +
+    (batch.tokenUsageRecords?.length ?? 0)
   );
 }
 
@@ -311,7 +315,7 @@ function uniqueSessionIds(events: SyncEvent[]): string[] {
   return Array.from(new Set(events.map((event) => event.session_id)));
 }
 
-function querySessionsByIds(
+export function querySessionsByIds(
   db: Database.Database,
   sessionIds: string[],
   projectId: string,
@@ -383,6 +387,7 @@ function queryEvents(
     tool_input_json: (r.tool_input_json as string) ?? null,
     tool_output_json: (r.tool_output_json as string) ?? null,
     diff_stat_json: (r.diff_stat_json as string) ?? null,
+    inferred_files_json: (r.inferred_files_json as string) ?? null,
     git_branch: (r.git_branch as string) ?? null,
     git_head_sha: (r.git_head_sha as string) ?? null,
     env_snapshot_id: (r.env_snapshot_id as string) ?? null,

@@ -13,7 +13,6 @@
  *   not drive the default here: a temporarily missing CLI on PATH would
  *   otherwise silently disconnect a connected platform on plain Enter.)
  * - A first-run project (no record) pre-checks the detected CLIs.
- * - Manual platforms (Cursor) are never pre-checked unless recorded.
  */
 
 import { createInterface } from "node:readline/promises";
@@ -23,12 +22,10 @@ import { getAdapter, listAdapters } from "@varveai/adit-hooks/adapters";
 
 /** Companion platforms installed/removed together with their owner. */
 export const BUNDLED_PLATFORMS: Partial<Record<Platform, Platform[]>> = {
-  // The VS Code extension shares Claude Code's configuration; connecting
-  // Claude Code always connects both.
-  "claude-code": ["claude-vscode"],
+  "claude-code": ["claude-vscode", "cursor"],
 };
 
-const DISPLAY_ORDER: Platform[] = ["claude-code", "codex", "gemini", "opencode", "cursor"];
+const DISPLAY_ORDER: Platform[] = ["claude-code", "codex", "gemini", "opencode"];
 
 export interface PlatformChoice {
   platform: Platform;
@@ -102,7 +99,7 @@ export function buildPlatformChoices(opts: {
     const preChecked = opts.hasRecord ? connected : detected && !manual;
     return {
       platform,
-      displayName: adapter.displayName,
+      displayName: platform === "claude-code" ? "Claude Code / Cursor" : adapter.displayName,
       cliBinary: adapter.cliBinary,
       detected,
       connected,

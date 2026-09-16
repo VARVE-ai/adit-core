@@ -8,11 +8,11 @@
  * All errors are caught and swallowed — hooks must never block the AI agent.
  */
 
-import type { Platform } from "@varveai/adit-core";
 import { readStdin } from "./common/context.js";
 import { debugLog } from "./common/debug-log.js";
 import { getAdapter } from "./adapters/index.js";
-import { parseHookArgs, type HookPlatformArg } from "./adapters/command.js";
+import { parseHookArgs } from "./adapters/command.js";
+import { resolveHookPlatform } from "./adapters/platform.js";
 import { dispatchHook } from "./handlers/unified.js";
 
 // Hard safety net: kill the process after 10 seconds no matter what.
@@ -27,10 +27,10 @@ async function main(): Promise<void> {
 
   // Every installed hook command bakes in --platform; without it there is
   // nothing to dispatch to (fail-open).
-  const platform = resolvePlatformArg(hookArgs.platform);
-  if (!platform) return;
-
+  if (!hookArgs.platform) return;
   const raw = await readStdin();
+  const platform = resolveHookPlatform(hookArgs.platform, raw);
+  if (!platform) return;
 
   // Debug: log hook envelope shape only (ADIT_DEBUG). Never log the raw
   // payload or message bodies — they contain prompt and tool I/O plaintext
@@ -57,17 +57,6 @@ async function main(): Promise<void> {
   });
 
   await dispatchHook(input, { projectRoot: hookArgs.projectRoot });
-}
-
-function resolvePlatformArg(platform: HookPlatformArg | null): Platform | null {
-  if (platform === null) return null;
-  if (platform === "claude") {
-    if (process.env.ELECTRON_RUN_AS_NODE && process.env.VSCODE_IPC_HOOK) {
-      return "claude-vscode";
-    }
-    return "claude-code";
-  }
-  return platform;
 }
 
 // Fail-open: catch everything, always exit code 0 (Claude Code treats some

@@ -24,9 +24,11 @@ interface CodexHookDefinition {
 }
 
 const CODEX_HOOK_DEFINITIONS: CodexHookDefinition[] = [
+  { eventName: "PreToolUse", keyLabel: "pre_tool_use" },
   { eventName: "PostToolUse", keyLabel: "post_tool_use" },
   { eventName: "UserPromptSubmit", keyLabel: "user_prompt_submit" },
   { eventName: "Stop", keyLabel: "stop" },
+  { eventName: "Interrupt", keyLabel: "interrupt" },
 ];
 
 export function resolveCodexHookTrustConfigPath(codexHome?: string): string {

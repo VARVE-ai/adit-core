@@ -42,6 +42,14 @@ const HOOK_TIMEOUT = 30;
 const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "UserPromptSubmit", aditHandler: "prompt-submit" },
   { platformEvent: "Stop", aditHandler: "stop" },
+  { platformEvent: "Interrupt", aditHandler: "stop" },
+  // Working-tree snapshots around shell commands. Codex reports every
+  // exec_command call (also the ones issued from `exec` scripts) as a
+  // PreToolUse/PostToolUse pair with tool_name "Bash", a tool_use_id and the
+  // turn_id, so shell-driven edits that leave no FileChange record are still
+  // attributed to the turn.
+  { platformEvent: "PreToolUse", aditHandler: "pre-tool-use", matcher: "Bash" },
+  { platformEvent: "PostToolUse", aditHandler: "post-tool-use", matcher: "Bash" },
 ];
 
 export const codexAdapter: PlatformAdapter = {
@@ -62,14 +70,16 @@ export const codexAdapter: PlatformAdapter = {
       platformCli: "codex",
       platformSessionId: raw.session_id as string | undefined,
       transcriptPath: raw.transcript_path as string | undefined,
+      turnId: raw.turn_id as string | undefined,
       // Prompt
       prompt: raw.prompt as string | undefined,
       // Stop
       stopReason: raw.stop_reason as string | undefined,
       lastAssistantMessage: raw.last_assistant_message as string | undefined,
       stopHookActive: raw.stop_hook_active as boolean | undefined,
-      // Tool use (from PostToolUse)
+      // Tool use (PreToolUse / PostToolUse)
       toolName: raw.tool_name as string | undefined,
+      toolUseId: raw.tool_use_id as string | undefined,
       toolInput: raw.tool_input as Record<string, unknown> | undefined,
       toolOutput: raw.tool_response as Record<string, unknown> | undefined,
       rawPlatformData: raw,
@@ -77,12 +87,13 @@ export const codexAdapter: PlatformAdapter = {
   },
 
   generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
-    const makeHookEntry = (hookType: AditHookType) => [
+    const makeHookEntry = (hookType: AditHookType, matcher?: string, timeout = HOOK_TIMEOUT) => [
       {
+        ...(matcher ? { matcher } : {}),
         hooks: [{
           type: "command",
           command: buildAditHookCommand(aditBinaryPath, "codex", hookType, projectRoot),
-          timeout: HOOK_TIMEOUT,
+          timeout,
         }],
       },
     ];
@@ -92,6 +103,9 @@ export const codexAdapter: PlatformAdapter = {
         hooks: {
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
+          Interrupt: makeHookEntry("stop", undefined, 3),
+          PreToolUse: makeHookEntry("pre-tool-use", "Bash"),
+          PostToolUse: makeHookEntry("post-tool-use", "Bash"),
         },
       },
     };

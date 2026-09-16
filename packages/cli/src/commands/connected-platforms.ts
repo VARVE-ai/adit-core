@@ -19,6 +19,7 @@ import { listAdapters } from "@varveai/adit-hooks/adapters";
 
 const RECORD_RELATIVE_PATH = join(".adit", "platforms.json");
 const RECORD_SCHEMA_VERSION = 1;
+const SHARED_CLAUDE_PLATFORMS: Platform[] = ["claude-code", "claude-vscode", "cursor"];
 
 export function connectedPlatformsPath(projectRoot: string): string {
   return join(projectRoot, RECORD_RELATIVE_PATH);
@@ -93,7 +94,10 @@ export async function addConnectedPlatforms(
   platforms: Platform[],
 ): Promise<Platform[]> {
   const current = await ensureConnectedPlatformsRecorded(projectRoot);
-  const merged = Array.from(new Set([...current, ...platforms]));
+  const connected = platforms.flatMap((platform) =>
+    SHARED_CLAUDE_PLATFORMS.includes(platform) ? SHARED_CLAUDE_PLATFORMS : [platform],
+  );
+  const merged = Array.from(new Set([...current, ...connected]));
   writeConnectedPlatforms(projectRoot, merged);
   return merged;
 }
@@ -104,7 +108,8 @@ export async function removeConnectedPlatform(
   platform: Platform,
 ): Promise<Platform[]> {
   const current = await ensureConnectedPlatformsRecorded(projectRoot);
-  const remaining = current.filter((entry) => entry !== platform);
+  const removed = SHARED_CLAUDE_PLATFORMS.includes(platform) ? SHARED_CLAUDE_PLATFORMS : [platform];
+  const remaining = current.filter((entry) => !removed.includes(entry));
   writeConnectedPlatforms(projectRoot, remaining);
   return remaining;
 }

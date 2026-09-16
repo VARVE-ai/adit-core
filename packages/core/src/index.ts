@@ -29,6 +29,9 @@ export type {
 export type { EnvSnapshot, EnvDiff, EnvChange } from "./types/index.js";
 
 // Database
+export { normalizeUsage, sanitizeUsage } from "./usage.js";
+export type { TokenUsageRecord } from "./usage.js";
+
 export {
   openDatabase,
   closeDatabase,
@@ -39,6 +42,7 @@ export {
   insertSessionPlatformAlias,
   listSessionPlatformAliases,
   listRecentSessions,
+  mergeSessionInto,
   listSessions,
   insertEvent,
   insertEventAutoSeq,

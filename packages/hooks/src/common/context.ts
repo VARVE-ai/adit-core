@@ -13,7 +13,6 @@ import {
   closeDatabase,
   getSessionByPlatformSessionId,
   insertSession,
-  insertSessionPlatformAlias,
   generateId,
   createClock,
   serialize,
@@ -25,7 +24,15 @@ import type Database from "better-sqlite3";
 import { getCurrentBranch, getRemoteUrl } from "@varveai/adit-engine";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { findForkedSession, markSupersededPrompt } from "./session-fork.js";
+import {
+  attachForkAlias,
+  findForkedSession,
+  FORK_CHECK_PENDING_KEY,
+  isForkCheckPending,
+  lookupForkedSession,
+  resolvePendingFork,
+  type ForkLookup,
+} from "./session-fork.js";
 import { bindSessionProject, readSessionProject } from "./session-project.js";
 import { parseHookStdin } from "./hook-stdin.js";
 
@@ -120,17 +127,32 @@ export async function initHookContext(
   // The same platform session ID always reattaches to the same local row
   // (directly, or through an alias recorded for a client-side fork).
   let session: AditSession | null = getSessionByPlatformSessionId(db, platformSessionId);
+  if (session && options.transcriptPath && isForkCheckPending(session)) {
+    // Created while the platform had not written its transcript yet: now
+    // that a later hook can read it, the fork check gets its second chance.
+    session = resolvePendingFork(db, {
+      session,
+      projectId: config.projectId,
+      clientId: config.clientId,
+      platform,
+      platformSessionId,
+      transcriptPath: options.transcriptPath,
+    }) ?? session;
+  }
+  let forkCheckPending = false;
   if (!session && options.transcriptPath) {
     // First sight of this platform session id: is it a fork of a recent
     // conversation (edited + resent message)? Then keep recording into the
     // original session instead of starting a new one.
-    session = attachForkedSession(db, {
+    const fork = attachForkedSession(db, {
       projectId: config.projectId,
       clientId: config.clientId,
       platform,
       platformSessionId,
       transcriptPath: options.transcriptPath,
     });
+    if (fork.kind === "fork") session = fork.original;
+    forkCheckPending = fork.kind === "pending";
   }
   if (!session) {
     const id = generateId();
@@ -153,6 +175,9 @@ export async function initHookContext(
         gitRemoteUrl: remoteUrl ?? undefined,
         workingDirectory: cwd,
         transcriptPath: options.transcriptPath ?? undefined,
+        // Claude Code writes a fork's transcript only after this first hook
+        // has returned; the check is repeated on later hooks until readable.
+        ...(forkCheckPending ? { [FORK_CHECK_PENDING_KEY]: true } : {}),
       }),
       vclockJson: serialize(createClock(config.clientId)),
       platformSessionId,
@@ -178,18 +203,13 @@ function attachForkedSession(
     platformSessionId: string;
     transcriptPath: string;
   },
-): AditSession | null {
+): ForkLookup {
   try {
-    const original = findForkedSession(db, input);
-    if (!original) return null;
-    insertSessionPlatformAlias(db, {
-      platformSessionId: input.platformSessionId,
-      sessionId: original.id,
-    });
-    markSupersededPrompt(db, original, input.clientId);
-    return original;
+    const lookup = lookupForkedSession(db, input);
+    if (lookup.kind === "fork") attachForkAlias(db, lookup.original, input);
+    return lookup;
   } catch {
-    return null;
+    return { kind: "none" };
   }
 }
 

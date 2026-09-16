@@ -341,8 +341,9 @@ describe("ensurePersistentClaudeHooksInstalled", () => {
 
       const settings = readFileSync(join(dir, ".claude", "settings.local.json"), "utf8");
       expect(installedAgain).toBe(false);
-      // 3 hook mappings: prompt-submit, stop (Stop + StopFailure)
-      expect((settings.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(3);
+      // 5 hook mappings: prompt-submit, stop (Stop + StopFailure),
+      // pre-tool-use + post-tool-use (Bash working-tree snapshots)
+      expect((settings.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(5);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

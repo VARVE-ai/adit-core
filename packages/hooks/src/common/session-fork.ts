@@ -6,12 +6,20 @@
  * whole history (same message uuids), then diverges at the resent prompt.
  * Without special handling every fork became a separate ADIT session.
  *
- * Detection runs once, when an unknown platform session id first shows up:
- * the head of the new transcript is compared with the heads of recent
- * sessions' transcripts (same project and platform); a shared message uuid
- * means "fork of that session". The fork is then recorded as an alias of
- * the original local session, and the prompt the user abandoned (the last,
- * unanswered prompt of the original) is labelled `superseded`.
+ * Detection compares the head of the new transcript with the heads of
+ * recently active sessions' transcripts (same project and platform); a
+ * shared message uuid means "fork of that session". The fork is then
+ * recorded as an alias of the original local session, and the prompt the
+ * user abandoned (the last, unanswered prompt of the original) is labelled
+ * `superseded`.
+ *
+ * Timing matters: Claude Code writes the forked transcript only after the
+ * first hook of the new session id (UserPromptSubmit) has returned, so at
+ * that moment there is nothing to compare yet. The lookup then reports
+ * `pending`; the session created in the meantime carries a pending flag in
+ * its metadata and the check is repeated on later hooks. Once the transcript
+ * can be read, a confirmed fork folds that placeholder session (and whatever
+ * it recorded) back into the original.
  *
  * Fail-open everywhere: any read/parse problem simply means "not a fork".
  */
@@ -22,7 +30,9 @@ import type Database from "better-sqlite3";
 import {
   deserialize,
   getLastEventOfSession,
+  insertSessionPlatformAlias,
   listRecentSessions,
+  mergeSessionInto,
   parseLabels,
   serialize,
   tick,
@@ -34,10 +44,32 @@ import {
 /** Label put on the abandoned prompt that a fork replaced. */
 export const SUPERSEDED_PROMPT_LABEL = "superseded";
 
+/**
+ * Session metadata key of a session whose fork check could not run when it
+ * was created (transcript not written yet); removed once the check has run.
+ */
+export const FORK_CHECK_PENDING_KEY = "forkCheckPending";
+
 const TRANSCRIPT_HEAD_BYTES = 512 * 1024;
 const MAX_HEAD_UUIDS = 24;
 const CANDIDATE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_CANDIDATES = 50;
+
+export interface ForkLookupInput {
+  projectId: string;
+  platform: Platform;
+  platformSessionId: string;
+  transcriptPath: string;
+  now?: Date;
+}
+
+export type ForkLookup =
+  /** The transcript continues `original`'s conversation. */
+  | { kind: "fork"; original: AditSession }
+  /** The transcript starts a conversation of its own. */
+  | { kind: "none" }
+  /** The transcript holds no message yet (not written): retry on a later hook. */
+  | { kind: "pending" };
 
 /**
  * Message uuids from the first records of a transcript (JSONL). Only
@@ -86,38 +118,26 @@ export function candidateTranscriptPath(
   newTranscriptPath: string,
   session: AditSession,
 ): string | null {
-  try {
-    const metadata = session.metadataJson
-      ? (JSON.parse(session.metadataJson) as { transcriptPath?: unknown })
-      : null;
-    if (typeof metadata?.transcriptPath === "string" && metadata.transcriptPath) {
-      return metadata.transcriptPath;
-    }
-  } catch {
-    /* fall through to the convention */
+  const metadata = parseMetadata(session.metadataJson);
+  if (typeof metadata?.transcriptPath === "string" && metadata.transcriptPath) {
+    return metadata.transcriptPath;
   }
   if (!session.platformSessionId) return null;
   return join(dirname(newTranscriptPath), `${session.platformSessionId}.jsonl`);
 }
 
 /**
- * The recent session (same project + platform) whose transcript shares its
- * opening messages with the new transcript — i.e. the session this one was
- * forked from. Null when there is no such session or nothing can be read.
+ * Classify a transcript against the recently active sessions of the same
+ * project and platform: a fork of one of them, a new conversation, or not
+ * decidable yet because the platform has not written any message to it.
  */
-export function findForkedSession(
+export function lookupForkedSession(
   db: Database.Database,
-  input: {
-    projectId: string;
-    platform: Platform;
-    platformSessionId: string;
-    transcriptPath: string;
-    now?: Date;
-  },
-): AditSession | null {
-  if (!existsSync(input.transcriptPath)) return null;
+  input: ForkLookupInput,
+): ForkLookup {
+  if (!existsSync(input.transcriptPath)) return { kind: "pending" };
   const headUuids = new Set(readTranscriptHeadUuids(input.transcriptPath));
-  if (headUuids.size === 0) return null;
+  if (headUuids.size === 0) return { kind: "pending" };
 
   const now = input.now ?? new Date();
   const candidates = listRecentSessions(db, {
@@ -128,12 +148,110 @@ export function findForkedSession(
   });
   for (const candidate of candidates) {
     if (!candidate.platformSessionId || candidate.platformSessionId === input.platformSessionId) continue;
+    // A session whose own identity is still unresolved cannot anchor a fork:
+    // a fork of a fork resolves to the conversation both were copied from.
+    if (isForkCheckPending(candidate)) continue;
     const path = candidateTranscriptPath(input.transcriptPath, candidate);
     if (!path || path === input.transcriptPath || !existsSync(path)) continue;
     const shared = readTranscriptHeadUuids(path).some((uuid) => headUuids.has(uuid));
-    if (shared) return candidate;
+    if (shared) return { kind: "fork", original: candidate };
   }
-  return null;
+  return { kind: "none" };
+}
+
+/**
+ * The recent session the transcript was forked from; null for a new
+ * conversation or when nothing can be compared yet (see lookupForkedSession).
+ */
+export function findForkedSession(
+  db: Database.Database,
+  input: ForkLookupInput,
+): AditSession | null {
+  const lookup = lookupForkedSession(db, input);
+  return lookup.kind === "fork" ? lookup.original : null;
+}
+
+/** Whether the session still awaits its deferred fork check. */
+export function isForkCheckPending(session: AditSession): boolean {
+  return parseMetadata(session.metadataJson)?.[FORK_CHECK_PENDING_KEY] === true;
+}
+
+/** Drop the pending flag: the check has run, whatever its verdict. */
+export function clearForkCheckPending(db: Database.Database, session: AditSession): void {
+  const metadata = parseMetadata(session.metadataJson);
+  if (!metadata || !(FORK_CHECK_PENDING_KEY in metadata)) return;
+  delete metadata[FORK_CHECK_PENDING_KEY];
+  const metadataJson = JSON.stringify(metadata);
+  db.prepare("UPDATE sessions SET metadata_json = ? WHERE id = ?").run(metadataJson, session.id);
+  session.metadataJson = metadataJson;
+}
+
+/**
+ * Record `platformSessionId` as an alias of `original`, so later hooks under
+ * that id reattach to it, and label the prompt the fork replaced.
+ */
+export function attachForkAlias(
+  db: Database.Database,
+  original: AditSession,
+  input: { platformSessionId: string; clientId: string },
+): void {
+  insertSessionPlatformAlias(db, {
+    platformSessionId: input.platformSessionId,
+    sessionId: original.id,
+  });
+  markSupersededPrompt(db, original, input.clientId);
+}
+
+/**
+ * Deferred fork check for a session created while its transcript was still
+ * unwritten. Returns the original session when the transcript turns out to
+ * continue one — `session` has then been folded into it (events moved,
+ * alias recorded, placeholder row soft-deleted) — and null when hooks should
+ * keep recording into `session`: still nothing to read, or a conversation of
+ * its own (the pending flag is cleared so the check does not repeat).
+ */
+export function resolvePendingFork(
+  db: Database.Database,
+  input: ForkLookupInput & { session: AditSession; clientId: string },
+): AditSession | null {
+  let lookup: ForkLookup;
+  try {
+    lookup = lookupForkedSession(db, input);
+  } catch {
+    return null;
+  }
+  if (lookup.kind === "pending") return null;
+  if (lookup.kind === "none") {
+    try {
+      clearForkCheckPending(db, input.session);
+    } catch {
+      /* fail-open */
+    }
+    return null;
+  }
+  const original = lookup.original;
+  try {
+    db.transaction(() => {
+      // Label before moving: afterwards the original's last event is the
+      // fork's own prompt, not the one it replaced.
+      attachForkAlias(db, original, input);
+      mergeSessionInto(db, {
+        sourceSessionId: input.session.id,
+        targetSessionId: original.id,
+        clientId: input.clientId,
+      });
+    })();
+    return original;
+  } catch {
+    // Keep recording into the placeholder rather than retrying a failing
+    // merge on every hook.
+    try {
+      clearForkCheckPending(db, input.session);
+    } catch {
+      /* fail-open */
+    }
+    return null;
+  }
 }
 
 /**
@@ -158,4 +276,14 @@ export function markSupersededPrompt(
   }
   updateEventLabels(db, last.id, JSON.stringify(Array.from(labels)), serialize(clock));
   return true;
+}
+
+function parseMetadata(metadataJson: string | null): Record<string, unknown> | null {
+  if (!metadataJson) return null;
+  try {
+    const parsed: unknown = JSON.parse(metadataJson);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }

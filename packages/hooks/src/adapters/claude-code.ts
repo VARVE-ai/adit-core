@@ -6,6 +6,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
+import { prepareLegacyCursorHooksRemoval } from "./cursor-legacy.js";
 import { join } from "node:path";
 import type { Platform } from "@varveai/adit-core";
 import type {
@@ -32,6 +33,10 @@ const HOOK_MAPPINGS: HookMapping[] = [
   // Route it through the stop handler so edits made before the failure are
   // still extracted from the transcript.
   { platformEvent: "StopFailure", aditHandler: "stop" },
+  // Working-tree snapshots around Bash calls: the only way to learn which
+  // files a shell command rewrote (python heredocs, sed -i, cat > ...).
+  { platformEvent: "PreToolUse", aditHandler: "pre-tool-use", matcher: "Bash" },
+  { platformEvent: "PostToolUse", aditHandler: "post-tool-use", matcher: "Bash" },
 ];
 
 /** Slash command installed into .claude/commands/ */
@@ -117,10 +122,12 @@ export const claudeCodeAdapter: PlatformAdapter = {
       platformCli: "claude-code",
       platformSessionId: raw.session_id as string | undefined,
       transcriptPath: raw.transcript_path as string | undefined,
+      promptId: raw.prompt_id as string | undefined,
       // Prompt
       prompt: raw.prompt as string | undefined,
       // Tool use fields (Claude Code sends tool_response for tool results)
       toolName: raw.tool_name as string | undefined,
+      toolUseId: raw.tool_use_id as string | undefined,
       toolInput: raw.tool_input as Record<string, unknown> | undefined,
       toolOutput: (raw.tool_response ?? raw.tool_output) as Record<string, unknown> | undefined,
       // Stop / StopFailure (StopFailure carries `error` instead of stop_reason)
@@ -146,8 +153,9 @@ export const claudeCodeAdapter: PlatformAdapter = {
   },
 
   generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
-    const makeHookEntry = (hookType: AditHookType) => [
+    const makeHookEntry = (hookType: AditHookType, matcher?: string) => [
       {
+        ...(matcher ? { matcher } : {}),
         hooks: [{
           type: "command",
           command: buildAditHookCommand(aditBinaryPath, "claude", hookType, projectRoot),
@@ -165,6 +173,8 @@ export const claudeCodeAdapter: PlatformAdapter = {
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
           StopFailure: makeHookEntry("stop"),
+          PreToolUse: makeHookEntry("pre-tool-use", "Bash"),
+          PostToolUse: makeHookEntry("post-tool-use", "Bash"),
         },
       },
     };
@@ -265,6 +275,7 @@ export const claudeCodeAdapter: PlatformAdapter = {
     aditBinaryPath: string,
     options?: { hookProjectRoot?: string },
   ): Promise<void> {
+    const legacyCursor = prepareLegacyCursorHooksRemoval(projectRoot);
     const claudeDir = join(projectRoot, ".claude");
     if (!existsSync(claudeDir)) {
       mkdirSync(claudeDir, { recursive: true });
@@ -312,6 +323,7 @@ export const claudeCodeAdapter: PlatformAdapter = {
     const commandsDir = join(claudeDir, "commands");
     mkdirSync(commandsDir, { recursive: true });
     writeFileSync(join(commandsDir, ADIT_COMMAND.filename), ADIT_COMMAND.content);
+    legacyCursor.remove();
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {
@@ -321,12 +333,14 @@ export const claudeCodeAdapter: PlatformAdapter = {
   },
 
   async uninstallHooks(projectRoot: string): Promise<void> {
+    const legacyCursor = prepareLegacyCursorHooksRemoval(projectRoot);
     removeAditHooksFromConfig(join(projectRoot, ".claude", "settings.local.json"));
     removeAditHooksFromConfig(join(projectRoot, ".claude", "settings.json"));
 
     // Remove slash command
     const commandsDir = join(projectRoot, ".claude", "commands");
     try { unlinkSync(join(commandsDir, ADIT_COMMAND.filename)); } catch { /* best-effort */ }
+    legacyCursor.remove();
   },
 };
 

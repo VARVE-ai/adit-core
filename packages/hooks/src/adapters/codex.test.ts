@@ -67,9 +67,19 @@ describe("Codex CLI Hook Chaining", () => {
 
     expect(hooks.UserPromptSubmit).toBeDefined();
     expect(hooks.Stop).toBeDefined();
+    expect(hooks.Interrupt).toEqual([
+      { hooks: [{ type: "command", command: expect.stringContaining(" stop"), timeout: 3 }] },
+    ]);
     expect(hooks.SessionStart).toBeUndefined();
-    // notification collection was retired — fresh installs carry no PostToolUse
-    expect(hooks.PostToolUse).toBeUndefined();
+    // Shell snapshots: one Bash-matched entry before and after each command
+    const preEntries = hooks.PreToolUse as Array<{ matcher?: string; hooks: Array<{ command: string }> }>;
+    const postEntries = hooks.PostToolUse as Array<{ matcher?: string; hooks: Array<{ command: string }> }>;
+    expect(preEntries).toHaveLength(1);
+    expect(preEntries[0].matcher).toBe("Bash");
+    expect(preEntries[0].hooks[0].command).toContain("pre-tool-use");
+    expect(postEntries).toHaveLength(1);
+    expect(postEntries[0].matcher).toBe("Bash");
+    expect(postEntries[0].hooks[0].command).toContain("post-tool-use");
 
     // Each event should have exactly one matcher group with one ADIT hook
     const stopEntries = hooks.Stop as Array<{ hooks: Array<{ command: string }> }>;
@@ -113,13 +123,16 @@ describe("Codex CLI Hook Chaining", () => {
       .filter((event) => JSON.stringify(hooks[event]).includes("adit-hook"))
       .sort();
     // Only this release's events carry ADIT entries — nothing retired lingers.
-    expect(eventsWithAdit).toEqual(["Stop", "UserPromptSubmit"]);
+    expect(eventsWithAdit).toEqual(["Interrupt", "PostToolUse", "PreToolUse", "Stop", "UserPromptSubmit"]);
     for (const event of eventsWithAdit) {
       expect(hooks[event].filter((e) => JSON.stringify(e).includes("adit-hook"))).toHaveLength(1);
     }
-    // The other tool's hook under a retired event is untouched.
-    expect(hooks.PostToolUse).toHaveLength(1);
+    // The retired notification entry is gone; the other tool's hook under
+    // PostToolUse is untouched and this release's snapshot entry sits beside it.
+    expect(hooks.PostToolUse).toHaveLength(2);
     expect(JSON.stringify(hooks.PostToolUse)).toContain("other-tool after-bash");
+    expect(JSON.stringify(hooks.PostToolUse)).toContain("post-tool-use");
+    expect(JSON.stringify(hooks.PostToolUse)).not.toContain("notification");
   });
 
   it("preserves other tools' hooks when installing ADIT hooks", async () => {
@@ -409,8 +422,8 @@ describe("Codex CLI Hook Chaining", () => {
   });
 
   describe("Hook mappings", () => {
-    it("has exactly 2 hook mappings", () => {
-      expect(codexAdapter.hookMappings).toHaveLength(2);
+    it("has exactly 5 hook mappings", () => {
+      expect(codexAdapter.hookMappings).toHaveLength(5);
     });
 
     it("maps UserPromptSubmit to prompt-submit", () => {
@@ -429,9 +442,22 @@ describe("Codex CLI Hook Chaining", () => {
       });
     });
 
-    it("does not register PostToolUse (notification collection retired)", () => {
-      const mapping = codexAdapter.hookMappings.find(m => m.platformEvent === "PostToolUse");
-      expect(mapping).toBeUndefined();
+    it("maps Interrupt to stop", () => {
+      const mapping = codexAdapter.hookMappings.find(m => m.platformEvent === "Interrupt");
+      expect(mapping).toEqual({
+        platformEvent: "Interrupt",
+        aditHandler: "stop"
+      });
+    });
+
+    it("registers Bash-matched PreToolUse/PostToolUse for shell snapshots", () => {
+      const toolMappings = codexAdapter.hookMappings.filter(
+        (m) => m.platformEvent === "PreToolUse" || m.platformEvent === "PostToolUse",
+      );
+      expect(toolMappings).toEqual([
+        { platformEvent: "PreToolUse", aditHandler: "pre-tool-use", matcher: "Bash" },
+        { platformEvent: "PostToolUse", aditHandler: "post-tool-use", matcher: "Bash" },
+      ]);
     });
   });
 
@@ -496,25 +522,32 @@ describe("Codex CLI Hook Chaining", () => {
     });
 
     it("parses PostToolUse input correctly", () => {
+      // Shape observed from Codex 0.154 for an exec_command call.
       const raw = {
         session_id: "session123",
+        hook_event_name: "PostToolUse",
         tool_name: "Bash",
-        tool_input: { command: "ls -la" },
-        tool_response: { output: "file1.txt\nfile2.txt" },
+        tool_use_id: "exec-0c80cc67-c3d9-4f02-97e3-d6f26204385d",
+        turn_id: "01a0a33d-b246-7851-92e8-9b41781ac41f",
+        tool_input: { command: "printf hello > probe/two.txt" },
+        tool_response: "",
+        transcript_path: "/home/u/.codex/sessions/2026/09/15/rollout.jsonl",
         model: "gpt-4",
         cwd: "/project"
       };
 
-      const result = codexAdapter.parseInput(raw, "notification");
+      const result = codexAdapter.parseInput(raw, "post-tool-use");
 
       expect(result).toMatchObject({
         cwd: "/project",
-        hookType: "notification",
+        hookType: "post-tool-use",
         platformCli: "codex",
         platformSessionId: "session123",
+        transcriptPath: "/home/u/.codex/sessions/2026/09/15/rollout.jsonl",
+        turnId: "01a0a33d-b246-7851-92e8-9b41781ac41f",
         toolName: "Bash",
-        toolInput: { command: "ls -la" },
-        toolOutput: { output: "file1.txt\nfile2.txt" },
+        toolUseId: "exec-0c80cc67-c3d9-4f02-97e3-d6f26204385d",
+        toolInput: { command: "printf hello > probe/two.txt" },
         rawPlatformData: raw
       });
     });
@@ -535,6 +568,15 @@ describe("Codex CLI Hook Chaining", () => {
             ],
             Stop: [
               { hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} stop`, timeout: 30 }] }
+            ],
+            Interrupt: [
+              { hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} stop`, timeout: 3 }] }
+            ],
+            PreToolUse: [
+              { matcher: "Bash", hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} pre-tool-use`, timeout: 30 }] }
+            ],
+            PostToolUse: [
+              { matcher: "Bash", hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} post-tool-use`, timeout: 30 }] }
             ]
           }
         }
@@ -618,7 +660,7 @@ describe("Codex CLI Hook Chaining", () => {
       expect(result.checks[2].name).toBe("Codex hook trust");
       expect(result.checks[2].ok).toBe(false);
       expect(result.checks[2].advisory).toBe(true);
-      expect(result.checks[2].detail).toContain("2 hook(s) not yet approved");
+      expect(result.checks[2].detail).toContain("5 hook(s) not yet approved");
       expect(result.checks[2].detail).toContain("/hooks");
     });
 
@@ -632,7 +674,10 @@ describe("Codex CLI Hook Chaining", () => {
         hooks: readHooks(projectRoot).hooks as Record<string, unknown>,
         matchesEntry: () => true,
       });
-      expect(states).toHaveLength(2);
+      expect(states).toHaveLength(5);
+      expect(states.map((state) => state.key.split(":").at(-3)).sort()).toEqual(
+        ["interrupt", "post_tool_use", "pre_tool_use", "stop", "user_prompt_submit"],
+      );
       writeFileSync(
         join(codexHome, "config.toml"),
         states.flatMap((state) => [

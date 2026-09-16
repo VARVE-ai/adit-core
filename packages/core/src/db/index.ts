@@ -8,6 +8,7 @@ export {
   insertSessionPlatformAlias,
   listSessionPlatformAliases,
   listRecentSessions,
+  mergeSessionInto,
   listSessions,
   type CreateSessionInput,
 } from "./sessions.js";

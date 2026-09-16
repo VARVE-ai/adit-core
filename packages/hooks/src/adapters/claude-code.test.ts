@@ -152,7 +152,7 @@ describe("Claude Code Hook Chaining", () => {
       .filter((event) => JSON.stringify(hooks[event]).includes("adit-hook"))
       .sort();
     // Only this release's events carry ADIT entries — nothing retired lingers.
-    expect(eventsWithAdit).toEqual(["Stop", "StopFailure", "UserPromptSubmit"]);
+    expect(eventsWithAdit).toEqual(["PostToolUse", "PreToolUse", "Stop", "StopFailure", "UserPromptSubmit"]);
     for (const event of eventsWithAdit) {
       expect(hooks[event].filter((e) => JSON.stringify(e).includes("adit-hook"))).toHaveLength(1);
     }
@@ -290,11 +290,14 @@ describe("Claude Code Hook Chaining", () => {
     const settings = readSettings(projectRoot);
     const hooks = settings.hooks as Record<string, unknown[]>;
 
-    // PostToolUse should be preserved exactly as-is
+    // The other tool's PostToolUse entry stays first and untouched; ADIT's
+    // own Bash-matcher entry is appended after it.
     const postToolEntries = hooks.PostToolUse as Array<{ matcher: string; hooks: Array<{ command: string }> }>;
-    expect(postToolEntries).toHaveLength(1);
+    expect(postToolEntries).toHaveLength(2);
     expect(postToolEntries[0].matcher).toBe("Write|Edit");
     expect(postToolEntries[0].hooks[0].command).toBe("my-formatter run");
+    expect(postToolEntries[1].matcher).toBe("Bash");
+    expect(postToolEntries[1].hooks[0].command).toContain("adit-hook");
 
     // ADIT hooks should also be present
     expect(hooks.SessionStart).toBeUndefined();
@@ -482,6 +485,12 @@ describe("Claude Code Hook Chaining", () => {
         StopFailure: [
           { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook stop" }] },
         ],
+        PreToolUse: [
+          { matcher: "Bash", hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook pre-tool-use" }] },
+        ],
+        PostToolUse: [
+          { matcher: "Bash", hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook post-tool-use" }] },
+        ],
         SessionStart: [
           { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook session-start" }] },
         ],
@@ -513,6 +522,21 @@ describe("Claude Code Hook Chaining", () => {
     expect(hookCheck?.detail).toContain("Stale ADIT hooks");
     expect(hookCheck?.detail).toContain("re-run `adit init`");
     expect(hookCheck?.detail).not.toContain("Missing hooks");
+  });
+
+  it("validateInstallation reports an install that predates Bash snapshots as missing hooks", async () => {
+    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+    const settings = readSettings(projectRoot);
+    const hooks = settings.hooks as Record<string, unknown[]>;
+    delete hooks.PreToolUse;
+    delete hooks.PostToolUse;
+    writeSettings(projectRoot, settings);
+
+    const result = await claudeCodeAdapter.validateInstallation(projectRoot);
+
+    const hookCheck = result.checks.find((c) => c.name === "Hook configuration");
+    expect(hookCheck?.ok).toBe(false);
+    expect(hookCheck?.detail).toContain("Missing hooks: PreToolUse, PostToolUse");
   });
 
   it("validateInstallation hints at a moved project when the pinned root differs", async () => {

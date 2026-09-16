@@ -485,7 +485,8 @@ describe("initCommand", () => {
       const claude = fakeAdapter("claude-code", "Claude Code", "claude");
       const vscode = fakeAdapter("claude-vscode", "Claude Code (VS Code)");
       const codex = fakeAdapter("codex", "Codex", "codex");
-      const all = [claude, vscode, codex];
+      const cursor = fakeAdapter("cursor", "Cursor");
+      const all = [claude, vscode, cursor, codex];
       mocks.listAdapters.mockReturnValue(all as never);
       mocks.getAdapter.mockImplementation(
         (platform: string) => {
@@ -494,7 +495,7 @@ describe("initCommand", () => {
           return adapter;
         },
       );
-      return { claude, vscode, codex };
+      return { claude, vscode, cursor, codex };
     }
 
     function readRecord(): string[] {
@@ -511,7 +512,7 @@ describe("initCommand", () => {
       expect(claude.installHooks).toHaveBeenCalled();
       expect(vscode.installHooks).toHaveBeenCalled();
       expect(codex.installHooks).toHaveBeenCalled();
-      expect(readRecord().sort()).toEqual(["claude-code", "claude-vscode", "codex"]);
+      expect(readRecord().sort()).toEqual(["claude-code", "claude-vscode", "codex", "cursor"]);
     });
 
     it("re-init refreshes connected platforms and only adds new ones", async () => {
@@ -530,7 +531,27 @@ describe("initCommand", () => {
       expect(codex.installHooks).toHaveBeenCalledTimes(1);
       expect(claude.installHooks).toHaveBeenCalledTimes(1);
       expect(vscode.installHooks).toHaveBeenCalledTimes(1);
-      expect(readRecord().sort()).toEqual(["claude-code", "claude-vscode", "codex"]);
+      expect(readRecord().sort()).toEqual(["claude-code", "claude-vscode", "codex", "cursor"]);
+    });
+
+    it("treats explicit Cursor installation as the shared integration", async () => {
+      mkdirSync(join(root, ".git"), { recursive: true });
+      const { claude, cursor } = registerFakes();
+      await initCommand({ cwd: root, platform: "cursor" });
+      expect(claude.installHooks).toHaveBeenCalledTimes(1);
+      expect(cursor.installHooks).not.toHaveBeenCalled();
+      expect(readRecord()).toEqual(["claude-code", "claude-vscode", "cursor"]);
+    });
+
+    it("keeps a legacy Cursor-only connection on a non-interactive rerun", async () => {
+      mkdirSync(join(root, ".git"), { recursive: true });
+      const { claude } = registerFakes();
+      mkdirSync(join(root, ".adit"), { recursive: true });
+      writeFileSync(join(root, ".adit", "platforms.json"), JSON.stringify({ schemaVersion: 1, connected: ["cursor"] }));
+      mocks.detectInstalledPlatforms.mockReturnValue([] as never);
+      await initCommand({ cwd: root });
+      expect(claude.installHooks).toHaveBeenCalledTimes(1);
+      expect(readRecord()).toEqual(["claude-code", "claude-vscode", "cursor"]);
     });
 
     it("records the platform on explicit --platform install", async () => {

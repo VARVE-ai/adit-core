@@ -27,6 +27,7 @@ export interface InsertEventInput {
   toolInputJson?: string | null;
   toolOutputJson?: string | null;
   diffStatJson?: string | null;
+  inferredFilesJson?: string | null;
   gitBranch?: string | null;
   gitHeadSha?: string | null;
   envSnapshotId?: string | null;
@@ -44,7 +45,7 @@ const INSERT_SQL = `
     id, session_id, parent_event_id, sequence, event_type, actor,
     prompt_text, cot_text, response_text,
     tool_name, tool_input_json, tool_output_json,
-    diff_stat_json,
+    diff_stat_json, inferred_files_json,
     git_branch, git_head_sha, env_snapshot_id,
     started_at, ended_at, status, error_json, labels_json,
     client_id, vclock_json
@@ -52,7 +53,7 @@ const INSERT_SQL = `
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?,
     ?, ?, ?,
-    ?,
+    ?, ?,
     ?, ?, ?,
     ?, ?, ?, ?, ?,
     ?, ?
@@ -70,7 +71,7 @@ const INSERT_WITH_SEQ_SQL = `
     id, session_id, parent_event_id, sequence, event_type, actor,
     prompt_text, cot_text, response_text,
     tool_name, tool_input_json, tool_output_json,
-    diff_stat_json,
+    diff_stat_json, inferred_files_json,
     git_branch, git_head_sha, env_snapshot_id,
     started_at, ended_at, status, error_json, labels_json,
     client_id, vclock_json
@@ -80,7 +81,7 @@ const INSERT_WITH_SEQ_SQL = `
     ?, ?,
     ?, ?, ?,
     ?, ?, ?,
-    ?,
+    ?, ?,
     ?, ?, ?,
     ?, ?, ?, ?, ?,
     ?, ?
@@ -105,6 +106,7 @@ export function insertEvent(
     input.toolInputJson ?? null,
     input.toolOutputJson ?? null,
     input.diffStatJson ?? null,
+    input.inferredFilesJson ?? null,
     input.gitBranch ?? null,
     input.gitHeadSha ?? null,
     input.envSnapshotId ?? null,
@@ -142,6 +144,7 @@ export function insertEventAutoSeq(
     input.toolInputJson ?? null,
     input.toolOutputJson ?? null,
     input.diffStatJson ?? null,
+    input.inferredFilesJson ?? null,
     input.gitBranch ?? null,
     input.gitHeadSha ?? null,
     input.envSnapshotId ?? null,
@@ -389,6 +392,7 @@ function rowToEvent(row: Record<string, unknown>): AditEvent {
     toolInputJson: (row.tool_input_json as string) ?? null,
     toolOutputJson: (row.tool_output_json as string) ?? null,
     diffStatJson: (row.diff_stat_json as string) ?? null,
+    inferredFilesJson: (row.inferred_files_json as string) ?? null,
     gitBranch: (row.git_branch as string) ?? null,
     gitHeadSha: (row.git_head_sha as string) ?? null,
     envSnapshotId: (row.env_snapshot_id as string) ?? null,
