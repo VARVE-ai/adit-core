@@ -58,6 +58,7 @@ import {
 } from "./requests.js";
 import { stopLocalCodexProcess } from "./terminal.js";
 import { hasCodexRolloutHistory } from "./local-rollout.js";
+import { codexRestartArgs } from "./local-cli-args.js";
 import { applyReclaimInput } from "../reclaim-input.js";
 import {
   RECLAIM_COMMAND,
@@ -898,7 +899,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.emitState();
   }
 
-  private startLocal(extraArgs: string[] = []): void {
+  private startLocal(extraArgs?: string[]): void {
     this.stopLocalResumeLogWatcher();
     this.stopLocalModelConfigWatcher();
     this.detachReclaimInput();
@@ -910,7 +911,10 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.appServer?.stop();
     this.appServer = null;
     const resumeLogWatermark = readMaxCodexLogId();
-    const child = spawnCliProcess(this.opts.bin, [...extraArgs, ...this.opts.args], {
+    const args = extraArgs === undefined
+      ? this.opts.args
+      : [...extraArgs, ...codexRestartArgs(this.opts.args)];
+    const child = spawnCliProcess(this.opts.bin, args, {
       cwd: this.opts.cwd,
       env: this.buildEnv(),
       stdio: "inherit",

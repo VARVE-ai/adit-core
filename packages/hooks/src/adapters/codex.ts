@@ -42,6 +42,7 @@ const HOOK_TIMEOUT = 30;
 const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "UserPromptSubmit", aditHandler: "prompt-submit" },
   { platformEvent: "Stop", aditHandler: "stop" },
+  { platformEvent: "Interrupt", aditHandler: "stop" },
 ];
 
 export const codexAdapter: PlatformAdapter = {
@@ -77,12 +78,12 @@ export const codexAdapter: PlatformAdapter = {
   },
 
   generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
-    const makeHookEntry = (hookType: AditHookType) => [
+    const makeHookEntry = (hookType: AditHookType, timeout = HOOK_TIMEOUT) => [
       {
         hooks: [{
           type: "command",
           command: buildAditHookCommand(aditBinaryPath, "codex", hookType, projectRoot),
-          timeout: HOOK_TIMEOUT,
+          timeout,
         }],
       },
     ];
@@ -92,6 +93,7 @@ export const codexAdapter: PlatformAdapter = {
         hooks: {
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
+          Interrupt: makeHookEntry("stop", 3),
         },
       },
     };

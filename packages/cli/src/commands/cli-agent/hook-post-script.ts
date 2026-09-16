@@ -24,7 +24,7 @@
  * hook-post-script.test.ts pins the exact output; update it only together
  * with a conscious trust-migration decision.
  */
-export const HOOK_POST_SCRIPT = [
+const buildHookPostScript = (timeoutMs: number): string => [
   "try{",
   "const a=process.argv[1]===undefined?'':process.argv[1];",
   "const argIsUrl=a.startsWith('http');",
@@ -43,14 +43,16 @@ export const HOOK_POST_SCRIPT = [
   "process.stdin.setEncoding('utf8');",
   "process.stdin.on('data',c=>{d+=c});",
   "process.stdin.on('end',()=>{try{",
-  "const r=m.request(u,{method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(d)},timeout:3000},res=>{res.resume();res.on('end',finish)});",
+  `const r=m.request(u,{method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(d)},timeout:${timeoutMs - 500}},res=>{res.resume();res.on('end',finish)});`,
   "r.on('timeout',()=>{r.destroy();finish()});",
   "r.on('error',finish);",
   "r.end(d)",
   "}catch{finish()}});",
-  "setTimeout(finish,3500).unref();",
+  `setTimeout(finish,${timeoutMs}).unref();`,
   "}catch{process.exit(0)}",
 ].join("");
+
+export const HOOK_POST_SCRIPT = buildHookPostScript(3500);
 
 /**
  * Build the relay hook command. With an endpoint, both endpoint and marker
@@ -60,11 +62,11 @@ export const HOOK_POST_SCRIPT = [
  * non-empty arg survives Codex's shell-less Windows spawn (an empty-string
  * placeholder would be dropped and shift argv — see module doc).
  */
-export function buildCloudHookCommand(endpoint: string, marker: string): string {
+export function buildCloudHookCommand(endpoint: string, marker: string, timeoutMs = 3500): string {
   const args = endpoint
     ? [quoteHookCommandArg(endpoint), quoteHookCommandArg(marker)]
     : [quoteHookCommandArg(marker)];
-  return ["node", "-e", quoteHookCommandArg(HOOK_POST_SCRIPT), ...args].join(" ");
+  return ["node", "-e", quoteHookCommandArg(buildHookPostScript(timeoutMs)), ...args].join(" ");
 }
 
 export function quoteHookCommandArg(value: string): string {

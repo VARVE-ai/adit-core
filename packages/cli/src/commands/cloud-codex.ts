@@ -578,7 +578,7 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
           enqueueEvents(transcriptSync.toolEvents(sessionId, body));
         }
       }
-      if (event.type === "Stop") {
+      if (event.type === "Stop" || event.type === "Interrupt") {
         if (isLocalOwner) {
           const transcriptEvents = transcriptSync.drainSession(sessionId);
           if (transcriptEvents.length > 0) {

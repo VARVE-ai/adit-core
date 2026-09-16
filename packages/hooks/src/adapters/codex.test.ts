@@ -67,6 +67,9 @@ describe("Codex CLI Hook Chaining", () => {
 
     expect(hooks.UserPromptSubmit).toBeDefined();
     expect(hooks.Stop).toBeDefined();
+    expect(hooks.Interrupt).toEqual([
+      { hooks: [{ type: "command", command: expect.stringContaining(" stop"), timeout: 3 }] },
+    ]);
     expect(hooks.SessionStart).toBeUndefined();
     // notification collection was retired — fresh installs carry no PostToolUse
     expect(hooks.PostToolUse).toBeUndefined();
@@ -113,7 +116,7 @@ describe("Codex CLI Hook Chaining", () => {
       .filter((event) => JSON.stringify(hooks[event]).includes("adit-hook"))
       .sort();
     // Only this release's events carry ADIT entries — nothing retired lingers.
-    expect(eventsWithAdit).toEqual(["Stop", "UserPromptSubmit"]);
+    expect(eventsWithAdit).toEqual(["Interrupt", "Stop", "UserPromptSubmit"]);
     for (const event of eventsWithAdit) {
       expect(hooks[event].filter((e) => JSON.stringify(e).includes("adit-hook"))).toHaveLength(1);
     }
@@ -409,8 +412,8 @@ describe("Codex CLI Hook Chaining", () => {
   });
 
   describe("Hook mappings", () => {
-    it("has exactly 2 hook mappings", () => {
-      expect(codexAdapter.hookMappings).toHaveLength(2);
+    it("has exactly 3 hook mappings", () => {
+      expect(codexAdapter.hookMappings).toHaveLength(3);
     });
 
     it("maps UserPromptSubmit to prompt-submit", () => {
@@ -425,6 +428,14 @@ describe("Codex CLI Hook Chaining", () => {
       const mapping = codexAdapter.hookMappings.find(m => m.platformEvent === "Stop");
       expect(mapping).toEqual({
         platformEvent: "Stop",
+        aditHandler: "stop"
+      });
+    });
+
+    it("maps Interrupt to stop", () => {
+      const mapping = codexAdapter.hookMappings.find(m => m.platformEvent === "Interrupt");
+      expect(mapping).toEqual({
+        platformEvent: "Interrupt",
         aditHandler: "stop"
       });
     });
@@ -535,6 +546,9 @@ describe("Codex CLI Hook Chaining", () => {
             ],
             Stop: [
               { hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} stop`, timeout: 30 }] }
+            ],
+            Interrupt: [
+              { hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} stop`, timeout: 3 }] }
             ]
           }
         }
@@ -618,7 +632,7 @@ describe("Codex CLI Hook Chaining", () => {
       expect(result.checks[2].name).toBe("Codex hook trust");
       expect(result.checks[2].ok).toBe(false);
       expect(result.checks[2].advisory).toBe(true);
-      expect(result.checks[2].detail).toContain("2 hook(s) not yet approved");
+      expect(result.checks[2].detail).toContain("3 hook(s) not yet approved");
       expect(result.checks[2].detail).toContain("/hooks");
     });
 
@@ -632,7 +646,7 @@ describe("Codex CLI Hook Chaining", () => {
         hooks: readHooks(projectRoot).hooks as Record<string, unknown>,
         matchesEntry: () => true,
       });
-      expect(states).toHaveLength(2);
+      expect(states).toHaveLength(3);
       writeFileSync(
         join(codexHome, "config.toml"),
         states.flatMap((state) => [
