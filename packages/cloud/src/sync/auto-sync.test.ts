@@ -88,6 +88,8 @@ vi.mock("./serializer.js", () => ({
   countUnsyncedEvents: vi.fn(),
 }));
 
+vi.mock("./token-usage.js", () => ({ hasPendingTokenUsage: vi.fn() }));
+
 vi.mock("./sync-cycle.js", () => {
   return {
     runSyncCycle: (...args: unknown[]) => runSyncCycleFn(...args),
@@ -110,6 +112,7 @@ import { loadCloudConfig } from "../config.js";
 import { loadCredentials } from "../auth/credentials.js";
 import { getSyncState } from "@varveai/adit-core";
 import { countUnsyncedEvents } from "./serializer.js";
+import { hasPendingTokenUsage } from "./token-usage.js";
 
 const mockLoadCloudConfig = vi.mocked(loadCloudConfig);
 const mockLoadCredentials = vi.mocked(loadCredentials);
@@ -147,6 +150,7 @@ function setupDefaults() {
   });
 
   mockCountUnsyncedEvents.mockReturnValue(0);
+  vi.mocked(hasPendingTokenUsage).mockReturnValue(false);
 }
 
 describe("triggerAutoSync", () => {
@@ -173,6 +177,12 @@ describe("triggerAutoSync", () => {
 
     expect(mockCountUnsyncedEvents).toHaveBeenCalled();
     expect(runSyncCycleFn).toHaveBeenCalled();
+  });
+
+  it("syncs pending usage even without new conversation events", async () => {
+    vi.mocked(hasPendingTokenUsage).mockReturnValue(true);
+    await triggerAutoSync(fakeDb, PROJECT_ID);
+    expect(runSyncCycleFn).toHaveBeenCalledOnce();
   });
 
   it("passes project name from project root when syncing", async () => {

@@ -7,6 +7,7 @@
  */
 
 import type Database from "better-sqlite3";
+import type { TokenUsageRecord } from "@varveai/adit-core";
 
 /** Total diff_text byte cap per push payload. Mirrors agent-file-mutation-capture-plan.md. */
 const MAX_SYNC_DIFF_BYTES = 2 * 1024 * 1024;
@@ -104,6 +105,7 @@ export interface SyncDiff {
 }
 
 export interface SyncBatch {
+  tokenUsageRecords?: TokenUsageRecord[];
   sessions: SyncSession[];
   events: SyncEvent[];
   /** Kept in the wire shape for server compatibility; local snapshots are never uploaded. */
@@ -302,7 +304,8 @@ export function batchRecordCount(batch: SyncBatch): number {
   return (
     batch.sessions.length +
     batch.events.length +
-    batch.envSnapshots.length
+    batch.envSnapshots.length +
+    (batch.tokenUsageRecords?.length ?? 0)
   );
 }
 
@@ -312,7 +315,7 @@ function uniqueSessionIds(events: SyncEvent[]): string[] {
   return Array.from(new Set(events.map((event) => event.session_id)));
 }
 
-function querySessionsByIds(
+export function querySessionsByIds(
   db: Database.Database,
   sessionIds: string[],
   projectId: string,

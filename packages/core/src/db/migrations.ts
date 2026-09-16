@@ -474,4 +474,50 @@ export const migrations: Migration[] = [
       ALTER TABLE events ADD COLUMN inferred_files_json TEXT;
     `,
   },
+  {
+    id: 23,
+    name: "token_usage_ledger",
+    sql: `
+      CREATE TABLE IF NOT EXISTS token_usage_cursors (
+        source_key TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        state_json TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS token_usage_records (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        turn_id TEXT,
+        revision INTEGER NOT NULL,
+        record_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage_records(session_id, turn_id);
+    `,
+  },
+  {
+    id: 24,
+    name: "independent_token_usage_sync",
+    sql: `
+      CREATE TABLE IF NOT EXISTS token_usage_sync_state (
+        server_url TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        record_id TEXT NOT NULL REFERENCES token_usage_records(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,
+        PRIMARY KEY (server_url, client_id, record_id)
+      );
+      DELETE FROM events
+      WHERE event_type = 'token_usage' AND tool_name = 'adit.token-usage.v1'
+        AND CASE WHEN json_valid(tool_input_json) THEN EXISTS (
+          SELECT 1 FROM token_usage_records AS usage
+          WHERE usage.id = json_extract(events.tool_input_json, '$.id')
+            AND usage.session_id = events.session_id
+            AND usage.revision >= json_extract(events.tool_input_json, '$.revision')
+            AND json_valid(usage.record_json)
+            AND json_extract(CASE WHEN json_valid(usage.record_json) THEN usage.record_json ELSE '{}' END, '$.id') = usage.id
+            AND json_extract(CASE WHEN json_valid(usage.record_json) THEN usage.record_json ELSE '{}' END, '$.revision') = usage.revision
+            AND json_extract(CASE WHEN json_valid(usage.record_json) THEN usage.record_json ELSE '{}' END, '$.sessionId') = usage.session_id
+        ) ELSE 0 END
+        AND NOT EXISTS (SELECT 1 FROM events AS child WHERE child.parent_event_id = events.id)
+        AND NOT EXISTS (SELECT 1 FROM diffs WHERE diffs.event_id = events.id);
+    `,
+  },
 ];
