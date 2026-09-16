@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { openSync, closeSync, readSync, statSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { generateId, insertEventAutoSeq, normalizeUsage, type TokenUsageRecord } from "@varveai/adit-core";
+import { generateId, normalizeUsage, type TokenUsageRecord } from "@varveai/adit-core";
 import type { HookContext } from "./context.js";
 
 interface Cursor {
@@ -45,12 +45,6 @@ function saveRecord(ctx: HookContext, record: TokenUsageRecord): void {
   ctx.db.prepare(`INSERT INTO token_usage_records(id, session_id, turn_id, revision, record_json)
     VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, record_json=excluded.record_json`)
     .run(record.id, record.sessionId, record.turnId, record.revision, serialized);
-  insertEventAutoSeq(ctx.db, {
-    id: generateId(), sessionId: ctx.session.id, parentEventId: record.turnId,
-    eventType: "token_usage", actor: "system", status: "success",
-    startedAt: record.occurredAt, toolName: "adit.token-usage.v1", toolInputJson: serialized,
-    vclockJson: "{}",
-  });
 }
 
 function makeRecord(ctx: HookContext, cursor: Cursor, key: string, raw: unknown,

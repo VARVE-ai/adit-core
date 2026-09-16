@@ -38,11 +38,11 @@ describe("incremental token usage ledger", () => {
     expect(records().map((record) => record.responseId)).toEqual(["response-a", "response-b"]);
     expect(records().every((record) => record.turnId === "turn-1" && record.totalTokens === 13)).toBe(true);
     const events = ctx.db.prepare("SELECT tool_input_json FROM events WHERE event_type='token_usage'").all();
-    expect(events).toHaveLength(2);
-    expect(JSON.stringify(events)).not.toContain("secret code");
+    expect(events).toHaveLength(0);
+    expect(JSON.stringify(records())).not.toContain("secret code");
   });
 
-  it("emits a new outbox revision instead of counting usage updates twice", () => {
+  it("updates only the ledger revision without emitting conversation events", () => {
     captureTokenUsage(ctx, transcript, "prompt", "turn-1");
     append("response-a", { ...raw, output_tokens: 1 });
     captureTokenUsage(ctx, transcript, "stop");
@@ -51,7 +51,7 @@ describe("incremental token usage ledger", () => {
     expect(records()).toHaveLength(1);
     expect(records()[0].revision).toBe(2);
     expect(records()[0].outputTokens).toBe(3);
-    expect(ctx.db.prepare("SELECT COUNT(*) AS count FROM events WHERE event_type='token_usage'").get()).toEqual({ count: 2 });
+    expect(ctx.db.prepare("SELECT COUNT(*) AS count FROM events WHERE event_type='token_usage'").get()).toEqual({ count: 0 });
   });
 
   it("does not consume a partial JSON line and records an explicit gap", () => {

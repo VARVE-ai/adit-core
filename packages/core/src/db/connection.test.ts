@@ -5,6 +5,7 @@ import { unlinkSync, existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
 import { openDatabase, closeDatabase } from "./connection.js";
+import { migrations } from "./migrations.js";
 
 function tempDbPath(): string {
   return join(tmpdir(), `adit-test-${randomBytes(8).toString("hex")}.sqlite`);
@@ -47,6 +48,7 @@ describe("Database", () => {
     expect(tables).toContain("_migrations");
     expect(tables).toContain("token_usage_cursors");
     expect(tables).toContain("token_usage_records");
+    expect(tables).toContain("token_usage_sync_state");
 
     const eventColumns = db
       .prepare("PRAGMA table_info(events)")
@@ -133,6 +135,32 @@ describe("Database", () => {
         closeDatabase(db);
       }
     }
+  });
+
+  it("removes only backed-up legacy usage events without losing ledger data or referenced events", () => {
+    const db = openDatabase(":memory:");
+    try {
+      db.prepare(`INSERT INTO sessions (id, project_id, client_id, platform, started_at, vclock_json)
+        VALUES ('session', 'project', 'client', 'codex', '2026-09-16T00:00:00.000Z', '{}')`).run();
+      const record = { id: "usage", sessionId: "session", revision: 2, totalTokens: 15 };
+      db.prepare("INSERT INTO token_usage_records VALUES ('usage', 'session', NULL, 2, ?)").run(JSON.stringify(record));
+      const insert = db.prepare(`INSERT INTO events (id, session_id, sequence, event_type, actor, tool_name, tool_input_json, started_at, vclock_json)
+        VALUES (?, 'session', ?, ?, 'system', 'adit.token-usage.v1', ?, '2026-09-16T00:00:00.000Z', '{}')`);
+      insert.run("covered", 1, "token_usage", JSON.stringify({ ...record, revision: 1 }));
+      insert.run("latest", 2, "token_usage", JSON.stringify(record));
+      insert.run("unbacked", 3, "token_usage", JSON.stringify({ ...record, id: "missing" }));
+      insert.run("malformed", 4, "token_usage", "not-json");
+      insert.run("newer", 5, "token_usage", JSON.stringify({ ...record, revision: 3 }));
+      insert.run("referenced", 6, "token_usage", JSON.stringify(record));
+      insert.run("conversation", 7, "prompt_submit", null);
+      db.prepare("UPDATE events SET parent_event_id = 'referenced' WHERE id = 'conversation'").run();
+      db.exec(migrations.find((migration) => migration.id === 24)!.sql);
+      expect(db.prepare("SELECT id FROM events ORDER BY id").all()).toEqual(
+        ["conversation", "malformed", "newer", "referenced", "unbacked"].map((id) => ({ id })),
+      );
+      expect(JSON.parse((db.prepare("SELECT record_json FROM token_usage_records").get() as { record_json: string }).record_json)).toEqual(record);
+      expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    } finally { db.close(); }
   });
 
   it("normalizes and merges legacy cloud server URL keys", () => {

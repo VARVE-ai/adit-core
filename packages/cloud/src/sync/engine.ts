@@ -20,6 +20,7 @@ import type { ProjectType, SyncState } from "@varveai/adit-core";
 import type { CloudClient } from "../http/client.js";
 import { buildSyncBatch, batchRecordCount, countUnsyncedEvents } from "./serializer.js";
 import { handleConflicts, type SyncConflict } from "./conflicts.js";
+import { syncTokenUsage } from "./token-usage.js";
 
 export type { SyncConflict } from "./conflicts.js";
 
@@ -49,6 +50,7 @@ export interface SyncRepositoryPayload {
 }
 
 interface PushResponse {
+  tokenUsageAcknowledgements?: { id: string; revision: number }[];
   accepted: number;
   duplicates: number;
   conflicts: SyncConflict[];
@@ -305,8 +307,22 @@ export class SyncEngine {
         // still unsynced.
         if (count < this.batchSize && !diffByteCapApplied && !payloadByteCapApplied) break;
       }
-
-
+      const usage = await syncTokenUsage(this.db, async (batch) => {
+        const response = await this.client.post<PushResponse>("/api/sync/push",
+          this.createPushPayload(batch, syncVersion, isNewProject));
+        syncVersion = response.newSyncVersion;
+        persistSyncState(this.db, {
+          serverUrl: this.serverUrl, clientId: this.cloudClientId,
+          lastSyncedEventId: cursor, lastSyncedAt: new Date().toISOString(), syncVersion,
+        });
+        return response;
+      }, {
+        projectId: this.projectId, serverUrl: this.serverUrl, cloudClientId: this.cloudClientId,
+      });
+      result.accepted += usage.accepted;
+      result.duplicates += usage.duplicates;
+      result.batches += usage.batches;
+      result.totalRecords += usage.totalRecords;
       return result;
     };
 

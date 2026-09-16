@@ -24,12 +24,17 @@ vi.mock("./conflicts.js", () => ({
   handleConflicts: vi.fn(),
 }));
 
+vi.mock("./token-usage.js", () => ({
+  syncTokenUsage: vi.fn(),
+}));
+
 import { SyncEngine } from "./engine.js";
 import {
   applyAuthoritativeSyncState,
   upsertSyncState,
 } from "@varveai/adit-core";
 import { buildSyncBatch, batchRecordCount } from "./serializer.js";
+import { syncTokenUsage } from "./token-usage.js";
 
 const mockBuildSyncBatch = vi.mocked(buildSyncBatch);
 const mockBatchRecordCount = vi.mocked(batchRecordCount);
@@ -87,6 +92,7 @@ function createEngine(
 describe("SyncEngine", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(syncTokenUsage).mockResolvedValue({ accepted: 0, duplicates: 0, batches: 0, totalRecords: 0 });
   });
 
   afterEach(() => {
@@ -104,6 +110,23 @@ describe("SyncEngine", () => {
     expect(result.totalRecords).toBe(0);
     expect(result.accepted).toBe(0);
     expect(mockClient.post).not.toHaveBeenCalled();
+  });
+
+  it("uploads usage-only batches through the existing sync push endpoint", async () => {
+    const { engine, mockClient } = createEngine();
+    mockBatchRecordCount.mockReturnValue(0);
+    mockBuildSyncBatch.mockReturnValue({ batch: { events: [], sessions: [], envSnapshots: [], diffs: [] }, diffByteCapApplied: false });
+    vi.mocked(syncTokenUsage).mockImplementationOnce(async (_db, push) => {
+      await push({ sessions: [], events: [], envSnapshots: [], diffs: [], tokenUsageRecords: [] });
+      return { accepted: 1, duplicates: 0, batches: 1, totalRecords: 1 };
+    });
+    const result = await engine.sync();
+    expect(mockClient.post).toHaveBeenCalledExactlyOnceWith("/api/sync/push", expect.objectContaining({
+      localProjectId: "proj-001", syncVersion: 0,
+      batch: expect.objectContaining({ events: [], tokenUsageRecords: [] }),
+    }));
+    expect(result.accepted).toBe(1);
+    expect(mockApplyAuthoritativeSyncState).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ syncVersion: 1 }));
   });
 
   it("pushes a single batch and stops when count < batchSize", async () => {
