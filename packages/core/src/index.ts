@@ -39,6 +39,7 @@ export {
   insertSessionPlatformAlias,
   listSessionPlatformAliases,
   listRecentSessions,
+  mergeSessionInto,
   listSessions,
   insertEvent,
   insertEventAutoSeq,

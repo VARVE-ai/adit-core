@@ -10,9 +10,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   closeDatabase,
   createClock,
+  getEventsBySession,
+  getSessionById,
+  insertEventAutoSeq,
   insertSession,
   loadConfig,
   openDatabase,
+  parseLabels,
   serialize,
   writeProjectManifest,
 } from "@varveai/adit-core";
@@ -183,6 +187,78 @@ describe("initHookContext", () => {
       .get(forkPsid) as { session_id: string } | undefined;
     expect(alias?.session_id).toBe("original-session");
     closeDatabase(again!.db);
+  });
+
+  it("defers the fork check until the platform writes the transcript, then folds the placeholder into the original", async () => {
+    const originalPsid = "claude-original";
+    const forkPsid = "claude-fork";
+    const transcriptsDir = join(dir, "transcripts");
+    mkdirSync(transcriptsDir, { recursive: true });
+    const line = (type: string, uuid: string, sessionId: string) =>
+      JSON.stringify({ type, uuid, sessionId, message: { role: type, content: [{ type: "text", text: "x" }] } });
+    writeFileSync(
+      join(transcriptsDir, `${originalPsid}.jsonl`),
+      [line("user", "u1", originalPsid), line("assistant", "a1", originalPsid), line("user", "u2", originalPsid)].join("\n") + "\n",
+    );
+    insertSession(db, {
+      id: "original-session",
+      projectId,
+      clientId,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      vclockJson: serialize(createClock(clientId)),
+      platformSessionId: originalPsid,
+    });
+    insertEventAutoSeq(db, {
+      id: "abandoned-prompt",
+      sessionId: "original-session",
+      eventType: "prompt_submit",
+      actor: "user",
+      promptText: "typo verison",
+      startedAt: new Date().toISOString(),
+      status: "success",
+      vclockJson: serialize(createClock(clientId)),
+    });
+
+    // UserPromptSubmit of the fork: Claude Code has not written its transcript yet.
+    const forkPath = join(transcriptsDir, `${forkPsid}.jsonl`);
+    const { initHookContext } = await loadContextModule();
+    const first = await initHookContext(dir, "claude-code", forkPsid, { projectRoot: dir, transcriptPath: forkPath });
+    expect(first?.session.id).not.toBe("original-session");
+    expect(JSON.parse(first!.session.metadataJson ?? "{}").forkCheckPending).toBe(true);
+    const placeholderId = first!.session.id;
+    insertEventAutoSeq(first!.db, {
+      id: "resent-prompt",
+      sessionId: placeholderId,
+      eventType: "prompt_submit",
+      actor: "user",
+      promptText: "typo version, fixed",
+      startedAt: new Date().toISOString(),
+      status: "success",
+      vclockJson: serialize(createClock(clientId)),
+    });
+    closeDatabase(first!.db);
+
+    // The transcript lands after that hook returned; the next hook can read it.
+    writeFileSync(
+      forkPath,
+      [line("user", "u1", forkPsid), line("assistant", "a1", forkPsid), line("user", "u2-edited", forkPsid)].join("\n") + "\n",
+    );
+    const second = await initHookContext(dir, "claude-code", forkPsid, { projectRoot: dir, transcriptPath: forkPath });
+    expect(second?.session.id).toBe("original-session");
+    const events = getEventsBySession(second!.db, "original-session");
+    expect(events.map((e) => [e.id, e.sequence])).toEqual([["abandoned-prompt", 1], ["resent-prompt", 2]]);
+    expect(parseLabels(events[0]!.labelsJson)).toEqual(["superseded"]);
+    expect(getSessionById(second!.db, placeholderId)?.deletedAt).not.toBeNull();
+    closeDatabase(second!.db);
+
+    // Later hooks resolve through the alias, with or without a transcript path.
+    const third = await initHookContext(dir, "claude-code", forkPsid, { projectRoot: dir });
+    expect(third?.session.id).toBe("original-session");
+    const live = third!.db.prepare("SELECT COUNT(*) AS count FROM sessions WHERE deleted_at IS NULL").get() as { count: number };
+    expect(live.count).toBe(1);
+    closeDatabase(third!.db);
   });
 
   it("starts a new session when the transcript does not continue an existing one", async () => {

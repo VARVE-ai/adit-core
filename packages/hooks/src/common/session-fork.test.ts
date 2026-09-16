@@ -12,18 +12,26 @@ import {
   closeDatabase,
   createClock,
   getEventsBySession,
+  getSessionById,
+  getSessionByPlatformSessionId,
   insertEventAutoSeq,
   insertSession,
+  listSessionPlatformAliases,
   openDatabase,
   parseLabels,
   serialize,
+  type AditSession,
 } from "@varveai/adit-core";
 import type Database from "better-sqlite3";
 import {
   candidateTranscriptPath,
   findForkedSession,
+  FORK_CHECK_PENDING_KEY,
+  isForkCheckPending,
+  lookupForkedSession,
   markSupersededPrompt,
   readTranscriptHeadUuids,
+  resolvePendingFork,
   SUPERSEDED_PROMPT_LABEL,
 } from "./session-fork.js";
 
@@ -215,5 +223,156 @@ describe("session forks", () => {
     const events = getEventsBySession(db, "local-original");
     expect(parseLabels(events.find((e) => e.id === "e-prompt-abandoned")!.labelsJson)).toEqual([SUPERSEDED_PROMPT_LABEL]);
     expect(parseLabels(events.find((e) => e.id === "e-prompt-answered")!.labelsJson)).toEqual([]);
+  });
+
+  it("cannot classify a transcript the platform has not written yet", () => {
+    const forkPath = join(dir, `${FORK_ID}.jsonl`);
+    const input = { projectId: PROJECT, platform: "claude-code" as const, platformSessionId: FORK_ID, transcriptPath: forkPath };
+
+    expect(lookupForkedSession(db, input)).toEqual({ kind: "pending" });
+    // Meta records only: no message has been flushed yet.
+    writeFileSync(forkPath, transcript(FORK_ID, []));
+    expect(lookupForkedSession(db, input)).toEqual({ kind: "pending" });
+
+    writeFileSync(forkPath, transcript(FORK_ID, ["m1", "m2", "m3", "m4", "m5-resent"]));
+    expect(lookupForkedSession(db, input)).toMatchObject({ kind: "fork", original: { id: "local-original" } });
+
+    writeFileSync(forkPath, transcript(FORK_ID, ["n1"]));
+    expect(lookupForkedSession(db, input)).toEqual({ kind: "none" });
+  });
+
+  it("never anchors a fork on a placeholder that is itself unresolved", () => {
+    // An earlier fork that never got a second hook (interrupted again before
+    // any reply) is more recent than the original but must not win.
+    const stalePath = join(dir, `${UNRELATED_ID}.jsonl`);
+    writeFileSync(stalePath, transcript(UNRELATED_ID, ["m1", "m2", "m3", "m4", "m5-stale"]));
+    insertSession(db, {
+      id: "local-stale-fork",
+      projectId: PROJECT,
+      clientId: CLIENT,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: new Date().toISOString(),
+      vclockJson: serialize(createClock(CLIENT)),
+      platformSessionId: UNRELATED_ID,
+      metadataJson: JSON.stringify({ transcriptPath: stalePath, [FORK_CHECK_PENDING_KEY]: true }),
+    });
+    const forkPath = join(dir, `${FORK_ID}.jsonl`);
+    writeFileSync(forkPath, transcript(FORK_ID, ["m1", "m2", "m3", "m4", "m5-resent"]));
+
+    expect(
+      findForkedSession(db, {
+        projectId: PROJECT,
+        platform: "claude-code",
+        platformSessionId: FORK_ID,
+        transcriptPath: forkPath,
+      })?.id,
+    ).toBe("local-original");
+  });
+
+  describe("deferred check of a placeholder session", () => {
+    const forkPath = () => join(dir, `${FORK_ID}.jsonl`);
+    const clock = () => serialize(createClock(CLIENT));
+    const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60 * 1000).toISOString();
+
+    function recordOriginalTurns(): void {
+      for (const [id, eventType, actor, text, minute] of [
+        ["e-prompt-answered", "prompt_submit", "user", "first", 0],
+        ["e-response", "assistant_response", "assistant", "ok", 1],
+        ["e-prompt-abandoned", "prompt_submit", "user", "typo verison", 2],
+      ] as const) {
+        insertEventAutoSeq(db, {
+          id,
+          sessionId: "local-original",
+          eventType,
+          actor,
+          promptText: actor === "user" ? text : null,
+          responseText: actor === "assistant" ? text : null,
+          startedAt: minutesAgo(30 - minute),
+          status: "completed",
+          vclockJson: clock(),
+        });
+      }
+    }
+
+    /** The session created for the fork id while its transcript was unreadable. */
+    function insertPlaceholder(): AditSession {
+      insertSession(db, {
+        id: "local-placeholder",
+        projectId: PROJECT,
+        clientId: CLIENT,
+        sessionType: "interactive",
+        platform: "claude-code",
+        startedAt: new Date().toISOString(),
+        vclockJson: clock(),
+        platformSessionId: FORK_ID,
+        metadataJson: JSON.stringify({ transcriptPath: forkPath(), [FORK_CHECK_PENDING_KEY]: true }),
+      });
+      insertEventAutoSeq(db, {
+        id: "e-prompt-resent",
+        sessionId: "local-placeholder",
+        eventType: "prompt_submit",
+        actor: "user",
+        promptText: "typo version, fixed",
+        startedAt: minutesAgo(1),
+        status: "completed",
+        vclockJson: clock(),
+      });
+      return getSessionById(db, "local-placeholder")!;
+    }
+
+    const input = (session: AditSession) => ({
+      session,
+      clientId: CLIENT,
+      projectId: PROJECT,
+      platform: "claude-code" as const,
+      platformSessionId: FORK_ID,
+      transcriptPath: forkPath(),
+    });
+
+    it("waits while the transcript is still unwritten", () => {
+      const session = insertPlaceholder();
+
+      expect(resolvePendingFork(db, input(session))).toBeNull();
+
+      expect(isForkCheckPending(getSessionById(db, "local-placeholder")!)).toBe(true);
+      expect(getSessionById(db, "local-placeholder")?.deletedAt).toBeNull();
+      expect(getEventsBySession(db, "local-placeholder").map((e) => e.id)).toEqual(["e-prompt-resent"]);
+    });
+
+    it("folds the placeholder into the original once the transcript can be read", () => {
+      recordOriginalTurns();
+      const session = insertPlaceholder();
+      writeFileSync(forkPath(), transcript(FORK_ID, ["m1", "m2", "m3", "m4", "m5-resent"]));
+
+      expect(resolvePendingFork(db, input(session))?.id).toBe("local-original");
+
+      const events = getEventsBySession(db, "local-original");
+      expect(events.map((e) => [e.id, e.sequence])).toEqual([
+        ["e-prompt-answered", 1],
+        ["e-response", 2],
+        ["e-prompt-abandoned", 3],
+        ["e-prompt-resent", 4],
+      ]);
+      expect(parseLabels(events[2]!.labelsJson)).toEqual([SUPERSEDED_PROMPT_LABEL]);
+      expect(parseLabels(events[3]!.labelsJson)).toEqual([]);
+      expect(getSessionById(db, "local-placeholder")?.deletedAt).not.toBeNull();
+      expect(getSessionByPlatformSessionId(db, FORK_ID)?.id).toBe("local-original");
+      expect(listSessionPlatformAliases(db, "local-original")).toEqual([FORK_ID]);
+    });
+
+    it("stops checking once the transcript proves to be a conversation of its own", () => {
+      const session = insertPlaceholder();
+      writeFileSync(forkPath(), transcript(FORK_ID, ["n1", "n2"]));
+
+      expect(resolvePendingFork(db, input(session))).toBeNull();
+
+      expect(isForkCheckPending(session)).toBe(false);
+      const stored = getSessionById(db, "local-placeholder")!;
+      expect(isForkCheckPending(stored)).toBe(false);
+      expect(JSON.parse(stored.metadataJson!)).toEqual({ transcriptPath: forkPath() });
+      expect(stored.deletedAt).toBeNull();
+      expect(listSessionPlatformAliases(db, "local-original")).toEqual([]);
+    });
   });
 });
