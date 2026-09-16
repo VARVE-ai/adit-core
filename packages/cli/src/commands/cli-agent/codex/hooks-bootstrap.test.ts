@@ -90,6 +90,11 @@ describe("installCodexHooks", () => {
       expect(command).not.toContain("||");
       expect(command).not.toContain("/dev/null");
       expect(command).toContain("require('http')");
+      expect(hooksConfig.hooks.Interrupt[0].hooks[0].timeout).toBe(3);
+      expect(hooksConfig.hooks.Interrupt[0].hooks[0].command).toContain("timeout:2000");
+      expect(hooksConfig.hooks.Interrupt[0].hooks[0].command).toContain("setTimeout(finish,2500)");
+      expect(hooksConfig.hooks.Stop[0].hooks[0].timeout).toBe(30);
+      expect(hooksConfig.hooks.Stop[0].hooks[0].command).toContain("setTimeout(finish,3500)");
 
       installed.cleanup();
       expect(existsSync(installed.settingsPath)).toBe(false);
@@ -384,8 +389,7 @@ describe("ensurePersistentCodexHooksInstalled", () => {
 
       const hooks = readFileSync(join(dir, ".codex", "hooks.json"), "utf8");
       expect(installedAgain).toBe(false);
-      // 2 hook mappings: prompt-submit, stop
-      expect((hooks.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(2);
+      expect((hooks.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(5);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

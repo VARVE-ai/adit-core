@@ -67,6 +67,9 @@ describe("Codex CLI Hook Chaining", () => {
 
     expect(hooks.UserPromptSubmit).toBeDefined();
     expect(hooks.Stop).toBeDefined();
+    expect(hooks.Interrupt).toEqual([
+      { hooks: [{ type: "command", command: expect.stringContaining(" stop"), timeout: 3 }] },
+    ]);
     expect(hooks.SessionStart).toBeUndefined();
     // Shell snapshots: one Bash-matched entry before and after each command
     const preEntries = hooks.PreToolUse as Array<{ matcher?: string; hooks: Array<{ command: string }> }>;
@@ -120,7 +123,7 @@ describe("Codex CLI Hook Chaining", () => {
       .filter((event) => JSON.stringify(hooks[event]).includes("adit-hook"))
       .sort();
     // Only this release's events carry ADIT entries — nothing retired lingers.
-    expect(eventsWithAdit).toEqual(["PostToolUse", "PreToolUse", "Stop", "UserPromptSubmit"]);
+    expect(eventsWithAdit).toEqual(["Interrupt", "PostToolUse", "PreToolUse", "Stop", "UserPromptSubmit"]);
     for (const event of eventsWithAdit) {
       expect(hooks[event].filter((e) => JSON.stringify(e).includes("adit-hook"))).toHaveLength(1);
     }
@@ -419,8 +422,8 @@ describe("Codex CLI Hook Chaining", () => {
   });
 
   describe("Hook mappings", () => {
-    it("has exactly 4 hook mappings", () => {
-      expect(codexAdapter.hookMappings).toHaveLength(4);
+    it("has exactly 5 hook mappings", () => {
+      expect(codexAdapter.hookMappings).toHaveLength(5);
     });
 
     it("maps UserPromptSubmit to prompt-submit", () => {
@@ -435,6 +438,14 @@ describe("Codex CLI Hook Chaining", () => {
       const mapping = codexAdapter.hookMappings.find(m => m.platformEvent === "Stop");
       expect(mapping).toEqual({
         platformEvent: "Stop",
+        aditHandler: "stop"
+      });
+    });
+
+    it("maps Interrupt to stop", () => {
+      const mapping = codexAdapter.hookMappings.find(m => m.platformEvent === "Interrupt");
+      expect(mapping).toEqual({
+        platformEvent: "Interrupt",
         aditHandler: "stop"
       });
     });
@@ -558,6 +569,9 @@ describe("Codex CLI Hook Chaining", () => {
             Stop: [
               { hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} stop`, timeout: 30 }] }
             ],
+            Interrupt: [
+              { hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} stop`, timeout: 3 }] }
+            ],
             PreToolUse: [
               { matcher: "Bash", hooks: [{ type: "command", command: `npx adit-hook --platform codex ${fixedRootArg} pre-tool-use`, timeout: 30 }] }
             ],
@@ -646,7 +660,7 @@ describe("Codex CLI Hook Chaining", () => {
       expect(result.checks[2].name).toBe("Codex hook trust");
       expect(result.checks[2].ok).toBe(false);
       expect(result.checks[2].advisory).toBe(true);
-      expect(result.checks[2].detail).toContain("4 hook(s) not yet approved");
+      expect(result.checks[2].detail).toContain("5 hook(s) not yet approved");
       expect(result.checks[2].detail).toContain("/hooks");
     });
 
@@ -660,9 +674,9 @@ describe("Codex CLI Hook Chaining", () => {
         hooks: readHooks(projectRoot).hooks as Record<string, unknown>,
         matchesEntry: () => true,
       });
-      expect(states).toHaveLength(4);
-      expect(states.map((state) => state.key.split(":")[1]).sort()).toEqual(
-        ["post_tool_use", "pre_tool_use", "stop", "user_prompt_submit"],
+      expect(states).toHaveLength(5);
+      expect(states.map((state) => state.key.split(":").at(-3)).sort()).toEqual(
+        ["interrupt", "post_tool_use", "pre_tool_use", "stop", "user_prompt_submit"],
       );
       writeFileSync(
         join(codexHome, "config.toml"),

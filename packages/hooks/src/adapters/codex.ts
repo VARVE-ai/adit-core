@@ -42,6 +42,7 @@ const HOOK_TIMEOUT = 30;
 const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "UserPromptSubmit", aditHandler: "prompt-submit" },
   { platformEvent: "Stop", aditHandler: "stop" },
+  { platformEvent: "Interrupt", aditHandler: "stop" },
   // Working-tree snapshots around shell commands. Codex reports every
   // exec_command call (also the ones issued from `exec` scripts) as a
   // PreToolUse/PostToolUse pair with tool_name "Bash", a tool_use_id and the
@@ -86,13 +87,13 @@ export const codexAdapter: PlatformAdapter = {
   },
 
   generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
-    const makeHookEntry = (hookType: AditHookType, matcher?: string) => [
+    const makeHookEntry = (hookType: AditHookType, matcher?: string, timeout = HOOK_TIMEOUT) => [
       {
         ...(matcher ? { matcher } : {}),
         hooks: [{
           type: "command",
           command: buildAditHookCommand(aditBinaryPath, "codex", hookType, projectRoot),
-          timeout: HOOK_TIMEOUT,
+          timeout,
         }],
       },
     ];
@@ -102,6 +103,7 @@ export const codexAdapter: PlatformAdapter = {
         hooks: {
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
+          Interrupt: makeHookEntry("stop", undefined, 3),
           PreToolUse: makeHookEntry("pre-tool-use", "Bash"),
           PostToolUse: makeHookEntry("post-tool-use", "Bash"),
         },

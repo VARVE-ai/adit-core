@@ -63,6 +63,9 @@ export function installCodexHooks(opts: {
   setCodexHook(hooks, "Stop", {
     hooks: [{ type: "command", command, timeout: 30 }],
   }, hookMarker);
+  setCodexHook(hooks, "Interrupt", {
+    hooks: [{ type: "command", command: buildCloudHookCommand("", hookMarker, 2500), timeout: 3 }],
+  }, hookMarker);
   setCodexHook(hooks, "PostToolUse", {
     hooks: [{ type: "command", command, timeout: 30 }],
   }, hookMarker);

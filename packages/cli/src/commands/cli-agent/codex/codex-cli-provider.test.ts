@@ -1413,6 +1413,127 @@ describe("CodexCliProvider takeover", () => {
     provider.stop();
   });
 
+  it.each([
+    {
+      args: ["--enable", "hooks", "resume"],
+      retainedArgs: ["--enable", "hooks"],
+    },
+    {
+      args: ["resume", "old-session", "continue working", "--model", "gpt-test"],
+      retainedArgs: ["--model", "gpt-test"],
+    },
+    {
+      args: ["resume", "--last", "--all", "--include-non-interactive", "--no-alt-screen"],
+      retainedArgs: ["--no-alt-screen"],
+    },
+    {
+      args: ["--model", "resume", "--config", "model_reasoning_effort=high", "initial task"],
+      retainedArgs: ["--model", "resume", "--config", "model_reasoning_effort=high"],
+    },
+    {
+      args: ["fork", "old-session", "--image", "input.png", "initial task", "--sandbox", "read-only"],
+      retainedArgs: ["--sandbox", "read-only"],
+    },
+  ])("does not replay startup input on local handoff: $args", async ({ args, retainedArgs }) => {
+    const sessionId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    mocks.savedThreadIds.add(sessionId);
+    const provider = new CodexCliProvider({ bin: "codex", args, cwd: "/tmp/project" });
+
+    try {
+      expect(mocks.spawn).toHaveBeenCalledWith(
+        "codex",
+        args,
+        expect.objectContaining({ cwd: "/tmp/project" }),
+      );
+      provider.noteLocalSession(sessionId);
+      for (const cycle of [1, 2]) {
+        await provider.takeover();
+        mocks.spawn.mockClear();
+        mocks.appRequest.mockClear();
+
+        await provider.releaseToLocal();
+
+        expect(mocks.spawn, `handoff ${cycle}`).toHaveBeenCalledTimes(1);
+        expect(mocks.spawn.mock.calls[0]?.slice(0, 2)).toEqual([
+          "codex", ["resume", sessionId, ...retainedArgs],
+        ]);
+        expect(mocks.appRequest).not.toHaveBeenCalledWith("turn/start", expect.anything());
+        expect(provider.state.owner).toBe("local");
+        expect(provider.state.activeSessionId).toBe(sessionId);
+      }
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("drops the startup session and prompt when switching local sessions", async () => {
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: ["resume", "old-session", "initial task", "--enable", "hooks"],
+      cwd: "/tmp/project",
+    });
+    try {
+      mocks.spawn.mockClear();
+      await provider.switchSession("new-session");
+
+      expect(mocks.spawn).toHaveBeenCalledTimes(1);
+      expect(mocks.spawn.mock.calls[0]?.slice(0, 2)).toEqual([
+        "codex", ["resume", "new-session", "--enable", "hooks"],
+      ]);
+      expect(provider.state.activeSessionId).toBe("new-session");
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("does not replay startup selection or prompt when returning to an empty local session", async () => {
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: ["--enable", "hooks", "resume", "--last", "old-session", "initial task"],
+      cwd: "/tmp/project",
+    });
+    try {
+      await provider.takeover();
+      mocks.spawn.mockClear();
+      await provider.releaseToLocal();
+
+      expect(mocks.spawn).toHaveBeenCalledTimes(1);
+      expect(mocks.spawn.mock.calls[0]?.slice(0, 2)).toEqual([
+        "codex", ["--enable", "hooks"],
+      ]);
+      expect(provider.state.activeSessionId).toBeNull();
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("does not replay startup input when Web takeover falls back to local control", async () => {
+    const sessionId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    const handleRequest = mocks.appRequest.getMockImplementation();
+    mocks.appRequest.mockImplementation((method: string, params: unknown) => {
+      if (method === "thread/resume") throw new Error("test resume failure");
+      return handleRequest?.(method, params);
+    });
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: ["resume", "old-session", "initial task", "--enable", "hooks"],
+      cwd: "/tmp/project",
+    });
+    try {
+      provider.noteLocalSession(sessionId);
+      mocks.spawn.mockClear();
+      await expect(provider.takeover()).rejects.toThrow("test resume failure");
+
+      expect(mocks.spawn).toHaveBeenCalledTimes(1);
+      expect(mocks.spawn.mock.calls[0]?.slice(0, 2)).toEqual([
+        "codex", ["resume", sessionId, "--enable", "hooks"],
+      ]);
+      expect(provider.state.owner).toBe("local");
+    } finally {
+      provider.stop();
+    }
+  });
+
   it("selects the Web thread before stopping the app-server", async () => {
     const sessionId = "019e2110-d96f-7e40-882e-b524fa9148e4";
     let appServerStopped = false;
