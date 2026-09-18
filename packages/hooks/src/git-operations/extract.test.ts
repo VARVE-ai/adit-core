@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { extractGitOperations } from "./extract.js";
 import { codexShellCalls } from "./codex-shell-calls.js";
@@ -39,12 +40,12 @@ describe("extractGitOperations", () => {
   it("extracts only Codex Git commands from the latest turn", () => {
     const path = transcript([
       { payload: { type: "message", role: "user", content: "old" } },
-      commandExecution({ id: "exec-old", command: ["/bin/zsh", "-lc", "git status"], cwd: "file:///repo", status: "completed", exit_code: 0 }),
+      commandExecution({ id: "exec-old", command: ["/bin/zsh", "-lc", "git status"], cwd: pathToFileURL(resolve("/repo")).href, status: "completed", exit_code: 0 }),
       { payload: { type: "message", role: "user", content: "new" } },
       commandExecution({
         id: "exec-new",
         command: ["/bin/zsh", "-lc", "git add a.ts && git commit -m fix"],
-        cwd: "file:///repo",
+        cwd: pathToFileURL(resolve("/repo")).href,
         status: "completed",
         exit_code: 0,
         aggregated_output: "[main abc1234] fix",
@@ -56,8 +57,8 @@ describe("extractGitOperations", () => {
       transcriptPath: path,
       defaultCwd: "/fallback",
     })).toEqual([
-      expect.objectContaining({ toolCallId: "exec-new", operationIndex: 0, operation: "add", cwd: "/repo" }),
-      expect.objectContaining({ toolCallId: "exec-new", operationIndex: 1, operation: "commit", cwd: "/repo", output: "[main abc1234] fix", commitMessage: "fix" }),
+      expect.objectContaining({ toolCallId: "exec-new", operationIndex: 0, operation: "add", cwd: resolve("/repo") }),
+      expect.objectContaining({ toolCallId: "exec-new", operationIndex: 1, operation: "commit", cwd: resolve("/repo"), output: "[main abc1234] fix", commitMessage: "fix" }),
     ]);
   });
 
@@ -80,7 +81,7 @@ describe("extractGitOperations", () => {
       commandExecution({
         id: "exec-cloud",
         command: ["/bin/zsh", "-lc", "git commit -m \"fix: cloud\""],
-        cwd: "file:///work/cloud",
+        cwd: pathToFileURL(resolve("/work/cloud")).href,
         status: "completed",
         exit_code: 0,
         aggregated_output: "[main 1111111] fix: cloud\n 1 file changed\n",
@@ -88,7 +89,7 @@ describe("extractGitOperations", () => {
       commandExecution({
         id: "exec-core",
         command: ["/bin/zsh", "-lc", "git commit -m \"fix: core\""],
-        cwd: "file:///work/core",
+        cwd: pathToFileURL(resolve("/work/core")).href,
         status: "completed",
         exit_code: 0,
         stdout: "[main 2222222] fix: core\n",
@@ -107,7 +108,7 @@ describe("extractGitOperations", () => {
         toolCallId: "exec-cloud",
         operation: "commit",
         status: "success",
-        cwd: "/work/cloud",
+        cwd: resolve("/work/cloud"),
         output: "[main 1111111] fix: cloud\n 1 file changed\n",
         commitMessage: "fix: cloud",
       }),
@@ -115,14 +116,14 @@ describe("extractGitOperations", () => {
         toolCallId: "exec-core",
         operation: "commit",
         status: "success",
-        cwd: "/work/core",
+        cwd: resolve("/work/core"),
         output: "[main 2222222] fix: core\n",
         commitMessage: "fix: core",
       }),
     ]);
   });
 
-  it("ignores Codex items that are not command executions and retired native records", () => {
+  it("accepts old native execution records but ignores non-command items", () => {
     const path = transcript([
       { payload: { type: "message", role: "user", content: "inspect" } },
       { payload: { type: "exec_command_end", call_id: "legacy", command: "git commit -m legacy", status: "completed", exit_code: 0 } },
@@ -134,7 +135,7 @@ describe("extractGitOperations", () => {
       platform: "codex",
       transcriptPath: path,
       defaultCwd: "/fallback",
-    })).toEqual([]);
+    })).toEqual([expect.objectContaining({ toolCallId: "legacy", operation: "commit", status: "success" })]);
   });
 
   it("uses Claude Bash tool results for operation status and output", () => {
@@ -181,7 +182,7 @@ describe("extractGitOperations", () => {
     expect(extractGitOperations({ platform: "gemini", transcriptPath: geminiPath, defaultCwd: "/repo" }))
       .toEqual([expect.objectContaining({ toolCallId: "g-1", operation: "push" })]);
     expect(extractGitOperations({ platform: "opencode", transcriptPath: openCodePath, defaultCwd: "/workspace" }))
-      .toEqual([expect.objectContaining({ toolCallId: "o-1", operation: "status", cwd: "/workspace/api" })]);
+      .toEqual([expect.objectContaining({ toolCallId: "o-1", operation: "status", cwd: resolve("/workspace/api") })]);
   });
 
   it("rejects a transcript belonging to a different platform session", () => {

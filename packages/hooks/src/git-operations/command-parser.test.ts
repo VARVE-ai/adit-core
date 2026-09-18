@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { resolve } from "node:path";
 import { parseGitCommands } from "./command-parser.js";
 
 describe("parseGitCommands", () => {
@@ -28,7 +29,7 @@ describe("parseGitCommands", () => {
 
   it("tracks cd and git -C without treating quoted text as a command", () => {
     expect(parseGitCommands("echo 'git commit'\ncd packages/core && git -C ../cloud status | head", "/work"))
-      .toEqual([{ operation: "status", cwd: "/work/packages/cloud" }]);
+      .toEqual([{ operation: "status", cwd: resolve("/work/packages/cloud") }]);
   });
 
   it("treats backslash-newline as a line continuation", () => {
@@ -47,5 +48,12 @@ describe("parseGitCommands", () => {
 
   it("ignores commands that merely contain the word git", () => {
     expect(parseGitCommands("printf git && npm run git:check", "/repo")).toEqual([]);
+  });
+
+  it("preserves Windows directory separators in quoted and unquoted Git commands", () => {
+    expect(parseGitCommands('git -C "C:\\work\\my repo" commit -m fix', "/fallback"))
+      .toEqual([{ operation: "commit", cwd: resolve("/fallback", "C:\\work\\my repo"), commitMessage: "fix" }]);
+    expect(parseGitCommands("cd C:\\work\\repo && git commit -m fix", "/fallback"))
+      .toEqual([{ operation: "commit", cwd: resolve("/fallback", "C:\\work\\repo"), commitMessage: "fix" }]);
   });
 });

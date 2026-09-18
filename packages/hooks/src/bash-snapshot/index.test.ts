@@ -77,6 +77,54 @@ describe("captureWorkingTree + diffWorkingTrees (real git)", () => {
     rmSync(repo, { recursive: true, force: true });
   });
 
+  it("scopes captures to targets even when another agent edits and stages unrelated files", async () => {
+    const targets = ["src/a.ts", "src/new.ts", "README.md"];
+    const before = await captureWorkingTree(repo, targets);
+    writeFileSync(join(repo, "src/a.ts"), "export const a = 2;\n");
+    writeFileSync(join(repo, "src/new.ts"), "new\n");
+    unlinkSync(join(repo, "README.md"));
+    writeFileSync(join(repo, "src/b.ts"), "another agent\n");
+    git(repo, "add", "src/b.ts");
+    const indexBefore = readFileSync(join(repo, ".git/index"));
+    const after = await captureWorkingTree(repo, targets);
+    expect(before).not.toBeNull();
+    expect(after).not.toBeNull();
+    expect(readFileSync(join(repo, ".git/index"))).toEqual(indexBefore);
+    expect((await diffWorkingTreesWithPatch(repo, before!.tree, after!.tree)).map(({ path, status }) => ({ path, status })))
+      .toEqual([{ path: "README.md", status: "D" }, { path: "src/a.ts", status: "M" }, { path: "src/new.ts", status: "A" }]);
+  });
+
+  it("produces no evidence when only another agent's file changes", async () => {
+    const before = await captureWorkingTree(repo, ["src/a.ts"]);
+    writeFileSync(join(repo, "src/b.ts"), "another agent\n");
+    const after = await captureWorkingTree(repo, ["src/a.ts"]);
+    expect(after!.tree).toBe(before!.tree);
+  });
+
+  it("does not capture the entire repository for empty or escaping scopes", async () => {
+    expect(await captureWorkingTree(repo, [])).toBeNull();
+    expect(await captureWorkingTree(repo, ["."])).toBeNull();
+    expect(await captureWorkingTree(repo, ["../outside"])).toBeNull();
+  });
+
+  it("does not widen a directory target to unrelated files underneath it", async () => {
+    const before = await captureWorkingTree(repo, ["src"]);
+    writeFileSync(join(repo, "src/b.ts"), "another agent\n");
+    const after = await captureWorkingTree(repo, ["src"]);
+    expect(after!.tree).toBe(before!.tree);
+  });
+
+  it("captures tracked ignored files without including ignored untracked files", async () => {
+    mkdirSync(join(repo, "ignored"));
+    writeFileSync(join(repo, "ignored/tracked.txt"), "old\n");
+    git(repo, "add", "-f", "ignored/tracked.txt");
+    const before = await captureWorkingTree(repo, ["ignored/tracked.txt", "ignored/untracked.txt"]);
+    writeFileSync(join(repo, "ignored/tracked.txt"), "new\n");
+    writeFileSync(join(repo, "ignored/untracked.txt"), "ignore\n");
+    const after = await captureWorkingTree(repo, ["ignored/tracked.txt", "ignored/untracked.txt"]);
+    expect(await diffWorkingTrees(repo, before!.tree, after!.tree)).toEqual([{ path: "ignored/tracked.txt", status: "M" }]);
+  });
+
   it("lists files a shell-style edit changed, including untracked, deleted and renamed ones", async () => {
     const before = await captureWorkingTree(repo);
     expect(before).not.toBeNull();

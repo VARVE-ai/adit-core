@@ -21,6 +21,7 @@ import {
   type TranscriptEntryLike,
 } from "../common/transcript-entry.js";
 import { recordGitCommits } from "../git-operations/index.js";
+import { commandWriteTargets, repositoryTargets } from "../bash-snapshot/command-targets.js";
 import { debugLog } from "../common/debug-log.js";
 import { captureTokenUsage } from "../common/token-usage.js";
 import {
@@ -28,6 +29,7 @@ import {
   type PromptSubmitClassification,
 } from "../common/system-prompt.js";
 import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { NormalizedHookInput } from "../adapters/types.js";
 import {
   extractClaudeMutationsFromTranscript,
@@ -406,17 +408,24 @@ function isBashSnapshotCandidate(input: NormalizedHookInput): boolean {
   return input.toolInput?.run_in_background !== true;
 }
 
-/** PreToolUse(Bash): record the working tree of every project repository. */
+/** PreToolUse(Bash): snapshot only write targets named by the current command. */
 async function handlePreToolUse(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
   if (!isBashSnapshotCandidate(input) || !input.toolUseId) return;
   const repositories = ctx.config.repositories;
   if (repositories.length === 0) return;
+  const command = input.toolInput?.command ?? input.toolInput?.cmd;
+  if (typeof command !== "string") return;
+  const workingDirectory = input.toolInput?.workdir ?? input.toolInput?.cwd;
+  const targets = commandWriteTargets(command, typeof workingDirectory === "string" ? resolve(input.cwd, workingDirectory) : input.cwd);
+  if (targets.length === 0) return;
   const startedAt = new Date().toISOString();
 
   const captured = await Promise.all(
     repositories.map(async (repository): Promise<RepositoryTreeSnapshot | null> => {
       try {
-        const capture = await captureWorkingTree(repository.path);
+        const scopedTargets = repositoryTargets(targets, repository.path);
+        if (scopedTargets.length === 0) return null;
+        const capture = await captureWorkingTree(repository.path, scopedTargets);
         if (!capture) return null;
         return {
           localRepositoryId: repository.localRepositoryId,
@@ -424,6 +433,7 @@ async function handlePreToolUse(ctx: HookContext, input: NormalizedHookInput): P
           path: repository.path,
           tree: capture.tree,
           head: capture.head,
+          targets: scopedTargets,
         };
       } catch (err) {
         debugLog({ phase: "bash-snapshot-capture-failed", error: String(err) });
@@ -456,7 +466,8 @@ async function handlePostToolUse(ctx: HookContext, input: NormalizedHookInput): 
   await Promise.all(
     snapshot.repositories.map(async (repository) => {
       try {
-        const after = await captureWorkingTree(repository.path);
+        if (!repository.targets?.length) return;
+        const after = await captureWorkingTree(repository.path, repository.targets);
         if (!after || after.tree === repository.tree) return;
         // HEAD moved: the command was a checkout/pull/reset, and the files it
         // touched are history moving, not the agent's edits.

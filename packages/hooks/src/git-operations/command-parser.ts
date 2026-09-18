@@ -204,7 +204,8 @@ function tokenizeShellWords(segment: string): string[] {
     current = "";
   };
 
-  for (const char of segment) {
+  for (let index = 0; index < segment.length; index++) {
+    const char = segment[index];
     if (escaped) {
       escaped = false;
       // Line continuation (see splitShellSegments): contributes no character.
@@ -212,7 +213,9 @@ function tokenizeShellWords(segment: string): string[] {
       current += char;
       continue;
     }
-    if (char === "\\" && quote !== "'") {
+    if (char === "\\" && quote !== "'" && !/^(?:[A-Za-z]:|\\\\)/u.test(current)
+      && /[\s"'\\$]/u.test(segment[index + 1] ?? "")
+      && !(current === "" && segment[index + 1] === "\\")) {
       escaped = true;
       continue;
     }

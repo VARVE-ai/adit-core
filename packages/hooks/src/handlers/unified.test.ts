@@ -439,7 +439,7 @@ describe("dispatchHook", () => {
       });
     }
 
-    it("pre-tool-use records a snapshot of every repository for a Bash call", async () => {
+    it("pre-tool-use snapshots only the current command's write targets", async () => {
       await withRepositories();
       snapshotMocks.captureWorkingTree.mockResolvedValueOnce({ tree: "tree-a", head: "head-1" });
 
@@ -450,17 +450,17 @@ describe("dispatchHook", () => {
         promptId: "prompt-1",
         toolName: "Bash",
         toolUseId: "toolu_01",
-        toolInput: { command: "python3 - <<'EOF'\nprint(1)\nEOF" },
+        toolInput: { command: "python3 - <<'EOF'\nfrom pathlib import Path\nPath('src/a.ts').write_text('new')\nEOF" },
       });
 
-      expect(snapshotMocks.captureWorkingTree).toHaveBeenCalledWith("/test");
+      expect(snapshotMocks.captureWorkingTree).toHaveBeenCalledWith("/test", ["src/a.ts"]);
       expect(snapshotMocks.writeToolSnapshot).toHaveBeenCalledWith(
         "/tmp/adit-test",
         "sess-001",
         expect.objectContaining({
           toolUseId: "toolu_01",
           promptId: "prompt-1",
-          repositories: [expect.objectContaining({ path: "/test", tree: "tree-a", head: "head-1" })],
+          repositories: [expect.objectContaining({ path: "/test", tree: "tree-a", head: "head-1", targets: ["src/a.ts"] })],
         }),
       );
       expect(mockRecordEvent).not.toHaveBeenCalled();
@@ -541,7 +541,7 @@ describe("dispatchHook", () => {
         toolUseId: "toolu_03",
         promptId: "prompt-1",
         startedAt: "2026-09-15T00:00:00.000Z",
-        repositories: [{ localRepositoryId: "repo-root", relativePath: ".", path: "/test", tree: "tree-a", head: "head-1" }],
+        repositories: [{ localRepositoryId: "repo-root", relativePath: ".", path: "/test", tree: "tree-a", head: "head-1", targets: ["src/a.ts", "src/new.ts"] }],
       });
       snapshotMocks.captureWorkingTree.mockResolvedValueOnce({ tree: "tree-b", head: "head-1" });
       snapshotMocks.diffWorkingTreesWithPatch.mockResolvedValueOnce([
@@ -579,7 +579,7 @@ describe("dispatchHook", () => {
         toolUseId: "toolu_04",
         promptId: null,
         startedAt: "2026-09-15T00:00:00.000Z",
-        repositories: [{ localRepositoryId: "repo-root", relativePath: ".", path: "/test", tree: "tree-a", head: "head-1" }],
+        repositories: [{ localRepositoryId: "repo-root", relativePath: ".", path: "/test", tree: "tree-a", head: "head-1", targets: ["src/a.ts"] }],
       });
       snapshotMocks.captureWorkingTree.mockResolvedValueOnce({ tree: "tree-c", head: "head-2" });
 
@@ -589,10 +589,29 @@ describe("dispatchHook", () => {
         platformCli: "claude-code",
         toolName: "Bash",
         toolUseId: "toolu_04",
-        toolInput: { command: "git checkout main" },
+        toolInput: { command: "echo new > src/a.ts; git checkout main" },
       });
 
       expect(snapshotMocks.diffWorkingTreesWithPatch).not.toHaveBeenCalled();
+      expect(snapshotMocks.appendPendingInferred).not.toHaveBeenCalled();
+    });
+
+    it("does not infer targets for read-only commands or standalone external scripts", async () => {
+      for (const command of ["git status", "python output/edit.py", "node edit.js", "Get-Content src/a.ts"]) {
+        await withRepositories();
+        await dispatchHook({ cwd: "/test", hookType: "pre-tool-use", platformCli: "codex", toolName: "Bash", toolUseId: "read", toolInput: { command } });
+      }
+      expect(snapshotMocks.captureWorkingTree).not.toHaveBeenCalled();
+      expect(snapshotMocks.writeToolSnapshot).not.toHaveBeenCalled();
+    });
+
+    it("does not compare legacy snapshots that have no target scope", async () => {
+      snapshotMocks.takeToolSnapshot.mockReturnValueOnce({
+        toolUseId: "legacy", promptId: null, startedAt: "2026-09-15T00:00:00.000Z",
+        repositories: [{ localRepositoryId: "repo-root", relativePath: ".", path: "/test", tree: "tree-a", head: "head-1" }],
+      });
+      await dispatchHook({ cwd: "/test", hookType: "post-tool-use", platformCli: "codex", toolName: "Bash", toolUseId: "legacy" });
+      expect(snapshotMocks.captureWorkingTree).not.toHaveBeenCalled();
       expect(snapshotMocks.appendPendingInferred).not.toHaveBeenCalled();
     });
 
