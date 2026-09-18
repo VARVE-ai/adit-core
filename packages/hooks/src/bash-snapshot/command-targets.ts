@@ -66,7 +66,7 @@ export function commandWriteTargets(command: string, initialCwd: string): string
       const values = valueOf(words[pathIndex]);
       if (values.length !== 1 || /[$*?]/u.test(values[0])) break;
       if (executable === "push-location") directoryStack.push(cwd);
-      cwd = resolve(cwd, values[0]);
+      cwd = resolve(cwd, executable === "cd" ? values[0] : normalizePowerShellPath(values[0]));
       continue;
     }
     const bodyKey = words.find((word) => bodies.has(word));
@@ -88,8 +88,8 @@ export function commandWriteTargets(command: string, initialCwd: string): string
           if (words[index + 1]) named.set(word.toLowerCase(), words[++index]);
         } else positional.push(word);
       }
-      const source = valueOf(named.get("-literalpath") ?? named.get("-path") ?? named.get("-filepath") ?? positional[0]);
-      const destination = valueOf(named.get("-destination") ?? named.get("-newname") ?? positional[1]);
+      const source = valueOf(named.get("-literalpath") ?? named.get("-path") ?? named.get("-filepath") ?? positional[0]).map(normalizePowerShellPath);
+      const destination = valueOf(named.get("-destination") ?? named.get("-newname") ?? positional[1]).map(normalizePowerShellPath);
       if (executable !== "copy-item") add(source);
       if (executable === "rename-item") add(source.flatMap((path) => destination.map((name) => resolve(cwd, dirname(path), name))));
       else if (["copy-item", "move-item"].includes(executable!)) add(destination);
@@ -122,6 +122,10 @@ export function commandWriteTargets(command: string, initialCwd: string): string
     pipedBody = segment.separator === "|" ? inputBody : undefined;
   }
   return [...targets];
+}
+
+function normalizePowerShellPath(path: string): string {
+  return path.replace(/\\/gu, "/");
 }
 
 function shellSegments(command: string): Array<{ text: string; separator: string }> {

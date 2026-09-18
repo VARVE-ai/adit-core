@@ -28,6 +28,28 @@ describe("commandWriteTargets", () => {
     expect(targets(command)).toEqual(paths(...expected));
   });
 
+  it.each([
+    ["Set-Content -LiteralPath 'docs\\new note.md' -Value hello", ["docs/new note.md"]],
+    ["Add-Content -Path docs\\note.md -Value hello", ["docs/note.md"]],
+    ["'hello' | Out-File -FilePath docs\\note.md", ["docs/note.md"]],
+    ["New-Item -ItemType File -Path docs\\note.md", ["docs/note.md"]],
+    ["Remove-Item -LiteralPath docs\\old.md", ["docs/old.md"]],
+    ["Copy-Item -LiteralPath docs\\old.md -Destination docs\\new.md", ["docs/new.md"]],
+    ["Move-Item -LiteralPath docs\\old.md -Destination docs\\new.md", ["docs/old.md", "docs/new.md"]],
+    ["Rename-Item -LiteralPath src\\nested\\old.ts -NewName new.ts", ["src/nested/old.ts", "src/nested/new.ts"]],
+    ["$folder = 'docs\\nested'; $file = Join-Path $folder 'note.md'; Set-Content $file hello", ["docs/nested/note.md"]],
+    ["Set-Location src\\nested; Set-Content file.ts hello", ["src/nested/file.ts"]],
+    ["Push-Location src\\nested; Set-Content file.ts hello; Pop-Location; Set-Content README.md hello", ["src/nested/file.ts", "README.md"]],
+  ])("normalizes PowerShell path separators in %s", (command, expected) => {
+    expect(targets(command)).toEqual(paths(...expected));
+  });
+
+  it("preserves native path semantics outside PowerShell cmdlets", () => {
+    expect(targets("touch 'docs\\literal.md'")).toEqual(paths("docs\\literal.md"));
+    expect(targets("Set-Content docs\\note.md hello; touch 'docs\\literal.md'"))
+      .toEqual(paths("docs/note.md", "docs\\literal.md"));
+  });
+
   it.each(["git status", "Get-Content src/a.ts", "rg src/a.ts", "python worker.py", "node worker.js", "npm run build", "git merge feature/test", "python -c \"print('src/a.ts')\""])("does not infer writes from %s", (command) => {
     expect(targets(command)).toEqual([]);
   });
