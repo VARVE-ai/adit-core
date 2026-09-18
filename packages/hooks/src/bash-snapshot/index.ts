@@ -1,29 +1,9 @@
 /**
- * Working-tree snapshots around shell tool calls (Claude's Bash tool,
- * Codex's exec_command — both reported to hooks as tool_name "Bash").
- *
- * Editing tools name the file they touch, but a shell command can rewrite
- * any number of files (python heredocs, `cat >`, `sed -i`, generated
- * scripts) without naming them. To still learn which files a turn changed,
- * PreToolUse(Bash) records the working tree of every project repository as
- * a git tree object, PostToolUse(Bash) records it again, and the tree diff
- * is the list of files that changed while the command ran.
- *
- * Guarantees and limits:
- *  - The user's real index is never touched: `git add -A` runs against a
- *    temporary copy of the index (which keeps git's stat cache, so unchanged
- *    files are not re-hashed). The temporary tree objects are unreachable and
- *    get garbage-collected by git.
- *  - Result is path-level evidence only ("inferred"), never a diff. Anything
- *    else writing to the same checkout during the command is indistinguishable
- *    from the command's own writes.
- *  - Commands that move HEAD (checkout, pull, reset) are skipped: the files a
- *    branch switch touches are not the agent's edits.
- *  - Background commands are skipped by the caller: their hooks fire before
- *    the command finishes, so no window exists to snapshot.
- *
- * Snapshots live under `<dataDir>/bash-snapshots/<localSessionId>/` between
- * the two hooks; the stop hook drains them into the turn's event.
+ * Shell hooks snapshot only write targets identified in the current command.
+ * A fresh temporary index isolates scoped captures from other agents' file
+ * and staging changes. Writes to the same target remain indistinguishable.
+ * Unknown targets, background commands and HEAD changes are not attributed.
+ * Snapshots persist between the pre/post hooks and are drained at Stop.
  */
 
 import {
@@ -70,6 +50,7 @@ export interface RepositoryTreeSnapshot {
   tree: string;
   /** HEAD commit at capture time (null on an unborn branch). */
   head: string | null;
+  targets?: string[];
 }
 
 export interface ToolSnapshot {
@@ -128,7 +109,11 @@ export interface WorkingTreeCapture {
  * temporary index so the user's staging area is untouched. Returns null
  * when the directory is not a git repository or git fails/times out.
  */
-export async function captureWorkingTree(repoPath: string): Promise<WorkingTreeCapture | null> {
+export async function captureWorkingTree(repoPath: string, targets?: string[]): Promise<WorkingTreeCapture | null> {
+  if (targets && (targets.length === 0 || targets.some((target) => {
+    const path = relative(repoPath, resolve(repoPath, target));
+    return !path || path === ".." || path.startsWith("..\\") || path.startsWith("../") || isAbsolute(path);
+  }))) return null;
   const indexPathResult = await runGit(["rev-parse", "--git-path", "index"], {
     cwd: repoPath,
     timeout: GIT_TIMEOUT_MS,
@@ -139,24 +124,44 @@ export async function captureWorkingTree(repoPath: string): Promise<WorkingTreeC
   const tempIndex = join(tmpdir(), `adit-index-${process.pid}-${randomBytes(6).toString("hex")}`);
   try {
     try {
-      copyFileSync(indexPath, tempIndex);
+      if (!targets) copyFileSync(indexPath, tempIndex);
       // Keep the original index mtime on the copy. Git decides whether a
       // cached stat can be trusted by comparing an entry's mtime with the
       // index file's mtime ("racy git"): a file rewritten in the same second
       // the index recorded it, with the same size, is only re-hashed when the
       // entry is not older than the index. A fresh copy timestamp would mark
       // every entry as safely older and silently miss such rewrites.
-      const original = statSync(indexPath);
-      utimesSync(tempIndex, original.atime, original.mtime);
+      if (!targets) {
+        const original = statSync(indexPath);
+        utimesSync(tempIndex, original.atime, original.mtime);
+      }
     } catch {
       // No index yet (fresh repository) — git creates the temp index from scratch.
     }
     const env = { GIT_INDEX_FILE: tempIndex };
-    const add = await runGit(
-      ["-c", "advice.addEmbeddedRepo=false", "add", "-A", "--ignore-errors", "--", "."],
-      { cwd: repoPath, env, timeout: GIT_TIMEOUT_MS },
-    );
-    if (add.exitCode !== 0) return null;
+    let paths = ["."];
+    if (targets) {
+      const empty = await runGit(["read-tree", "--empty"], { cwd: repoPath, env, timeout: GIT_TIMEOUT_MS });
+      if (empty.exitCode !== 0) return null;
+      const listed = await runGit(["--literal-pathspecs", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", ...targets], {
+        cwd: repoPath, timeout: GIT_TIMEOUT_MS,
+      });
+      if (listed.exitCode !== 0) return null;
+      const pathKey = (path: string): string => {
+        const normalized = resolve(repoPath, path);
+        return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+      };
+      const targetKeys = new Set(targets.map(pathKey));
+      paths = [...new Set(listed.stdout.split("\0").filter((path) =>
+        path && targetKeys.has(pathKey(path)) && existsSync(join(repoPath, path))))];
+    }
+    if (paths.length > 0) {
+      const add = await runGit(
+        ["--literal-pathspecs", "-c", "advice.addEmbeddedRepo=false", "add", "-A", "--ignore-errors", ...(targets ? ["-f"] : []), "--", ...paths],
+        { cwd: repoPath, env, timeout: GIT_TIMEOUT_MS },
+      );
+      if (add.exitCode !== 0) return null;
+    }
     const writeTree = await runGit(["write-tree"], { cwd: repoPath, env, timeout: GIT_TIMEOUT_MS });
     if (writeTree.exitCode !== 0) return null;
     const tree = writeTree.stdout.trim();

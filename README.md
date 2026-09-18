@@ -313,6 +313,25 @@ environment snapshot view.
 Common shortcuts: `j`/`k` navigate, `d` diff, `p` prompt, `e` environment, `/`
 search, `f` filter, `s` cycle sort, `Esc`/`b` back, and `q` quit.
 
+## Shell File Attribution
+
+Shell hooks identify write targets from the current command, inline Python/Node
+bodies, and inline patches, then compare only those paths before and after the
+command. Other agents' changes to different files and to the Git staging area
+are excluded; concurrent edits to the same target file are not separated.
+
+The parser recognizes common literal paths, local path variables and simple path
+construction. A script created and executed in the same command can be analyzed
+from that command's inline body. Standalone external script invocations are not
+opened or traced, and earlier transcript commands are not consulted. Unknown
+targets never fall back to a full-repository diff; directory targets are not
+expanded to all files underneath them. Background commands and
+commands that change HEAD are not attributed through these snapshots.
+
+Session commit evidence accepts Codex command-execution records, paired shell
+function calls/results, and legacy execution events. Successful explicit commits
+are recorded; merges are not. No database migration is required for this behavior.
+
 ## Cloud Sync
 
 Cloud sync is optional. After `adit cloud login`, ADIT automatically pushes

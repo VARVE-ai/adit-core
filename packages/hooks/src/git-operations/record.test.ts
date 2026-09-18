@@ -91,7 +91,7 @@ describe("recordGitCommits", () => {
     } finally { closeDatabase(db); }
   });
 
-  it("records only a successful git commit once and resolves its printed SHA", async () => {
+  it.each(["execution", "function"] as const)("records a successful %s commit once, excluding failures and merges", async (format) => {
     const root = mkdtempSync(join(tmpdir(), "adit-git-commit-record-"));
     tempDirs.push(root);
     execFileSync("git", ["init", "-b", "main"], { cwd: root });
@@ -103,33 +103,21 @@ describe("recordGitCommits", () => {
     const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
 
     const transcriptPath = join(root, "turn.jsonl");
-    writeFileSync(transcriptPath, [
-      JSON.stringify({ payload: { type: "message", role: "user", content: "commit" } }),
-      JSON.stringify({
-        type: "event_msg",
-        payload: { type: "item_completed", item: {
-          type: "CommandExecution",
-          id: "call-1",
-          command: ["/bin/zsh", "-lc", "git status && git commit -m initial"],
-          cwd: root,
-          status: "completed",
-          exit_code: 0,
-          aggregated_output: `[main ${sha.slice(0, 7)}] initial`,
-        } },
-      }),
-      JSON.stringify({
-        type: "event_msg",
-        payload: { type: "item_completed", item: {
-          type: "CommandExecution",
-          id: "call-2",
-          command: ["/bin/zsh", "-lc", "git commit -m failed"],
-          cwd: root,
-          status: "failed",
-          exit_code: 1,
-          aggregated_output: "nothing to commit",
-        } },
-      }),
-    ].join("\n"));
+
+    const recordedEntries = [
+      { payload: { type: "message", role: "user", content: "commit" } },
+      ...[
+        { id: "call-1", command: "git status && git commit -m initial", code: 0, output: "[main " + sha.slice(0, 7) + "] initial" },
+        { id: "call-2", command: "git commit -m failed", code: 1, output: "nothing to commit" },
+        { id: "call-3", command: "git merge feature/test", code: 0, output: "Merge made by the ort strategy." },
+      ].flatMap((entry) => format === "function" ? [
+        { payload: { type: "function_call", call_id: entry.id, name: "exec_command", arguments: JSON.stringify({ cmd: entry.command, workdir: root }) } },
+        { payload: { type: "function_call_output", call_id: entry.id, output: "Process exited with code " + entry.code + "\nOutput:\n" + entry.output } },
+      ] : [
+        { payload: { type: "item_completed", item: { type: "CommandExecution", id: entry.id, command: entry.command, cwd: root, exit_code: entry.code, aggregated_output: entry.output } } },
+      ]),
+    ];
+    writeFileSync(transcriptPath, recordedEntries.map((entry) => JSON.stringify(entry)).join("\n"));
 
     const db = openDatabase(join(root, ".adit", "adit.sqlite"));
     const config: AditConfig = {
@@ -189,7 +177,7 @@ describe("recordGitCommits", () => {
       transcriptPath,
       expectedSessionId: "platform-1",
       defaultCwd: root,
-    })).toHaveLength(3);
+    })).toHaveLength(4);
     expect(hasGitCommitEvent(db, "session-1", "codex", "call-1", 1)).toBe(false);
 
     await recordGitCommits(ctx, input, createTimelineManager(db, config));
@@ -200,6 +188,7 @@ describe("recordGitCommits", () => {
     expect(queryEvents(db, { limit: 10 }).map((event) => event.eventType)).toEqual(["git_commit"]);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
+      sessionId: "session-1",
       actor: "assistant",
       responseText: "initial",
       toolName: "commit",
