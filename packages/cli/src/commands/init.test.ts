@@ -37,6 +37,8 @@ vi.mock("./init-cloud-setup.js", () => ({
 }));
 
 import { initCommand } from "./init.js";
+import { installTaskSkillCommand } from "./task-skill.js";
+vi.mock("./task-skill.js", () => ({ installTaskSkillCommand: vi.fn() }));
 
 describe("initCommand", () => {
   let root: string;
@@ -73,6 +75,7 @@ describe("initCommand", () => {
     mkdirSync(join(root, "web", ".git"), { recursive: true });
 
     await initCommand({ cwd: root, multiRepo: true });
+    expect(installTaskSkillCommand).toHaveBeenCalledOnce();
 
     const manifest = readProjectManifest(root)!;
     expect(manifest.schemaVersion).toBe(3);

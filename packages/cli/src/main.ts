@@ -42,6 +42,7 @@ import {
 import { registerCloudCliAgentCommands } from "./commands/cloud-cli-agent.js";
 import { cloudClaudeCommand } from "./commands/cloud-claude.js";
 import { cloudCodexCommand } from "./commands/cloud-codex.js";
+import { registerCloudTaskCommands } from "./commands/cloud-tasks.js";
 import { dbClearEventsCommand } from "./commands/db.js";
 import { perfCommand, perfClearCommand } from "./commands/perf.js";
 import {
@@ -255,6 +256,7 @@ export function createProgram(): Command {
 
   // Cloud sync
   const cloudCmd = program.command("cloud").description("Cloud sync commands");
+  registerCloudTaskCommands(cloudCmd);
 
   cloudCmd
     .command("login")

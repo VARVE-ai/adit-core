@@ -125,3 +125,5 @@ export type {
   BulkTaskUpdateOptions,
   BulkTaskUpdateResult,
 } from "./project-link/types.js";
+export { listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask } from "./tasks.js";
+export type { CloudTask, CloudTaskList, CloudTaskDetail, CloudTaskContext, CloudTaskPatch, CloudTaskState } from "./tasks.js";

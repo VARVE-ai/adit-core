@@ -28,6 +28,7 @@ import {
   writeConnectedPlatforms,
 } from "./connected-platforms.js";
 import { marks, sectionTitle } from "./cli-style.js";
+import { installTaskSkillCommand } from "./task-skill.js";
 import { runCloudSetupSection } from "./init-cloud-setup.js";
 import {
   buildPlatformChoices,
@@ -119,6 +120,7 @@ async function initializeProject(opts: InitOptions): Promise<void> {
   const migratedFrom = plan.status === "written" ? plan.migratedFrom : null;
   const config = loadConfig(projectRoot);
   const setupRoot = config.projectRoot;
+  installTaskSkillCommand();
 
   // --- Step 1: Clean up if --force ---
   if (opts.force) {
