@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openDatabase, insertSession, insertEventAutoSeq, type TokenUsageRecord } from "@varveai/adit-core";
+import { openDatabase, insertSession, insertEventAutoSeq, readSessionUsageRecords, attachPendingTokenUsage } from "@varveai/adit-core";
 import { captureTokenUsage } from "./token-usage.js";
 import type { HookContext } from "./context.js";
 
@@ -23,7 +23,7 @@ describe("incremental token usage ledger", () => {
     }
   });
   afterEach(() => { ctx.db.close(); rmSync(directory, { recursive: true, force: true }); });
-  const records = () => (ctx.db.prepare("SELECT record_json FROM token_usage_records ORDER BY rowid").all() as { record_json: string }[]).map((row) => JSON.parse(row.record_json) as TokenUsageRecord);
+  const records = () => readSessionUsageRecords(ctx.db, ctx.session.id);
   function append(responseId: string, usage = raw) {
     appendFileSync(transcript, JSON.stringify({ type: "assistant", message: { id: responseId, model: "test-model", content: "secret code", usage } }) + "\n");
   }
@@ -123,6 +123,21 @@ describe("incremental token usage ledger", () => {
     ctx.db.prepare("DELETE FROM events").run();
     ctx.db.prepare("DELETE FROM sessions WHERE id='session'").run();
     expect(records()).toEqual([]);
-    expect(ctx.db.prepare("SELECT COUNT(*) AS count FROM token_usage_cursors").get()).toEqual({ count: 0 });
+    expect(ctx.db.prepare("SELECT name FROM sqlite_master WHERE name IN ('token_usage_records','token_usage_cursors','token_usage_sync_state')").all()).toEqual([]);
+  });
+  it("stores numeric totals on the final reply and keeps late updates on the same turn", () => {
+    captureTokenUsage(ctx, transcript, "prompt", "turn-1");
+    append("first"); append("second");
+    captureTokenUsage(ctx, transcript, "stop");
+    insertEventAutoSeq(ctx.db, { id: "reply", sessionId: "session", parentEventId: "turn-1", eventType: "assistant_response", actor: "assistant", startedAt: new Date().toISOString(), vclockJson: "{}", responseText: "Done" });
+    attachPendingTokenUsage(ctx.db, "session");
+    expect(ctx.db.prepare("SELECT token_requests, token_input, token_output, token_total, token_usage_revision FROM events WHERE id='reply'").get())
+      .toEqual({ token_requests: 2, token_input: 20, token_output: 6, token_total: 26, token_usage_revision: 1 });
+    attachPendingTokenUsage(ctx.db, "session");
+    append("late");
+    captureTokenUsage(ctx, transcript, "prompt", "turn-2");
+    expect(ctx.db.prepare("SELECT token_requests, token_total, token_usage_revision FROM events WHERE id='reply'").get())
+      .toEqual({ token_requests: 3, token_total: 39, token_usage_revision: 2 });
+    expect(JSON.parse((ctx.db.prepare("SELECT token_capture_json FROM sessions").get() as { token_capture_json: string }).token_capture_json).pending).toEqual([]);
   });
 });

@@ -20,7 +20,7 @@ import type { ProjectType, SyncState } from "@varveai/adit-core";
 import type { CloudClient } from "../http/client.js";
 import { buildSyncBatch, batchRecordCount, countUnsyncedEvents } from "./serializer.js";
 import { handleConflicts, type SyncConflict } from "./conflicts.js";
-import { syncTokenUsage } from "./token-usage.js";
+import { acknowledgeEventTokenUsage, syncTokenUsage } from "./token-usage.js";
 
 export type { SyncConflict } from "./conflicts.js";
 
@@ -50,7 +50,7 @@ export interface SyncRepositoryPayload {
 }
 
 interface PushResponse {
-  tokenUsageAcknowledgements?: { id: string; revision: number }[];
+  eventTokenUsageAcknowledgements?: { id: string; revision: number }[];
   accepted: number;
   duplicates: number;
   conflicts: SyncConflict[];
@@ -252,6 +252,9 @@ export class SyncEngine {
           "/api/sync/push",
           payload,
         );
+        acknowledgeEventTokenUsage(this.db, payload.batch.events, response, {
+          projectId: this.projectId, serverUrl: this.serverUrl, cloudClientId: this.cloudClientId,
+        });
 
         result.accepted += response.accepted;
         result.duplicates += response.duplicates;

@@ -405,6 +405,22 @@ Files larger than 500 KB are skipped with a warning.
 | `ADIT_CODEX_BIN` | Override Codex binary used by cloud coding commands | unset |
 | `ADIT_INSTALL_DIR` | Override the upgrade install directory | unset |
 
+## Reply Token Usage
+
+Token totals are stored as numeric columns on the final reply event. The normal
+sync request includes the reply's `tokenUsage` payload; late usage replays the
+same event and requires a matching usage acknowledgement before marking it synced.
+Per-request capture evidence stays private to the reply for deduplication and
+exact request-time accounting. It is not emitted as additional timeline events.
+
+The next database open adds the reply fields and drops `token_usage_records`,
+`token_usage_sync_state`, and `token_usage_cursors`. Historical local token usage
+is deliberately discarded, not migrated or reread from old transcripts. Existing
+conversations, file changes, and usage already synced to Cloud remain intact.
+Capture begins with subsequent prompts. Deploy a Cloud version that accepts
+reply usage before upgrading Core; older Cloud versions leave usage pending
+and report a missing acknowledgement rather than silently lose it.
+
 ## Task Skill
 
 The `adit-tasks` skill is installed automatically by `adit init`, `adit upgrade`,

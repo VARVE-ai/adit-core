@@ -520,4 +520,29 @@ export const migrations: Migration[] = [
         AND NOT EXISTS (SELECT 1 FROM diffs WHERE diffs.event_id = events.id);
     `,
   },
+  {
+    id: 25,
+    name: "store_token_usage_on_replies",
+    sql: `
+      ALTER TABLE sessions ADD COLUMN token_capture_json TEXT;
+      ALTER TABLE events ADD COLUMN token_usage_turn_id TEXT;
+      ALTER TABLE events ADD COLUMN token_usage_revision INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE events ADD COLUMN token_usage_json TEXT;
+      ALTER TABLE events ADD COLUMN token_usage_ack_json TEXT;
+      ALTER TABLE events ADD COLUMN token_requests INTEGER;
+      ALTER TABLE events ADD COLUMN token_observations INTEGER;
+      ALTER TABLE events ADD COLUMN token_incomplete INTEGER;
+      ALTER TABLE events ADD COLUMN token_input REAL;
+      ALTER TABLE events ADD COLUMN token_uncached_input REAL;
+      ALTER TABLE events ADD COLUMN token_output REAL;
+      ALTER TABLE events ADD COLUMN token_cache_read REAL;
+      ALTER TABLE events ADD COLUMN token_cache_write REAL;
+      ALTER TABLE events ADD COLUMN token_reasoning REAL;
+      ALTER TABLE events ADD COLUMN token_total REAL;
+      CREATE INDEX idx_events_token_turn ON events(session_id, token_usage_turn_id);
+      DROP TABLE IF EXISTS token_usage_sync_state;
+      DROP TABLE IF EXISTS token_usage_records;
+      DROP TABLE IF EXISTS token_usage_cursors;
+    `,
+  },
 ];

@@ -71,6 +71,16 @@ describe("Events CRUD", () => {
     expect(event!.promptText).toBe("Hello, Claude!");
   });
 
+  it("reads numeric reply usage without parsing private request evidence", () => {
+    insertEvent(db, { id: "reply", sessionId, sequence: 1, eventType: "assistant_response", actor: "assistant",
+      responseText: "Done", startedAt: new Date().toISOString(), vclockJson: "{}" });
+    db.prepare(`UPDATE events SET token_usage_json = 'not parsed on reads', token_usage_turn_id = 'turn',
+      token_usage_revision = 1, token_requests = 1, token_observations = 0, token_incomplete = 0,
+      token_input = 100, token_output = 20, token_total = 120 WHERE id = 'reply'`).run();
+    expect(getEventById(db, "reply")?.tokenUsage).toMatchObject({ requests: 1, inputTokens: 100, outputTokens: 20, totalTokens: 120 });
+    expect(getEventById(db, "reply")?.tokenUsage).not.toHaveProperty("records");
+  });
+
   it("queries events by type and actor", () => {
     insertEvent(db, {
       id: "evt-001",

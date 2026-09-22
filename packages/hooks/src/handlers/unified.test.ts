@@ -22,6 +22,7 @@ const mockList = vi.fn().mockResolvedValue([]);
 const mockInsertDiff = vi.fn();
 
 vi.mock("@varveai/adit-core", () => ({
+  attachPendingTokenUsage: vi.fn(),
   getLatestEnvSnapshot: vi.fn(() => null),
   withPerf: vi.fn((_dir: string, _cat: string, _op: string, fn: () => unknown) => fn()),
   insertDiff: (...args: unknown[]) => mockInsertDiff(...args),

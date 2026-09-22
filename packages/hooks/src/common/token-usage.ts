@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { openSync, closeSync, readSync, statSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { generateId, normalizeUsage, type TokenUsageRecord } from "@varveai/adit-core";
+import { generateId, normalizeUsage, readTokenCaptureState, readSessionUsageRecords, storeSessionUsage, type TokenUsageRecord } from "@varveai/adit-core";
 import type { HookContext } from "./context.js";
 
 interface Cursor {
@@ -27,10 +27,9 @@ function text(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 && value.length <= 256 ? value : null;
 }
 
-function saveRecord(ctx: HookContext, record: TokenUsageRecord): void {
-  const previous = ctx.db.prepare("SELECT record_json FROM token_usage_records WHERE id = ?").get(record.id) as { record_json: string } | undefined;
-  if (previous) {
-    const old = JSON.parse(previous.record_json) as TokenUsageRecord;
+function saveRecord(records: Map<string, TokenUsageRecord>, record: TokenUsageRecord): void {
+  const old = records.get(record.id);
+  if (old) {
     record.turnId = old.turnId;
     record.occurredAt = old.occurredAt;
     record.revision = old.revision;
@@ -41,10 +40,7 @@ function saveRecord(ctx: HookContext, record: TokenUsageRecord): void {
     if (JSON.stringify(record) === JSON.stringify(old)) return;
     record.revision++;
   }
-  const serialized = JSON.stringify(record);
-  ctx.db.prepare(`INSERT INTO token_usage_records(id, session_id, turn_id, revision, record_json)
-    VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, record_json=excluded.record_json`)
-    .run(record.id, record.sessionId, record.turnId, record.revision, serialized);
+  records.set(record.id, record);
 }
 
 function makeRecord(ctx: HookContext, cursor: Cursor, key: string, raw: unknown,
@@ -65,18 +61,19 @@ export function captureTokenUsage(ctx: HookContext, transcriptPath: string | und
   if (!transcriptPath || !["codex", "claude-code", "claude-vscode"].includes(ctx.session.platform)) return;
   const sourceKey = identity(`${ctx.session.id}:${resolve(transcriptPath)}`);
   ctx.db.transaction(() => {
+    const state = readTokenCaptureState(ctx.db, ctx.session.id);
+    const records = new Map(readSessionUsageRecords(ctx.db, ctx.session.id).map(record => [record.id, record]));
     const file = existsSync(transcriptPath) ? statSync(transcriptPath) : null;
     if (file && !file.isFile()) return;
     const size = file?.size ?? 0;
     const fileIdentity = file ? `${file.dev}:${file.ino}:${file.birthtimeMs}` : "";
     const now = new Date().toISOString();
-    const row = ctx.db.prepare("SELECT state_json FROM token_usage_cursors WHERE source_key = ?").get(sourceKey) as { state_json: string } | undefined;
-    const cursor: Cursor = row ? JSON.parse(row.state_json) : {
+    const cursor: Cursor = state.cursors[sourceKey] as Cursor ?? {
       offset: size, generation: generateId(), turnId: null, model: null,
       cumulative: null, enabledAt: now, fileIdentity,
     };
     if ((cursor.fileIdentity && cursor.fileIdentity !== fileIdentity) || size < cursor.offset) {
-      if (cursor.turnId) saveRecord(ctx, makeRecord(ctx, cursor, `gap:${cursor.turnId}`, {}, "gap", now));
+      if (cursor.turnId) saveRecord(records, makeRecord(ctx, cursor, `gap:${cursor.turnId}`, {}, "gap", now));
       cursor.offset = size;
       cursor.generation = generateId();
       cursor.cumulative = null;
@@ -93,7 +90,7 @@ export function captureTokenUsage(ctx: HookContext, transcriptPath: string | und
           if (count < 8 * 1024 * 1024) break;
           cursor.offset += count;
           cursor.discardLine = true;
-          if (cursor.turnId) saveRecord(ctx, makeRecord(ctx, cursor, `gap:${cursor.turnId}`, {}, "gap", now));
+          if (cursor.turnId) saveRecord(records, makeRecord(ctx, cursor, `gap:${cursor.turnId}`, {}, "gap", now));
           continue;
         }
         const lines = buffer.subarray(0, newline + 1).toString("utf8").split("\n");
@@ -105,7 +102,7 @@ export function captureTokenUsage(ctx: HookContext, transcriptPath: string | und
           if (!line.trim()) continue;
           let entry: Record<string, unknown>;
           try { entry = object(JSON.parse(line)); } catch {
-            if (cursor.turnId) saveRecord(ctx, makeRecord(ctx, cursor, `gap:${cursor.turnId}`, {}, "gap", now));
+            if (cursor.turnId) saveRecord(records, makeRecord(ctx, cursor, `gap:${cursor.turnId}`, {}, "gap", now));
             continue;
           }
           const payload = object(entry.payload);
@@ -119,13 +116,13 @@ export function captureTokenUsage(ctx: HookContext, transcriptPath: string | und
             const responseId = text(message.id);
             if (!responseId) continue;
             cursor.model = text(message.model) ?? cursor.model;
-            saveRecord(ctx, makeRecord(ctx, cursor, `response:${responseId}`, message.usage,
+            saveRecord(records, makeRecord(ctx, cursor, `response:${responseId}`, message.usage,
               "request", timestamp, responseId, text(entry.requestId)));
           }
           if (ctx.session.platform === "codex" && entry.type === "token_usage_record") {
             const responseId = text(payload.response_id);
             if (responseId) {
-              saveRecord(ctx, makeRecord(ctx, cursor, `response:${responseId}`, payload.usage,
+              saveRecord(records, makeRecord(ctx, cursor, `response:${responseId}`, payload.usage,
                 "request", timestamp, responseId));
             }
           }
@@ -134,7 +131,7 @@ export function captureTokenUsage(ctx: HookContext, transcriptPath: string | und
             const cumulative = JSON.stringify(normalizeUsage("codex", info.total_token_usage).raw);
             if (cumulative === "{}" || cumulative === cursor.cumulative) continue;
             cursor.cumulative = cumulative;
-            saveRecord(ctx, makeRecord(ctx, cursor, `${sourceKey}:${cursor.generation}:${linePosition}`,
+            saveRecord(records, makeRecord(ctx, cursor, `${sourceKey}:${cursor.generation}:${linePosition}`,
               info.last_token_usage, "observation", timestamp));
           }
         }
@@ -142,14 +139,12 @@ export function captureTokenUsage(ctx: HookContext, transcriptPath: string | und
       }
     } finally { if (descriptor !== null) closeSync(descriptor); }
     if (cursor.turnId) {
-      const count = ctx.db.prepare("SELECT COUNT(*) AS count FROM token_usage_records WHERE session_id = ? AND turn_id = ?")
-        .get(ctx.session.id, cursor.turnId) as { count: number };
-      if (count.count === 0 || cursor.offset < size) {
-        saveRecord(ctx, makeRecord(ctx, cursor, `gap:${cursor.turnId}`, {}, "gap", now));
+      if (![...records.values()].some(record => record.turnId === cursor.turnId) || cursor.offset < size) {
+        saveRecord(records, makeRecord(ctx, cursor, `gap:${cursor.turnId}`, {}, "gap", now));
       }
     }
     if (boundary === "prompt") cursor.turnId = turnId ?? null;
-    ctx.db.prepare(`INSERT INTO token_usage_cursors(source_key, session_id, state_json) VALUES (?, ?, ?)
-      ON CONFLICT(source_key) DO UPDATE SET state_json=excluded.state_json`).run(sourceKey, ctx.session.id, JSON.stringify(cursor));
+    state.cursors[sourceKey] = cursor;
+    storeSessionUsage(ctx.db, ctx.session.id, [...records.values()], state);
   }).immediate();
 }

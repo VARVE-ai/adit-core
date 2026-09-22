@@ -31,6 +31,8 @@ export type { EnvSnapshot, EnvDiff, EnvChange } from "./types/index.js";
 // Database
 export { normalizeUsage, sanitizeUsage } from "./usage.js";
 export type { TokenUsageRecord } from "./usage.js";
+export { readTokenCaptureState, readSessionUsageRecords, storeSessionUsage, attachPendingTokenUsage, eventUsageFromRow, summarizeEventUsage } from "./db/event-token-usage.js";
+export type { EventTokenUsage } from "./db/event-token-usage.js";
 
 export {
   openDatabase,
