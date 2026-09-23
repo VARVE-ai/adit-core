@@ -16,7 +16,6 @@ import {
   updateCachedGitState,
   updateCachedRemoteBranchState,
   updateCachedDocHashes,
-  updateCachedQualified,
 } from "./cache.js";
 import type { ProjectLinkCache } from "./types.js";
 
@@ -37,7 +36,6 @@ function makeCache(overrides: Partial<ProjectLinkCache> = {}): ProjectLinkCache 
     lastBranchSyncAt: null,
     lastDocSyncAt: null,
     docHashes: {},
-    qualified: false,
     initializedAt: "2026-03-10T12:00:00.000Z",
     updatedAt: "2026-03-10T12:00:00.000Z",
     ...overrides,
@@ -76,7 +74,6 @@ describe("Project Link Cache", () => {
     expect(result!.repositoryId).toBe("proj-abc123");
     expect(result!.confirmedProjectId).toBe("confirmed-123");
     expect(result!.docHashes).toEqual({ "README.md": "abc123" });
-    expect(result!.qualified).toBe(false);
   });
 
   it("uses one cache key with or without trailing slashes", () => {
@@ -156,17 +153,6 @@ describe("Project Link Cache", () => {
     expect(result!.remoteRefsFingerprint).toBe("remote-fingerprint-1");
     expect(result!.lastRemoteBranchCheckAt).toBe("2026-03-10T14:00:00.000Z");
     expect(result!.gitRefsFingerprint).toBeNull();
-  });
-
-  it("updates qualified status", () => {
-    const cache = makeCache();
-    upsertProjectLinkCache(db, cache);
-    expect(getProjectLinkCache(db, cache.projectId, cache.serverUrl)!.qualified).toBe(false);
-
-    updateCachedQualified(db, cache.projectId, cache.serverUrl, true);
-
-    const result = getProjectLinkCache(db, cache.projectId, cache.serverUrl);
-    expect(result!.qualified).toBe(true);
   });
 
   it("supports multiple projects on different servers", () => {

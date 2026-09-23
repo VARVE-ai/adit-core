@@ -57,8 +57,7 @@ describe("project uninstall command", () => {
     });
     mocks.existsSync.mockImplementation((path: string) =>
       path === "/repo/.adit" ||
-      path === "/repo/.adit/adit.sqlite" ||
-      path === "/repo/.claude/skills/generate-docs.md"
+      path === "/repo/.adit/adit.sqlite"
     );
     mocks.listCheckpointRefs.mockResolvedValue([
       { stepId: "evt-1", sha: "abc" },
@@ -97,13 +96,10 @@ describe("project uninstall command", () => {
     expect(output).not.toContain("refs/adit/checkpoints");
   });
 
-  it("removes hooks, init-generated files, data directory, and checkpoint refs", async () => {
+  it("removes hooks, data directory, and checkpoint refs", async () => {
     const result = await uninstallProject("/repo", "/repo/.adit");
 
     expect(mocks.uninstallInstalledPlatformHooks).toHaveBeenCalledWith("/repo");
-    expect(mocks.rmSync).toHaveBeenCalledWith("/repo/.claude/skills/generate-docs.md", {
-      force: true,
-    });
     expect(mocks.rmSync).toHaveBeenCalledWith("/repo/.adit", {
       recursive: true,
       force: true,
@@ -114,7 +110,6 @@ describe("project uninstall command", () => {
       ok: true,
       uninstalled: ["Codex CLI"],
       dataRemoved: true,
-      generatedFilesRemoved: 1,
       checkpointRefsRemoved: 2,
     });
   });
@@ -134,14 +129,12 @@ describe("project uninstall command", () => {
       ok: boolean;
       action: string;
       dataRemoved: boolean;
-      generatedFilesRemoved: number;
       checkpointRefsRemoved: number;
     };
     expect(parsed).toEqual(expect.objectContaining({
       ok: true,
       action: "project-uninstall",
       dataRemoved: true,
-      generatedFilesRemoved: 1,
       checkpointRefsRemoved: 2,
     }));
   });

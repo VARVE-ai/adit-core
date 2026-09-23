@@ -38,14 +38,6 @@ import {
   type PlatformChoice,
 } from "./init-platform-select.js";
 import { canUseInkSelect, runInkPlatformSelect } from "./init-select-ink.js";
-import {
-  renderProjectOverviewTemplate,
-  renderArchitectureTemplate,
-  renderApiReferenceTemplate,
-  renderDataModelTemplate,
-  renderGenerateDocsPrompt,
-  GENERATE_DOCS_PROMPT_PATH,
-} from "@varveai/adit-plans";
 import { analyzeProjectLayout, resolveInitRoot } from "./project-layout.js";
 import { prepareProjectManifest } from "./init-manifest.js";
 
@@ -280,48 +272,6 @@ async function initializeProject(opts: InitOptions): Promise<void> {
     dbPath: config.dbPath,
   });
 
-  // --- Step 4: Generate document templates ---
-  console.log();
-  console.log(sectionTitle("  Project Documents"));
-
-  const docsDir = join(config.dataDir, "docs");
-  const projectName = basename(setupRoot);
-  const defaultDocTypes: Array<{ file: string; renderer: (title: string) => string }> = [
-    { file: "project-overview.md", renderer: renderProjectOverviewTemplate },
-    { file: "architecture.md", renderer: renderArchitectureTemplate },
-    { file: "api-reference.md", renderer: renderApiReferenceTemplate },
-    { file: "data-model.md", renderer: renderDataModelTemplate },
-  ];
-
-  let docsCreated = 0;
-  let docsExisting = 0;
-
-  for (const { file, renderer } of defaultDocTypes) {
-    const filePath = join(docsDir, file);
-    if (existsSync(filePath)) {
-      docsExisting++;
-    } else {
-      if (docsCreated === 0) mkdirSync(docsDir, { recursive: true });
-      writeFileSync(filePath, renderer(projectName), "utf-8");
-      docsCreated++;
-    }
-  }
-
-  // Always (re)write the AI prompt file. adit owns this copy — it is
-  // refreshed on every init so upgrades propagate; users customize by
-  // copying it (e.g. into their AI tool's skills/commands).
-  const promptsDir = join(config.dataDir, "prompts");
-  mkdirSync(promptsDir, { recursive: true });
-  const promptPath = join(promptsDir, "generate-docs.md");
-  writeFileSync(promptPath, renderGenerateDocsPrompt(), "utf-8");
-
-  if (docsCreated > 0) {
-    const existingNote = docsExisting > 0 ? ` · ${docsExisting} already exist` : "";
-    console.log(`  ${marks.ok} Created ${docsCreated} doc templates${pc.dim(existingNote)} + ${GENERATE_DOCS_PROMPT_PATH}`);
-  } else {
-    console.log(pc.dim(`  [=] ${docsExisting} doc templates exist · generate-docs prompt refreshed`));
-  }
-
   // --- Summary ---
   console.log();
   const finalConnected = readConnectedPlatforms(setupRoot) ?? [];
@@ -353,9 +303,7 @@ async function initializeProject(opts: InitOptions): Promise<void> {
   if (!cloudResult.linked) {
     console.log(`\n  ${pc.cyan("Next step:")} run ${pc.bold("adit cloud link")} to connect this project to the cloud.`);
   }
-  console.log(`\n  ${pc.cyan("Next step:")} ask your AI agent to follow ${pc.bold(GENERATE_DOCS_PROMPT_PATH)}`);
-  console.log(pc.dim("             (fills the project docs, also unlocks cloud qualification),"));
-  console.log(`             then run ${pc.bold("'adit timeline'")} after your first prompt.`);
+  console.log(`\n  ${pc.cyan("Next step:")} run ${pc.bold("'adit timeline'")} after your first prompt.`);
   console.log();
 }
 

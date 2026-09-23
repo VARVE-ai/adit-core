@@ -31,7 +31,6 @@ import type {
   CommitUploadResponse,
   DocumentUploadResponse,
   DiscoveredDocument,
-  QualifyResponse,
   WorkspaceRepositoryFailure,
   WorkspaceRepositoryResult,
 } from "./types.js";
@@ -54,10 +53,7 @@ import {
   upsertProjectLinkCache,
   clearProjectLinkCache,
   updateCachedDocHashes,
-  updateCachedQualified,
 } from "./cache.js";
-import { checkQuality, formatQualityFeedback } from "./qualify.js";
-import { validateDocument } from "@varveai/adit-plans";
 import { normalizeGitHubRepoKey } from "./repo-key.js";
 
 /** Maximum number of commits per upload batch */
@@ -81,18 +77,6 @@ interface LinkRepositoryInternalOptions {
 
 interface WorkspaceLinkFailure extends WorkspaceRepositoryFailure {
   error: unknown;
-}
-
-interface WorkspaceQualitySummary {
-  lowScoreDocumentCount: number;
-  stubDocumentCount: number;
-  lowestScoringDocuments: Array<{
-    fileName: string;
-    score: number;
-    detectedType: string;
-  }>;
-  missingItems: string[];
-  suggestions: string[];
 }
 
 class LinkStepError extends Error {
@@ -379,7 +363,7 @@ async function linkRepositoryCommand(
   // ──────────────────────────────────────────────────────────
 
   currentStep = "Negotiate project ID";
-  log(options.dryRun ? "\n[Step 1/6] Previewing local project (no server registration)..." : "\n[Step 1/6] Negotiating project ID with server...");
+  log(options.dryRun ? "\n[Step 1/4] Previewing local project (no server registration)..." : "\n[Step 1/4] Negotiating project ID with server...");
   const step1Start = startStep();
 
   const remoteUrl = repository.repositoryUrl?.trim() ?? "";
@@ -448,7 +432,6 @@ async function linkRepositoryCommand(
       lastBranchSyncAt: null,
       lastDocSyncAt: null,
       docHashes: {},
-      qualified: false,
       initializedAt: now,
       updatedAt: now,
     };
@@ -464,7 +447,6 @@ async function linkRepositoryCommand(
       cache.lastBranchSyncAt = null;
       cache.lastDocSyncAt = null;
       cache.docHashes = {};
-      cache.qualified = false;
     }
     cache.updatedAt = now;
     if (!options.dryRun) upsertProjectLinkCache(db, cache);
@@ -481,7 +463,7 @@ async function linkRepositoryCommand(
   // ──────────────────────────────────────────────────────────
 
   currentStep = "Collect git metadata";
-  log("\n[Step 2/6] Uploading git metadata...");
+  log("\n[Step 2/4] Uploading git metadata...");
   const step2Start = startStep();
 
   // 3a. Branches — collect once and reuse for commit branch resolution.
@@ -679,7 +661,7 @@ async function linkRepositoryCommand(
 
   if (!options.skipDocs) {
     currentStep = "Discover documents";
-    log("\n[Step 3/6] Discovering project documents...");
+    log("\n[Step 3/4] Discovering project documents...");
 
     const docSettings = runStepSync(currentStep, () => loadDocSettings(projectRoot));
     discoveredDocs = runStepSync(currentStep, () => discoverDocuments(projectRoot, cache.docHashes, docSettings));
@@ -700,30 +682,6 @@ async function linkRepositoryCommand(
       if (discoveredDocs.length > 50) {
         log(`\n  Warning: ${discoveredDocs.length} documents found. Consider narrowing patterns in settings.json`);
       }
-
-      // ── Local structural validation ────────────────────────
-      const threshold = 0.6;
-      const newOrChanged = discoveredDocs.filter((d) => d.status !== "unchanged");
-      if (newOrChanged.length > 0) {
-        log("\n  Validating document structure...");
-        for (const doc of newOrChanged) {
-          const result = validateDocument(doc.content);
-          const scorePct = Math.round(result.score * 100);
-          if (result.score < threshold) {
-            log(`    [WARN] ${doc.sourcePath} — score ${scorePct}% (type: ${result.detectedType})`);
-            for (const s of result.missingRequired) {
-              log(`           Missing required: ## ${s}`);
-            }
-            for (const s of result.stubSections) {
-              log(`           Stub section: ## ${s}`);
-            }
-          } else {
-            log(`    [OK]   ${doc.sourcePath} — score ${scorePct}% (type: ${result.detectedType})`);
-          }
-        }
-        log("  Tip: Use 'adit docs validate' for a detailed report, or ask your AI");
-        log("       agent to follow .adit/prompts/generate-docs.md to fill missing sections.");
-      }
     }
 
     // ──────────────────────────────────────────────────────────
@@ -733,13 +691,13 @@ async function linkRepositoryCommand(
     const toUpload = discoveredDocs.filter((d) => d.status !== "unchanged");
 
     if (toUpload.length === 0) {
-      log("\n[Step 4/6] All documents up to date.");
+      log("\n[Step 4/4] All documents up to date.");
       documentCount = discoveredDocs.length;
     } else if (options.dryRun) {
-      log(`\n[Step 4/6] [dry-run] Would upload ${toUpload.length} document${toUpload.length !== 1 ? "s" : ""}`);
+      log(`\n[Step 4/4] [dry-run] Would upload ${toUpload.length} document${toUpload.length !== 1 ? "s" : ""}`);
       documentCount = discoveredDocs.length;
     } else {
-      log(`\n[Step 4/6] Uploading ${toUpload.length} document${toUpload.length !== 1 ? "s" : ""}...`);
+      log(`\n[Step 4/4] Uploading ${toUpload.length} document${toUpload.length !== 1 ? "s" : ""}...`);
 
       currentStep = "Upload documents";
       const response = await runStep(currentStep, () =>
@@ -772,67 +730,17 @@ async function linkRepositoryCommand(
       cache.docHashes = newHashes;
     }
   } else {
-    log("\n[Step 3/6] Skipping document upload (--skip-docs)");
-    log("\n[Step 4/6] Skipping document upload (--skip-docs)");
+    log("\n[Step 3/4] Skipping document upload (--skip-docs)");
+    log("\n[Step 4/4] Skipping document upload (--skip-docs)");
   }
   endStep("Discover & upload documents", step3Start);
 
-  // ──────────────────────────────────────────────────────────
-  // Step 6: Quality check
-  // ──────────────────────────────────────────────────────────
-
-  let qualified = cache.qualified;
-  let score: number | null = null;
-  let qualityFeedback: string | null = null;
-  let summaryPrompt: string | null = null;
-  let qualitySummary: WorkspaceQualitySummary | null = null;
-  const step5Start = startStep();
-
-  if (!options.skipDocs && !options.dryRun && !options.skipQualify) {
-    currentStep = "Quality check";
-    log("\n[Step 5/6] Checking document quality...");
-
-    const qualifyResult = await runStep(currentStep, () => checkQuality(client, localProjectId, {
-      localRepositoryId: repositoryId,
-      relativePath: repository.relativePath,
-    }));
-    qualified = qualifyResult.qualified;
-    score = qualifyResult.score;
-    qualitySummary = summarizeQuality(qualifyResult);
-
-    if (qualified) {
-      log(`  Documents qualified (score: ${score!.toFixed(2)})`);
-    } else {
-      log(`  Documents not yet qualified (score: ${score!.toFixed(2)})`);
-    }
-
-    // Always show document quality feedback (even when qualified)
-    qualityFeedback = formatQualityFeedback(qualifyResult);
-    if (qualityFeedback) {
-      log(qualityFeedback);
-    }
-
-    // Show summary prompt when not qualified
-    if (!qualified && qualifyResult.feedback?.summaryPrompt) {
-      summaryPrompt = qualifyResult.feedback.summaryPrompt;
-      log("");
-      log(`  ${summaryPrompt}`);
-    }
-
-    updateCachedQualified(db, localProjectId, serverUrl, qualified, repositoryId);
-    cache.qualified = qualified;
-  } else {
-    log("\n[Step 5/6] Skipping quality check");
-  }
-  endStep("Quality check", step5Start);
 
   const totalDurationMs = Math.round(performance.now() - totalStart);
 
   // ──────────────────────────────────────────────────────────
   // Final: Summary
   // ──────────────────────────────────────────────────────────
-
-  const qualifiedLabel = qualified ? "qualified" : "not qualified";
 
   log("");
   log("══════════════════════════════════════════");
@@ -841,7 +749,7 @@ async function linkRepositoryCommand(
   log(`Server:     ${serverUrl}`);
   log(`Branches:   ${branchCount}`);
   log(`Commits:    ${commitCount}`);
-  log(`Documents:  ${documentCount} (${qualifiedLabel})`);
+  log(`Documents:  ${documentCount}`);
   log("──────────────────────────────────────────");
   for (const t of stepTimings) {
     log(`  ${t.step.padEnd(28)} ${formatDuration(t.durationMs)}`);
@@ -861,17 +769,6 @@ async function linkRepositoryCommand(
     branchCount,
     commitCount,
     documentCount,
-    qualified,
-    score,
-    ...(qualitySummary ? {
-      lowScoreDocumentCount: qualitySummary.lowScoreDocumentCount,
-      stubDocumentCount: qualitySummary.stubDocumentCount,
-      lowestScoringDocuments: qualitySummary.lowestScoringDocuments,
-      missingItems: qualitySummary.missingItems,
-      suggestions: qualitySummary.suggestions,
-    } : {}),
-    qualityFeedback,
-    summaryPrompt,
     stepTimings,
     totalDurationMs,
     ...(negotiate.similarProjects && negotiate.similarProjects.length > 0
@@ -924,8 +821,6 @@ function createWorkspaceLinkResult(
     branchCount: results.reduce((sum, result) => sum + result.branchCount, 0),
     commitCount: results.reduce((sum, result) => sum + result.commitCount, 0),
     documentCount: results.reduce((sum, result) => sum + result.documentCount, 0),
-    qualified: results.length > 0 && failures.length === 0 && results.every((result) => result.qualified),
-    score: averageScore(results),
     stepTimings: results.flatMap((result) => result.stepTimings),
     totalDurationMs,
     repositoryResults,
@@ -940,15 +835,6 @@ function toWorkspaceRepositoryResult(result: LinkResult): WorkspaceRepositoryRes
     branchCount: result.branchCount,
     commitCount: result.commitCount,
     documentCount: result.documentCount,
-    qualified: result.qualified,
-    score: result.score,
-    ...(result.lowScoreDocumentCount !== undefined ? { lowScoreDocumentCount: result.lowScoreDocumentCount } : {}),
-    ...(result.stubDocumentCount !== undefined ? { stubDocumentCount: result.stubDocumentCount } : {}),
-    ...(result.lowestScoringDocuments ? { lowestScoringDocuments: result.lowestScoringDocuments } : {}),
-    ...(result.missingItems ? { missingItems: result.missingItems } : {}),
-    ...(result.suggestions ? { suggestions: result.suggestions } : {}),
-    qualityFeedback: result.qualityFeedback ?? null,
-    summaryPrompt: result.summaryPrompt ?? null,
     totalDurationMs: result.totalDurationMs,
   };
 }
@@ -959,11 +845,9 @@ function logWorkspaceRepositoryResult(
   result: LinkResult,
   log: (message?: unknown) => void,
 ): void {
-  const qualifiedLabel = result.qualified ? "qualified" : "not qualified";
-  const scoreLabel = formatScore(result.score);
   log(
     `[${index}/${total}] ${result.relativePath} ok | branches ${result.branchCount} | ` +
-    `commits ${result.commitCount} | docs ${result.documentCount} | ${qualifiedLabel}${scoreLabel} | ` +
+    `commits ${result.commitCount} | docs ${result.documentCount} | ` +
     formatDuration(result.totalDurationMs),
   );
 }
@@ -993,8 +877,6 @@ function logWorkspaceSummary(
 ): void {
   const successful = result.repositoryResults?.length ?? 0;
   const failed = failures.length;
-  const qualifiedLabel = result.qualified ? "qualified" : "not qualified";
-  const scoreLabel = formatScore(result.score);
 
   log("");
   log("══════════════════════════════════════════");
@@ -1004,10 +886,8 @@ function logWorkspaceSummary(
   log(`Repositories: ${successful} succeeded, ${failed} failed`);
   log(`Branches:     ${result.branchCount}`);
   log(`Commits:      ${result.commitCount}`);
-  log(`Documents:    ${result.documentCount} (${qualifiedLabel}${scoreLabel})`);
+  log(`Documents:    ${result.documentCount}`);
   log(`Total:        ${formatDuration(result.totalDurationMs)}`);
-
-  logWorkspaceQualityFeedback(result, log);
 
   if (failures.length > 0) {
     log("──────────────────────────────────────────");
@@ -1020,113 +900,8 @@ function logWorkspaceSummary(
   log("══════════════════════════════════════════");
 }
 
-function logWorkspaceQualityFeedback(result: LinkResult, log: (message?: unknown) => void): void {
-  const feedbackResults = (result.repositoryResults ?? []).filter(
-    (repository) => repository.qualityFeedback || repository.summaryPrompt,
-  );
-  if (feedbackResults.length === 0) return;
-
-  log("──────────────────────────────────────────");
-  log("Quality feedback:");
-  log(formatQualityTable(feedbackResults));
-  log("");
-  log("  Quality shows the cloud score and pass status for each repository.");
-  log("  Needs attention explains why docs still need work: low scores, placeholders, worst file, or missing content.");
-  log("  AI prompt is not a shell command. Enter it in the AI agent opened at the project root.");
-  log("  Each prompt asks the agent to fill that repository's documents following .adit/prompts/generate-docs.md;");
-  log("  generated docs stay in their existing locations.");
-  log("  After the docs are updated, re-run adit cloud link.");
-}
-
-function formatQualityTable(repositories: WorkspaceRepositoryResult[]): string {
-  const headers = ["Repository", "Quality", "Docs", "Needs attention", "AI prompt"];
-  const rows = repositories.map((repository) => [
-    truncateCell(repository.relativePath, 18),
-    formatScoreCell(repository),
-    String(repository.documentCount),
-    truncateCell(formatIssueCell(repository), 50),
-    truncateCell(`Fill docs for ${repository.relativePath}`, 36),
-  ]);
-  const widths = headers.map((header, index) =>
-    Math.max(header.length, ...rows.map((row) => row[index]?.length ?? 0)),
-  );
-  const formatRow = (row: string[]): string =>
-    row.map((cell, index) => cell.padEnd(widths[index] ?? cell.length)).join("  ");
-
-  return [
-    `  ${formatRow(headers)}`,
-    `  ${widths.map((width) => "-".repeat(width)).join("  ")}`,
-    ...rows.map((row) => `  ${formatRow(row)}`),
-  ].join("\n");
-}
-
-function formatScoreCell(repository: WorkspaceRepositoryResult): string {
-  const score = repository.score === null ? "--" : repository.score.toFixed(2);
-  return repository.qualified ? `${score} pass` : `${score} needs docs`;
-}
-
-function formatIssueCell(repository: WorkspaceRepositoryResult): string {
-  const parts: string[] = [];
-  const low = repository.lowScoreDocumentCount ?? 0;
-  const stub = repository.stubDocumentCount ?? 0;
-  if (low > 0) parts.push(`${low} docs below 60%`);
-  if (stub > 0) parts.push(`${stub} placeholders`);
-
-  const lowest = repository.lowestScoringDocuments?.[0];
-  if (lowest) {
-    parts.push(`worst ${lowest.fileName} ${Math.round(lowest.score * 100)}%`);
-  }
-
-  const missing = repository.missingItems?.[0];
-  if (missing) {
-    parts.push(`missing ${missing}`);
-  }
-
-  return parts.length > 0 ? parts.join("; ") : "review quality feedback";
-}
-
-function truncateCell(value: string, maxLength: number): string {
-  if (value.length <= maxLength) return value;
-  if (maxLength <= 1) return value.slice(0, maxLength);
-  return `${value.slice(0, maxLength - 1)}…`;
-}
-
-function summarizeQuality(response: QualifyResponse): WorkspaceQualitySummary {
-  const details = response.documentDetails ?? [];
-  const lowestScoringDocuments = details
-    .map((doc) => ({
-      fileName: doc.fileName,
-      score: doc.structuralScore,
-      detectedType: doc.detectedType,
-    }))
-    .sort((a, b) => a.score - b.score)
-    .slice(0, 3);
-
-  return {
-    lowScoreDocumentCount: details.filter((doc) => doc.structuralScore < 0.6).length,
-    stubDocumentCount: details.filter((doc) => doc.hasStubContent).length,
-    lowestScoringDocuments,
-    missingItems: response.feedback?.missing.slice(0, 3) ?? [],
-    suggestions: response.feedback?.suggestions.slice(0, 3) ?? [],
-  };
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function averageScore(results: LinkResult[]): number | null {
-  const scores = results
-    .map((result) => result.score)
-    .filter((score): score is number => typeof score === "number" && Number.isFinite(score));
-  if (scores.length === 0) return null;
-  return scores.reduce((sum, score) => sum + score, 0) / scores.length;
-}
-
-function formatScore(score: number | null): string {
-  return typeof score === "number" && Number.isFinite(score)
-    ? `, score ${score.toFixed(2)}`
-    : "";
 }
 
 async function runLinkStep<T>(

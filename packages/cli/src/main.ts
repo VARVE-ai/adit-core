@@ -51,7 +51,6 @@ import {
 } from "./commands/project-link.js";
 import { completeCliHandler } from "./commands/complete.js";
 import { selfUpdateCommand } from "./commands/self-update.js";
-import { docsScaffoldCommand, docsValidateCommand } from "./commands/docs.js";
 import { isCliEntrypoint } from "./entrypoint.js";
 import { launchTui } from "./tui/index.js";
 import { withUpdateWarning } from "./update-check.js";
@@ -311,7 +310,6 @@ export function createProgram(): Command {
     .option("-f, --force", "Clear cache and re-link from scratch")
     .option("--skip-docs", "Skip document upload")
     .option("--skip-commits", "Skip commit history upload")
-    .option("--skip-qualify", "Skip document quality check")
     .option("--dry-run", "Preview without uploading")
     .option("--json", "Output result as JSON")
     .action(withUpdateWarning("cloud.link", async (opts) => {
@@ -319,7 +317,6 @@ export function createProgram(): Command {
         force: opts.force,
         skipDocs: opts.skipDocs,
         skipCommits: opts.skipCommits,
-        skipQualify: opts.skipQualify,
         dryRun: opts.dryRun,
         json: opts.json,
       });
@@ -457,33 +454,6 @@ export function createProgram(): Command {
     .option("-c, --check", "Check for updates without installing")
     .action((opts) => selfUpdateCommand({ check: opts.check }));
 
-  // Document management
-  const docsCmd = program
-    .command("docs")
-    .description("Project document scaffolding and validation");
-
-  docsCmd
-    .command("scaffold [type]")
-    .description("Generate a project document template")
-    .option("-o, --output <path>", "Output directory (default: docs/)")
-    .action((type, opts) => docsScaffoldCommand(type, { output: opts.output }));
-
-  docsCmd
-    .command("validate [path]")
-    .description("Validate project document(s) against structural spec")
-    .option(
-      "-t, --threshold <n>",
-      "Quality threshold (0-1, default: 0.6)",
-      "0.6",
-    )
-    .option("--json", "Output as JSON")
-    .action((path, opts) =>
-      docsValidateCommand(path, {
-        json: opts.json,
-        threshold: parseFloat(opts.threshold),
-      }),
-    );
-
   // TUI — interactive terminal interface
   program
     .command("tui")
@@ -558,7 +528,6 @@ Commands:
   snapshot                   Show event diffs and environment snapshots
   cloud                      Sync and connect with adit-cloud
   hook                       Manage AI platform hook integrations
-  docs                       Scaffold and validate project documents
   export                     Export event or session data
 
   doctor [options]           Validate installation health

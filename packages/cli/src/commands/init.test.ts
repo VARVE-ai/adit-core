@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   computeRepoProjectId,
@@ -429,45 +429,6 @@ describe("initCommand", () => {
     const after = readProjectManifest(root)!;
     expect(after.projectId).toBe(before.projectId);
     expect(after.repositories.map((repo) => repo.relativePath)).toEqual([".", "api"]);
-  });
-
-  it("writes the generate-docs prompt and refreshes it on re-init", async () => {
-    mkdirSync(join(root, ".git"), { recursive: true });
-    mocks.getHeadSha.mockResolvedValue("abc123");
-    mocks.getRemoteUrl.mockResolvedValue("https://example.com/repo.git");
-
-    await initCommand({ cwd: root });
-
-    const promptPath = join(root, ".adit", "prompts", "generate-docs.md");
-    expect(existsSync(promptPath)).toBe(true);
-    expect(readFileSync(promptPath, "utf-8")).toContain("adit docs validate");
-
-    // adit owns this copy — re-init overwrites in-place edits
-    writeFileSync(promptPath, "user edits");
-    await initCommand({ cwd: root });
-    expect(readFileSync(promptPath, "utf-8")).not.toBe("user edits");
-  });
-
-  it("preserves legacy per-platform generate-docs files", async () => {
-    mkdirSync(join(root, ".git"), { recursive: true });
-    mocks.getHeadSha.mockResolvedValue("abc123");
-    mocks.getRemoteUrl.mockResolvedValue("https://example.com/repo.git");
-    const legacyFiles = [
-      join(root, ".claude", "skills", "generate-docs.md"),
-      join(root, ".opencode", "commands", "generate-docs.md"),
-      join(root, ".cursor", "rules", "generate-docs.mdc"),
-    ];
-    for (const file of legacyFiles) {
-      mkdirSync(dirname(file), { recursive: true });
-      writeFileSync(file, "old skill");
-    }
-
-    await initCommand({ cwd: root });
-
-    for (const file of legacyFiles) {
-      expect(existsSync(file)).toBe(true);
-      expect(readFileSync(file, "utf-8")).toBe("old skill");
-    }
   });
 
   describe("hook installation via CLI detection", () => {

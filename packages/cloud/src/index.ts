@@ -76,8 +76,6 @@ export {
   intentCommand,
   formatIntentList,
   formatIntentDetail,
-  checkQuality,
-  formatQualityFeedback,
   collectRemoteUrl,
   collectBranches,
   branchHeadMap,
@@ -114,7 +112,6 @@ export {
   type GitSyncFailure,
   type GitSyncSkip,
   type GitSyncSkipReason,
-  type QualifyResponse,
 } from "./project-link/index.js";
 
 // Bulk Task Update

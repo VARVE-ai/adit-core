@@ -48,21 +48,19 @@ the adit-cloud Coding panel.
 
 ## Architecture
 
-ADIT is a TypeScript pnpm monorepo with six packages:
+ADIT is a TypeScript pnpm monorepo with five packages:
 
 | Package | Description |
 | --- | --- |
 | `@varveai/adit-core` | Core types, SQLite database access, config, sync primitives, and performance logs |
 | `@varveai/adit-engine` | Git runner, working tree detection, timeline management, and environment capture/diff |
 | `@varveai/adit-hooks` | Hook dispatcher, fail-open handlers, platform adapter registry, and hook install/validate/uninstall logic |
-| `@varveai/adit-cli` | Commander.js CLI, cloud coding entry points, debug commands, docs commands, and React/Ink TUI |
+| `@varveai/adit-cli` | Commander.js CLI, cloud coding entry points, debug commands, and React/Ink TUI |
 | `@varveai/adit-cloud` | Cloud config, device/token auth, HTTP client, incremental sync, project-link sync, and intent commands |
-| `@varveai/adit-plans` | Project document template generator and validator |
 
 Package boundaries are intentionally small: `core` owns storage and shared
 types, `engine` owns Git/timeline mechanics, `hooks` normalizes platform events,
-`cli` owns user commands, `cloud` owns remote sync, and `plans` owns project
-document templates and validation.
+`cli` owns user commands, and `cloud` owns remote sync.
 
 ## Platform Support
 
@@ -278,7 +276,7 @@ Common timeline options include `--limit`, `--actor`, `--type`,
 | `adit cloud tasks update <taskId> --state done --json` | Update Cloud immediately and record task history |
 
 `adit cloud link` supports `--force`, `--skip-docs`, `--skip-commits`,
-`--skip-qualify`, `--dry-run`, and `--json`. The same project-link and intent
+`--dry-run`, and `--json`. The same project-link and intent
 flows are also exposed as `/adit link` and `/adit intent` in supported
 platform integrations.
 
@@ -291,14 +289,12 @@ link. When a link would create a brand-new cloud project while the account
 already has projects pointing at the same git remotes (typical after a fresh
 clone or on a new machine), link prints a notice — nothing is merged.
 
-### Export, Docs, Debug, Maintenance
+### Export, Debug, Maintenance
 
 | Command | Description |
 | --- | --- |
 | `adit export event <id>` | Export one event as JSON |
 | `adit export session [id]` | Export a session as JSON, JSONL, or Markdown |
-| `adit docs scaffold [type]` | Generate project document templates |
-| `adit docs validate [path]` | Validate project documents against structural specs |
 | `adit debug db clear-events` | Clear local events, sessions, diffs, and environment snapshots |
 | `adit debug perf stats` | Show performance stats |
 | `adit debug perf clear` | Clear performance logs |
