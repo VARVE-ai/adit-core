@@ -117,6 +117,65 @@ describe("incremental token usage ledger", () => {
     expect(records()[1].complete).toBe(true);
   });
 
+  it("restores the latest existing Codex model without importing historical usage", () => {
+    ctx.session.platform = "codex";
+    const usage = { input_tokens: 100, output_tokens: 20, cached_input_tokens: 80 };
+    const snapshot = { type: "event_msg", payload: { type: "token_count", info: { total_token_usage: usage, last_token_usage: usage } } };
+    appendFileSync(transcript, [
+      { type: "turn_context", payload: { model: "old-model" } },
+      { type: "token_usage_record", payload: { response_id: "history", usage } },
+      snapshot,
+      { type: "turn_context", payload: { model: "first-turn-model" } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+
+    captureTokenUsage(ctx, transcript, "prompt", "turn-1");
+    expect(records()).toEqual([]);
+    appendFileSync(transcript, [
+      { type: "token_usage_record", payload: { response_id: "first-response", usage } },
+      snapshot,
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    captureTokenUsage(ctx, transcript, "stop");
+    captureTokenUsage(ctx, transcript, "stop");
+
+    expect(records()).toHaveLength(2);
+    expect(records().every(record => record.model === "first-turn-model" && record.turnId === "turn-1" && record.totalTokens === 120)).toBe(true);
+    expect(records().filter(record => record.granularity === "request").map(record => record.responseId)).toEqual(["first-response"]);
+
+    appendFileSync(transcript, JSON.stringify({ type: "turn_context", payload: { model: "second-turn-model" } }) + "\n");
+    captureTokenUsage(ctx, transcript, "prompt", "turn-2");
+    appendFileSync(transcript, JSON.stringify({ type: "token_usage_record", payload: { response_id: "second-response", usage } }) + "\n");
+    captureTokenUsage(ctx, transcript, "stop");
+    expect(records().find(record => record.responseId === "second-response")).toMatchObject({ model: "second-turn-model", turnId: "turn-2" });
+    expect(records().find(record => record.responseId === "first-response")?.model).toBe("first-turn-model");
+  });
+
+  it("does not guess the model of Codex usage captured before any model context", () => {
+    ctx.session.platform = "codex";
+    captureTokenUsage(ctx, transcript, "prompt", "turn-1");
+    appendFileSync(transcript, [
+      { type: "token_usage_record", payload: { response_id: "unknown-model-response", usage: raw } },
+      { type: "turn_context", payload: { model: "later-model" } },
+      { type: "token_usage_record", payload: { response_id: "known-model-response", usage: raw } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    captureTokenUsage(ctx, transcript, "stop");
+    expect(records().map(record => record.model)).toEqual([null, "later-model"]);
+  });
+
+  it("restores Codex model context at an initial Stop without importing the old turn", () => {
+    ctx.session.platform = "codex";
+    appendFileSync(transcript, [
+      { type: "turn_context", payload: { model: "codex-test" } },
+      { type: "token_usage_record", payload: { response_id: "history", usage: raw } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    captureTokenUsage(ctx, transcript, "stop");
+    expect(records()).toEqual([]);
+    captureTokenUsage(ctx, transcript, "prompt", "turn-1");
+    appendFileSync(transcript, JSON.stringify({ type: "token_usage_record", payload: { response_id: "new-response", usage: raw } }) + "\n");
+    captureTokenUsage(ctx, transcript, "stop");
+    expect(records()).toHaveLength(1);
+    expect(records()[0]).toMatchObject({ model: "codex-test", responseId: "new-response", turnId: "turn-1" });
+  });
+
   it("cleans up the ledger and cursors when a session is deleted", () => {
     captureTokenUsage(ctx, transcript, "prompt", "turn-1"); append("response-a");
     captureTokenUsage(ctx, transcript, "stop");

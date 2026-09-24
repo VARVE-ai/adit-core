@@ -68,8 +68,9 @@ export function captureTokenUsage(ctx: HookContext, transcriptPath: string | und
     const size = file?.size ?? 0;
     const fileIdentity = file ? `${file.dev}:${file.ino}:${file.birthtimeMs}` : "";
     const now = new Date().toISOString();
+    const restoreModel = ctx.session.platform === "codex" && !state.cursors[sourceKey];
     const cursor: Cursor = state.cursors[sourceKey] as Cursor ?? {
-      offset: size, generation: generateId(), turnId: null, model: null,
+      offset: restoreModel ? 0 : size, generation: generateId(), turnId: null, model: null,
       cumulative: null, enabledAt: now, fileIdentity,
     };
     if ((cursor.fileIdentity && cursor.fileIdentity !== fileIdentity) || size < cursor.offset) {
@@ -138,6 +139,12 @@ export function captureTokenUsage(ctx: HookContext, transcriptPath: string | und
         cursor.offset += newline + 1;
       }
     } finally { if (descriptor !== null) closeSync(descriptor); }
+    // The initial Codex scan has no turnId, so it restores context only.
+    // Keep the usage baseline at EOF, including any pre-existing partial line.
+    if (restoreModel) {
+      cursor.offset = size;
+      cursor.discardLine = false;
+    }
     if (cursor.turnId) {
       if (![...records.values()].some(record => record.turnId === cursor.turnId) || cursor.offset < size) {
         saveRecord(records, makeRecord(ctx, cursor, `gap:${cursor.turnId}`, {}, "gap", now));
