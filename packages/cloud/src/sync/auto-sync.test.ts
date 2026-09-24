@@ -179,10 +179,11 @@ describe("triggerAutoSync", () => {
     expect(runSyncCycleFn).toHaveBeenCalled();
   });
 
-  it("syncs pending usage even without new conversation events", async () => {
+  it.each([0, 2, 19])("does not bypass the threshold for pending usage with %i unsynced events", async (count) => {
+    mockCountUnsyncedEvents.mockReturnValue(count);
     vi.mocked(hasPendingTokenUsage).mockReturnValue(true);
     await triggerAutoSync(fakeDb, PROJECT_ID);
-    expect(runSyncCycleFn).toHaveBeenCalledOnce();
+    expect(runSyncCycleFn).not.toHaveBeenCalled();
   });
 
   it("passes project name from project root when syncing", async () => {
