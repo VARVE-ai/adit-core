@@ -17,6 +17,7 @@ import {
   collectRemoteBranchSnapshot,
   branchHeadMap,
   collectGitRefsFingerprint,
+  readGitRefsFingerprint,
   collectCommitsBetweenRefSnapshots,
   collectCurrentBranch,
   collectCommitLogs,
@@ -610,5 +611,26 @@ describe("collectCommitFileStats (with temp repo)", () => {
   it("returns an empty map for unknown shas", async () => {
     const stats = await collectCommitFileStats(repoDir, ["0000000000000000000000000000000000000000"]);
     expect(stats.size).toBe(0);
+  });
+});
+
+describe("readGitRefsFingerprint", () => {
+  it("keeps git's diagnostic when the directory is not a repository", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "adit-refs-"));
+    try {
+      const result = await readGitRefsFingerprint(dir);
+      expect(result.fingerprint).toBeNull();
+      expect(result.error).toContain("not a git repository");
+      expect(await collectGitRefsFingerprint(dir)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("describes a missing directory", async () => {
+    const missing = join(tmpdir(), `adit-refs-missing-${randomBytes(8).toString("hex")}`);
+    const result = await readGitRefsFingerprint(missing);
+    expect(result.fingerprint).toBeNull();
+    expect(result.error).toContain("not found");
   });
 });

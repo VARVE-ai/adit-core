@@ -43,13 +43,34 @@ export async function runGit(
       stdout?: string;
       stderr?: string;
       code?: number | string;
+      killed?: boolean;
+      signal?: string | null;
+      message?: string;
     };
     return {
       stdout: error.stdout ?? "",
-      stderr: error.stderr ?? String(err),
+      stderr: error.stderr?.trim() ? error.stderr : describeFailure(error, opts),
       exitCode: typeof error.code === "number" ? error.code : 1,
     };
   }
+}
+
+/**
+ * Git writes its own diagnostics to stderr. An empty stderr means the failure
+ * happened around the process instead (missing executable or working
+ * directory, timeout, output cap), so describe that in its place.
+ */
+function describeFailure(
+  error: { code?: number | string; killed?: boolean; signal?: string | null; message?: string },
+  opts: GitRunOptions,
+): string {
+  if (error.killed && error.signal) {
+    return `git timed out after ${opts.timeout ?? DEFAULT_TIMEOUT}ms in ${opts.cwd}`;
+  }
+  if (error.code === "ENOENT") {
+    return `git executable or working directory not found (${opts.cwd})`;
+  }
+  return error.message || String(error);
 }
 
 /** Run git and throw if it fails */
