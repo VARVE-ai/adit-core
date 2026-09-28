@@ -6,6 +6,7 @@
  */
 
 import type Database from "better-sqlite3";
+import { eventUsageSummaryFromRow } from "./event-token-usage.js";
 import type {
   AditEvent,
   EventType,
@@ -378,7 +379,9 @@ export function hasGitCommitEvent(
 }
 
 function rowToEvent(row: Record<string, unknown>): AditEvent {
+  const tokenUsage = eventUsageSummaryFromRow(row);
   return {
+    ...(tokenUsage ? { tokenUsage } : {}),
     id: row.id as string,
     sessionId: row.session_id as string,
     parentEventId: (row.parent_event_id as string) ?? null,

@@ -128,8 +128,6 @@ function makeWorkspaceResult(): LinkResult {
     branchCount: 1,
     commitCount: 2,
     documentCount: 3,
-    qualified: false,
-    score: null,
     stepTimings: [],
     totalDurationMs: 100,
     repositoryResults: [{
@@ -138,8 +136,6 @@ function makeWorkspaceResult(): LinkResult {
       branchCount: 1,
       commitCount: 2,
       documentCount: 3,
-      qualified: false,
-      score: null,
       totalDurationMs: 80,
     }],
     repositoryFailures: [{

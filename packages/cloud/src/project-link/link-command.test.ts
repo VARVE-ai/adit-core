@@ -19,7 +19,6 @@ const mockCollectCommitFileStats = vi.fn();
 const mockResolveCommitBranches = vi.fn();
 const mockCollectGitRefsFingerprint = vi.fn();
 const mockDiscoverDocuments = vi.fn();
-const mockCheckQuality = vi.fn();
 
 vi.mock("@varveai/adit-core", () => ({
   loadConfig: (...args: unknown[]) => mockLoadConfig(...args),
@@ -52,7 +51,6 @@ vi.mock("./cache.js", () => ({
   upsertProjectLinkCache: (...args: unknown[]) => mockUpsertProjectLinkCache(...args),
   clearProjectLinkCache: vi.fn(),
   updateCachedDocHashes: vi.fn(),
-  updateCachedQualified: vi.fn(),
 }));
 
 vi.mock("./git-collector.js", () => ({
@@ -75,16 +73,8 @@ vi.mock("./doc-discovery.js", () => ({
   loadDocSettings: vi.fn(() => undefined),
 }));
 
-vi.mock("./qualify.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./qualify.js")>();
-  return {
-    ...actual,
-    checkQuality: (...args: unknown[]) => mockCheckQuality(...args),
-  };
-});
-
 import { linkCommand, WorkspaceLinkPartialFailureError } from "./link-command.js";
-import { clearProjectLinkCache, updateCachedDocHashes, updateCachedQualified } from "./cache.js";
+import { clearProjectLinkCache, updateCachedDocHashes } from "./cache.js";
 import { refreshProjectDeletionPolicy } from "../project-deletion-policy.js";
 
 interface TestRepository {
@@ -167,12 +157,6 @@ function setupWorkspaceLinkTest(repositories: TestRepository[], commitsByPath: R
   mockResolveCommitBranches.mockResolvedValue(undefined);
   mockCollectGitRefsFingerprint.mockResolvedValue(null);
   mockDiscoverDocuments.mockReturnValue([]);
-  mockCheckQuality.mockResolvedValue({
-    qualified: true,
-    score: 0.82,
-    documentCount: 0,
-    feedback: null,
-  });
 
   return { client, commitRequests };
 }
@@ -190,7 +174,7 @@ describe("linkCommand workspace repository requests", () => {
       registration: { localProjectId: "workspace-id", repositories },
     });
     const cache = { confirmedProjectId: "server-project", lastBranchSyncAt: new Date().toISOString(),
-      remoteRefsFingerprint: "remote-main", docHashes: {}, qualified: false, branchHeads: {} };
+      remoteRefsFingerprint: "remote-main", docHashes: {}, branchHeads: {} };
     if (scenario === "cached" || scenario === "force") mockGetProjectLinkCache.mockReturnValue(cache);
     const before = structuredClone(cache);
     mockDiscoverDocuments.mockReturnValue([{ fileName: "README.md", sourcePath: "README.md", content: "# Test", contentHash: "hash", sizeBytes: 6, status: "new" }]);
@@ -203,8 +187,6 @@ describe("linkCommand workspace repository requests", () => {
     expect(mockUpsertProjectLinkCache).not.toHaveBeenCalled();
     expect(clearProjectLinkCache).not.toHaveBeenCalled();
     expect(updateCachedDocHashes).not.toHaveBeenCalled();
-    expect(updateCachedQualified).not.toHaveBeenCalled();
-    expect(mockCheckQuality).not.toHaveBeenCalled();
     expect(cache).toEqual(before);
   });
 
@@ -255,17 +237,17 @@ describe("linkCommand workspace repository requests", () => {
         "/workspace",
         "workspace-id",
         "https://cloud.example.com",
-        { skipDocs: true, skipQualify: true },
+        { skipDocs: true },
       );
 
       const output = log.mock.calls.map((call) => String(call[0] ?? "")).join("\n");
       expect(output.match(/Link complete!/gu)).toHaveLength(1);
       expect(output).not.toContain("Project link complete!");
-      expect(output).not.toContain("[Step 1/6]");
+      expect(output).not.toContain("[Step 1/4]");
       expect(output).toContain("[1/2] a linking...");
       expect(output).toContain("[2/2] b linking...");
-      expect(output).toContain("[1/2] a ok | branches 1 | commits 1 | docs 0 | not qualified");
-      expect(output).toContain("[2/2] b ok | branches 1 | commits 1 | docs 0 | not qualified");
+      expect(output).toContain("[1/2] a ok | branches 1 | commits 1 | docs 0 |");
+      expect(output).toContain("[2/2] b ok | branches 1 | commits 1 | docs 0 |");
       expect(output).toContain("Repositories: 2 succeeded, 0 failed");
       expect(result.repositoryResults).toHaveLength(2);
       expect(result.repositoryFailures).toEqual([]);
@@ -274,7 +256,7 @@ describe("linkCommand workspace repository requests", () => {
     }
   });
 
-  it("keeps the full summary and detailed quality feedback for normal repo projects", async () => {
+  it("keeps the full summary for normal repo projects", async () => {
     const client = {
       post: vi.fn(async (path: string) => {
         if (path === "/api/project-link/negotiate") {
@@ -329,23 +311,6 @@ describe("linkCommand workspace repository requests", () => {
       sizeBytes: 32,
       status: "unchanged",
     }]);
-    mockCheckQuality.mockResolvedValue({
-      qualified: false,
-      score: 0.4,
-      documentCount: 1,
-      documentDetails: [{
-        fileName: "README.md",
-        detectedType: "project-overview",
-        structuralScore: 0.4,
-        missingSections: ["Architecture"],
-        hasStubContent: true,
-      }],
-      feedback: {
-        missing: ["Architecture overview"],
-        suggestions: ["Ask your AI agent to read .adit/prompts/generate-docs.md and follow it to fill missing sections."],
-        summaryPrompt: "Read .adit/prompts/generate-docs.md, fill the docs, then re-run link.",
-      },
-    });
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     try {
@@ -359,19 +324,14 @@ describe("linkCommand workspace repository requests", () => {
       );
 
       const output = log.mock.calls.map((call) => String(call[0] ?? "")).join("\n");
-      expect(output).toContain("[Step 1/6] Negotiating project ID with server...");
+      expect(output).toContain("[Step 1/4] Negotiating project ID with server...");
       expect(client.post).toHaveBeenCalledWith("/api/project-link/negotiate", expect.objectContaining({
         projectName: "repo-name",
         remoteUrl: "git@github.com:VARVE-ai/adit-core.git",
       }));
-      expect(output).toContain("Document scores:");
-      expect(output).toContain("Missing:");
-      expect(output).toContain("Suggestions:");
-      expect(output).toContain("Read .adit/prompts/generate-docs.md, fill the docs, then re-run link.");
+      expect(output).toContain("Documents:  1");
       expect(output).toContain("Project link complete!");
       expect(output).not.toContain("Link complete!");
-      expect(output).not.toContain("Quality feedback:");
-      expect(output).not.toContain("Repository  Quality");
     } finally {
       log.mockRestore();
     }
@@ -407,7 +367,6 @@ describe("linkCommand workspace repository requests", () => {
       lastBranchSyncAt: new Date().toISOString(),
       lastDocSyncAt: null,
       docHashes: {},
-      qualified: true,
       initializedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -431,7 +390,7 @@ describe("linkCommand workspace repository requests", () => {
     mockCollectBranches.mockResolvedValue([{ name: "main", headSha: "abc", isDefault: true }]);
     mockCollectDefaultBranch.mockResolvedValue("main");
     mockCollectGitIdentity.mockResolvedValue({ authorName: null, authorEmail: null });
-    const options = { skipCommits: true, skipDocs: true, skipQualify: true };
+    const options = { skipCommits: true, skipDocs: true };
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     try {
@@ -531,7 +490,7 @@ describe("linkCommand workspace repository requests", () => {
         "/workspace",
         "workspace-id",
         "https://cloud.example.com",
-        { skipDocs: true, skipQualify: true },
+        { skipDocs: true },
       )).rejects.toMatchObject({
         repositoryResults: [
           expect.objectContaining({ relativePath: "b", localRepositoryId: "repo-b" }),
@@ -552,14 +511,14 @@ describe("linkCommand workspace repository requests", () => {
         "/workspace",
         "workspace-id",
         "https://cloud.example.com",
-        { skipDocs: true, skipQualify: true, json: true },
+        { skipDocs: true, json: true },
       ).catch((caught: unknown) => caught);
       expect(error).toBeInstanceOf(WorkspaceLinkPartialFailureError);
       expect((error as WorkspaceLinkPartialFailureError).result.repositoryFailures).toHaveLength(1);
 
       const output = log.mock.calls.map((call) => String(call[0] ?? "")).join("\n");
       expect(output).toContain("[1/2] a failed | Negotiate project ID: No git remote 'origin' configured for a.");
-      expect(output).toContain("[2/2] b ok | branches 1 | commits 1 | docs 0 | not qualified");
+      expect(output).toContain("[2/2] b ok | branches 1 | commits 1 | docs 0 |");
       expect(output).toContain("Repositories: 1 succeeded, 1 failed");
       expect(output).toContain("Failures:");
       expect(output).toContain("a: Negotiate project ID: No git remote 'origin' configured for a.");
@@ -627,7 +586,7 @@ describe("linkCommand workspace repository requests", () => {
         "/workspace",
         "workspace-id",
         "https://cloud.example.com",
-        { skipDocs: true, skipQualify: true },
+        { skipDocs: true },
       ).catch((caught: unknown) => caught);
 
       expect(error).toBeInstanceOf(WorkspaceLinkPartialFailureError);
@@ -646,7 +605,7 @@ describe("linkCommand workspace repository requests", () => {
       expect(output).toContain(
         "[1/2] a failed | Upload branches: API error 400: Bad Request | relativePath is not registered for this workspace",
       );
-      expect(output).toContain("[2/2] b ok | branches 1 | commits 1 | docs 0 | not qualified");
+      expect(output).toContain("[2/2] b ok | branches 1 | commits 1 | docs 0 |");
       expect(output).toContain(
         "a: Upload branches: API error 400: Bad Request | relativePath is not registered for this workspace",
       );
@@ -676,131 +635,10 @@ describe("linkCommand workspace repository requests", () => {
         "/workspace",
         "workspace-id",
         "https://cloud.example.com",
-        { skipDocs: true, skipQualify: true, json: true },
+        { skipDocs: true, json: true },
       );
 
       expect(log).not.toHaveBeenCalled();
-    } finally {
-      log.mockRestore();
-    }
-  });
-
-  it("prints repository and workspace quality scores when quality check runs", async () => {
-    const repositories = [{
-      localRepositoryId: "repo-a",
-      relativePath: "a",
-      displayName: "a",
-      path: "/workspace/a",
-      repositoryUrl: "git@github.com:VARVE-ai/adit-core.git",
-      canonicalRepoKey: "github:varve-ai/adit-core",
-    }];
-    const { client } = setupWorkspaceLinkTest(repositories, {
-      "/workspace/a": [makeCommit("sha-a")],
-    });
-    mockDiscoverDocuments.mockReturnValue([{
-      fileName: "README.md",
-      sourcePath: "README.md",
-      content: "# Project\n\n## Purpose\nUseful context.",
-      contentHash: "hash-1",
-      sizeBytes: 32,
-      status: "unchanged",
-    }]);
-    mockCheckQuality.mockResolvedValue({
-      qualified: true,
-      score: 0.88,
-      documentCount: 1,
-      feedback: null,
-    });
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-
-    try {
-      const result = await linkCommand(
-        {} as never,
-        client as never,
-        "/workspace",
-        "workspace-id",
-        "https://cloud.example.com",
-        {},
-      );
-
-      const output = log.mock.calls.map((call) => String(call[0] ?? "")).join("\n");
-      expect(output).toContain("[1/1] a ok | branches 1 | commits 1 | docs 1 | qualified, score 0.88");
-      expect(output).toContain("Documents:    1 (qualified, score 0.88)");
-      expect(result.score).toBe(0.88);
-      expect(result.repositoryResults?.[0]?.score).toBe(0.88);
-    } finally {
-      log.mockRestore();
-    }
-  });
-
-  it("prints workspace quality feedback and summary prompts when documents are not qualified", async () => {
-    const repositories = [{
-      localRepositoryId: "repo-a",
-      relativePath: "a",
-      displayName: "a",
-      path: "/workspace/a",
-      repositoryUrl: "git@github.com:VARVE-ai/adit-core.git",
-      canonicalRepoKey: "github:varve-ai/adit-core",
-    }];
-    const { client } = setupWorkspaceLinkTest(repositories, {
-      "/workspace/a": [makeCommit("sha-a")],
-    });
-    mockDiscoverDocuments.mockReturnValue([{
-      fileName: "README.md",
-      sourcePath: "README.md",
-      content: "# Project\n\n## Purpose\nUseful context.",
-      contentHash: "hash-1",
-      sizeBytes: 32,
-      status: "unchanged",
-    }]);
-    mockCheckQuality.mockResolvedValue({
-      qualified: false,
-      score: 0.41,
-      documentCount: 1,
-      documentDetails: [{
-        fileName: "README.md",
-        detectedType: "project-overview",
-        structuralScore: 0.4,
-        missingSections: ["Architecture"],
-        hasStubContent: true,
-      }],
-      feedback: {
-        missing: ["Architecture overview"],
-        suggestions: ["Ask your AI agent to read .adit/prompts/generate-docs.md and follow it to fill missing sections."],
-        summaryPrompt: "Read .adit/prompts/generate-docs.md, fill the docs, then re-run link.",
-      },
-    });
-    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-
-    try {
-      const result = await linkCommand(
-        {} as never,
-        client as never,
-        "/workspace",
-        "workspace-id",
-        "https://cloud.example.com",
-        {},
-      );
-
-      const output = log.mock.calls.map((call) => String(call[0] ?? "")).join("\n");
-      expect(output).toContain("[1/1] a ok | branches 1 | commits 1 | docs 1 | not qualified, score 0.41");
-      expect(output).toContain("Quality feedback:");
-      expect(output).toContain("Repository");
-      expect(output).toContain("Quality");
-      expect(output).toContain("Needs attention");
-      expect(output).toContain("AI prompt");
-      expect(output).toContain("a           0.41 needs docs");
-      expect(output).toContain("1 docs below 60%; 1 placeholders; worst README.md…");
-      expect(output).toContain("Fill docs for a");
-      expect(output).toContain("AI prompt is not a shell command.");
-      expect(output).toContain("Enter it in the AI agent opened at the project root.");
-      expect(output).toContain("following .adit/prompts/generate-docs.md;");
-      expect(output).toContain("generated docs stay in their existing locations.");
-      expect(result.repositoryResults?.[0]?.qualityFeedback).toContain("Document scores:");
-      expect(result.repositoryResults?.[0]?.summaryPrompt).toBe("Read .adit/prompts/generate-docs.md, fill the docs, then re-run link.");
-      expect(result.repositoryResults?.[0]?.lowScoreDocumentCount).toBe(1);
-      expect(result.repositoryResults?.[0]?.stubDocumentCount).toBe(1);
-      expect(result.repositoryResults?.[0]?.missingItems).toEqual(["Architecture overview"]);
     } finally {
       log.mockRestore();
     }
@@ -879,7 +717,7 @@ describe("linkCommand workspace repository requests", () => {
       "/workspace",
       "workspace-id",
       "https://cloud.example.com",
-      { skipDocs: true, skipQualify: true, json: true },
+      { skipDocs: true, json: true },
     );
 
     expect(client.post).toHaveBeenCalledWith(
@@ -1002,7 +840,7 @@ describe("linkCommand workspace repository requests", () => {
       "/workspace",
       "workspace-id",
       "https://cloud.example.com",
-      { skipQualify: true, json: true },
+      { json: true },
     );
 
     expect(client.post).toHaveBeenCalledWith(
@@ -1046,7 +884,7 @@ describe("linkCommand workspace repository requests", () => {
       "/workspace",
       "workspace-id",
       "https://cloud.example.com",
-      { skipDocs: true, skipQualify: true, json: true },
+      { skipDocs: true, json: true },
     );
 
     expect(commitRequests).toEqual([
@@ -1088,7 +926,7 @@ describe("linkCommand workspace repository requests", () => {
       "/workspace",
       "workspace-id",
       "https://cloud.example.com",
-      { skipDocs: true, skipQualify: true, json: true },
+      { skipDocs: true, json: true },
     );
 
     expect(commitRequests).toEqual([
@@ -1135,7 +973,7 @@ describe("linkCommand workspace repository requests", () => {
       "/workspace",
       "workspace-id",
       "https://cloud.example.com",
-      { skipDocs: true, skipQualify: true, json: true },
+      { skipDocs: true, json: true },
     );
 
     expect(commitRequests).toEqual([
@@ -1177,7 +1015,7 @@ describe("linkCommand workspace repository requests", () => {
       "/workspace",
       "workspace-id",
       "https://cloud.example.com",
-      { skipDocs: true, skipQualify: true, json: true },
+      { skipDocs: true, json: true },
     );
 
     expect(commitRequests).toEqual([
@@ -1224,7 +1062,7 @@ describe("linkCommand workspace repository requests", () => {
       "/workspace",
       "workspace-id",
       "https://cloud.example.com",
-      { skipDocs: true, skipQualify: true, json: true },
+      { skipDocs: true, json: true },
     );
 
     expect(commitRequests).toEqual([

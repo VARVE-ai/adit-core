@@ -24,6 +24,7 @@ import { recordGitCommits } from "../git-operations/index.js";
 import { commandWriteTargets, repositoryTargets } from "../bash-snapshot/command-targets.js";
 import { debugLog } from "../common/debug-log.js";
 import { captureTokenUsage } from "../common/token-usage.js";
+import { attachPendingTokenUsage } from "@varveai/adit-core";
 import {
   classifyPromptSubmit,
   type PromptSubmitClassification,
@@ -339,6 +340,11 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     diffStatJson: mutationStatJson,
     inferredFilesJson,
   });
+  try {
+    attachPendingTokenUsage(ctx.db, ctx.session.id);
+  } catch {
+    debugLog({ phase: "token-usage-attach-failed" });
+  }
 
   // Persist bounded diff_text from mutations (replaces old git checkpoint path)
   if (mutations.length > 0) {

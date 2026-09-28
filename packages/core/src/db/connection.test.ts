@@ -11,6 +11,17 @@ function tempDbPath(): string {
   return join(tmpdir(), `adit-test-${randomBytes(8).toString("hex")}.sqlite`);
 }
 
+function legacyTokenDatabase(path: string): Database.Database {
+  const db = new Database(path);
+  db.pragma("foreign_keys = ON");
+  db.exec("CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL)");
+  for (const migration of migrations.filter(migration => migration.id <= 24)) {
+    db.exec(migration.sql);
+    db.prepare("INSERT INTO _migrations(id, name) VALUES (?, ?)").run(migration.id, migration.name);
+  }
+  return db;
+}
+
 describe("Database", () => {
   const paths: string[] = [];
 
@@ -46,9 +57,9 @@ describe("Database", () => {
     expect(tables).not.toContain("transcript_uploads");
     expect(tables).toContain("diffs");
     expect(tables).toContain("_migrations");
-    expect(tables).toContain("token_usage_cursors");
-    expect(tables).toContain("token_usage_records");
-    expect(tables).toContain("token_usage_sync_state");
+    expect(tables).not.toContain("token_usage_cursors");
+    expect(tables).not.toContain("token_usage_records");
+    expect(tables).not.toContain("token_usage_sync_state");
 
     const eventColumns = db
       .prepare("PRAGMA table_info(events)")
@@ -56,6 +67,8 @@ describe("Database", () => {
       .map((r) => (r as { name: string }).name);
     expect(eventColumns).not.toContain("plan_task_id");
     expect(eventColumns).toContain("inferred_files_json");
+    expect(eventColumns).toContain("token_input");
+    expect(eventColumns).toContain("token_total");
 
     const sessionColumns = db
       .prepare("PRAGMA table_info(sessions)")
@@ -97,14 +110,18 @@ describe("Database", () => {
     closeDatabase(db2);
   });
 
-  it("adds shell snapshot storage to a token-only database without losing usage", () => {
+  it("adds reply fields and discards historical usage without migrating it", () => {
     const path = tempDbPath();
     paths.push(path);
-    const tokenDb = openDatabase(path);
+    const tokenDb = legacyTokenDatabase(path);
     tokenDb.exec("DELETE FROM _migrations WHERE id = 22; ALTER TABLE events DROP COLUMN inferred_files_json;");
     tokenDb.prepare(`INSERT INTO sessions (id, project_id, client_id, platform, started_at, vclock_json)
       VALUES ('token-session', 'project', 'client', 'codex', '2026-09-16T00:00:00.000Z', '{}')`).run();
     tokenDb.prepare("INSERT INTO token_usage_records VALUES ('usage', 'token-session', NULL, 1, '{}')").run();
+    tokenDb.prepare(`INSERT INTO events (id, session_id, sequence, event_type, actor, response_text, started_at, vclock_json)
+      VALUES ('retained-reply', 'token-session', 1, 'assistant_response', 'assistant', 'Done', '2026-09-16T00:00:00.000Z', '{}')`).run();
+    tokenDb.prepare(`INSERT INTO diffs (id, event_id, diff_text, created_at)
+      VALUES ('retained-diff', 'retained-reply', '+existing change', '2026-09-16T00:00:00.000Z')`).run();
     closeDatabase(tokenDb);
 
     for (const attempt of [1, 2]) {
@@ -113,11 +130,12 @@ describe("Database", () => {
         expect(db.prepare("PRAGMA table_info(events)").all(), `open ${attempt}`).toEqual(
           expect.arrayContaining([expect.objectContaining({ name: "inferred_files_json" })]),
         );
-        expect(db.prepare("SELECT id, record_json FROM token_usage_records").all()).toEqual([
-          { id: "usage", record_json: "{}" },
-        ]);
+        expect(db.prepare("SELECT name FROM sqlite_master WHERE name='token_usage_records'").all()).toEqual([]);
+        expect(db.prepare("SELECT token_capture_json FROM sessions WHERE id='token-session'").get()).toEqual({ token_capture_json: null });
+        expect(db.prepare("SELECT response_text, token_total FROM events WHERE id='retained-reply'").get()).toEqual({ response_text: "Done", token_total: null });
+        expect(db.prepare("SELECT diff_text FROM diffs WHERE id='retained-diff'").get()).toEqual({ diff_text: "+existing change" });
         expect(db.prepare("SELECT id FROM _migrations WHERE id >= 22 ORDER BY id").all()).toEqual([
-          { id: 22 }, { id: 23 }, { id: 24 },
+          { id: 22 }, { id: 23 }, { id: 24 }, { id: 25 },
         ]);
         expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
       } finally { closeDatabase(db); }
@@ -127,13 +145,13 @@ describe("Database", () => {
   it.each(["add_event_inferred_files", "token_usage_ledger"])("upgrades migration 22 from %s without losing data", (legacyName) => {
     const path = tempDbPath();
     paths.push(path);
-    const legacyDb = openDatabase(path);
+    const legacyDb = legacyTokenDatabase(path);
     legacyDb.exec("DELETE FROM _migrations WHERE id >= 22");
     legacyDb.prepare("INSERT INTO _migrations (id, name) VALUES (22, ?)").run(legacyName);
     legacyDb.prepare(`INSERT INTO sessions (id, project_id, client_id, platform, started_at, vclock_json)
       VALUES ('retained-session', 'project', 'client', 'codex', '2026-09-15T00:00:00.000Z', '{}')`).run();
     if (legacyName === "add_event_inferred_files") {
-      legacyDb.exec(`DROP TABLE token_usage_cursors;
+      legacyDb.exec(`DROP TABLE token_usage_sync_state; DROP TABLE token_usage_cursors;
         DROP TABLE token_usage_records;`);
     } else {
       legacyDb.prepare(`INSERT INTO token_usage_records (id, session_id, turn_id, revision, record_json)
@@ -150,14 +168,8 @@ describe("Database", () => {
         expect(db.prepare("SELECT name FROM _migrations WHERE id = 23").get(), `open ${attempt}`).toEqual({ name: "token_usage_ledger" });
         expect(db.prepare("SELECT id FROM sessions").all()).toEqual([{ id: "retained-session" }]);
         expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
-        if (legacyName === "token_usage_ledger") {
-          expect(db.prepare("SELECT id, record_json FROM token_usage_records").all()).toEqual([{ id: "retained-usage", record_json: "{}" }]);
-          expect(db.prepare("SELECT state_json FROM token_usage_cursors").all()).toEqual([{ state_json: '{"offset":123}' }]);
-        } else {
-          expect(db.prepare("SELECT * FROM token_usage_records").all()).toEqual([]);
-          expect(db.prepare("SELECT * FROM token_usage_cursors").all()).toEqual([]);
-          expect(db.prepare("PRAGMA table_info(events)").all()).toEqual(expect.arrayContaining([expect.objectContaining({ name: "inferred_files_json" })]));
-        }
+        expect(db.prepare("SELECT name FROM sqlite_master WHERE name IN ('token_usage_records','token_usage_cursors','token_usage_sync_state')").all()).toEqual([]);
+        expect(db.prepare("PRAGMA table_info(events)").all()).toEqual(expect.arrayContaining([expect.objectContaining({ name: "inferred_files_json" })]));
       } finally {
         closeDatabase(db);
       }
@@ -165,7 +177,7 @@ describe("Database", () => {
   });
 
   it("removes only backed-up legacy usage events without losing ledger data or referenced events", () => {
-    const db = openDatabase(":memory:");
+    const db = legacyTokenDatabase(":memory:");
     try {
       db.prepare(`INSERT INTO sessions (id, project_id, client_id, platform, started_at, vclock_json)
         VALUES ('session', 'project', 'client', 'codex', '2026-09-16T00:00:00.000Z', '{}')`).run();

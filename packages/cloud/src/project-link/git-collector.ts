@@ -188,7 +188,14 @@ export function branchHeadMap(branches: GitBranch[]): Record<string, string> {
 }
 
 /** Hash all known local and remote-tracking refs without walking commit history. */
-export async function collectGitRefsFingerprint(cwd: string): Promise<string | null> {
+export interface GitRefsFingerprintResult {
+  fingerprint: string | null;
+  /** Git's own diagnostic when the refs could not be read. */
+  error: string | null;
+}
+
+/** Fingerprint local refs, keeping Git's diagnostic when they cannot be read. */
+export async function readGitRefsFingerprint(cwd: string): Promise<GitRefsFingerprintResult> {
   const result = await runGit(
     [
       "for-each-ref",
@@ -200,8 +207,24 @@ export async function collectGitRefsFingerprint(cwd: string): Promise<string | n
     { cwd, timeout: 5_000 },
   );
 
-  if (result.exitCode !== 0) return null;
-  return createHash("sha256").update(result.stdout).digest("hex");
+  if (result.exitCode !== 0) {
+    return { fingerprint: null, error: describeGitFailure(result) };
+  }
+  return { fingerprint: createHash("sha256").update(result.stdout).digest("hex"), error: null };
+}
+
+export async function collectGitRefsFingerprint(cwd: string): Promise<string | null> {
+  return (await readGitRefsFingerprint(cwd)).fingerprint;
+}
+
+/** One-line summary of a failed git run for user-facing messages. */
+function describeGitFailure(result: { stderr: string; exitCode: number }): string {
+  const detail = result.stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" | ");
+  return detail || `git exited with code ${result.exitCode}`;
 }
 
 function normalizeBranchRef(fullRef: string, shortRef: string): string | null {

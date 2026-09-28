@@ -10,7 +10,6 @@ export { linkCommand, WorkspaceLinkPartialFailureError } from "./link-command.js
 export { intentCommand, formatIntentList, formatIntentDetail } from "./intent-command.js";
 
 // Quality check
-export { checkQuality, formatQualityFeedback } from "./qualify.js";
 
 // Repository key normalization
 export { normalizeGitHubRepoKey } from "./repo-key.js";
@@ -54,7 +53,6 @@ export type {
   GitCommit,
   DiscoveredDocument,
   ProjectLinkCache,
-  QualifyResponse,
   IntentSummary,
   IntentDetail,
   TaskSlice,

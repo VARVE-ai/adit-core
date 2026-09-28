@@ -7,7 +7,7 @@
  */
 
 import type Database from "better-sqlite3";
-import type { TokenUsageRecord } from "@varveai/adit-core";
+import { eventUsageFromRow } from "@varveai/adit-core";
 
 /** Total diff_text byte cap per push payload. Mirrors agent-file-mutation-capture-plan.md. */
 const MAX_SYNC_DIFF_BYTES = 2 * 1024 * 1024;
@@ -45,6 +45,7 @@ export interface SyncSession {
 }
 
 export interface SyncEvent {
+  tokenUsage?: import("@varveai/adit-core").EventTokenUsage;
   id: string;
   session_id: string;
   client_id: string;
@@ -105,7 +106,6 @@ export interface SyncDiff {
 }
 
 export interface SyncBatch {
-  tokenUsageRecords?: TokenUsageRecord[];
   sessions: SyncSession[];
   events: SyncEvent[];
   /** Kept in the wire shape for server compatibility; local snapshots are never uploaded. */
@@ -304,8 +304,7 @@ export function batchRecordCount(batch: SyncBatch): number {
   return (
     batch.sessions.length +
     batch.events.length +
-    batch.envSnapshots.length +
-    (batch.tokenUsageRecords?.length ?? 0)
+    batch.envSnapshots.length
   );
 }
 
@@ -371,7 +370,13 @@ function queryEvents(
 
   const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
 
-  return rows.map((r) => ({
+  return rows.map(row => serializeEvent(row, cloudClientId));
+}
+
+export function serializeEvent(r: Record<string, unknown>, cloudClientId: string): SyncEvent {
+  const usage = eventUsageFromRow(r);
+  return {
+    ...(usage ? { tokenUsage: usage } : {}),
     id: r.id as string,
     session_id: r.session_id as string,
     client_id: cloudClientId,
@@ -397,7 +402,7 @@ function queryEvents(
     labels_json: (r.labels_json as string) ?? null,
     vclock_json: (r.vclock_json as string) ?? null,
     deleted_at: (r.deleted_at as string) ?? null,
-  }));
+  };
 }
 
 function queryDiffs(

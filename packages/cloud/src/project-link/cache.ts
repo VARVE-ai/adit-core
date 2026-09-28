@@ -1,8 +1,8 @@
 /**
  * Local SQLite cache for project link state.
  *
- * Tracks the server-confirmed project ID, Git ref heads,
- * document content hashes, and qualification status. Stored in the
+ * Tracks the server-confirmed project ID, Git ref heads, and
+ * document content hashes. Stored in the
  * existing adit database ($projectRoot/.adit/adit.sqlite).
  */
 
@@ -23,7 +23,6 @@ interface CacheRow {
   last_branch_sync_at: string | null;
   last_doc_sync_at: string | null;
   doc_hashes_json: string;
-  qualified: number;
   initialized_at: string;
   updated_at: string;
 }
@@ -80,7 +79,6 @@ export function getProjectLinkCache(
     lastBranchSyncAt: row.last_branch_sync_at,
     lastDocSyncAt: row.last_doc_sync_at,
     docHashes,
-    qualified: row.qualified === 1,
     initializedAt: row.initialized_at,
     updatedAt: row.updated_at,
   };
@@ -97,8 +95,8 @@ export function upsertProjectLinkCache(
       git_ref_heads_json, git_refs_fingerprint,
       remote_refs_fingerprint, last_remote_branch_check_at,
       last_branch_sync_at, last_doc_sync_at,
-      doc_hashes_json, qualified, initialized_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      doc_hashes_json, initialized_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (project_id, repository_id, server_url) DO UPDATE SET
       confirmed_project_id = excluded.confirmed_project_id,
       git_ref_heads_json = excluded.git_ref_heads_json,
@@ -108,7 +106,6 @@ export function upsertProjectLinkCache(
       last_branch_sync_at = excluded.last_branch_sync_at,
       last_doc_sync_at = excluded.last_doc_sync_at,
       doc_hashes_json = excluded.doc_hashes_json,
-      qualified = excluded.qualified,
       updated_at = excluded.updated_at
   `).run(
     cache.projectId,
@@ -122,7 +119,6 @@ export function upsertProjectLinkCache(
     cache.lastBranchSyncAt,
     cache.lastDocSyncAt,
     JSON.stringify(cache.docHashes),
-    cache.qualified ? 1 : 0,
     cache.initializedAt,
     cache.updatedAt,
   );
@@ -215,27 +211,6 @@ export function updateCachedDocHashes(
   `).run(
     JSON.stringify(hashes),
     new Date().toISOString(),
-    new Date().toISOString(),
-    projectId,
-    repositoryId,
-    normalizeServerUrl(serverUrl),
-  );
-}
-
-/** Mark as qualified or not */
-export function updateCachedQualified(
-  db: Database.Database,
-  projectId: string,
-  serverUrl: string,
-  qualified: boolean,
-  repositoryId = projectId,
-): void {
-  db.prepare(`
-    UPDATE project_link_cache
-    SET qualified = ?, updated_at = ?
-    WHERE project_id = ? AND repository_id = ? AND server_url = ?
-  `).run(
-    qualified ? 1 : 0,
     new Date().toISOString(),
     projectId,
     repositoryId,

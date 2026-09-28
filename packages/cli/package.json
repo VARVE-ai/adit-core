@@ -9,7 +9,8 @@
     "node": ">=22.0.0"
   },
   "files": [
-    "dist"
+    "dist",
+    "install-skill.cjs"
   ],
   "bin": {
     "adit": "./dist/index.js"
@@ -29,6 +30,7 @@
   },
   "homepage": "https://github.com/VARVE-ai/adit-core",
   "scripts": {
+    "postinstall": "node install-skill.cjs",
     "build": "tsc",
     "prepack": "pnpm run build",
     "typecheck": "tsc --noEmit"
@@ -40,7 +42,6 @@
     "@varveai/adit-core": "workspace:*",
     "@varveai/adit-engine": "workspace:*",
     "@varveai/adit-hooks": "workspace:*",
-    "@varveai/adit-plans": "workspace:*",
     "better-sqlite3": "13.0.3",
     "commander": "^13.0.0",
     "ink": "^5.2.1",

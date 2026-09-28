@@ -7,11 +7,20 @@
  *   latest published version and run the matching global install command.
  */
 
-import { execSync, type ExecSyncOptions } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { execFileSync, execSync, type ExecSyncOptions } from "node:child_process";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { compareVersions, fetchLatestPublishedVersion } from "../update-check.js";
 import { CLI_VERSION } from "../version.js";
+import { installTaskSkillCommand } from "./task-skill.js";
+
+export function installUpgradedTaskSkill() {
+  try {
+    execFileSync(process.execPath, [resolve(dirname(realpathSync(process.argv[1])), "install-task-skill.js")], { stdio: "inherit", env: process.env });
+  } catch {
+    console.warn("Task skill installation failed. Run 'adit init' after fixing installation permissions.");
+  }
+}
 
 const PACKAGE_NAME = "@varveai/adit-cli";
 
@@ -55,6 +64,7 @@ async function upgradePackageInstall(opts?: { check?: boolean }): Promise<void> 
 
   if (latest && compareVersions(CLI_VERSION, latest) >= 0) {
     console.log(`Already up to date (v${CLI_VERSION}).`);
+    if (!opts?.check) installTaskSkillCommand();
     return;
   }
   if (!latest) {
@@ -91,6 +101,7 @@ async function upgradePackageInstall(opts?: { check?: boolean }): Promise<void> 
   console.log(
     `Updated successfully: v${CLI_VERSION} -> v${latest ?? "latest"}. Run \`adit --version\` to confirm.`,
   );
+  installUpgradedTaskSkill();
 }
 
 /** Default install location used by install.sh */
@@ -189,6 +200,7 @@ export async function selfUpdateCommand(opts?: {
     const latestVer = readVersionFromPackageJson(installDir);
     if (latestVer === CLI_VERSION) {
       console.log(`Already up to date (v${CLI_VERSION}).`);
+      if (!opts?.check) installTaskSkillCommand();
       return;
     }
   }
@@ -259,6 +271,8 @@ export async function selfUpdateCommand(opts?: {
     process.exitCode = 1;
     return;
   }
+
+  installUpgradedTaskSkill();
 
   // Step 4: Report
   const newVer = readVersionFromPackageJson(installDir);

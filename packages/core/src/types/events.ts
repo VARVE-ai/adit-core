@@ -81,6 +81,7 @@ export interface AditEvent {
   cotText: string | null;
   /** Summary of assistant's response */
   responseText: string | null;
+  tokenUsage?: Omit<import("../db/event-token-usage.js").EventTokenUsage, "records">;
 
   // -- Tool execution --
   /** Tool/command name */

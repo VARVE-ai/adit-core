@@ -26,6 +26,7 @@ vi.mock("./conflicts.js", () => ({
 
 vi.mock("./token-usage.js", () => ({
   syncTokenUsage: vi.fn(),
+  acknowledgeEventTokenUsage: vi.fn(),
 }));
 
 import { SyncEngine } from "./engine.js";
@@ -117,13 +118,13 @@ describe("SyncEngine", () => {
     mockBatchRecordCount.mockReturnValue(0);
     mockBuildSyncBatch.mockReturnValue({ batch: { events: [], sessions: [], envSnapshots: [], diffs: [] }, diffByteCapApplied: false });
     vi.mocked(syncTokenUsage).mockImplementationOnce(async (_db, push) => {
-      await push({ sessions: [], events: [], envSnapshots: [], diffs: [], tokenUsageRecords: [] });
+      await push({ sessions: [], events: [], envSnapshots: [], diffs: [] });
       return { accepted: 1, duplicates: 0, batches: 1, totalRecords: 1 };
     });
     const result = await engine.sync();
     expect(mockClient.post).toHaveBeenCalledExactlyOnceWith("/api/sync/push", expect.objectContaining({
       localProjectId: "proj-001", syncVersion: 0,
-      batch: expect.objectContaining({ events: [], tokenUsageRecords: [] }),
+      batch: expect.objectContaining({ events: [] }),
     }));
     expect(result.accepted).toBe(1);
     expect(mockApplyAuthoritativeSyncState).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ syncVersion: 1 }));

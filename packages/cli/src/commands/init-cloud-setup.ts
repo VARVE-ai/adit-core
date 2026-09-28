@@ -130,10 +130,6 @@ async function runEmbeddedLink(): Promise<boolean> {
   console.log(
     `  ${marks.ok} Linked: ${pc.bold(result.projectName)} ${pc.dim(`— ${stats} (${formatDuration(result.totalDurationMs)})`)}`,
   );
-  if (!result.qualified) {
-    const score = result.score === null ? "0.00" : result.score.toFixed(2);
-    console.log(`  ${marks.warn} ${pc.dim(`Documents not yet qualified (${score}/0.60) — see Next step below`)}`);
-  }
   if (result.similarProjects && result.similarProjects.length > 0) {
     console.log(
       `  ${marks.warn} ${pc.dim(`${result.similarProjects.length} existing cloud project(s) share this repository's remote — check the project list to avoid duplicates`)}`,

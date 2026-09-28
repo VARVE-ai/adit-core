@@ -17,8 +17,8 @@ import {
   collectCommitsBetweenRefSnapshots,
   collectDefaultBranch,
   collectGitIdentity,
-  collectGitRefsFingerprint,
   collectRemoteBranchSnapshot,
+  readGitRefsFingerprint,
   resolveCommitBranches,
 } from "./git-collector.js";
 
@@ -97,10 +97,11 @@ export async function syncLinkedGitMetadata(
 
     result.repositoriesChecked++;
     try {
-      const fingerprint = await collectGitRefsFingerprint(repository.path);
-      if (!fingerprint) {
-        throw new Error("Unable to read local Git refs");
+      const refs = await readGitRefsFingerprint(repository.path);
+      if (!refs.fingerprint) {
+        throw new Error(`Unable to read local Git refs: ${refs.error ?? "unknown error"}`);
       }
+      const fingerprint = refs.fingerprint;
 
       const branches = await collectBranches(repository.path);
       const currentHeads = branchHeadMap(branches);

@@ -81,7 +81,6 @@ export interface ProjectLinkCache {
   lastBranchSyncAt: string | null;
   lastDocSyncAt: string | null;
   docHashes: Record<string, string>; // sourcePath → contentHash
-  qualified: boolean;
   initializedAt: string;
   updatedAt: string;
 }
@@ -116,7 +115,6 @@ export interface LinkInitResponse {
     gitAuthorName: string | null;
     gitAuthorEmail: string | null;
     branchCount: number;
-    qualified: boolean;
     lastGitSyncAt: string | null;
     lastDocSyncAt: string | null;
     remoteBranchesCheckedAt?: string | null;
@@ -151,26 +149,6 @@ export interface DocumentUploadResponse {
     unchanged: number;
     total: number;
   };
-}
-
-export interface QualifyDocumentDetail {
-  fileName: string;
-  detectedType: string;
-  structuralScore: number;
-  missingSections: string[];
-  hasStubContent: boolean;
-}
-
-export interface QualifyResponse {
-  qualified: boolean;
-  score: number;
-  documentCount: number;
-  documentDetails?: QualifyDocumentDetail[];
-  feedback: {
-    missing: string[];
-    suggestions: string[];
-    summaryPrompt: string;
-  } | null;
 }
 
 // ─── Intent Types ──────────────────────────────────────────
@@ -255,7 +233,6 @@ export interface LinkOptions {
   force?: boolean;
   skipDocs?: boolean;
   skipCommits?: boolean;
-  skipQualify?: boolean;
   dryRun?: boolean;
   json?: boolean;
   /**
@@ -304,19 +281,6 @@ export interface LinkResult {
   branchCount: number;
   commitCount: number;
   documentCount: number;
-  qualified: boolean;
-  score: number | null;
-  lowScoreDocumentCount?: number;
-  stubDocumentCount?: number;
-  lowestScoringDocuments?: Array<{
-    fileName: string;
-    score: number;
-    detectedType: string;
-  }>;
-  missingItems?: string[];
-  suggestions?: string[];
-  qualityFeedback?: string | null;
-  summaryPrompt?: string | null;
   /** Per-step timing breakdown */
   stepTimings: StepTiming[];
   /** Total wall-clock duration in milliseconds */
@@ -335,19 +299,6 @@ export interface WorkspaceRepositoryResult {
   branchCount: number;
   commitCount: number;
   documentCount: number;
-  qualified: boolean;
-  score: number | null;
-  lowScoreDocumentCount?: number;
-  stubDocumentCount?: number;
-  lowestScoringDocuments?: Array<{
-    fileName: string;
-    score: number;
-    detectedType: string;
-  }>;
-  missingItems?: string[];
-  suggestions?: string[];
-  qualityFeedback?: string | null;
-  summaryPrompt?: string | null;
   totalDurationMs: number;
 }
 

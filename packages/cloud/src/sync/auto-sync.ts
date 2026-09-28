@@ -37,7 +37,6 @@ import { CloudClient } from "../http/client.js";
 import { CloudNetworkError, CloudAuthError } from "../http/errors.js";
 import { runSyncCycle } from "./sync-cycle.js";
 import { countUnsyncedEvents } from "./serializer.js";
-import { hasPendingTokenUsage } from "./token-usage.js";
 import { resolveCloudProjectContext } from "../project-context.js";
 
 /**
@@ -131,9 +130,7 @@ export async function triggerAutoSync(
       projectId,
     );
 
-    if (unsyncedCount < cloudConfig.syncThreshold && !hasPendingTokenUsage(db, {
-      projectId, serverUrl, cloudClientId: credentials.clientId,
-    })) {
+    if (unsyncedCount < cloudConfig.syncThreshold) {
       return;
     }
   }

@@ -48,21 +48,19 @@ the adit-cloud Coding panel.
 
 ## Architecture
 
-ADIT is a TypeScript pnpm monorepo with six packages:
+ADIT is a TypeScript pnpm monorepo with five packages:
 
 | Package | Description |
 | --- | --- |
 | `@varveai/adit-core` | Core types, SQLite database access, config, sync primitives, and performance logs |
 | `@varveai/adit-engine` | Git runner, working tree detection, timeline management, and environment capture/diff |
 | `@varveai/adit-hooks` | Hook dispatcher, fail-open handlers, platform adapter registry, and hook install/validate/uninstall logic |
-| `@varveai/adit-cli` | Commander.js CLI, cloud coding entry points, debug commands, docs commands, and React/Ink TUI |
+| `@varveai/adit-cli` | Commander.js CLI, cloud coding entry points, debug commands, and React/Ink TUI |
 | `@varveai/adit-cloud` | Cloud config, device/token auth, HTTP client, incremental sync, project-link sync, and intent commands |
-| `@varveai/adit-plans` | Project document template generator and validator |
 
 Package boundaries are intentionally small: `core` owns storage and shared
 types, `engine` owns Git/timeline mechanics, `hooks` normalizes platform events,
-`cli` owns user commands, `cloud` owns remote sync, and `plans` owns project
-document templates and validation.
+`cli` owns user commands, and `cloud` owns remote sync.
 
 ## Platform Support
 
@@ -271,9 +269,14 @@ Common timeline options include `--limit`, `--actor`, `--type`,
 | `adit cloud link` | Upload Git metadata and project documents to adit-cloud |
 | `adit cloud intent` | List or inspect connected project intents |
 | `adit cloud intent complete <id>` | Complete one phase or an entire intent |
+| `adit cloud tasks list --json` | Query your unfinished tasks using the current project's linked team, or its personal scope if no team is linked |
+| `adit cloud tasks scopes --json` | List only the current project's accessible linked teams; use `tasks list --team <id>` if more than one is linked |
+| `adit cloud tasks show <taskId> --json` | Read an assigned task, permissions and current update timestamp |
+| `adit cloud tasks context <taskId> --json` | Read the task, current PRD and attachment/sketch URLs without downloading files |
+| `adit cloud tasks update <taskId> --state done --json` | Update Cloud immediately and record task history |
 
 `adit cloud link` supports `--force`, `--skip-docs`, `--skip-commits`,
-`--skip-qualify`, `--dry-run`, and `--json`. The same project-link and intent
+`--dry-run`, and `--json`. The same project-link and intent
 flows are also exposed as `/adit link` and `/adit intent` in supported
 platform integrations.
 
@@ -286,14 +289,12 @@ link. When a link would create a brand-new cloud project while the account
 already has projects pointing at the same git remotes (typical after a fresh
 clone or on a new machine), link prints a notice — nothing is merged.
 
-### Export, Docs, Debug, Maintenance
+### Export, Debug, Maintenance
 
 | Command | Description |
 | --- | --- |
 | `adit export event <id>` | Export one event as JSON |
 | `adit export session [id]` | Export a session as JSON, JSONL, or Markdown |
-| `adit docs scaffold [type]` | Generate project document templates |
-| `adit docs validate [path]` | Validate project documents against structural specs |
 | `adit debug db clear-events` | Clear local events, sessions, diffs, and environment snapshots |
 | `adit debug perf stats` | Show performance stats |
 | `adit debug perf clear` | Clear performance logs |
@@ -418,6 +419,59 @@ Files larger than 500 KB are skipped with a warning.
 | `ADIT_DEBUG` | Enable debug output and the hook debug log (`$TMPDIR/adit-hook-debug.jsonl`, size-capped) | unset |
 | `ADIT_CODEX_BIN` | Override Codex binary used by cloud coding commands | unset |
 | `ADIT_INSTALL_DIR` | Override the upgrade install directory | unset |
+
+## Reply Token Usage
+
+Token totals are stored as numeric columns on the final reply event. The normal
+sync request includes the reply's `tokenUsage` payload; late usage replays the
+same event and requires a matching usage acknowledgement before marking it synced.
+Per-request capture evidence stays private to the reply for deduplication and
+exact request-time accounting. It is not emitted as additional timeline events.
+
+The next database open adds the reply fields and drops `token_usage_records`,
+`token_usage_sync_state`, and `token_usage_cursors`. Historical local token usage
+is deliberately discarded, not migrated or reread from old transcripts. Existing
+conversations, file changes, and usage already synced to Cloud remain intact.
+Capture begins with subsequent prompts. Deploy a Cloud version that accepts
+reply usage before upgrading Core; older Cloud versions leave usage pending
+and report a missing acknowledgement rather than silently lose it.
+
+## Task Skill
+
+The `adit-tasks` skill is installed automatically by `adit init`, `adit upgrade`,
+and published npm installs with lifecycle scripts enabled. It is placed in
+`~/.agents/skills/adit-tasks/SKILL.md` and `~/.claude/skills/adit-tasks/SKILL.md`.
+Already-running AI sessions may need restarting to discover it. Upgrades refresh
+unmodified ADIT-owned copies; custom or unrelated existing skills are not overwritten.
+If lifecycle scripts were disabled, run `adit init` to install the skill.
+
+Ask your AI assistant "What tasks do I still need to finish?" and then select a
+task to implement. The skill queries live data and keeps the real task ID,
+reads the related PRD and directs the AI to read relevant resource URLs itself.
+Independent tasks have no PRD and use their own requirements and attachments.
+Both task listing and scope discovery send the current local project ID. Team
+resolution reuses repository mounts, not all account memberships. One linked
+team is selected automatically; several require choosing one of that project's
+teams. Without a linked team, listing uses personal project tasks. Use
+`--personal` to explicitly select personal tasks, or `--team <id>` to select a
+linked team. Unrelated teams are rejected even if you belong to them. Responses
+identify the source project and effective scope. Lists are paginated and return
+`nextOffset`; changing pages must preserve the same project and scope.
+
+"Work on this task" does not mark it completed. An explicit request to mark it
+done runs an update, without requiring `adit cloud sync`. To postpone a task:
+
+```bash
+adit cloud tasks show <taskId> --json
+adit cloud tasks update <taskId> --due 2026-09-30 --expected-updated-at <updatedAt> --json
+```
+
+Assignees may update their own state and due date; other edits retain existing
+management permissions. A supplied stale `updatedAt` is rejected with HTTP 409;
+without one, the CLI reads the current version before attempting the update.
+Private resource URLs expire after 15 minutes and must not be published or
+committed. Re-query context to refresh them. No task snapshots or attachment
+files are cached by these commands. These commands require Cloud task API support.
 
 ## Development Commands
 

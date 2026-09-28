@@ -14,7 +14,6 @@
     "build:engine": "pnpm --filter @varveai/adit-engine run build",
     "build:hooks": "pnpm --filter @varveai/adit-hooks run build",
     "build:cli": "pnpm --filter @varveai/adit-cli run build",
-    "build:plans": "pnpm --filter @varveai/adit-plans run build",
     "build:cloud": "pnpm --filter @varveai/adit-cloud run build",
     "test": "vitest run",
     "test:watch": "vitest",

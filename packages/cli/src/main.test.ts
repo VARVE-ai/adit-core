@@ -43,7 +43,6 @@ describe("CLI help", () => {
 
     expect(help).toContain("cloud");
     expect(help).toContain("debug");
-    expect(help).toContain("docs");
     expect(help).toContain("hook");
     expect(help).toContain("upgrade [options]");
     expect(help).toContain("timeline|list [options]");
@@ -160,10 +159,10 @@ describe("CLI help", () => {
   });
 
   it("supports nested help for leaf commands", async () => {
-    const help = await parseAndCapture(["help", "docs", "scaffold"]);
+    const help = await parseAndCapture(["help", "cloud", "link"]);
 
-    expect(help).toContain("Usage: adit docs scaffold [options] [type]");
-    expect(help).toContain("-o, --output <path>");
+    expect(help).toContain("Usage: adit cloud link [options]");
+    expect(help).toContain("--skip-docs");
   });
 
   it("rewrites the legacy intent completion syntax", () => {

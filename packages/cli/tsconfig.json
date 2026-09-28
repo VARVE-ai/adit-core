@@ -10,7 +10,6 @@
   "references": [
     { "path": "../core" },
     { "path": "../engine" },
-    { "path": "../hooks" },
-    { "path": "../plans" }
+    { "path": "../hooks" }
   ]
 }

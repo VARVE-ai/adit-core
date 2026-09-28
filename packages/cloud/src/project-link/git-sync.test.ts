@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const getCache = vi.fn();
 const updateGitState = vi.fn();
 const updateRemoteState = vi.fn();
-const collectFingerprint = vi.fn();
+const readFingerprint = vi.fn();
+const fingerprint = (value: string) => ({ fingerprint: value, error: null });
 const collectBranches = vi.fn();
 const collectRemoteBranches = vi.fn();
 const collectDefaultBranch = vi.fn();
@@ -19,7 +20,7 @@ vi.mock("./cache.js", () => ({
 }));
 
 vi.mock("./git-collector.js", () => ({
-  collectGitRefsFingerprint: (...args: unknown[]) => collectFingerprint(...args),
+  readGitRefsFingerprint: (...args: unknown[]) => readFingerprint(...args),
   collectBranches: (...args: unknown[]) => collectBranches(...args),
   collectRemoteBranchSnapshot: (...args: unknown[]) => collectRemoteBranches(...args),
   branchHeadMap: (branches: Array<{ name: string; headSha: string }>) =>
@@ -69,7 +70,6 @@ function linkedCache() {
     lastBranchSyncAt: "2026-01-01T00:00:00.000Z",
     lastDocSyncAt: null,
     docHashes: {},
-    qualified: true,
     initializedAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
   };
@@ -79,7 +79,7 @@ describe("syncLinkedGitMetadata", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getCache.mockReturnValue(linkedCache());
-    collectFingerprint.mockResolvedValue("new-fingerprint");
+    readFingerprint.mockResolvedValue(fingerprint("new-fingerprint"));
     collectBranches.mockResolvedValue([{ name: "main", headSha: "new-sha", isDefault: true }]);
     collectRemoteBranches.mockResolvedValue({
       branches: [{ name: "main", headSha: "new-sha", isDefault: true }],
@@ -119,7 +119,7 @@ describe("syncLinkedGitMetadata", () => {
   });
 
   it("reports unchanged repositories separately from unlinked repositories", async () => {
-    collectFingerprint.mockResolvedValue("old-fingerprint");
+    readFingerprint.mockResolvedValue(fingerprint("old-fingerprint"));
     const client = { post: vi.fn() };
 
     const result = await syncLinkedGitMetadata(
@@ -178,7 +178,7 @@ describe("syncLinkedGitMetadata", () => {
   });
 
   it("uploads a changed remote snapshot when local refs are unchanged", async () => {
-    collectFingerprint.mockResolvedValue("old-fingerprint");
+    readFingerprint.mockResolvedValue(fingerprint("old-fingerprint"));
     collectBranches.mockResolvedValue([{ name: "feature/local", headSha: "local-sha", isDefault: false }]);
     collectRemoteBranches.mockResolvedValue({
       branches: [{ name: "main", headSha: "remote-main", isDefault: true }],
@@ -264,6 +264,30 @@ describe("syncLinkedGitMetadata", () => {
     expect(updateGitState).not.toHaveBeenCalled();
     expect(result.failures).toEqual([
       expect.objectContaining({ relativePath: ".", message: "upload failed" }),
+    ]);
+  });
+  it("reports Git's own diagnostic when local refs cannot be read", async () => {
+    readFingerprint.mockResolvedValue({
+      fingerprint: null,
+      error: "fatal: not a git repository (or any of the parent directories): .git",
+    });
+    const client = { post: vi.fn() };
+
+    const result = await syncLinkedGitMetadata(
+      {} as never,
+      client as never,
+      context,
+      "https://cloud.example.com",
+    );
+
+    expect(client.post).not.toHaveBeenCalled();
+    expect(updateGitState).not.toHaveBeenCalled();
+    expect(result.repositoriesChecked).toBe(1);
+    expect(result.failures).toEqual([
+      expect.objectContaining({
+        relativePath: ".",
+        message: "Unable to read local Git refs: fatal: not a git repository (or any of the parent directories): .git",
+      }),
     ]);
   });
 });
