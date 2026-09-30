@@ -23,8 +23,6 @@ export const UPDATE_CHECK_COMMANDS = new Set([
   "cloud.status",
   "cloud.sync",
   "cloud.link",
-  "cloud.intent",
-  "cloud.intent.complete",
   "cloud.claude",
   "cloud.codex",
 ]);

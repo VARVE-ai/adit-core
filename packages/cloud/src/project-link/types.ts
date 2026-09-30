@@ -151,82 +151,6 @@ export interface DocumentUploadResponse {
   };
 }
 
-// ─── Intent Types ──────────────────────────────────────────
-
-export interface IntentSummary {
-  id: string;
-  title: string;
-  businessGoal: string;
-  state: string;
-  ambiguityScore: number | null;
-  linkedBranches: string[];
-  taskCount: number;
-  completedTaskCount: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface IntentDetail extends IntentSummary {
-  acceptanceMd: string | null;
-  antiGoals: string | null;
-  clarityScores: {
-    goal: number;
-    constraints: number;
-    criteria: number;
-    context: number;
-  } | null;
-  tasks: TaskSlice[];
-  plans: PromptVersion[];
-  recentShipNotes: Array<{
-    id: string;
-    noteBody: string;
-    createdBy: string;
-    architecturalDecision: boolean;
-    createdAt: string;
-  }>;
-}
-
-export interface TaskSlice {
-  id: string;
-  title: string;
-  description: string | null;
-  phase: number;
-  phaseTitle: string | null;
-  phaseChecklist: Array<{ item: string; checked: boolean }>;
-  sortOrder: number;
-  wave: number | null;
-  complexityScore: number | null;
-  approvalStatus: string;
-  featureTag: string | null;
-  acceptanceCriteria: {
-    criteria: string[];
-    assertions: Array<{
-      type: string;
-      description: string;
-      path?: string;
-    }>;
-  };
-  linkedEventIds: string[];
-  dependsOn: number[];
-  codingPrompt: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface PromptVersion {
-  version: number;
-  versionType: string;
-  promptText: string | null;
-  responsePayload: string;
-  llmModel: string | null;
-  llmParamsJson: string | null;
-  sourceEventId: string | null;
-  gatekeeperVerdict: string | null;
-  gatekeeperReport: string | null;
-  parentVersionId: string | null;
-  createdAt: string;
-}
-
 // ─── Command Options ───────────────────────────────────────
 
 export interface LinkOptions {
@@ -245,12 +169,6 @@ export interface LinkOptions {
   deletionPolicyRefreshed?: boolean;
   /** Invoked as each link step completes (per repository in workspaces). */
   onStepComplete?: (step: StepTiming) => void;
-}
-
-export interface IntentOptions {
-  id?: string;
-  state?: string;
-  json?: boolean;
 }
 
 // ─── Step Timing ───────────────────────────────────────────
@@ -309,60 +227,4 @@ export interface WorkspaceRepositoryFailure {
   message: string;
   status?: number;
   response?: unknown;
-}
-
-export interface IntentResult {
-  intents?: IntentSummary[];
-  intent?: IntentDetail;
-}
-
-// ─── Bulk Task Update Types ─────────────────────────────────
-
-export interface BulkTaskFilter {
-  /** Filter by phase number (1-99) */
-  phase?: number;
-  /** Filter by task status */
-  status?: "pending" | "approved" | "in_progress" | "completed" | "rejected";
-  /** Filter by feature tag */
-  featureTag?: string;
-  /** Filter by wave number */
-  wave?: number;
-}
-
-export interface BulkTaskUpdate {
-  /** Task ID to update — must be "*" for phase/intent level operations */
-  taskId: string;
-  /** New status for the task */
-  status: "pending" | "approved" | "in_progress" | "completed" | "rejected";
-  /** Optional phase number */
-  phase?: number;
-  /** Optional title update */
-  title?: string;
-  /** Optional description update */
-  description?: string;
-}
-
-export interface BulkTaskUpdateOptions {
-  /** Intent ID containing the tasks to update */
-  intentId: string;
-  /** Target status (default: "completed") */
-  status?: "pending" | "approved" | "in_progress" | "completed" | "rejected";
-  /** Filters to apply before updating */
-  filters?: BulkTaskFilter;
-  /** Output as JSON */
-  json?: boolean;
-}
-
-export interface BulkTaskUpdateResult {
-  /** Number of tasks successfully updated */
-  updated: number;
-  /** Array of failed updates with error details */
-  failed: Array<{
-    taskId: string;
-    error: string;
-  }>;
-  /** Summary message */
-  message: string;
-  /** Intent state transition if triggered */
-  intentTransitioned?: "shipped" | null;
 }

@@ -98,7 +98,7 @@ describe("CLI help", () => {
     expect(cloudHelp).toContain("claude [options] [cliArgs...]");
     expect(cloudHelp).toContain("codex [options] [cliArgs...]");
     expect(cloudHelp).toContain("link [options]");
-    expect(cloudHelp).toContain("intent [options]");
+    expect(cloudHelp).not.toContain("intent [options]");
     expect(cloudHelp).not.toContain("repositories [options]");
     expect(cloudHelp).not.toContain("transcript");
   });
@@ -129,33 +129,19 @@ describe("CLI help", () => {
     expect(debugPerfHelp).toContain("clear [options]");
   });
 
-  it("documents the actual intent completion syntax", () => {
-    const intentHelp = findCommand(
-      createProgram(),
-      "cloud",
-      "intent",
-    ).helpInformation();
-
-    expect(intentHelp).toContain(
-      "Usage: adit cloud intent [options] [command]",
-    );
-    expect(intentHelp).toContain("--id <id>");
-    expect(intentHelp).toContain("complete [options] <id>");
-  });
-
   it("supports nested help paths beyond one level", async () => {
-    const help = await parseAndCapture(["help", "cloud", "intent"]);
+    const help = await parseAndCapture(["help", "cloud", "tasks"]);
 
-    expect(help).toContain("Usage: adit cloud intent [options] [command]");
-    expect(help).toContain("complete [options] <id>");
+    expect(help).toContain("Usage: adit cloud tasks [options] [command]");
+    expect(help).toContain("update [options] <taskId>");
     expect(help).not.toContain("Usage: adit cloud [options] [command]");
   });
 
-  it("shows leaf help for intent completion", async () => {
-    const help = await parseAndCapture(["help", "cloud", "intent", "complete"]);
+  it("shows leaf help for task updates", async () => {
+    const help = await parseAndCapture(["help", "cloud", "tasks", "update"]);
 
-    expect(help).toContain("Usage: adit cloud intent complete [options] <id>");
-    expect(help).toContain("--phase <number>");
+    expect(help).toContain("Usage: adit cloud tasks update [options] <taskId>");
+    expect(help).toContain("--state <state>");
   });
 
   it("supports nested help for leaf commands", async () => {

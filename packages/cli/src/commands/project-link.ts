@@ -1,5 +1,5 @@
 /**
- * CLI handlers for `adit cloud link` and `adit cloud intent`.
+ * CLI handler for `adit cloud link`.
  *
  * These wire up the config/credentials/database lifecycle around the
  * command handlers from @varveai/adit-cloud/project-link.
@@ -22,9 +22,6 @@ import {
   CloudApiError,
   WorkspaceLinkPartialFailureError,
   linkCommand,
-  intentCommand,
-  formatIntentList,
-  formatIntentDetail,
   DEFAULT_SERVER_URL,
   CloudProjectDeletedError,
   refreshProjectDeletionPolicy,
@@ -32,7 +29,6 @@ import {
 import type {
   LinkOptions,
   LinkResult,
-  IntentOptions,
   ProjectDeletionPolicy,
 } from "@varveai/adit-cloud";
 import { getRemoteUrl } from "@varveai/adit-engine";
@@ -220,57 +216,5 @@ export async function projectLinkCliHandler(opts: LinkOptions): Promise<LinkResu
     return null;
   } finally {
     closeDatabase(db);
-  }
-}
-
-/**
- * `adit cloud intent` — List or show intents from connected project.
- */
-export async function projectIntentCliHandler(
-  opts: IntentOptions,
-): Promise<void> {
-  const config = loadInitializedProjectConfig("adit cloud intent");
-  if (!config) return;
-
-  // Prerequisite: credentials
-  const credentials = loadCredentials();
-  if (!credentials) {
-    console.error(
-      "Not logged in to adit-cloud. Run 'adit cloud login' to authenticate.",
-    );
-    process.exitCode = 1;
-    return;
-  }
-
-  // Resolve server URL and project ID
-  const cloudConfig = loadCloudConfig();
-  const serverUrl =
-    cloudConfig.serverUrl ?? credentials.serverUrl ?? DEFAULT_SERVER_URL;
-  const client = new CloudClient(serverUrl, credentials);
-
-  try {
-    const result = await intentCommand(client, config.projectId, opts);
-
-    if (opts.json) {
-      console.log(JSON.stringify(result, null, 2));
-      return;
-    }
-
-    if (result.intent) {
-      console.log(formatIntentDetail(result.intent));
-    } else if (result.intents) {
-      console.log(formatIntentList(result.intents));
-    }
-  } catch (error) {
-    if (error instanceof CloudApiError && error.status === 404) {
-      console.error("No project link found. Run 'adit cloud link' first.");
-    } else if (error instanceof CloudApiError) {
-      console.error(`Server error: ${error.status} — ${error.message}`);
-    } else {
-      console.error(
-        `Failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    process.exitCode = 1;
   }
 }

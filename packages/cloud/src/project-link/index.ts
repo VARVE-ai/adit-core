@@ -2,12 +2,11 @@
  * Project Link — public API for connecting a local codebase to adit-cloud.
  *
  * Exports command handlers, utility functions, and type definitions
- * for the `/adit link` and `/adit intent` plugin commands.
+ * for the `/adit link` plugin command.
  */
 
 // Command handlers
 export { linkCommand, WorkspaceLinkPartialFailureError } from "./link-command.js";
-export { intentCommand, formatIntentList, formatIntentDetail } from "./intent-command.js";
 
 // Quality check
 
@@ -53,14 +52,9 @@ export type {
   GitCommit,
   DiscoveredDocument,
   ProjectLinkCache,
-  IntentSummary,
-  IntentDetail,
-  TaskSlice,
   StepTiming,
   LinkOptions,
-  IntentOptions,
   LinkResult,
   WorkspaceRepositoryResult,
   WorkspaceRepositoryFailure,
-  IntentResult,
 } from "./types.js";

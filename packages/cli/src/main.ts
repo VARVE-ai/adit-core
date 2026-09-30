@@ -45,11 +45,7 @@ import { cloudCodexCommand } from "./commands/cloud-codex.js";
 import { registerCloudTaskCommands } from "./commands/cloud-tasks.js";
 import { dbClearEventsCommand } from "./commands/db.js";
 import { perfCommand, perfClearCommand } from "./commands/perf.js";
-import {
-  projectLinkCliHandler,
-  projectIntentCliHandler,
-} from "./commands/project-link.js";
-import { completeCliHandler } from "./commands/complete.js";
+import { projectLinkCliHandler } from "./commands/project-link.js";
 import { selfUpdateCommand } from "./commands/self-update.js";
 import { isCliEntrypoint } from "./entrypoint.js";
 import { launchTui } from "./tui/index.js";
@@ -321,33 +317,6 @@ export function createProgram(): Command {
         json: opts.json,
       });
     }));
-
-  // cloud intent — list/view intents, with complete subcommand
-  const intentCmd = cloudCmd
-    .command("intent")
-    .description("Manage intents from connected project")
-    .option("--id <id>", "Intent ID")
-    .option("--state <state>", "Filter by intent state")
-    .option("--json", "Output as JSON")
-    .action(withUpdateWarning("cloud.intent", (opts) =>
-      projectIntentCliHandler({
-        id: opts.id,
-        state: opts.state,
-        json: opts.json,
-      }),
-    ));
-
-  intentCmd
-    .command("complete <id>")
-    .description("Complete a phase or entire intent")
-    .option("--phase <number>", "Complete a specific phase (1-99)")
-    .option("--json", "Output as JSON")
-    .action(withUpdateWarning("cloud.intent.complete", (intentId, opts) =>
-      completeCliHandler(intentId, {
-        phase: opts.phase ? parseInt(opts.phase, 10) : undefined,
-        json: opts.json,
-      }),
-    ));
 
   // Debug and maintenance commands
   const debugCmd = program

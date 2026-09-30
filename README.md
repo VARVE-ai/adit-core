@@ -71,7 +71,7 @@ events to ADIT's normalized hook model.
 | --- | --- | --- |
 | Claude Code | Supported | Installs hook entries in `.claude/settings.local.json` and slash command files under `.claude/commands/` |
 | Claude Code VS Code | Supported | Uses the Claude Code hook mechanism with VS Code-aware platform detection |
-| OpenCode | Supported | Generates `.opencode/plugins/adit.ts`, slash commands, and LLM-callable tools `adit_link` and `adit_intent` |
+| OpenCode | Supported | Generates `.opencode/plugins/adit.ts`, slash commands, and the LLM-callable tool `adit_link` |
 | Cursor | Supported | Shares `.claude/settings.local.json`; platform is identified from Cursor payloads, not the model |
 | Codex | Supported | Installs hook entries in `.codex/hooks.json`; approve them once inside Codex via `/hooks` (ADIT never edits the user-level Codex config) |
 | Gemini CLI | Supported | Installs hook entries in `.gemini/settings.json` |
@@ -267,8 +267,6 @@ Common timeline options include `--limit`, `--actor`, `--type`,
 | Command | Description |
 | --- | --- |
 | `adit cloud link` | Upload Git metadata and project documents to adit-cloud |
-| `adit cloud intent` | List or inspect connected project intents |
-| `adit cloud intent complete <id>` | Complete one phase or an entire intent |
 | `adit cloud tasks list --json` | Query your unfinished tasks using the current project's linked team, or its personal scope if no team is linked |
 | `adit cloud tasks scopes --json` | List only the current project's accessible linked teams; use `tasks list --team <id>` if more than one is linked |
 | `adit cloud tasks show <taskId> --json` | Read an assigned task, permissions and current update timestamp |
@@ -276,9 +274,8 @@ Common timeline options include `--limit`, `--actor`, `--type`,
 | `adit cloud tasks update <taskId> --state done --json` | Update Cloud immediately and record task history |
 
 `adit cloud link` supports `--force`, `--skip-docs`, `--skip-commits`,
-`--dry-run`, and `--json`. The same project-link and intent
-flows are also exposed as `/adit link` and `/adit intent` in supported
-platform integrations.
+`--dry-run`, and `--json`. The same project-link flow is also exposed as
+`/adit link` in supported platform integrations.
 
 Link only connects an already initialized project: it reads the repository
 list from `.adit/project.json`, validates every repository and its `origin`
