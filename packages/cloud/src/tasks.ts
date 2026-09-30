@@ -9,7 +9,8 @@ export interface CloudTask {
   priority: string;
   dueAt: string | null;
   updatedAt: string;
-  assigneeId: string | null;
+  /** Present on show, context and update; list rows are already the caller's own tasks. */
+  assigneeId?: string | null;
   blueprintId: string | null;
   blueprintTitle?: string | null;
   projectId: string | null;
@@ -54,6 +55,6 @@ export function cloudTaskContext(client: CloudClient, taskId: string): Promise<C
   return client.get(`/api/cli/tasks/${encodeURIComponent(taskId)}/context`);
 }
 
-export function updateCloudTask(client: CloudClient, taskId: string, patch: CloudTaskPatch, expectedUpdatedAt: string): Promise<{ task: CloudTask; recorded: string[]; warnings: string[] }> {
+export function updateCloudTask(client: CloudClient, taskId: string, patch: CloudTaskPatch, expectedUpdatedAt: string): Promise<{ task: CloudTask; recorded: string[] }> {
   return client.patch(`/api/cli/tasks/${encodeURIComponent(taskId)}`, { patch, expectedUpdatedAt });
 }

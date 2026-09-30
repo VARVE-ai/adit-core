@@ -9,7 +9,7 @@ import { calendarDay, oneLine, periodOptions, printJson, reportFailure, requireC
 type Json = { json?: boolean };
 type PeriodOptions = { from?: string; to?: string; tz?: string };
 
-function usageLine(label: string, row: CloudUsageTotals): string {
+function usageLine(label: string, row: Omit<CloudUsageTotals, "models">): string {
   return `${label.padEnd(28)}  ${String(row.requests).padStart(6)} req  in ${String(row.inputTokens).padStart(10)}  out ${String(row.outputTokens).padStart(9)}  cache read ${String(row.cacheReadTokens).padStart(10)}  ${row.estimatedCostUsd !== null ? `$${row.estimatedCostUsd}` : "unpriced"}${row.unpricedRequests ? ` (${row.unpricedRequests} unpriced)` : ""}`;
 }
 
@@ -20,7 +20,6 @@ export async function cloudUsageCommand(options: Json & PeriodOptions & { by?: s
     console.log(`Usage ${result.period.from} to ${result.period.to} (${result.period.timeZone}), scope ${result.scope.kind}${result.scope.team ? ` team ${result.scope.team.name}` : ""}${result.scope.member ? ` member ${result.scope.member.name ?? result.scope.member.email ?? result.scope.member.id}` : ""}, by ${result.by}`);
     console.log(usageLine("total", result.totals));
     for (const row of result.rows) console.log(usageLine(oneLine(row.label, 28), row));
-    console.log(result.note);
   } catch (error) { reportFailure(error, options, "Usage"); }
 }
 
@@ -58,9 +57,12 @@ export async function cloudTeamProgressCommand(options: Json & PeriodOptions & {
     console.log(`${result.member.name ?? result.member.email ?? result.member.id} in ${result.team.name}${result.query ? ` on "${result.query}"` : ""}, ${result.period.from ?? "any"} to ${result.period.to ?? "any"}`);
     for (const task of result.tasks) console.log(`task ${task.id}  ${task.progressState}  ${oneLine(task.title, 60)}${task.dueAt ? `  due ${task.dueAt.slice(0, 10)}` : ""}`);
     for (const session of result.sessions) console.log(`session ${session.id}  ${shortTime(session.startedAt)}  ${session.sections.map((section) => `#${section.sequence} ${section.title}`).join("; ")}`);
-    for (const evidence of result.evidence) console.log(`evidence ${shortTime(evidence.at)}  [${evidence.card.stage}] ${oneLine(evidence.card.title, 40)}: ${oneLine(evidence.summary ?? evidence.title, 80)}`);
+    for (const card of result.cards) {
+      console.log(`card [${card.stage}] ${oneLine(card.title, 50)}: ${oneLine(card.contribution, 100)}`);
+      for (const evidence of card.evidence) console.log(`    ${evidence.kind} ${shortTime(evidence.at)}  ${oneLine(evidence.title, 80)}`);
+    }
     for (const commit of result.commits) console.log(`commit ${commit.sha.slice(0, 10)}  ${shortTime(commit.committedAt)}  ${oneLine(commit.message, 70)}`);
-    if (!result.tasks.length && !result.sessions.length && !result.evidence.length && !result.commits.length) console.log("Nothing recorded for this member matches.");
+    if (!result.tasks.length && !result.sessions.length && !result.cards.length && !result.commits.length) console.log("Nothing recorded for this member matches.");
   } catch (error) { reportFailure(error, options, "Team progress"); }
 }
 

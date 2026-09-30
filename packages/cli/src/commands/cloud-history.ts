@@ -39,6 +39,7 @@ import {
   type AditSession,
 } from "@varveai/adit-core";
 import { oneLine, pageOptions, periodOptions, printJson, reportFailure, requireCloudClient, shortTime } from "./cloud-read-output.js";
+import type { CloudSessionRow } from "@varveai/adit-cloud";
 
 type ScopeOptions = { project?: string; team?: string; member?: string };
 type PeriodOptions = { from?: string; to?: string; tz?: string };
@@ -145,7 +146,7 @@ export async function resolveCurrentSession(deps: CurrentSessionDeps): Promise<C
     }
     const hints: string[] = [];
     if (inferred) hints.push("No session ID came from the environment; this is the latest session recorded in the project.");
-    if (local.unsyncedEvents > 0) hints.push(`${local.unsyncedEvents} local events are not in Cloud yet. ${SYNC_HINT}`);
+    if (local.unsyncedEvents > 0) hints.push(`${local.unsyncedEvents} events of this project are not in Cloud yet (the count covers the whole project, not only this session). ${SYNC_HINT}`);
     else if (cloud.status === "notSynced") hints.push(`Cloud has not received this session yet. ${SYNC_HINT}`);
     if (cloud.analysis && cloud.analysis.state !== "ready") hints.push(`Cloud analysis is ${cloud.analysis.state}; read raw events when the outline is missing.`);
     return { ...base, state: "resolved", inferred, project, session: describe(session), local, cloud, candidates: [], hint: hints.join(" ") };
@@ -167,7 +168,7 @@ function scopeParams(options: ScopeOptions) {
   return { project: options.project, team: options.team, member: options.member };
 }
 
-function sessionLine(session: CloudSessionSummary): string {
+function sessionLine(session: CloudSessionRow | CloudSessionSummary): string {
   return `${session.id}  ${shortTime(session.startedAt)}  ${session.platform}  ${session.analysis.state}  ${oneLine(session.title ?? "(untitled)", 70)}`;
 }
 
@@ -196,7 +197,7 @@ export async function cloudSessionsCurrentCommand(options: Json, deps: CurrentSe
     console.log(`State: ${report.state}${report.inferred ? " (latest local session)" : ""}`);
     if (report.session) {
       console.log(`Session: ${report.session.id}  ${report.session.platform}  started ${shortTime(report.session.startedAt)}  last event ${shortTime(report.session.lastEventAt)}`);
-      if (report.local) console.log(`Local: ${report.local.unsyncedEvents} unsynced events, last sync ${shortTime(report.local.lastSyncedAt)}`);
+      if (report.local) console.log(`Local: ${report.local.unsyncedEvents} unsynced events in this project, last sync ${shortTime(report.local.lastSyncedAt)}`);
       if (report.cloud) console.log(`Cloud: ${report.cloud.status}${report.cloud.analysis ? `, analysis ${report.cloud.analysis.state} (${report.cloud.analysis.sections} sections)` : ""}${report.cloud.error ? ` (${report.cloud.error})` : ""}`);
     }
     for (const candidate of report.candidates) console.log(`Candidate: ${candidate.id}  ${candidate.platform}  started ${shortTime(candidate.startedAt)}  last event ${shortTime(candidate.lastEventAt)}`);
@@ -218,7 +219,7 @@ export async function cloudSessionsSearchCommand(query: string, options: Json & 
   try {
     const result = await searchCloudSessions(requireCloudClient(), { q: query, ...scopeParams(options), ...periodOptions(options), ...pageOptions(options, 50) });
     if (options.json) return printJson(result);
-    console.log(`${result.sessions.length} of ${result.total} matching sessions (${result.searchMode} search over ${result.scannedSessions} sessions${result.scopeTruncated ? ", newest only" : ""})`);
+    console.log(`${result.sessions.length} of ${result.total} matching sessions (${result.searchMode} search${result.scopeTruncated ? ", newest sessions only" : ""})`);
     for (const session of result.sessions) {
       console.log(`${sessionLine(session)}  score ${session.score}`);
       for (const match of session.matches) console.log(`    outline #${match.sequence} ${match.field}: ${oneLine(match.snippet, 100)}`);

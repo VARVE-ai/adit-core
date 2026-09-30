@@ -25,7 +25,7 @@ describe("history commands", () => {
   });
 
   it("searches sessions with the period, explicit time zone and paging", async () => {
-    mocks.get.mockResolvedValue({ query: "login", searchMode: "keyword", sessions: [], total: 0, nextOffset: null, scannedSessions: 0, scopeTruncated: false, period: { from: "2026-09-01", to: "2026-09-30", timeZone: "Asia/Shanghai" }, scope: { description: "everything" } });
+    mocks.get.mockResolvedValue({ query: "login", searchMode: "keyword", sessions: [], total: 0, nextOffset: null, scopeTruncated: false, period: { from: "2026-09-01", to: "2026-09-30", timeZone: "Asia/Shanghai" }, scope: { description: "everything" } });
     await cloudSessionsSearchCommand("login", { from: "2026-09-01", to: "2026-09-30", tz: "Asia/Shanghai", team: sessionId, json: true });
     expect(mocks.get).toHaveBeenCalledExactlyOnceWith(`/api/cli/sessions/search?q=login&team=${sessionId}&from=2026-09-01&to=2026-09-30&timeZone=Asia%2FShanghai&offset=0&limit=50`);
     await cloudSessionsSearchCommand("login", { from: "2026-13-01", json: true });
@@ -40,11 +40,11 @@ describe("history commands", () => {
   });
 
   it("creates and revokes read links through POST and DELETE", async () => {
-    mocks.post.mockResolvedValue({ sessionId, created: true, link: { id: "l1", expiresAt: "2026-09-30T02:00:00.000Z", revokedAt: null }, url: "https://cloud.example/api/session-context?token=adit_ctx_x", serverNow: "2026-09-30T01:00:00.000Z" });
+    mocks.post.mockResolvedValue({ sessionId, created: true, link: { createdAt: "2026-09-30T01:00:00.000Z", expiresAt: "2026-09-30T02:00:00.000Z", revokedAt: null }, url: "https://cloud.example/api/session-context?token=adit_ctx_x", serverNow: "2026-09-30T01:00:00.000Z" });
     await cloudSessionsLinkCommand("create", sessionId, {});
     expect(mocks.post).toHaveBeenCalledExactlyOnceWith(`/api/cli/sessions/${sessionId}/context-link`, {});
     expect(output()[0]).toContain("token=adit_ctx_x");
-    mocks.delete.mockResolvedValue({ sessionId, action: "revoke", link: { id: "l1", revokedAt: "2026-09-30T01:30:00.000Z" }, url: null, serverNow: "2026-09-30T01:30:00.000Z" });
+    mocks.delete.mockResolvedValue({ sessionId, action: "revoke", link: { createdAt: "2026-09-30T01:00:00.000Z", expiresAt: "2026-09-30T02:00:00.000Z", revokedAt: "2026-09-30T01:30:00.000Z" }, url: null, serverNow: "2026-09-30T01:30:00.000Z" });
     await cloudSessionsLinkCommand("revoke", sessionId, {});
     expect(mocks.delete).toHaveBeenCalledExactlyOnceWith(`/api/cli/sessions/${sessionId}/context-link`);
     expect(output()[2]).toContain("revoked");

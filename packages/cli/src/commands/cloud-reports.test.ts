@@ -17,7 +17,7 @@ afterEach(() => { vi.restoreAllMocks(); process.exitCode = undefined; });
 
 describe("report commands", () => {
   it("requests team usage by member for the period with the machine's or given zone", async () => {
-    mocks.get.mockResolvedValue({ period: { from: "2026-09-22", to: "2026-09-28", timeZone: "UTC" }, scope: { kind: "team", team: { name: "Web" }, member: null }, by: "member", totals: { requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCostUsd: "0.0031", unpricedRequests: 0 }, rows: [], note: "" });
+    mocks.get.mockResolvedValue({ period: { from: "2026-09-22", to: "2026-09-28", timeZone: "UTC" }, scope: { kind: "team", team: { name: "Web" }, member: null }, by: "member", totals: { requests: 1, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCostUsd: "0.0031", unpricedRequests: 0 }, rows: [], unreadableSessions: 0 });
     await cloudUsageCommand({ from: "2026-09-22", to: "2026-09-28", tz: "UTC", scope: "team", team: teamId, by: "member", json: true });
     expect(mocks.get).toHaveBeenCalledExactlyOnceWith(`/api/cli/usage?from=2026-09-22&to=2026-09-28&timeZone=UTC&by=member&scope=team&team=${teamId}`);
     await cloudUsageCommand({ tz: "UTC" });
@@ -38,7 +38,7 @@ describe("report commands", () => {
     await cloudTeamMembersCommand({ json: true });
     expect(mocks.get).not.toHaveBeenCalled();
     expect(JSON.parse(output()[0])).toMatchObject({ ok: false, error: expect.stringContaining("--team is required") });
-    mocks.get.mockResolvedValue({ team: { name: "Web", role: "owner" }, member: { name: "Mia" }, query: "login", period: { from: null, to: null }, tasks: [], sessions: [], evidence: [], commits: [] });
+    mocks.get.mockResolvedValue({ team: { name: "Web", role: "owner" }, member: { name: "Mia" }, query: "login", period: { from: null, to: null }, tasks: [], sessions: [], cards: [], commits: [] });
     await cloudTeamProgressCommand({ team: teamId, member: memberId, query: "login form", tz: "UTC" });
     expect(mocks.get).toHaveBeenCalledExactlyOnceWith(`/api/cli/teams/${teamId}/progress?member=${memberId}&q=login+form&timeZone=UTC`);
     expect(output().at(-1)).toContain("Nothing recorded");
