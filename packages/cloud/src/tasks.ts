@@ -1,6 +1,6 @@
 import type { CloudClient } from "./http/client.js";
 
-export type CloudTaskState = "not_started" | "in_progress" | "done";
+export type CloudTaskState = "not_started" | "in_progress" | "paused" | "done";
 export interface CloudTask {
   taskId: string;
   title: string;

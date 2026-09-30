@@ -10,7 +10,7 @@ description: Query and work on ADIT Cloud tasks assigned to the current user, re
 
 # ADIT tasks
 
-Use the installed adit CLI and its existing Cloud login. Never read, print, or forward credentials. Commands return JSON with --json; a nonzero exit code or ok:false is failure, not success.
+Use the installed adit CLI and its existing Cloud login. Never read, print, or forward credentials. Commands return JSON with --json; a nonzero exit code or ok:false is failure, not success. A failure carries the server's own reason in error, the HTTP status, and a code when the server sent one.
 
 ## Find my tasks
 
@@ -27,7 +27,7 @@ Do not begin by listing every team on the account or ask for a team when the pro
 
 Both scopes and list always send the current project's identity, including list --team. scopes returns project and only teams mounted by that project that the user can access, not all account memberships. With exactly one team, query it directly. With multiple teams, ask only among those returned. With no linked teams and an explicit team request, explain that this project has no accessible linked team; do not widen the search to unrelated teams. For an explicit personal-task request use list --personal. --project <localProjectId> is only for a project the user explicitly selected. Do not initialize, link, change directory, or change the login silently if setup is missing. Report the returned project name and effective scope with results.
 
-List results include taskId, blueprintId (null for independent tasks), title, keyPointsText, progressState, priority, dueAt, updatedAt, projectId and teamId. By default, automatically follow nextOffset with the same project/scope/state and --offset until it is null, then present the complete task list. API pagination is internal: do not ask the user to request the next page. Use --state all or done when requested. An empty list means no matching tasks in the returned scope, not permission to query other teams.
+List results include taskId, blueprintId (null for independent tasks), title, keyPointsText, progressState, priority, dueAt, updatedAt, projectId and teamId. By default, automatically follow nextOffset with the same project/scope/state and --offset until it is null, then present the complete task list. API pagination is internal: do not ask the user to request the next page. Use --state all, done or paused when requested; paused tasks are still unfinished and appear in the default list. An empty list means no matching tasks in the returned scope, not permission to query other teams.
 
 Display every matching task with continuous numbering, title, readable status and priority, and due date when present. Keep each task compact, preferably one row; group by intent if helpful without restarting numbering, and include independent tasks. Do not show only the first ten or replace remaining tasks with a summary such as “18 more”. Only shorten the list when the user explicitly requests a summary or a limited number. Keep full task IDs available for follow-up actions without printing a separate UUID line for every task unless requested. Do not expose pagination diagnostics such as nextOffset in the normal reply. Before sending, check that every fetched task is represented. If fetching fails or a response limit prevents a complete list, explicitly state what is missing rather than claim completeness.
 
@@ -54,7 +54,7 @@ When the user explicitly says the task is completed and asks to change status, r
     adit cloud tasks show <taskId> --json
     adit cloud tasks update <taskId> --state done --expected-updated-at <updatedAt> --json
 
-For an explicit request to change progress use not_started, in_progress or done. For postponement, resolve a definite calendar date in the user's local timezone; ask if ambiguous, and pass YYYY-MM-DD:
+For an explicit request to change progress use not_started, in_progress, paused or done. Only a not-started or in-progress task can be paused, and a paused task must be resumed (not_started or in_progress) before it can be marked done; pausing keeps the due date and stops the overdue count. For postponement, resolve a definite calendar date in the user's local timezone; ask if ambiguous, and pass YYYY-MM-DD:
 
     adit cloud tasks update <taskId> --due <YYYY-MM-DD> --expected-updated-at <updatedAt> --json
 
@@ -62,7 +62,7 @@ Use --clear-due only when explicitly asked to remove the deadline. Postponement 
 
 Task assignees may change their own state and due date. Other fields require existing management rights; do not infer those rights from being assigned. Supported explicit edits include --title, --key-points, --priority high|medium|low, and --assignee <memberId>. Never guess member IDs. Use adit cloud tasks update --help for options.
 
-The update writes directly to Cloud and records history. No adit cloud sync is needed. Report success only from a successful server response, identifying the task and the returned change. On 409, read the current task and explain the conflict before applying a revised action; never retry with a fresh version blindly. On a network timeout, read the task to determine whether the update succeeded before retrying. On 401/403/404, explain login/permission/missing-or-reassigned task issues and stop rather than switching accounts or scope automatically.
+The update writes directly to Cloud and records history. No adit cloud sync is needed. Report success only from a successful server response, identifying the task and the returned change. On 409 the error text says which case applies: the task changed since it was read (read it again, explain the difference, then decide), or the task is done and its owner, dates and estimate are frozen (do not retry that change). Never retry with a fresh version blindly. On a network timeout, read the task to determine whether the update succeeded before retrying. On 401 the login is invalid or expired; on 403 the login is fine but the permission is missing and the error text names the rule; on 404 the task is missing, deleted, archived or reassigned. Explain and stop rather than switching accounts or scope automatically.
 `;
 
 export type SkillInstallResult = { installed: string[]; unchanged: string[]; skipped: string[]; errors: string[] };
