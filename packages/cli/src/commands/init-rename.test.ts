@@ -30,6 +30,8 @@ vi.mock("@varveai/adit-engine", () => ({
   getRemoteUrl: mocks.getRemoteUrl,
 }));
 
+// Skill installation writes into the real home directory; keep tests from touching it.
+vi.mock("./skills.js", () => ({ installSkillsCommand: vi.fn(() => ({ installed: [], unchanged: [], skipped: [], errors: [] })) }));
 vi.mock("@varveai/adit-hooks/adapters", () => ({
   detectPlatforms: mocks.detectPlatforms,
   detectInstalledPlatforms: mocks.detectInstalledPlatforms,

@@ -43,6 +43,8 @@ import { registerCloudCliAgentCommands } from "./commands/cloud-cli-agent.js";
 import { cloudClaudeCommand } from "./commands/cloud-claude.js";
 import { cloudCodexCommand } from "./commands/cloud-codex.js";
 import { registerCloudTaskCommands } from "./commands/cloud-tasks.js";
+import { registerCloudHistoryCommands } from "./commands/cloud-history.js";
+import { registerCloudReportCommands } from "./commands/cloud-reports.js";
 import { dbClearEventsCommand } from "./commands/db.js";
 import { perfCommand, perfClearCommand } from "./commands/perf.js";
 import { projectLinkCliHandler } from "./commands/project-link.js";
@@ -252,6 +254,8 @@ export function createProgram(): Command {
   // Cloud sync
   const cloudCmd = program.command("cloud").description("Cloud sync commands");
   registerCloudTaskCommands(cloudCmd);
+  registerCloudHistoryCommands(cloudCmd);
+  registerCloudReportCommands(cloudCmd);
 
   cloudCmd
     .command("login")

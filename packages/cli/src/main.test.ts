@@ -99,6 +99,7 @@ describe("CLI help", () => {
     expect(cloudHelp).toContain("codex [options] [cliArgs...]");
     expect(cloudHelp).toContain("link [options]");
     expect(cloudHelp).not.toContain("intent [options]");
+    for (const group of ["projects", "teams", "sessions", "commits", "usage", "reports", "team"]) expect(cloudHelp).toContain(group);
     expect(cloudHelp).not.toContain("repositories [options]");
     expect(cloudHelp).not.toContain("transcript");
   });

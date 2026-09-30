@@ -161,9 +161,9 @@ export class CloudClient {
     return this.request<T>("PATCH", path, body);
   }
 
-  /** DELETE request with auth */
-  async delete(path: string): Promise<void> {
-    await this.request<void>("DELETE", path);
+  /** DELETE request with auth; returns the JSON body when the server sends one. */
+  async delete<T = void>(path: string): Promise<T> {
+    return this.request<T>("DELETE", path);
   }
 
   /** Get the current credentials (may have been refreshed) */

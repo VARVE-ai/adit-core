@@ -12,11 +12,11 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { compareVersions, fetchLatestPublishedVersion } from "../update-check.js";
 import { CLI_VERSION } from "../version.js";
-import { installTaskSkillCommand } from "./task-skill.js";
+import { installSkillsCommand } from "./skills.js";
 
 export function installUpgradedTaskSkill() {
   try {
-    execFileSync(process.execPath, [resolve(dirname(realpathSync(process.argv[1])), "install-task-skill.js")], { stdio: "inherit", env: process.env });
+    execFileSync(process.execPath, [resolve(dirname(realpathSync(process.argv[1])), "install-skills.js")], { stdio: "inherit", env: process.env });
   } catch {
     console.warn("Task skill installation failed. Run 'adit init' after fixing installation permissions.");
   }
@@ -64,7 +64,7 @@ async function upgradePackageInstall(opts?: { check?: boolean }): Promise<void> 
 
   if (latest && compareVersions(CLI_VERSION, latest) >= 0) {
     console.log(`Already up to date (v${CLI_VERSION}).`);
-    if (!opts?.check) installTaskSkillCommand();
+    if (!opts?.check) installSkillsCommand();
     return;
   }
   if (!latest) {
@@ -200,7 +200,7 @@ export async function selfUpdateCommand(opts?: {
     const latestVer = readVersionFromPackageJson(installDir);
     if (latestVer === CLI_VERSION) {
       console.log(`Already up to date (v${CLI_VERSION}).`);
-      if (!opts?.check) installTaskSkillCommand();
+      if (!opts?.check) installSkillsCommand();
       return;
     }
   }

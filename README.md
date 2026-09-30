@@ -272,6 +272,19 @@ Common timeline options include `--limit`, `--actor`, `--type`,
 | `adit cloud tasks show <taskId> --json` | Read an assigned task, permissions and current update timestamp |
 | `adit cloud tasks context <taskId> --json` | Read the task, current PRD and attachment/sketch URLs without downloading files |
 | `adit cloud tasks update <taskId> --state done --json` | Update Cloud immediately and record task history |
+| `adit cloud projects list --json` | Projects you can read: your own and the team projects your role allows |
+| `adit cloud teams list --json` | Your teams with your role (owner, lead or member) in each |
+| `adit cloud sessions current --json` | The session recorded in this directory, its unsynced events and whether Cloud has it |
+| `adit cloud sessions search <query> --from <date> --to <date> --json` | Find sessions by words in their outline titles, keywords or descriptions |
+| `adit cloud sessions list --from <date> --to <date> --json` | Sessions in a period, newest first |
+| `adit cloud sessions show <sessionId> --json` | A session's summary and outline (`current` stands for this session) |
+| `adit cloud sessions events <sessionId> --section <n> --json` | A session's events by outline section or page, truncated per field |
+| `adit cloud sessions link create <sessionId> --json` | One-hour read link for another assistant; also `status`, `renew`, `revoke` |
+| `adit cloud commits explain <sha> --json` | The prompts and responses recorded around a commit |
+| `adit cloud usage --by model --json` | Token usage and estimated cost, by model, day, session or team member |
+| `adit cloud reports daily --json` | Daily work reports as work cards with evidence |
+| `adit cloud team members --team <id> --json` | A team's members and roles |
+| `adit cloud team progress --team <id> --member <id> --query <text> --json` | A member's tasks, sessions, evidence and commits for a feature |
 
 `adit cloud link` supports `--force`, `--skip-docs`, `--skip-commits`,
 `--dry-run`, and `--json`. The same project-link flow is also exposed as
@@ -433,14 +446,22 @@ Capture begins with subsequent prompts. Deploy a Cloud version that accepts
 reply usage before upgrading Core; older Cloud versions leave usage pending
 and report a missing acknowledgement rather than silently lose it.
 
-## Task Skill
+## Skills
 
-The `adit-tasks` skill is installed automatically by `adit init`, `adit upgrade`,
-and published npm installs with lifecycle scripts enabled. It is placed in
-`~/.agents/skills/adit-tasks/SKILL.md` and `~/.claude/skills/adit-tasks/SKILL.md`.
-Already-running AI sessions may need restarting to discover it. Upgrades refresh
+Three skills are installed automatically by `adit init`, `adit upgrade`, and
+published npm installs with lifecycle scripts enabled: `adit-tasks` (the user's
+own tasks), `adit-history` (sessions, commits and read links) and
+`adit-reports` (daily and weekly reports, token usage, team progress). Each is
+placed in `~/.agents/skills/<name>/SKILL.md` and `~/.claude/skills/<name>/SKILL.md`.
+Already-running AI sessions may need restarting to discover them. Upgrades refresh
 unmodified ADIT-owned copies; custom or unrelated existing skills are not overwritten.
-If lifecycle scripts were disabled, run `adit init` to install the skill.
+If lifecycle scripts were disabled, run `adit init` to install the skills.
+
+The history and report commands work from any directory; only
+`adit cloud sessions current` reads the local project database, because the
+session recorded here and its unsynced events are only known locally. Dates are
+calendar days sent with this machine's time zone. Team queries about other
+members are allowed for owners and leads; members can only query themselves.
 
 Ask your AI assistant "What tasks do I still need to finish?" and then select a
 task to implement. The skill queries live data and keeps the real task ID,

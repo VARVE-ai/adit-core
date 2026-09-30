@@ -1,6 +1,9 @@
 import { Command, Option } from "commander";
-import { CloudClient, CloudApiError, CloudAuthError, loadCredentials, listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask, type CloudTaskPatch } from "@varveai/adit-cloud";
+import { CloudClient, CloudApiError, loadCredentials, listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask, type CloudTaskPatch } from "@varveai/adit-cloud";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
+import { describeFailure } from "./cloud-read-output.js";
+
+export { describeFailure };
 
 type Options = { json?: boolean; team?: string; project?: string; personal?: boolean; state?: string; limit?: string; offset?: string; due?: string; clearDue?: boolean; title?: string; keyPoints?: string; priority?: string; assignee?: string; expectedUpdatedAt?: string };
 
@@ -8,17 +11,6 @@ export function taskDueDate(value: string): string {
   const date = new Date(`${value}T00:00:00.000Z`);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) throw new Error("Due date must be a valid YYYY-MM-DD date");
   return date.toISOString();
-}
-
-/** The server's own reason, status and code for a failed request, falling back to the transport message. */
-export function describeFailure(error: unknown): { message: string; status?: number; code?: string } {
-  if (error instanceof CloudApiError) {
-    const body = error.body && typeof error.body === "object" ? error.body as Record<string, unknown> : {};
-    const reason = typeof body.error === "string" && body.error.trim() ? body.error.trim() : undefined;
-    return { message: reason ?? error.message, status: error.status, code: typeof body.code === "string" ? body.code : undefined };
-  }
-  if (error instanceof CloudAuthError) return { message: error.message, status: error.status, code: error.code };
-  return { message: error instanceof Error ? error.message : String(error) };
 }
 
 export function taskPatchFromOptions(options: Options): CloudTaskPatch {

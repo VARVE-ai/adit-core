@@ -107,4 +107,5 @@ export {
 } from "./project-link/index.js";
 
 export { listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask } from "./tasks.js";
+export * from "./cli-reads.js";
 export type { CloudTask, CloudTaskList, CloudTaskDetail, CloudTaskContext, CloudTaskPatch, CloudTaskState } from "./tasks.js";
