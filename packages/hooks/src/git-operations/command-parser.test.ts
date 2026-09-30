@@ -46,6 +46,55 @@ describe("parseGitCommands", () => {
     expect(parseGitCommands("echo 'not \\\ngit commit'", "/repo")).toEqual([]);
   });
 
+  it("reads a heredoc fed to `commit -F -` as the commit message", () => {
+    const command = [
+      "git add src && git commit -q -F - <<'MSG'",
+      "feat: add heredoc support  ",
+      "",
+      "",
+      "- git commit -m 'a body line, not a command'",
+      "MSG",
+      "git push origin main",
+    ].join("\n");
+    expect(parseGitCommands(command, "/repo")).toEqual([
+      { operation: "add", cwd: "/repo" },
+      {
+        operation: "commit",
+        cwd: "/repo",
+        commitMessage: "feat: add heredoc support\n\n- git commit -m 'a body line, not a command'",
+      },
+      { operation: "push", cwd: "/repo" },
+    ]);
+  });
+
+  it("gives each heredoc commit in one command its own message", () => {
+    const command = [
+      "git commit -q --file=- <<EOF",
+      "fix: first",
+      "EOF",
+      "git add -A",
+      "git commit -q -F - <<-'EOF'",
+      "\tfix: second",
+      "\tEOF",
+    ].join("\n");
+    expect(parseGitCommands(command, "/repo")).toEqual([
+      { operation: "commit", cwd: "/repo", commitMessage: "fix: first" },
+      { operation: "add", cwd: "/repo" },
+      { operation: "commit", cwd: "/repo", commitMessage: "fix: second" },
+    ]);
+  });
+
+  it("leaves the message null when the heredoc may expand or stdin is not a heredoc", () => {
+    expect(parseGitCommands("git commit -F - <<EOF\nfix: $subject\nEOF", "/repo"))
+      .toEqual([{ operation: "commit", cwd: "/repo", commitMessage: null }]);
+    expect(parseGitCommands("git commit -F - <<'EOF'\nfix: $literal\nEOF", "/repo"))
+      .toEqual([{ operation: "commit", cwd: "/repo", commitMessage: "fix: $literal" }]);
+    expect(parseGitCommands("printf 'fix: piped' | git commit -F -", "/repo"))
+      .toEqual([{ operation: "commit", cwd: "/repo", commitMessage: null }]);
+    expect(parseGitCommands("echo $((1 << 2))\ngit commit -m 'fix: shift'", "/repo"))
+      .toEqual([{ operation: "commit", cwd: "/repo", commitMessage: "fix: shift" }]);
+  });
+
   it("ignores commands that merely contain the word git", () => {
     expect(parseGitCommands("printf git && npm run git:check", "/repo")).toEqual([]);
   });
