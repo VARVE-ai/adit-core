@@ -7,10 +7,13 @@ import type { CloudProjectContext } from "../project-context.js";
 import { repositoryPayloads } from "../project-context.js";
 import { syncLinkedGitMetadata, type GitSyncResult } from "../project-link/git-sync.js";
 import { SyncEngine, type SyncResult } from "./engine.js";
+import type { RuntimeReport, UpgradeNotice } from "./runtime-report.js";
 
 export interface SyncCycleResult extends SyncResult {
   /** Null when the caller chose not to inspect Git without a new Event batch. */
   git: GitSyncResult | null;
+  upgrade?: UpgradeNotice;
+  runtimeReportError?: string;
 }
 
 export async function runSyncCycle(options: {
@@ -25,6 +28,8 @@ export async function runSyncCycle(options: {
   syncGitWhenNoBatches?: boolean;
   /** Manual commands bypass the hourly remote branch check cooldown. */
   forceRemoteBranchCheck?: boolean;
+  collectRuntimeReport?: () => Promise<RuntimeReport>;
+  runtimeClient?: Pick<CloudClient, "post">;
 }): Promise<SyncCycleResult> {
   const serverUrl = normalizeServerUrl(options.serverUrl);
   // Init changes must reach Cloud even when there are no new events or no
@@ -46,16 +51,23 @@ export async function runSyncCycle(options: {
   });
 
   const sync = await engine.sync();
-  if (sync.batches === 0 && !options.syncGitWhenNoBatches) {
-    return { ...sync, git: null };
-  }
-
-  const git = await syncLinkedGitMetadata(
+  const git = sync.batches === 0 && !options.syncGitWhenNoBatches ? null : await syncLinkedGitMetadata(
     options.db,
     options.client,
     options.projectContext,
     serverUrl,
     { forceRemoteBranchCheck: options.forceRemoteBranchCheck },
   );
-  return { ...sync, git };
+  const result: SyncCycleResult = { ...sync, git };
+  // Optional diagnostics run after business data and never fail its sync.
+  if (options.collectRuntimeReport && options.runtimeClient) {
+    try {
+      const report = await options.collectRuntimeReport();
+      const response = await options.runtimeClient.post<{ upgrade: UpgradeNotice }>("/api/sync/runtime", report);
+      if (response?.upgrade) result.upgrade = response.upgrade;
+    } catch {
+      result.runtimeReportError = "Version and diagnostic report was not uploaded. It will retry on the next sync.";
+    }
+  }
+  return result;
 }

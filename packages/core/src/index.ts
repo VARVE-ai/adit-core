@@ -138,6 +138,8 @@ export {
   type PerfStatsReport,
 } from "./perf/perf-log.js";
 
+export { recordAgentRuntime, readAgentRuntimeVersions } from "./config/runtime-agents.js";
+
 // Sync primitives
 export {
   generateId,

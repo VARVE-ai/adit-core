@@ -165,10 +165,12 @@ describe("triggerAutoSync", () => {
 
   it("does not sync when count is below threshold and last sync is recent", async () => {
     mockCountUnsyncedEvents.mockReturnValue(10);
-    await triggerAutoSync(fakeDb, PROJECT_ID);
+    const collectRuntimeReport = vi.fn();
+    await triggerAutoSync(fakeDb, PROJECT_ID, { collectRuntimeReport });
 
     expect(mockCountUnsyncedEvents).toHaveBeenCalled();
     expect(runSyncCycleFn).not.toHaveBeenCalled();
+    expect(collectRuntimeReport).not.toHaveBeenCalled();
   });
 
   it("syncs when count meets threshold", async () => {

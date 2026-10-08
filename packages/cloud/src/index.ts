@@ -68,6 +68,8 @@ export {
   type SyncBatch,
 } from "./sync/serializer.js";
 export { triggerAutoSync } from "./sync/auto-sync.js";
+export { formatUpgradeNotice } from "./sync/runtime-report.js";
+export type { RuntimeReport, UpgradeNotice } from "./sync/runtime-report.js";
 
 // Project Link
 export {

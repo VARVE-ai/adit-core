@@ -130,12 +130,16 @@ export async function dispatchHook(
             triggerAutoSync: (
               db: unknown,
               projectId: string,
-              options?: { projectRoot?: string },
+              options?: { projectRoot?: string; collectRuntimeReport?: () => Promise<import("@varveai/adit-cloud").RuntimeReport> },
             ) => Promise<void>;
           };
           // Awaited so db stays open until triggerAutoSync finishes querying and pushing.
           await cloudModule.triggerAutoSync(ctx.db, ctx.config.projectId, {
             projectRoot: ctx.config.projectRoot,
+            collectRuntimeReport: async () => {
+              const { collectRuntimeReport } = await import("../diagnostics.js");
+              return collectRuntimeReport(ctx.config, ctx.db, "hooks");
+            },
           });
         });
       } catch {

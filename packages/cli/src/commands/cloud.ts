@@ -26,6 +26,7 @@ import {
   pollForToken,
   CloudClient,
   runSyncCycle,
+  formatUpgradeNotice,
   countUnsyncedEvents,
   CloudAuthError,
   CloudNetworkError,
@@ -39,6 +40,7 @@ import type { DeviceAuthOptions } from "@varveai/adit-cloud";
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import { CLI_VERSION } from "../version.js";
+import { collectRuntimeReport } from "@varveai/adit-hooks/diagnostics";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 /**
@@ -229,11 +231,16 @@ export async function cloudSyncCommand(opts?: {
       dataDir: config.dataDir,
       syncGitWhenNoBatches: true,
       forceRemoteBranchCheck: true,
+      collectRuntimeReport: () => collectRuntimeReport(config, db, "cli", CLI_VERSION),
+      runtimeClient: new CloudClient(serverUrl, credentials, { timeoutMs: 1500, maxRetries: 0 }),
     });
 
     if (opts?.json) {
       console.log(JSON.stringify(result, null, 2));
     } else {
+      if (result.runtimeReportError) console.error(result.runtimeReportError);
+      const notice = result.upgrade ? formatUpgradeNotice(result.upgrade) : null;
+      if (notice) console.error(notice);
       if (result.batches === 0) {
         console.log("Conversation sync: already up to date.");
       } else {

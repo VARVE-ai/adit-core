@@ -301,7 +301,7 @@ describe("dispatchHook", () => {
     expect(mockTriggerAutoSync).toHaveBeenCalledWith(
       expect.anything(),
       "proj-001",
-      { projectRoot: "/test" },
+      { projectRoot: "/test", collectRuntimeReport: expect.any(Function) },
     );
   });
 
