@@ -118,7 +118,7 @@ describe("cloud task commands", () => {
     await cloudTasksCommand("update", { due: "2026-10-01", expectedUpdatedAt: updatedAt, json: true }, taskId);
     expect(JSON.parse(vi.mocked(console.log).mock.calls[0][0])).toEqual({ ok: false, error: reason, status: 409 });
     await cloudTasksCommand("update", { due: "2026-10-01", expectedUpdatedAt: updatedAt }, taskId);
-    expect(vi.mocked(console.error)).toHaveBeenCalledWith(`Task command failed (409): ${reason}`);
+    expect(vi.mocked(console.error)).toHaveBeenCalledWith(`✗ tasks update: ${reason} (409)`);
     expect(describeFailure(new CloudApiError("API error: 500 Internal Server Error", 500, "<html>"))).toEqual({ message: "API error: 500 Internal Server Error", status: 500, code: undefined });
   });
 

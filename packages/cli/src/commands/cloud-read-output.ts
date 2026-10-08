@@ -4,7 +4,8 @@
  * output that carries the server's reason, status and code.
  */
 
-import { CloudApiError, CloudAuthError, CloudClient, loadCredentials } from "@varveai/adit-cloud";
+import { CloudApiError, CloudAuthError, CloudClient, CloudNetworkError, loadCredentials } from "@varveai/adit-cloud";
+import { dim, printError, strong } from "./cli-style.js";
 
 export interface ReadCommandOptions { json?: boolean }
 
@@ -26,17 +27,56 @@ export function failureDetails(error: unknown): Record<string, unknown> {
   return rest;
 }
 
-export function reportFailure(error: unknown, options: ReadCommandOptions, label: string): void {
+/** No stored login; the message stays the one JSON callers already parse. */
+export class NotLoggedInError extends Error {
+  constructor() {
+    super("Not logged in. Run 'adit cloud login' first.");
+    this.name = "NotLoggedInError";
+  }
+}
+
+/**
+ * Print a failed read: JSON callers get the same envelope as before, people
+ * get "✗ command: reason (status code)" and what to do next. `notFoundHint`
+ * replaces the generic hint for a 404.
+ */
+export function reportFailure(error: unknown, options: ReadCommandOptions, command: string, notFoundHint?: string): void {
   const failure = describeFailure(error);
-  if (options.json) console.log(JSON.stringify({ ok: false, error: failure.message, status: failure.status, code: failure.code, ...failureDetails(error) }));
-  else console.error(`${label} failed${failure.status ? ` (${failure.status})` : ""}: ${failure.message}`);
+  if (options.json) {
+    console.log(JSON.stringify({ ok: false, error: failure.message, status: failure.status, code: failure.code, ...failureDetails(error) }));
+  } else if (error instanceof NotLoggedInError) {
+    printError(command, "not logged in to adit-cloud", `run ${strong("adit cloud login")} first`);
+  } else {
+    const tag = [failure.status, failure.code].filter(Boolean).join(" ");
+    const reason = `${failure.message.replace(/\.$/u, "")}${tag ? ` ${dim(`(${tag})`)}` : ""}`;
+    printError(command, reason, failureHint(error, failure.status, notFoundHint));
+  }
   process.exitCode = 1;
+}
+
+function failureHint(error: unknown, status: number | undefined, notFoundHint: string | undefined): string | undefined {
+  if (error instanceof CloudNetworkError) return `check ${strong("adit cloud status")}`;
+  if (status === 401 || error instanceof CloudAuthError) return `run ${strong("adit cloud login")}, then retry`;
+  if (status === 403) return "only owners and leads can read other members; ask one of them";
+  if (status === 404) return notFoundHint;
+  return undefined;
 }
 
 export function requireCloudClient(maxRetries = 2): CloudClient {
   const credentials = loadCredentials();
-  if (!credentials) throw new Error("Not logged in. Run 'adit cloud login' first.");
+  if (!credentials) throw new NotLoggedInError();
   return new CloudClient(credentials.serverUrl, credentials, { maxRetries });
+}
+
+/** "adit cloud sessions list --from 2026-09-01 --offset 50": the same command with its options. */
+export function commandWith(base: string, flags: Record<string, string | number | null | undefined>): string {
+  const parts = [base];
+  for (const [name, value] of Object.entries(flags)) {
+    if (value === undefined || value === null || value === "") continue;
+    const text = String(value);
+    parts.push(`--${name}`, /\s/u.test(text) ? `"${text}"` : text);
+  }
+  return parts.join(" ");
 }
 
 export function localTimeZone(): string {

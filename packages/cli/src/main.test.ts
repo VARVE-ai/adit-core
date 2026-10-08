@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Command } from "commander";
-import { createProgram, normalizeLegacyIntentCompleteArgs } from "./main.js";
+import { createProgram, formatParseError, normalizeLegacyIntentCompleteArgs } from "./main.js";
 
 function findCommand(program: Command, ...path: string[]): Command {
   let current = program;
@@ -44,7 +44,8 @@ describe("CLI help", () => {
     expect(help).toContain("cloud");
     expect(help).toContain("debug");
     expect(help).toContain("hook");
-    expect(help).toContain("upgrade [options]");
+    expect(help).toContain("update [options]");
+    expect(help).not.toContain("upgrade");
     expect(help).toContain("timeline|list [options]");
     expect(help).toContain("uninstall [options]");
     expect(help).toContain("help [command...]");
@@ -84,11 +85,17 @@ describe("CLI help", () => {
     expect(findCommand(createProgram(), "ls").name()).toBe("timeline");
   });
 
-  it("keeps self-update as a compatibility alias for upgrade", () => {
-    const upgradeCommand = findCommand(createProgram(), "upgrade");
+  it("names the self-update command update and keeps upgrade and self-update as aliases", () => {
+    const updateCommand = findCommand(createProgram(), "update");
 
-    expect(upgradeCommand.aliases()).toContain("self-update");
-    expect(findCommand(createProgram(), "self-update").name()).toBe("upgrade");
+    expect(updateCommand.aliases()).toEqual(["upgrade", "self-update"]);
+    expect(findCommand(createProgram(), "upgrade").name()).toBe("update");
+    expect(findCommand(createProgram(), "self-update").name()).toBe("update");
+  });
+
+  it("prints commander parse errors in the shared failure shape", () => {
+    expect(formatParseError("error: required option '--team <id>' not specified\n")).toBe("✗ required option '--team <id>' not specified\n");
+    expect(formatParseError("error: unknown command 'statsu'\n(Did you mean status?)\n")).toBe("✗ unknown command 'statsu'\n  (Did you mean status?)\n");
   });
 
   it("lists cloud coding and project commands", () => {

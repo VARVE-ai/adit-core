@@ -13,7 +13,6 @@
  */
 
 import { createInterface } from "node:readline/promises";
-import pc from "picocolors";
 import {
   closeDatabase,
   normalizeServerUrl,
@@ -24,7 +23,17 @@ import {
   loadCloudConfig,
   loadCredentials,
 } from "@varveai/adit-cloud";
-import { marks, sectionTitle } from "./cli-style.js";
+import {
+  dim,
+  formatCount,
+  formatDuration,
+  joinParts,
+  marks,
+  printLine,
+  printSection,
+  promptPrefix,
+  strong,
+} from "./cli-style.js";
 import { cloudLoginCommand } from "./cloud.js";
 import { projectLinkCliHandler } from "./project-link.js";
 
@@ -58,48 +67,48 @@ export async function runCloudSetupSection(opts: {
     ...opts.deps,
   };
 
-  console.log();
-  console.log(sectionTitle("  Cloud"));
+  printSection("Cloud");
 
   const loggedIn = deps.isLoggedIn();
   const serverUrl = deps.resolveServerUrl();
+  const server = serverHost(serverUrl);
+  const later = `run ${strong("adit cloud link")} when ready`;
 
   if (loggedIn && deps.isProjectLinked(serverUrl)) {
-    console.log(pc.dim(`  [=] Logged in (${serverUrl})`));
-    console.log(pc.dim("  [=] Project already linked"));
+    printLine(`${marks.skip} ${dim(`already linked · ${server}`)}`);
     return { linked: true };
   }
 
   if (!opts.interactive) {
-    console.log(pc.dim("  [ ] Cloud setup skipped (non-interactive) — run 'adit cloud link' to connect."));
+    printLine(`${marks.skip} ${dim(`not linked · ${later}`)}`);
     return { linked: false };
   }
 
   if (!loggedIn) {
     const wantsCloud = await deps.askYes(
-      `  Connect this project to adit-cloud (log in + link)? ${pc.dim("(Y/n):")} `,
+      `${promptPrefix()}Connect this project to adit-cloud (log in and link)? ${dim("(Y/n)")} `,
     );
     if (!wantsCloud) {
-      console.log(pc.dim("  [ ] Skipped — run 'adit cloud link' when ready."));
+      printLine(`${marks.skip} ${dim(`skipped · ${later}`)}`);
       return { linked: false };
     }
     const loginOk = await deps.login();
     if (!loginOk) {
-      console.log(`  ${marks.fail} Login not completed — everything local is done; run 'adit cloud link' later.`);
+      printLine(`${marks.fail} login not completed · everything local is done; run ${strong("adit cloud link")} later`);
       return { linked: false };
     }
   } else {
-    console.log(pc.dim(`  [=] Logged in (${serverUrl})`));
-    const wantsLink = await deps.askYes(`  Link this project to adit-cloud? ${pc.dim("(Y/n):")} `);
+    printLine(`${marks.skip} ${dim(`logged in · ${server}`)}`);
+    const wantsLink = await deps.askYes(`${promptPrefix()}Link this project to adit-cloud? ${dim("(Y/n)")} `);
     if (!wantsLink) {
-      console.log(pc.dim("  [ ] Skipped — run 'adit cloud link' when ready."));
+      printLine(`${marks.skip} ${dim(`skipped · ${later}`)}`);
       return { linked: false };
     }
   }
 
   const linkOk = await deps.link();
   if (!linkOk) {
-    console.log(`  ${marks.fail} Link failed — everything local is done; run 'adit cloud link' to retry.`);
+    printLine(`${marks.fail} link failed · everything local is done; run ${strong("adit cloud link")} to retry`);
     return { linked: false };
   }
   return { linked: true };
@@ -115,7 +124,7 @@ async function runEmbeddedLink(): Promise<boolean> {
     result = await projectLinkCliHandler({
       silent: true,
       onStepComplete: (step) => {
-        console.log(`  ${marks.ok} ${step.step} ${pc.dim(`(${formatDuration(step.durationMs)})`)}`);
+        printLine(`${marks.ok} ${step.step} ${dim(formatDuration(step.durationMs))}`);
       },
     });
   } catch {
@@ -126,14 +135,14 @@ async function runEmbeddedLink(): Promise<boolean> {
   process.exitCode = previousExitCode;
   if (failed || result === null) return false;
 
-  const stats = `${result.branchCount} branches · ${result.commitCount} commits · ${result.documentCount} documents`;
-  console.log(
-    `  ${marks.ok} Linked: ${pc.bold(result.projectName)} ${pc.dim(`— ${stats} (${formatDuration(result.totalDurationMs)})`)}`,
-  );
+  printLine(`${marks.ok} linked ${strong(result.projectName)} ${dim("·")} ${joinParts([
+    `${formatCount(result.branchCount)} branches`,
+    `${formatCount(result.commitCount)} commits`,
+    `${formatCount(result.documentCount)} documents`,
+    formatDuration(result.totalDurationMs),
+  ])}`);
   if (result.similarProjects && result.similarProjects.length > 0) {
-    console.log(
-      `  ${marks.warn} ${pc.dim(`${result.similarProjects.length} existing cloud project(s) share this repository's remote — check the project list to avoid duplicates`)}`,
-    );
+    printLine(`${marks.warn} ${result.similarProjects.length} existing cloud project(s) share this repository's remote · check the project list to avoid duplicates`);
   }
   return true;
 }
@@ -143,7 +152,7 @@ async function defaultLogin(): Promise<boolean> {
   process.exitCode = undefined;
   let failed = false;
   try {
-    await cloudLoginCommand();
+    await cloudLoginCommand({ embedded: true });
     failed = process.exitCode === 1;
   } catch {
     failed = true;
@@ -181,8 +190,12 @@ function defaultIsProjectLinked(
   }
 }
 
-function formatDuration(durationMs: number): string {
-  return durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(1)}s`;
+function serverHost(serverUrl: string): string {
+  try {
+    return new URL(serverUrl).host || serverUrl;
+  } catch {
+    return serverUrl;
+  }
 }
 
 async function defaultAskYes(question: string): Promise<boolean> {

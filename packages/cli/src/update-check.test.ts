@@ -73,10 +73,7 @@ describe("update check", () => {
 
     expect(blocked).toBe(false);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(writes.join("")).toContain(
-      "A new version of ADIT is available: 1.0.0 -> 1.2.3",
-    );
-    expect(writes.join("")).toContain("Run: adit upgrade");
+    expect(writes.join("")).toBe("! Update available 1.0.0 → 1.2.3 · run adit update\n");
     expect(JSON.parse(readFileSync(cachePath, "utf8"))).toEqual({
       checkedAt: 1000,
       latestVersion: "1.2.3",
@@ -129,7 +126,7 @@ describe("update check", () => {
 
     await maybeWarnForUpdate({
       cachePath,
-      commandId: "cloud.sync",
+      commandId: "status",
       currentVersion: "1.0.0",
       env: {},
       fetchImpl,
@@ -138,7 +135,7 @@ describe("update check", () => {
     });
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(writes.join("")).toContain("1.0.0 -> 1.2.0");
+    expect(writes.join("")).toContain("1.0.0 → 1.2.0");
   });
 
   it("fails open when the version request fails", async () => {
@@ -148,7 +145,7 @@ describe("update check", () => {
 
     await maybeWarnForUpdate({
       cachePath,
-      commandId: "cloud.link",
+      commandId: "doctor",
       currentVersion: "1.0.0",
       env: {},
       fetchImpl,
@@ -159,6 +156,43 @@ describe("update check", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(writes).toEqual([]);
     expect(existsSync(cachePath)).toBe(false);
+  });
+
+  it("checks the policy but shows no notice outside init, status and doctor", async () => {
+    const fetchImpl = mockPolicyAndLatest({ latestVersion: "1.2.3" });
+
+    const blocked = await maybeWarnForUpdate({
+      cachePath,
+      commandId: "cloud.sync",
+      currentVersion: "1.0.0",
+      env: {},
+      fetchImpl,
+      now: 1000,
+      stderr,
+    });
+
+    expect(blocked).toBe(false);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(writes).toEqual([]);
+  });
+
+  it("hands the notice to the caller when asked to defer it", async () => {
+    const fetchImpl = mockPolicyAndLatest({ latestVersion: "1.2.3" });
+    const notices: string[] = [];
+
+    await maybeWarnForUpdate({
+      cachePath,
+      commandId: "init",
+      currentVersion: "1.0.0",
+      env: {},
+      fetchImpl,
+      now: 1000,
+      stderr,
+      onNotice: (notice) => notices.push(notice),
+    });
+
+    expect(writes).toEqual([]);
+    expect(notices).toEqual(["! Update available 1.0.0 → 1.2.3 · run adit update"]);
   });
 
   it("still checks blocking policy when ordinary update checks are disabled", async () => {
@@ -254,7 +288,7 @@ describe("update check", () => {
 
     await maybeWarnForUpdate({
       cachePath,
-      commandId: "cloud.status",
+      commandId: "status",
       currentVersion: "1.0.0",
       env: {},
       fetchImpl,
@@ -263,7 +297,7 @@ describe("update check", () => {
       stderr,
     });
 
-    expect(writes.join("")).toMatch(/^A new version of ADIT is available/);
+    expect(writes.join("")).toMatch(/^! Update available/);
   });
 
   it("compares semantic versions", () => {
@@ -274,18 +308,18 @@ describe("update check", () => {
     expect(compareVersions("not-a-version", "1.2.3")).toBe(0);
   });
 
-  it("formats human warnings with a leading blank line by default", () => {
+  it("formats the notice as one line naming adit update", () => {
     expect(formatUpdateWarning("1.0.0", "1.2.0")).toBe(
-      "\nA new version of ADIT is available: 1.0.0 -> 1.2.0\nRun: adit upgrade\n\n",
+      "! Update available 1.0.0 → 1.2.0 · run adit update",
     );
   });
 
   it("formats colored TTY warnings", () => {
-    const warning = formatUpdateWarning("1.0.0", "1.2.0", false, true);
+    const warning = formatUpdateWarning("1.0.0", "1.2.0", true);
 
     expect(warning).toContain("\x1B[");
-    expect(warning).toContain("adit upgrade");
-    expect(warning.endsWith("\n\n")).toBe(true);
+    expect(warning).toContain("adit update");
+    expect(warning).not.toContain("\n");
   });
 
   it("formats critical update blocks with the npm install command", () => {
@@ -295,8 +329,8 @@ describe("update check", () => {
         currentVersion: "1.0.0",
       }),
     ).toBe(
-      "\nADIT update required: version 1.0.0 is blocked by adit-cloud policy.\n" +
-        "Run: npm install -g @varveai/adit-cli@latest\n\n",
+      "✗ ADIT update required: version 1.0.0 is blocked by adit-cloud policy\n" +
+        "  run npm install -g @varveai/adit-cli@latest\n",
     );
   });
 });

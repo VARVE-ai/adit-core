@@ -1,5 +1,5 @@
 /**
- * `adit upgrade` — Update ADIT to the latest version.
+ * `adit update` — Update ADIT to the latest version (aliases: upgrade, self-update).
  *
  * Two install flavours:
  * - Source install (git clone, developers): pull, reinstall deps, rebuild.
@@ -234,7 +234,7 @@ export async function selfUpdateCommand(opts?: {
     console.error(
       "Failed to pull latest changes. You may have local modifications.",
     );
-    console.error("Try: git -C " + installDir + " stash && adit upgrade");
+    console.error("Try: git -C " + installDir + " stash && adit update");
     process.exitCode = 1;
     return;
   }

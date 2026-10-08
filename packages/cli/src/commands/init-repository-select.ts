@@ -5,6 +5,7 @@ import {
   generateRepositoryId,
   type ProjectManifestRepository,
 } from "@varveai/adit-core";
+import { marks } from "./cli-style.js";
 import { canUseInkSelect } from "./init-select-ink.js";
 import { runInkRepositorySelect } from "./init-repository-select-ink.js";
 import {
@@ -79,7 +80,7 @@ export async function promptRepositorySelection(
     const answer = await rl.question("  Select: ");
     const selection = parseRepositorySelection(answer, choices);
     if (selection === null) {
-      console.log("  [=] Unrecognized selection; keeping the current repository settings.");
+      console.log(`  ${marks.skip} Unrecognized selection; keeping the current repository settings.`);
       return repositories;
     }
     return applyRepositorySelection(repositories, selection);
