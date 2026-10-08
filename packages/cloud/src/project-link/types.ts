@@ -169,6 +169,15 @@ export interface LinkOptions {
   deletionPolicyRefreshed?: boolean;
   /** Invoked as each link step completes (per repository in workspaces). */
   onStepComplete?: (step: StepTiming) => void;
+  /** Invoked when a repository starts linking, so callers can show progress. */
+  onRepositoryStart?: (progress: { index: number; total: number; relativePath: string }) => void;
+  /** Invoked when a repository finished linking, with its counts or its failure. */
+  onRepositoryDone?: (progress: {
+    index: number;
+    total: number;
+    result?: WorkspaceRepositoryResult;
+    failure?: WorkspaceRepositoryFailure;
+  }) => void;
 }
 
 // ─── Step Timing ───────────────────────────────────────────
