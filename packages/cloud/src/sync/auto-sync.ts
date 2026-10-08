@@ -38,6 +38,7 @@ import { CloudNetworkError, CloudAuthError } from "../http/errors.js";
 import { runSyncCycle } from "./sync-cycle.js";
 import { countUnsyncedEvents } from "./serializer.js";
 import { resolveCloudProjectContext } from "../project-context.js";
+import type { RuntimeReport } from "./runtime-report.js";
 
 /**
  * Trigger a sync cycle if credentials exist and the unsynced Event
@@ -59,7 +60,7 @@ import { resolveCloudProjectContext } from "../project-context.js";
 export async function triggerAutoSync(
   db: Database.Database,
   _projectId: string,
-  options?: { projectRoot?: string },
+  options?: { projectRoot?: string; collectRuntimeReport?: () => Promise<RuntimeReport> },
 ): Promise<void> {
   const cloudConfig = loadCloudConfig();
 
@@ -153,6 +154,8 @@ export async function triggerAutoSync(
       serverUrl,
       cloudClientId: credentials.clientId,
       dataDir: projectConfig.dataDir,
+      collectRuntimeReport: options?.collectRuntimeReport,
+      runtimeClient: new CloudClient(serverUrl, credentials, { timeoutMs: 1500, maxRetries: 0 }),
     });
     if (process.env.ADIT_DEBUG && result.git?.failures.length) {
       for (const failure of result.git.failures) {
