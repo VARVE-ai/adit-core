@@ -2,8 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { formatRow, marks, printLine, printSection, shortenPaths, strong } from "./cli-style.js";
 
-export interface SkillDefinition { name: string; content: string }
+export interface SkillDefinition {
+  name: string;
+  content: string;
+  /** What the skill covers, shown when it is first installed. */
+  summary?: string;
+}
 
 export const TASK_SKILL = `---
 name: adit-tasks
@@ -234,19 +240,23 @@ State the period and timezone used, the team or project the numbers cover, the d
 `;
 
 export const SKILLS: SkillDefinition[] = [
-  { name: "adit-tasks", content: TASK_SKILL },
-  { name: "adit-history", content: HISTORY_SKILL },
-  { name: "adit-reports", content: REPORTS_SKILL },
+  { name: "adit-tasks", content: TASK_SKILL, summary: "tasks assigned to you" },
+  { name: "adit-history", content: HISTORY_SKILL, summary: "projects, sessions and commits" },
+  { name: "adit-reports", content: REPORTS_SKILL, summary: "usage, daily reports and team progress" },
 ];
 
 export type SkillInstallResult = { installed: string[]; unchanged: string[]; skipped: string[]; errors: string[] };
 
 function digest(content: string) { return createHash("sha256").update(content).digest("hex"); }
 
+function skillBases(home: string): string[] {
+  return [join(home, ".agents", "skills"), join(home, ".claude", "skills")];
+}
+
 /** Installs every ADIT skill into the Claude and agents skill directories, never overwriting a customized copy. */
 export function installSkills(home = homedir(), skills: SkillDefinition[] = SKILLS): SkillInstallResult {
   const result: SkillInstallResult = { installed: [], unchanged: [], skipped: [], errors: [] };
-  for (const base of [join(home, ".agents", "skills"), join(home, ".claude", "skills")]) {
+  for (const base of skillBases(home)) {
     for (const skill of skills) {
       const directory = join(base, skill.name);
       const file = join(directory, "SKILL.md");
@@ -284,10 +294,82 @@ export function installSkills(home = homedir(), skills: SkillDefinition[] = SKIL
   return result;
 }
 
+export type SkillState = "installed" | "updated" | "unchanged" | "customized" | "failed";
+
+export interface SkillStatus {
+  name: string;
+  summary?: string;
+  state: SkillState;
+  /** The kept file for a customized copy, the reason for a failure. */
+  detail?: string;
+}
+
+export interface SkillReport {
+  result: SkillInstallResult;
+  skills: SkillStatus[];
+}
+
+/** Install the skills and summarize each one across both skill directories. */
+export function installSkillsWithReport(home = homedir(), skills: SkillDefinition[] = SKILLS): SkillReport {
+  const files = (skill: SkillDefinition) => skillBases(home).map((base) => join(base, skill.name, "SKILL.md"));
+  const existed = new Set(skills.flatMap(files).filter((file) => existsSync(file)));
+  const result = installSkills(home, skills);
+  const entryFor = (entries: string[], file: string) => entries.find((entry) => entry === file || entry.startsWith(`${file}: `));
+
+  const statuses = skills.map((skill): SkillStatus => {
+    const paths = files(skill);
+    const failure = paths.map((file) => entryFor(result.errors, file)).find(Boolean);
+    if (failure) return { name: skill.name, summary: skill.summary, state: "failed", detail: shortenPaths(failure) };
+    const kept = paths.map((file) => entryFor(result.skipped, file)).find(Boolean);
+    if (kept) return { name: skill.name, summary: skill.summary, state: "customized", detail: shortenPaths(kept.split(": ")[0] ?? kept) };
+    const written = paths.filter((file) => result.installed.includes(file));
+    if (written.length > 0) {
+      return { name: skill.name, summary: skill.summary, state: written.some((file) => existed.has(file)) ? "updated" : "installed" };
+    }
+    return { name: skill.name, summary: skill.summary, state: "unchanged" };
+  });
+  return { result, skills: statuses };
+}
+
+/** Problems worth counting as warnings: kept customized copies and failed installs. */
+export function skillWarnings(report: SkillReport): number {
+  return report.skills.filter((skill) => skill.state === "customized" || skill.state === "failed").length;
+}
+
+/** The "Skills" section of a command block, one row per skill. */
+export function printSkillsSection(report: SkillReport, labelWidth: number): void {
+  printSection("Skills", "~/.claude/skills", "~/.agents/skills");
+  for (const skill of report.skills) {
+    const row = {
+      installed: { mark: marks.ok, value: `installed${skill.summary ? ` · ${skill.summary}` : ""}` },
+      updated: { mark: marks.change, value: "updated" },
+      unchanged: { mark: marks.skip, value: "unchanged" },
+      customized: { mark: marks.warn, value: `kept your customized copy · ${skill.detail ?? ""}` },
+      failed: { mark: marks.fail, value: `not installed · ${skill.detail ?? ""}` },
+    }[skill.state];
+    printLine(formatRow({ mark: row.mark, label: skill.name, value: row.value }, labelWidth));
+  }
+  const installed = report.skills.filter((skill) => skill.state === "installed").length;
+  const updated = report.skills.filter((skill) => skill.state === "updated").length;
+  if (installed > 0) {
+    printLine(`${marks.warn} restart a running AI session so it picks up the new skills`);
+  } else if (updated > 0) {
+    printLine(`${marks.warn} restart a running AI session so it picks up the updated ${updated === 1 ? "skill" : "skills"}`);
+  }
+}
+
+/** Install the skills and print one line per skill (used by update and the package postinstall). */
 export function installSkillsCommand(): SkillInstallResult {
-  const result = installSkills();
-  console.log(`ADIT skills: ${result.installed.length} installed/updated, ${result.unchanged.length} unchanged.`);
-  for (const warning of [...result.skipped, ...result.errors]) console.warn(`Skills: ${warning}`);
-  if (result.installed.length) console.log("Restart an already running AI session if it does not discover the new skills.");
-  return result;
+  const report = installSkillsWithReport();
+  for (const skill of report.skills) {
+    const mark = { installed: marks.ok, updated: marks.change, unchanged: marks.skip, customized: marks.warn, failed: marks.fail }[skill.state];
+    const text = skill.state === "customized"
+      ? `kept your customized copy · ${skill.detail ?? ""}`
+      : skill.state === "failed"
+        ? `not installed · ${skill.detail ?? ""}`
+        : skill.state;
+    console.log(`${mark} ${strong(skill.name)} ${text}`);
+  }
+  if (report.result.installed.length) console.log(`${marks.warn} restart a running AI session so it picks up the new skills`);
+  return report.result;
 }

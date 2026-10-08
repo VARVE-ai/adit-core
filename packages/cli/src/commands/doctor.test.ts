@@ -143,7 +143,7 @@ describe("doctorCommand", () => {
         .join("\n"),
     );
 
-    expect(output).toContain("Hooks config: No platforms connected — run 'adit init'");
+    expect(output).toMatch(/✗ Platforms +none connected · run adit init to connect your AI tools/);
     expect(output).not.toContain("Unknown Platform settings");
     expect(output).not.toContain("Unknown Platform support");
   });
@@ -181,10 +181,10 @@ describe("doctorCommand", () => {
         .join("\n"),
     );
 
-    expect(output).toContain("Project manifest: 1 repository");
+    expect(output).toMatch(/✓ Project manifest +1 repository/);
     // /workspace/api does not exist on disk — reported as drift, never auto-fixed
-    expect(output).toContain("missing: api — run 'adit init' to update the list");
-    expect(output).toContain("Unregistered repositories: new-service — run 'adit init' to add them");
+    expect(output).toMatch(/✗ Repositories +missing: api · run adit init to update the list/);
+    expect(output).toMatch(/! Unregistered +new-service · run adit init to add them/);
     expect(output).not.toContain("git check skipped");
   });
 
@@ -222,8 +222,8 @@ describe("doctorCommand", () => {
         .join("\n"),
     );
 
-    expect(output).toContain("Hooks config: Claude Code: OK");
-    expect(output).not.toContain("Codex:");
+    expect(output).toMatch(/✓ Claude Code hooks +all hooks registered/);
+    expect(output).not.toContain("Codex");
   });
 });
 

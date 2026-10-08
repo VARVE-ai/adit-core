@@ -37,8 +37,12 @@ vi.mock("./init-cloud-setup.js", () => ({
 }));
 
 import { initCommand } from "./init.js";
-import { installSkillsCommand } from "./skills.js";
-vi.mock("./skills.js", () => ({ installSkillsCommand: vi.fn() }));
+import { installSkillsWithReport } from "./skills.js";
+vi.mock("./skills.js", () => ({
+  installSkillsWithReport: vi.fn(() => ({ result: { installed: [], unchanged: [], skipped: [], errors: [] }, skills: [] })),
+  printSkillsSection: vi.fn(),
+  skillWarnings: vi.fn(() => 0),
+}));
 
 describe("initCommand", () => {
   let root: string;
@@ -75,7 +79,7 @@ describe("initCommand", () => {
     mkdirSync(join(root, "web", ".git"), { recursive: true });
 
     await initCommand({ cwd: root, multiRepo: true });
-    expect(installSkillsCommand).toHaveBeenCalledOnce();
+    expect(installSkillsWithReport).toHaveBeenCalledOnce();
 
     const manifest = readProjectManifest(root)!;
     expect(manifest.schemaVersion).toBe(3);
@@ -98,7 +102,7 @@ describe("initCommand", () => {
     await initCommand({ cwd: root, multiRepo: true });
 
     const output = vi.mocked(console.log).mock.calls.flat().join("\n");
-    expect(output).toContain("work across the repository is recorded");
+    expect(output).toContain("record work across the repository");
     expect(output).not.toContain("all 1 repositories");
   });
 
@@ -365,10 +369,10 @@ describe("initCommand", () => {
 
     expect(readProjectManifest(root)).toEqual(deleted);
     const output = vi.mocked(console.log).mock.calls.flat().join("\n");
-    expect(output).toContain("This project was deleted in ADIT Cloud.");
+    expect(output).toContain("This project was deleted in ADIT Cloud");
     expect(output).not.toContain("Setup");
     expect(output).not.toContain("Platforms");
-    expect(output).not.toContain("Done! ADIT is ready.");
+    expect(output).not.toContain("Ready");
   });
 
   it("updates the repository list on re-init with --multi-repo after a new repo appears", async () => {

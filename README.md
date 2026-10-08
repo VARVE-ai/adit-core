@@ -308,7 +308,7 @@ clone or on a new machine), link prints a notice — nothing is merged.
 | `adit debug db clear-events` | Clear local events, sessions, diffs, and environment snapshots |
 | `adit debug perf stats` | Show performance stats |
 | `adit debug perf clear` | Clear performance logs |
-| `adit upgrade` | Update ADIT or check for updates |
+| `adit update` | Update ADIT or check for updates (`--check`); `upgrade` and `self-update` still work as aliases |
 
 ## Interactive TUI
 
@@ -428,7 +428,8 @@ Files larger than 500 KB are skipped with a warning.
 | `ADIT_AUTH_TOKEN` | Static JWT token for CI/CD or non-interactive auth | unset |
 | `ADIT_DEBUG` | Enable debug output and the hook debug log (`$TMPDIR/adit-hook-debug.jsonl`, size-capped) | unset |
 | `ADIT_CODEX_BIN` | Override Codex binary used by cloud coding commands | unset |
-| `ADIT_INSTALL_DIR` | Override the upgrade install directory | unset |
+| `ADIT_INSTALL_DIR` | Override the `adit update` install directory | unset |
+| `ADIT_PLAIN` | Set to `1` to print command output without the ┌ │ └ frame (it is already off when output is piped); `NO_COLOR` turns colors off | unset |
 
 ## Reply Token Usage
 
@@ -448,7 +449,7 @@ and report a missing acknowledgement rather than silently lose it.
 
 ## Skills
 
-Three skills are installed automatically by `adit init`, `adit upgrade`, and
+Three skills are installed automatically by `adit init`, `adit update`, and
 published npm installs with lifecycle scripts enabled: `adit-tasks` (the user's
 own tasks), `adit-history` (sessions, commits and read links) and
 `adit-reports` (daily and weekly reports, token usage, team progress). Each is

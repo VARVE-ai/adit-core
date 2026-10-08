@@ -17,6 +17,7 @@
 
 import { createInterface } from "node:readline/promises";
 import pc from "picocolors";
+import { marks } from "./cli-style.js";
 import type { Platform } from "@varveai/adit-core";
 import { getAdapter, listAdapters } from "@varveai/adit-hooks/adapters";
 
@@ -224,7 +225,7 @@ export async function promptPlatformSelectionFallback(
     const answer = await rl.question("  Select: ");
     let selection = parseSelectionAnswer(answer, choices);
     if (selection === null) {
-      console.log(pc.dim("  [ ] Unrecognized answer — keeping the current selection."));
+      console.log(`  ${marks.skip} ${pc.dim("Unrecognized answer; keeping the current selection.")}`);
       return new Set(
         choices.filter((choice) => choice.preChecked).map((choice) => choice.platform),
       );
@@ -240,7 +241,7 @@ export async function promptPlatformSelectionFallback(
       )).trim().toLowerCase();
       if (confirm !== "y" && confirm !== "yes") {
         selection = keepDisconnectedSelection(choices, selection);
-        console.log(pc.dim("  [=] Keeping them connected."));
+        console.log(`  ${marks.skip} ${pc.dim("Keeping them connected.")}`);
       }
     }
     return selection;

@@ -39,39 +39,91 @@ import {
 import type { DeviceAuthOptions } from "@varveai/adit-cloud";
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
+import { basename } from "node:path";
 import { CLI_VERSION } from "../version.js";
 import { collectRuntimeReport } from "@varveai/adit-hooks/diagnostics";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
+import {
+  dim,
+  formatCount,
+  formatDuration,
+  formatRow,
+  inTone,
+  joinParts,
+  localDate,
+  localDateTime,
+  localMoment,
+  localTime,
+  marks,
+  plural,
+  printEnd,
+  printError,
+  printLine,
+  printRows,
+  printTitle,
+  printTransient,
+  rowLabelWidth,
+  shortId,
+  stateWord,
+  strong,
+  type Row,
+} from "./cli-style.js";
+
+function serverHost(serverUrl: string): string {
+  try {
+    return new URL(serverUrl).host || serverUrl;
+  } catch {
+    return serverUrl;
+  }
+}
+
+/** Rows shown after every login: what being logged in uploads, and how to stop it. */
+function uploadDisclosureRows(): Row[] {
+  return [
+    {
+      label: "Uploads",
+      value: [
+        "conversation events, sessions and code diffs, automatically (as recorded, not redacted)",
+        "git metadata for linked projects, after each sync",
+        `project documents only when you run ${strong("adit cloud link")}`,
+      ].join("\n"),
+    },
+    { label: "Opt out", value: `ADIT_CLOUD_AUTO_SYNC=false, or ${strong("adit cloud logout")}` },
+  ];
+}
 
 /**
  * `adit cloud login` — Interactive device authorization flow.
+ *
+ * `embedded` renders the rows inside an already open block (adit init)
+ * instead of opening a block of its own.
  */
 export async function cloudLoginCommand(opts?: {
   server?: string;
+  embedded?: boolean;
 }): Promise<void> {
   const serverUrl = normalizeServerUrl(
     opts?.server ?? process.env.ADIT_CLOUD_URL ?? DEFAULT_SERVER_URL,
   );
   const config = loadConfig();
+  const embedded = opts?.embedded === true;
+  const fail = (reason: string, hint?: string) => {
+    if (embedded) printLine(`${marks.fail} ${reason}${hint ? dim(` · ${hint}`) : ""}`, { stream: "stderr" });
+    else printError("login", reason, hint);
+    process.exitCode = 1;
+  };
 
   // Single-server binding: reject login if already bound to a different server
   const existingCredentials = loadCredentials();
   if (existingCredentials && existingCredentials.serverUrl !== serverUrl) {
-    console.error(
-      `Already authenticated with ${existingCredentials.serverUrl}.`,
+    fail(
+      `already logged in to ${existingCredentials.serverUrl}`,
+      `a client connects to one cloud server at a time; run ${strong("adit cloud auth reset")} first, then retry`,
     );
-    console.error(
-      "A client can only be connected to one cloud server at a time.",
-    );
-    console.error(
-      "Run 'adit cloud auth reset' first to disconnect, then try again.",
-    );
-    process.exitCode = 1;
     return;
   }
 
-  console.log(`Connecting to ${serverUrl}...`);
-  console.log();
+  if (!embedded) printTitle("Login", serverHost(serverUrl));
 
   // Build machine identifier (deterministic per-machine)
   const machineId = createHash("sha256")
@@ -86,18 +138,19 @@ export async function cloudLoginCommand(opts?: {
     displayName: hostname(),
   };
 
+  const labels = rowLabelWidth([{ label: "Approval" }, ...uploadDisclosureRows()]);
   try {
     // Step 1: Request device code
     const deviceCode = await requestDeviceCode(serverUrl, authOptions);
 
-    console.log("To authenticate, open this URL in your browser:");
-    console.log(`  ${deviceCode.verificationUrl}`);
-    console.log();
-    console.log(`Then enter this code: ${deviceCode.userCode}`);
-    console.log();
-    console.log("Waiting for approval... (press Ctrl+C to cancel)");
+    printRows([
+      { label: "Open", value: strong(deviceCode.verificationUrl) },
+      { label: "Code", value: strong(deviceCode.userCode) },
+    ], labels);
+    printTransient(formatRow({ label: "Approval", value: dim("waiting for approval in the browser · press Ctrl+C to cancel") }, labels), { keepInPlain: true });
 
     // Step 2: Poll for approval
+    const started = Date.now();
     const tokenResponse = await pollForToken(
       serverUrl,
       deviceCode.deviceCode,
@@ -119,22 +172,20 @@ export async function cloudLoginCommand(opts?: {
     // Reset any error state from previous sync failures
     clearSyncErrors();
 
-    console.log();
-    console.log("Authenticated successfully.");
-    console.log(`Client ID: ${tokenResponse.clientId}`);
-    console.log("Credentials saved to ~/.adit/cloud-credentials.json");
-    printUploadDisclosure();
+    printRows([{ label: "Approval", value: joinParts([stateWord("approved"), formatDuration(Date.now() - started)]) }], labels);
+    printLine();
+    printRows(uploadDisclosureRows(), labels);
+    const done = joinParts([hostname(), `client ${shortId(tokenResponse.clientId, 8)}`, "saved to ~/.adit/cloud-credentials.json"]);
+    if (embedded) printLine(`${marks.ok} logged in ${dim("·")} ${done}`);
+    else printEnd(`${marks.ok} Logged in ${dim("·")} ${done}`);
   } catch (error) {
     if (error instanceof CloudApiError) {
-      console.error(`Login failed: ${error.message}`);
+      fail(`login failed: ${error.message}`, `run ${strong("adit cloud login")} to try again`);
     } else if (error instanceof CloudNetworkError) {
-      console.error(`Cannot reach ${serverUrl}: ${error.message}`);
+      fail(`cannot reach ${serverUrl}: ${error.message}`, "check your network connection, then retry");
     } else {
-      console.error(
-        `Login failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      fail(`login failed: ${error instanceof Error ? error.message : String(error)}`, `run ${strong("adit cloud login")} to try again`);
     }
-    process.exitCode = 1;
   }
 }
 
@@ -198,7 +249,7 @@ export async function cloudSyncCommand(opts?: {
     if (opts?.json) {
       console.log(JSON.stringify({ error: msg }));
     } else {
-      console.error(msg);
+      printError("sync", "not logged in to adit-cloud", `run ${strong("adit cloud login")} (or ${strong("adit cloud login --token <jwt>")}) first`);
     }
     process.exitCode = 1;
     return;
@@ -214,9 +265,11 @@ export async function cloudSyncCommand(opts?: {
   if (!config) return;
 
   if (!opts?.json) {
-    console.log(`Syncing with ${serverUrl}...`);
+    printTitle("Sync", serverHost(serverUrl));
+    printTransient(dim("pushing conversation records, then linked git metadata…"));
   }
 
+  const started = Date.now();
   const db = openDatabase(config.dbPath);
   try {
     const client = new CloudClient(serverUrl, credentials);
@@ -241,40 +294,66 @@ export async function cloudSyncCommand(opts?: {
       if (result.runtimeReportError) console.error(result.runtimeReportError);
       const notice = result.upgrade ? formatUpgradeNotice(result.upgrade) : null;
       if (notice) console.error(notice);
-      if (result.batches === 0) {
-        console.log("Conversation sync: already up to date.");
-      } else {
-        console.log(
-          `Sync complete: ${result.accepted} accepted, ${result.duplicates} duplicates, ${result.conflicts.length} conflicts (${result.batches} batch${result.batches !== 1 ? "es" : ""})`,
-        );
-      }
+      const rows: Row[] = [{
+        label: "Conversations",
+        value: result.batches === 0
+          ? dim("nothing to push")
+          : joinParts([
+              `${formatCount(result.accepted)} accepted`,
+              `${formatCount(result.duplicates)} duplicates`,
+              result.conflicts.length > 0 ? inTone("warning", `${result.conflicts.length} conflicts`) : "0 conflicts",
+              plural(result.batches, "batch", "batches"),
+            ]),
+      }];
+      let problems = 0;
+      let uploaded = result.batches > 0;
       if (result.git) {
-        const unchanged = result.git.skips.filter(
-          (skip) => skip.reason === "unchanged",
-        ).length;
-        const notLinked = result.git.skips.filter(
-          (skip) => skip.reason === "not-linked",
-        ).length;
-        console.log(
-          `Git sync: ${result.git.commitsUploaded} commits, ${result.git.branchesUploaded} branches; ${result.git.repositoriesUpdated} updated, ${unchanged} unchanged, ${notLinked} not linked.`,
-        );
-        for (const skip of result.git.skips) {
+        const git = result.git;
+        const unchanged = git.skips.filter((skip) => skip.reason === "unchanged").length;
+        const notLinked = git.skips.filter((skip) => skip.reason === "not-linked").length;
+        uploaded ||= git.repositoriesUpdated > 0;
+        rows.push({
+          label: "Git metadata",
+          value: git.repositoriesUpdated > 0
+            ? joinParts([
+                `${plural(git.repositoriesUpdated, "repository", "repositories")} updated`,
+                `${formatCount(git.commitsUploaded)} commits`,
+                `${formatCount(git.branchesUploaded)} branches`,
+                unchanged > 0 ? `${unchanged} unchanged` : null,
+                notLinked > 0 ? `${notLinked} not linked` : null,
+              ])
+            : joinParts([
+                unchanged > 0 ? `${plural(unchanged, "repository", "repositories")} unchanged` : null,
+                notLinked > 0 ? `${notLinked} not linked` : null,
+                "nothing to upload",
+              ]),
+        });
+        printRows(rows);
+        for (const skip of git.skips) {
           if (skip.reason === "not-linked") {
-            console.error(
-              `Git sync skipped for ${skip.relativePath}: ${skip.message}`,
-            );
+            problems += 1;
+            printLine(`${marks.warn} ${skip.relativePath} not linked · ${skip.message}`, { stream: "stderr" });
           }
         }
-        for (const failure of result.git.failures) {
-          console.error(
-            `Git sync failed for ${failure.relativePath}: ${failure.message}`,
-          );
+        for (const failure of git.failures) {
+          problems += 1;
+          printLine(`${marks.fail} git sync failed for ${failure.relativePath} · ${failure.message}`, { stream: "stderr" });
         }
-        for (const warning of result.git.warnings) {
-          console.error(
-            `Remote branch check warning for ${warning.relativePath}: ${warning.message}. Keeping the last successful snapshot.`,
-          );
+        for (const warning of git.warnings) {
+          problems += 1;
+          printLine(`${marks.warn} remote branch check for ${warning.relativePath} · ${warning.message}; kept the last good snapshot`, { stream: "stderr" });
         }
+      } else {
+        printRows(rows);
+      }
+
+      const elapsed = formatDuration(Date.now() - started);
+      if (problems > 0) {
+        printEnd(`${marks.warn} Synced with ${plural(problems, "problem")} · ${elapsed}`);
+      } else if (uploaded) {
+        printEnd(`${marks.ok} Synced ${dim("·")} ${joinParts([result.newSyncCursor ? `cursor ${shortId(result.newSyncCursor)}` : null, elapsed])}`);
+      } else {
+        printEnd(`${marks.ok} Already up to date ${dim(`· checked ${localTime(new Date().toISOString())}`)}`);
       }
     }
   } catch (error) {
@@ -287,8 +366,12 @@ export async function cloudSyncCommand(opts?: {
 
     if (opts?.json) {
       console.log(JSON.stringify({ error: msg }));
+    } else if (error instanceof CloudAuthError) {
+      printError("sync", `authentication failed: ${error.message}`, `run ${strong("adit cloud login")}, then retry`);
+    } else if (error instanceof CloudNetworkError) {
+      printError("sync", `network error: ${error.message}`, "check your connection and retry; auto-sync also retries on its own");
     } else {
-      console.error(msg);
+      printError("sync", `sync failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     process.exitCode = 1;
   } finally {
@@ -403,14 +486,10 @@ export async function cloudStatusCommand(opts?: {
     return;
   }
 
-  console.log("Cloud Sync Status");
-  console.log("==================");
-  console.log();
   const effectiveServerUrl = cloudConfig.serverUrl ?? credentials?.serverUrl ?? null;
-  console.log(`Server:       ${effectiveServerUrl ?? "(not configured)"}`);
-  console.log(`Enabled:      ${cloudConfig.enabled ? "yes" : "no"}`);
-  console.log(`Auto-sync:    ${cloudConfig.autoSync ? "yes" : "no"}`);
-  console.log(`Logged in:    ${credentials ? "yes (local credentials present)" : "no"}`);
+  const now = new Date().toISOString();
+  const rows: Row[] = [];
+  const unsynced = status.unsyncedRecords;
 
   if (credentials) {
     const authType = credentials.authType ?? "device";
@@ -418,116 +497,97 @@ export async function cloudStatusCommand(opts?: {
     const refreshStatus = status.refreshToken as {
       valid?: boolean;
       reason?: string;
-      status?: number;
       expiresAt?: string;
-      message?: string;
+      client?: { displayName?: string | null } | null;
     } | undefined;
-    console.log(`Auth type:    ${authType}`);
-    console.log(`Client ID:    ${credentials.clientId}`);
+    rows.push({
+      label: "Account",
+      value: joinParts([authType, refreshStatus?.client?.displayName ?? null, `client ${shortId(credentials.clientId, 8)}`]),
+    });
     if (authType === "token") {
-      console.log("Access token: static (never expires)");
-      console.log("Refresh token: not used");
+      rows.push({ label: "Token", value: `static ${dim("· never expires")}` });
     } else {
-      console.log(
-        `Access token: ${accessStatus?.status ?? (isTokenExpired(credentials) ? "expired" : "valid")}${accessStatus?.expiresAt ? ` (expires ${accessStatus.expiresAt})` : ""}`,
-      );
-      if (refreshStatus) {
-        const refreshLabel = refreshStatus.valid
-          ? "valid"
-          : `invalid${refreshStatus.reason ? ` (${refreshStatus.reason})` : ""}`;
-        console.log(
-          `Refresh token: ${refreshLabel}${refreshStatus.expiresAt ? ` (expires ${refreshStatus.expiresAt})` : ""}`,
-        );
-      } else {
-        console.log("Refresh token: not checked");
-      }
+      const access = accessStatus?.status ?? (isTokenExpired(credentials) ? "expired" : "valid");
+      rows.push({
+        label: "Token",
+        value: joinParts([
+          stateWord(access),
+          accessStatus?.expiresAt ? `${access === "expired" ? "expired" : "expires"} ${localMoment(accessStatus.expiresAt, now)}` : null,
+          refreshStatus
+            ? refreshStatus.valid
+              ? `refresh until ${localDate(refreshStatus.expiresAt ?? null)}`
+              : inTone("invalid", `refresh token invalid${refreshStatus.reason ? ` (${refreshStatus.reason})` : ""}`)
+            : dim("refresh not checked"),
+        ]),
+      });
     }
-    console.log(`Auth verified: ${status.authVerified === true ? "yes" : "no"}`);
     if (credentials.lastAuthFailure) {
-      console.log(
-        `Last auth failure: ${credentials.lastAuthFailure.at} [${credentials.lastAuthFailure.stage}] ${credentials.lastAuthFailure.message}`,
-      );
+      rows.push({
+        label: "Last failure",
+        value: inTone("warning", `${localDateTime(credentials.lastAuthFailure.at)} · ${credentials.lastAuthFailure.stage} · ${credentials.lastAuthFailure.message}`),
+      });
     }
+  }
+  if (status.serverOnline === false) {
+    rows.push({ label: "Server", value: `${stateWord("offline")} ${dim(`· ${String(status.serverError ?? "")}`)}` });
+  }
+  if (!cloudConfig.enabled || !cloudConfig.autoSync) {
+    rows.push({ label: "Auto-sync", value: `off ${dim(!cloudConfig.enabled ? "(ADIT_CLOUD_ENABLED=false)" : "(ADIT_CLOUD_AUTO_SYNC=false)")}` });
   }
 
-  // Server reachability
-  if (status.serverOnline === true) {
-    console.log(`Server:       \x1b[32monline\x1b[0m`);
-  } else if (status.serverOnline === false) {
-    console.log(`Server:       \x1b[31moffline\x1b[0m (${status.serverError})`);
-  }
+  rows.push({ label: "Project", value: joinParts([strong(basename(config.projectRoot)), config.projectId]) });
 
   const syncState = status.syncState as {
     lastSyncedEventId: string | null;
     lastSyncedAt: string | null;
     syncVersion: number;
   } | null;
+  rows.push({
+    label: "Last sync",
+    value: syncState?.lastSyncedAt
+      ? joinParts([localDateTime(syncState.lastSyncedAt), `version ${syncState.syncVersion}`])
+      : "never",
+  });
 
-  if (syncState) {
-    console.log(
-      `Last sync:    ${syncState.lastSyncedAt ?? "never"}`,
-    );
-    console.log(
-      `Cursor:       ${syncState.lastSyncedEventId ?? "none"}`,
-    );
-    console.log(`Sync version: ${syncState.syncVersion}`);
-  } else {
-    console.log("Last sync:    never");
-  }
-
-  // Show remote cursor comparison when server is online
+  // Show the remote cursor only when it differs from the local one.
   const remoteStatus = status.remoteStatus as {
     lastSyncedEventId: string | null;
-    syncVersion: number;
-    lastSyncedAt: string | null;
-    projectCursors?: Record<string, {
-      lastSyncedEventId: string | null;
-      lastSyncedAt: string | null;
-    }>;
+    projectCursors?: Record<string, { lastSyncedEventId: string | null }>;
   } | undefined;
   if (remoteStatus) {
     const localCursor = syncState?.lastSyncedEventId ?? null;
-    // Prefer per-project cursor when available
-    const projectEntry = config.projectId
-      ? remoteStatus.projectCursors?.[config.projectId]
-      : undefined;
-    const remoteCursor = projectEntry !== undefined
-      ? projectEntry.lastSyncedEventId
-      : remoteStatus.lastSyncedEventId;
-    const cursorSource = projectEntry !== undefined ? "project" : "global";
-
+    const projectEntry = config.projectId ? remoteStatus.projectCursors?.[config.projectId] : undefined;
+    const remoteCursor = projectEntry !== undefined ? projectEntry.lastSyncedEventId : remoteStatus.lastSyncedEventId;
     if (localCursor !== remoteCursor) {
-      console.log(
-        `Remote cursor: ${remoteCursor ?? "none"} (${cursorSource}, differs from local)`,
-      );
-    }
-    if (projectEntry !== undefined) {
-      console.log(`Project:      ${config.projectId}`);
+      rows.push({
+        label: "Cursor",
+        value: inTone("warning", `local ${localCursor ? shortId(localCursor) : "none"} · server ${remoteCursor ? shortId(remoteCursor) : "none"} (${projectEntry !== undefined ? "project" : "global"})`),
+      });
     }
   }
 
-  console.log(`Unsynced:     ${status.unsyncedRecords} records`);
+  rows.push({
+    label: "Unsynced",
+    value: typeof unsynced === "number"
+      ? unsynced > 0 ? inTone("unsynced", plural(unsynced, "record")) : "0 records"
+      : String(unsynced ?? "unknown"),
+  });
 
-  // Actionable hints
-  if (status.serverOnline === false) {
-    console.log();
-    console.log(
-      "The cloud server is not reachable. Auto-sync will resume when the server is back online.",
-    );
-    const lastAuthFailure = credentials?.lastAuthFailure;
-    if (lastAuthFailure) {
-      console.log(`Last auth failure: ${lastAuthFailure.message}`);
-    }
-    console.log("To retry manually: adit cloud sync");
-  } else if (
-    status.serverOnline === true &&
-    typeof status.unsyncedRecords === "number" &&
-    status.unsyncedRecords > 0
-  ) {
-    console.log();
-    console.log(
-      `${status.unsyncedRecords} records pending. Run 'adit cloud sync' to push now.`,
-    );
+  printTitle(
+    "Cloud",
+    effectiveServerUrl ? serverHost(effectiveServerUrl) : "no server configured",
+    !credentials ? "not logged in" : status.serverOnline === true ? stateWord("online") : status.serverOnline === false ? stateWord("offline") : null,
+  );
+  printRows(rows);
+
+  if (!credentials) {
+    printEnd(`${marks.skip} Not logged in · run ${strong("adit cloud login")}`);
+  } else if (status.serverOnline === false) {
+    printEnd(`${marks.warn} Server not reachable · auto-sync resumes when it is back; retry now with ${strong("adit cloud sync")}`);
+  } else if (typeof unsynced === "number" && unsynced > 0) {
+    printEnd(`${marks.warn} ${plural(unsynced, "record")} pending · run ${strong("adit cloud sync")}`);
+  } else {
+    printEnd(`${marks.ok} In sync`);
   }
 }
 
@@ -544,12 +604,13 @@ export async function cloudAuthTokenCommand(
     opts?.server ?? process.env.ADIT_CLOUD_URL ?? DEFAULT_SERVER_URL;
   const config = loadConfig();
 
+  printTitle("Login", serverHost(serverUrl), "static token");
+  const rows: Row[] = [];
+
   // If device (login) credentials already exist, warn but allow override
   const existingCredentials = loadCredentials();
   if (existingCredentials && existingCredentials.authType !== "token") {
-    console.log(
-      "Replacing existing login credentials with static token.",
-    );
+    rows.push({ label: "Replaced", value: "the previous device login" });
   }
 
   // Save credentials with local clientId initially
@@ -564,61 +625,43 @@ export async function cloudAuthTokenCommand(
   saveCredentials(credentials);
 
   // Verify token against the server and retrieve server-assigned clientId
+  let verified = false;
   try {
     const client = new CloudClient(serverUrl, credentials);
     const status = await client.get<{ clientId: string }>(
       "/api/sync/status",
     );
+    verified = true;
     if (status.clientId && status.clientId !== config.clientId) {
       // Update with server-assigned clientId
       saveCredentials({ ...credentials, clientId: status.clientId });
-      console.log("Token verified successfully.");
-      console.log(`Server:    ${serverUrl}`);
-      console.log(`Client ID: ${status.clientId} (server-assigned)`);
+      rows.push({ label: "Token", value: joinParts([stateWord("valid"), `client ${shortId(status.clientId, 8)} (assigned by the server)`]) });
     } else {
-      console.log("Token verified successfully.");
-      console.log(`Server:    ${serverUrl}`);
-      console.log(`Client ID: ${config.clientId}`);
+      rows.push({ label: "Token", value: joinParts([stateWord("valid"), `client ${shortId(config.clientId, 8)}`]) });
     }
   } catch (error) {
     // Token saved but verification failed — still usable, warn user
-    if (error instanceof CloudAuthError) {
-      console.warn(
-        `Warning: Token verification failed (${error.message}). The token may be invalid.`,
-      );
-    } else if (error instanceof CloudNetworkError) {
-      console.warn(
-        `Warning: Could not reach ${serverUrl} to verify token. Token saved anyway.`,
-      );
-    } else {
-      console.warn(
-        `Warning: Token verification failed. Token saved anyway.`,
-      );
-    }
-    console.log(`Server:    ${serverUrl}`);
-    console.log(`Client ID: ${config.clientId}`);
+    const reason = error instanceof CloudAuthError
+      ? `rejected: ${error.message}; the token may be invalid`
+      : error instanceof CloudNetworkError
+        ? `could not reach ${serverUrl} to verify it`
+        : "verification failed";
+    rows.push({ label: "Token", value: inTone("warning", `${reason} · saved anyway`) });
   }
 
   // Reset any error state from previous sync failures
   clearSyncErrors();
 
-  console.log("Credentials saved to ~/.adit/cloud-credentials.json");
-  printUploadDisclosure();
-}
-
-/**
- * Tell the user exactly what logging in opts them into. Being logged in
- * is the implicit switch for several background uploads — that must not
- * be a surprise discovered later.
- */
-function printUploadDisclosure(): void {
-  console.log();
-  console.log("While logged in, ADIT automatically uploads to this server:");
-  console.log("  - Conversation events, their sessions, and code diffs (as-is, unredacted)");
-  console.log("  - Git metadata for already-linked projects, after a conversation batch syncs");
-  console.log("Project documents upload only when you run 'adit cloud link'.");
-  console.log();
-  console.log("Disable all auto-sync with ADIT_CLOUD_AUTO_SYNC=false, or run 'adit cloud logout'.");
+  const disclosure = uploadDisclosureRows();
+  const labels = rowLabelWidth([...rows, ...disclosure]);
+  printRows(rows, labels);
+  printLine();
+  printRows(disclosure, labels);
+  printEnd(
+    verified
+      ? `${marks.ok} Logged in with a static token ${dim("· saved to ~/.adit/cloud-credentials.json")}`
+      : `${marks.warn} Token saved but not verified ${dim("· saved to ~/.adit/cloud-credentials.json")}`,
+  );
 }
 
 /**

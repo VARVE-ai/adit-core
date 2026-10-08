@@ -13,6 +13,7 @@ import {
   type PerfStatsReport,
 } from "@varveai/adit-core";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
+import { arrow, dim, formatCount, marks, printEnd, printTable, printTitle, strong } from "./cli-style.js";
 
 /** Show performance stats report */
 export function perfCommand(opts?: {
@@ -61,72 +62,35 @@ export function perfClearCommand(opts?: { json?: boolean }): void {
 /** Print a formatted stats report to the terminal */
 function printReport(report: PerfStatsReport): void {
   if (report.totalEntries === 0) {
-    console.log("No performance data recorded yet.");
-    console.log("Performance logs are automatically captured during hook events.");
+    printTitle("Performance");
+    printEnd(`${marks.skip} No performance data yet · logs are captured during hook events`);
     return;
   }
 
-  console.log("ADIT Performance Report");
-  console.log("=======================");
-  console.log();
-  console.log(`Period:      ${report.fromDate} to ${report.toDate}`);
-  console.log(`Total calls: ${report.totalEntries}`);
-  console.log();
-
-  // Table header
-  const colCategory = 12;
-  const colOperation = 24;
-  const colCount = 7;
-  const colAvg = 10;
-  const colMin = 10;
-  const colMax = 10;
-  const colP95 = 10;
-  const colStddev = 10;
-  const colFail = 6;
-
-  const header = [
-    padRight("Category", colCategory),
-    padRight("Operation", colOperation),
-    padLeft("Count", colCount),
-    padLeft("Avg (ms)", colAvg),
-    padLeft("Min (ms)", colMin),
-    padLeft("Max (ms)", colMax),
-    padLeft("P95 (ms)", colP95),
-    padLeft("StdDev", colStddev),
-    padLeft("Fail", colFail),
-  ].join("  ");
-
-  console.log(header);
-  console.log("-".repeat(header.length));
-
-  for (const op of report.operations) {
-    const row = [
-      padRight(op.category, colCategory),
-      padRight(op.operation, colOperation),
-      padLeft(String(op.count), colCount),
-      padLeft(formatMs(op.avgMs), colAvg),
-      padLeft(formatMs(op.minMs), colMin),
-      padLeft(formatMs(op.maxMs), colMax),
-      padLeft(formatMs(op.p95Ms), colP95),
-      padLeft(formatMs(op.stddevMs), colStddev),
-      padLeft(op.failures > 0 ? String(op.failures) : "-", colFail),
-    ].join("  ");
-
-    console.log(row);
-  }
-}
-
-function padRight(str: string, len: number): string {
-  return str.length >= len ? str.substring(0, len) : str + " ".repeat(len - str.length);
-}
-
-function padLeft(str: string, len: number): string {
-  return str.length >= len ? str : " ".repeat(len - str.length) + str;
+  printTitle("Performance", `${report.fromDate} ${arrow()} ${report.toDate}`, `${formatCount(report.totalEntries)} calls`);
+  printTable(
+    [
+      { header: "category" },
+      { header: "operation" },
+      { header: "count", align: "right" },
+      { header: "avg", align: "right" },
+      { header: "p95", align: "right" },
+      { header: "max", align: "right" },
+      { header: "fail", align: "right" },
+    ],
+    report.operations.map((op) => [
+      op.category,
+      op.operation,
+      String(op.count),
+      formatMs(op.avgMs),
+      formatMs(op.p95Ms),
+      formatMs(op.maxMs),
+      op.failures > 0 ? String(op.failures) : "-",
+    ]),
+  );
+  printEnd(dim(`min and stddev: ${strong("adit debug perf stats --json")}`));
 }
 
 function formatMs(ms: number): string {
-  if (ms >= 1000) {
-    return (ms / 1000).toFixed(2) + "s";
-  }
-  return ms.toFixed(2);
+  return ms >= 1000 ? `${(ms / 1000).toFixed(2)} s` : `${ms.toFixed(1)} ms`;
 }

@@ -23,6 +23,8 @@ import {
 } from "@varveai/adit-core";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
 import { createTimelineManager } from "@varveai/adit-engine";
+import { strong } from "./cli-style.js";
+import { resolveLocalIdOrReport } from "./local-ids.js";
 
 /** `adit export <id>` — export a single event bundle */
 export async function exportCommand(
@@ -37,13 +39,16 @@ export async function exportCommand(
   const timeline = createTimelineManager(db, config);
 
   try {
-    const event = await timeline.get(eventId);
+    // Accepts the 10-character prefix other commands print.
+    const id = resolveLocalIdOrReport(db, "events", eventId, "export event", `find IDs with ${strong("adit timeline")}`);
+    if (!id) return;
+    const event = await timeline.get(id);
     if (!event) {
       console.error(`Event not found: ${eventId}`);
       process.exit(1);
     }
 
-    const diff = await timeline.getDiff(eventId);
+    const diff = await timeline.getDiff(event.id);
     const envSnapshot = event.envSnapshotId
       ? getEnvSnapshotById(db, event.envSnapshotId)
       : null;
@@ -82,6 +87,12 @@ export async function exportSessionCommand(
 
   try {
     let sid = sessionId;
+    if (sid) {
+      // Accepts the 10-character prefix other commands print.
+      const resolved = resolveLocalIdOrReport(db, "sessions", sid, "export session", `find the session ID with ${strong("adit status")} or ${strong("adit show <event-id>")}`);
+      if (!resolved) return;
+      sid = resolved;
+    }
     if (!sid) {
       const session = getLatestSession(db, config.projectId, config.clientId);
       if (!session) {

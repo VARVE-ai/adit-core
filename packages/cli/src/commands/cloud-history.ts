@@ -25,7 +25,6 @@ import {
   showCloudSession,
   type CloudSessionAnalysis,
   type CloudSessionDetail,
-  type CloudSessionSummary,
 } from "@varveai/adit-cloud";
 import {
   closeDatabase,
@@ -38,8 +37,34 @@ import {
   openDatabase,
   type AditSession,
 } from "@varveai/adit-core";
-import { oneLine, pageOptions, periodOptions, printJson, reportFailure, requireCloudClient, shortTime } from "./cloud-read-output.js";
-import type { CloudSessionRow } from "@varveai/adit-cloud";
+import { commandWith, pageOptions, periodOptions, printJson, reportFailure, requireCloudClient } from "./cloud-read-output.js";
+import {
+  arrow,
+  dim,
+  displayWidth,
+  formatDuration,
+  formatTable,
+  highlight,
+  inTone,
+  joinParts,
+  localDateTime,
+  localMoment,
+  marks,
+  padEnd,
+  plural,
+  printEnd,
+  printLine,
+  printRows,
+  printSection,
+  printTable,
+  printTitle,
+  shortId,
+  stateWord,
+  strong,
+  summaryColumns,
+  truncate,
+  type Row,
+} from "./cli-style.js";
 
 type ScopeOptions = { project?: string; team?: string; member?: string };
 type PeriodOptions = { from?: string; to?: string; tz?: string };
@@ -168,64 +193,207 @@ function scopeParams(options: ScopeOptions) {
   return { project: options.project, team: options.team, member: options.member };
 }
 
-function sessionLine(session: CloudSessionRow | CloudSessionSummary): string {
-  return `${session.id}  ${shortTime(session.startedAt)}  ${session.platform}  ${session.analysis.state}  ${oneLine(session.title ?? "(untitled)", 70)}`;
+const SYNC_NOT_FOUND = `run ${strong("adit cloud sync")} in the project directory, then retry`;
+const PLATFORM_NAMES: Record<string, string> = {
+  "claude-code": "Claude Code",
+  "claude-vscode": "Claude Code (VS Code)",
+  codex: "Codex",
+  cursor: "Cursor",
+  gemini: "Gemini CLI",
+  opencode: "OpenCode",
+};
+
+function platformName(platform: string): string {
+  return PLATFORM_NAMES[platform] ?? platform;
+}
+
+function personName(person: { name: string | null; email: string | null; id: string } | null | undefined): string {
+  return person?.name ?? person?.email ?? person?.id ?? "-";
+}
+
+function periodLabel(period: { from: string | null; to: string | null }): string {
+  return `${period.from ?? "any"} ${arrow()} ${period.to ?? "any"}`;
 }
 
 export async function cloudProjectsCommand(options: Json & { query?: string; kind?: string }): Promise<void> {
   try {
     const result = await listCloudProjects(requireCloudClient(), { q: options.query, kind: options.kind });
     if (options.json) return printJson(result);
-    if (!result.projects.length) return console.log("No projects are visible to you.");
-    for (const project of result.projects) console.log(`${project.id}  ${project.kind.padEnd(8)}  ${oneLine(project.name ?? project.localProjectId ?? "(unnamed)", 40)}  ${project.teams.map((team) => team.name).join(", ") || "-"}  last activity ${shortTime(project.lastActivityAt)}`);
-  } catch (error) { reportFailure(error, options, "Project listing"); }
+    const filters = [options.query ? `matching "${options.query}"` : null, options.kind ?? null];
+    if (!result.projects.length) {
+      printTitle("Projects", ...filters);
+      printEnd(`${marks.skip} No projects visible to you`);
+      return;
+    }
+    printTitle("Projects", ...filters, `${result.projects.length} visible`);
+    printTable(
+      [{ header: "id" }, { header: "kind" }, { header: "name" }, { header: "teams" }, { header: "last activity" }],
+      result.projects.map((project) => [
+        project.id,
+        project.kind,
+        project.name ? strong(truncate(project.name, 30)) : dim("(unnamed)"),
+        truncate(project.teams.map((team) => team.name).join(", "), 30) || "-",
+        localDateTime(project.lastActivityAt),
+      ]),
+    );
+    printEnd();
+  } catch (error) { reportFailure(error, options, "projects list"); }
 }
 
 export async function cloudTeamsCommand(options: Json): Promise<void> {
   try {
     const result = await listCloudTeams(requireCloudClient());
     if (options.json) return printJson(result);
-    if (!result.teams.length) return console.log("You are not a member of any team.");
-    for (const team of result.teams) console.log(`${team.id}  ${team.role.padEnd(6)}  ${oneLine(team.name, 40)}  ${team.memberCount} members  ${team.projects.length} projects`);
-  } catch (error) { reportFailure(error, options, "Team listing"); }
+    if (!result.teams.length) {
+      printTitle("Teams");
+      printEnd(`${marks.skip} You are not in any team`);
+      return;
+    }
+    printTitle("Teams", String(result.teams.length));
+    printTable(
+      [{ header: "id" }, { header: "role" }, { header: "name" }, { header: "members" }, { header: "projects" }],
+      result.teams.map((team) => [team.id, team.role, strong(truncate(team.name, 30)), String(team.memberCount), String(team.projects.length)]),
+    );
+    printEnd(dim(`members: ${strong("adit cloud team members --team <id>")}`));
+  } catch (error) { reportFailure(error, options, "teams list"); }
 }
 
 export async function cloudSessionsCurrentCommand(options: Json, deps: CurrentSessionDeps = defaultCurrentSessionDeps()): Promise<void> {
   try {
     const report = await resolveCurrentSession(deps);
     if (options.json) return printJson(report);
-    console.log(`State: ${report.state}${report.inferred ? " (latest local session)" : ""}`);
-    if (report.session) {
-      console.log(`Session: ${report.session.id}  ${report.session.platform}  started ${shortTime(report.session.startedAt)}  last event ${shortTime(report.session.lastEventAt)}`);
-      if (report.local) console.log(`Local: ${report.local.unsyncedEvents} unsynced events in this project, last sync ${shortTime(report.local.lastSyncedAt)}`);
-      if (report.cloud) console.log(`Cloud: ${report.cloud.status}${report.cloud.analysis ? `, analysis ${report.cloud.analysis.state} (${report.cloud.analysis.sections} sections)` : ""}${report.cloud.error ? ` (${report.cloud.error})` : ""}`);
+    const candidatesTable = () => printTable(
+      [{ header: "id" }, { header: "platform" }, { header: "started" }, { header: "last event" }],
+      report.candidates.map((candidate) => [candidate.id, candidate.platform, localDateTime(candidate.startedAt), localDateTime(candidate.lastEventAt)]),
+    );
+
+    if (report.state === "notInitialized") {
+      printTitle("Current session", "not initialized here");
+      printEnd(`${marks.warn} This directory is not initialized for ADIT ${dim("·")} run this in the project where the session was recorded, or ${strong("adit init")} there first`);
+      return;
     }
-    for (const candidate of report.candidates) console.log(`Candidate: ${candidate.id}  ${candidate.platform}  started ${shortTime(candidate.startedAt)}  last event ${shortTime(candidate.lastEventAt)}`);
-    if (report.hint) console.log(report.hint);
-  } catch (error) { reportFailure(error, options, "Current session"); }
+    if (report.state === "ambiguous") {
+      printTitle("Current session", "ambiguous");
+      candidatesTable();
+      printEnd(`${marks.warn} Several sessions were active in the last day ${dim("·")} pick one by ID`);
+      return;
+    }
+    if (report.state === "notRecorded" || !report.session) {
+      printTitle("Current session", "not recorded");
+      if (report.candidates.length > 0) candidatesTable();
+      printEnd(report.platformSessionId
+        ? `${marks.warn} This session is not recorded in this project ${dim("·")} run ${strong("adit doctor")} to check the hooks`
+        : `${marks.skip} No session recorded in this project yet`);
+      return;
+    }
+
+    const session = report.session;
+    const now = new Date().toISOString();
+    const rows: Row[] = [
+      {
+        label: "Started",
+        value: joinParts([localDateTime(session.startedAt), session.lastEventAt ? `last event ${localMoment(session.lastEventAt, session.startedAt)}` : null]),
+      },
+    ];
+    if (report.local) {
+      rows.push({
+        label: "Local",
+        value: joinParts([
+          report.local.unsyncedEvents > 0 ? inTone("unsynced", `${report.local.unsyncedEvents} unsynced in this project`) : "0 unsynced",
+          report.local.lastSyncedAt ? `last sync ${localMoment(report.local.lastSyncedAt, now)}` : "never synced",
+        ]),
+      });
+    }
+    const cloud = report.cloud;
+    if (cloud) {
+      const analysis = cloud.analysis ? `analysis ${stateWord(cloud.analysis.state)} · ${plural(cloud.analysis.sections, "section")}` : null;
+      rows.push({
+        label: "Cloud",
+        value: cloud.status === "ready"
+          ? joinParts([stateWord("ready"), analysis])
+          : cloud.status === "notSynced"
+            ? inTone("pending", "not synced yet")
+            : cloud.status === "unreachable"
+              ? `${stateWord("unreachable")} ${dim(`· ${cloud.error ?? ""}`)}`
+              : dim("not checked (not logged in)"),
+      });
+    }
+    if (report.inferred) rows.push({ label: "Note", value: inTone("warning", "no session ID came from the environment; this is the latest session in the project") });
+
+    printTitle("Current session", session.id, platformName(session.platform));
+    printRows(rows);
+    if (report.local && report.local.unsyncedEvents > 0) {
+      printEnd(`${marks.warn} ${plural(report.local.unsyncedEvents, "event")} not in Cloud yet ${dim("·")} run ${strong("adit cloud sync")} here, then query again`);
+    } else if (cloud?.status === "notSynced") {
+      printEnd(`${marks.warn} Cloud has not received this session yet ${dim("·")} run ${strong("adit cloud sync")}`);
+    } else if (cloud?.status === "unreachable") {
+      printEnd(`${marks.warn} Cloud unreachable ${dim("·")} check ${strong("adit cloud status")}`);
+    } else if (cloud?.status === "skipped") {
+      printEnd(`${marks.skip} Not logged in ${dim("·")} run ${strong("adit cloud login")} to compare with Cloud`);
+    } else {
+      printEnd(`${marks.ok} Cloud has this session ${dim("·")} read it: ${strong("adit cloud sessions show current")}`);
+    }
+  } catch (error) { reportFailure(error, options, "sessions current"); }
 }
 
 export async function cloudSessionsListCommand(options: Json & ScopeOptions & PeriodOptions & PageOpts): Promise<void> {
   try {
     const result = await listCloudSessions(requireCloudClient(), { ...scopeParams(options), ...periodOptions(options), ...pageOptions(options, 100) });
     if (options.json) return printJson(result);
-    console.log(`${result.sessions.length} of ${result.total} sessions (${result.scope.description}; ${result.period.from ?? "any"} to ${result.period.to ?? "any"}, ${result.period.timeZone})`);
-    for (const session of result.sessions) console.log(sessionLine(session));
-    if (result.nextOffset !== null) console.log(`More sessions: repeat with --offset ${result.nextOffset}`);
-  } catch (error) { reportFailure(error, options, "Session listing"); }
+    const scope = [result.scope.description, periodLabel(result.period), result.period.timeZone];
+    if (!result.sessions.length) {
+      printTitle("Sessions", ...scope);
+      printEnd(`${marks.skip} No sessions in this period`);
+      return;
+    }
+    printTitle("Sessions", ...scope, `${result.sessions.length} of ${result.total}`);
+    printTable(
+      [{ header: "id" }, { header: "started" }, { header: "platform" }, { header: "analysis" }, { header: "title" }],
+      result.sessions.map((session) => [
+        session.id,
+        localDateTime(session.startedAt),
+        session.platform,
+        stateWord(session.analysis.state),
+        truncate(session.title ?? "(untitled)", summaryColumns(26 + 16 + 11 + 8 + 8)),
+      ]),
+    );
+    const more = result.nextOffset !== null
+      ? `more: ${strong(commandWith("adit cloud sessions list", { ...scopeParams(options), from: options.from, to: options.to, tz: options.tz, limit: options.limit, offset: result.nextOffset }))}`
+      : null;
+    printEnd(dim([`${result.sessions.length} of ${result.total}`, more, `details: ${strong("adit cloud sessions show <id>")}`].filter(Boolean).join(" · ")));
+  } catch (error) { reportFailure(error, options, "sessions list"); }
 }
 
 export async function cloudSessionsSearchCommand(query: string, options: Json & ScopeOptions & PeriodOptions & PageOpts): Promise<void> {
   try {
     const result = await searchCloudSessions(requireCloudClient(), { q: query, ...scopeParams(options), ...periodOptions(options), ...pageOptions(options, 50) });
     if (options.json) return printJson(result);
-    console.log(`${result.sessions.length} of ${result.total} matching sessions (${result.searchMode} search${result.scopeTruncated ? ", newest sessions only" : ""})`);
-    for (const session of result.sessions) {
-      console.log(`${sessionLine(session)}  score ${session.score}`);
-      for (const match of session.matches) console.log(`    outline #${match.sequence} ${match.field}: ${oneLine(match.snippet, 100)}`);
+    const scope = [`"${query}"`, `${result.searchMode} search`, result.scopeTruncated ? "newest sessions only" : null];
+    if (!result.sessions.length) {
+      printTitle("Sessions", ...scope);
+      printEnd(`${marks.skip} No sessions match ${dim("· only outline titles, keywords and descriptions are searched")}`);
+      return;
     }
-    if (result.nextOffset !== null) console.log(`More sessions: repeat with --offset ${result.nextOffset}`);
-  } catch (error) { reportFailure(error, options, "Session search"); }
+    printTitle("Sessions", ...scope, plural(result.total, "match", "matches"));
+    const lines = formatTable(
+      [{ header: "id" }, { header: "started" }, { header: "score" }, { header: "title" }],
+      result.sessions.map((session) => [session.id, localDateTime(session.startedAt), String(session.score), truncate(session.title ?? "(untitled)", 60)]),
+    );
+    const indent = " ".repeat(displayWidth(result.sessions[0]?.id ?? "") + 2);
+    const words = query.trim().split(/\s+/u).filter(Boolean).map((word) => word.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"));
+    const mark = (text: string) => words.length > 0 ? text.replace(new RegExp(`(${words.join("|")})`, "giu"), (hit) => highlight(hit)) : text;
+    printLine(lines[0] ?? "");
+    result.sessions.forEach((session, index) => {
+      printLine(lines[index + 1] ?? "");
+      for (const match of session.matches) {
+        printLine(`${indent}${dim(padEnd(`outline #${match.sequence} ${match.field}`, 22))}${mark(truncate(match.snippet, 70))}`);
+      }
+    });
+    const more = result.nextOffset !== null
+      ? `more: ${strong(commandWith(`adit cloud sessions search "${query}"`, { ...scopeParams(options), from: options.from, to: options.to, tz: options.tz, limit: options.limit, offset: result.nextOffset }))}`
+      : null;
+    printEnd(dim([`${result.sessions.length} of ${result.total}`, more, "only outline titles, keywords and descriptions are searched"].filter(Boolean).join(" · ")));
+  } catch (error) { reportFailure(error, options, "sessions search"); }
 }
 
 export async function cloudSessionsShowCommand(sessionId: string, options: Json): Promise<void> {
@@ -233,13 +401,53 @@ export async function cloudSessionsShowCommand(sessionId: string, options: Json)
     const result = await showCloudSession(requireCloudClient(), await sessionArgument(sessionId));
     if (options.json) return printJson(result);
     const { session } = result;
-    console.log(`${session.id}  ${session.platform}  ${oneLine(session.title ?? "(untitled)", 80)}`);
-    console.log(`Project ${session.project.name ?? session.project.id}; ${shortTime(session.startedAt)} to ${shortTime(session.lastActivityAt)}; ${session.promptCount} prompts, ${session.commitCount} commits, ${session.fileCount} files; analysis ${session.analysis.state}`);
-    for (const section of result.outline) console.log(`  #${section.sequence}  ${oneLine(section.title, 70)}  (${section.eventCount} events, ${shortTime(section.startedAt)})`);
-    if (result.coverage && result.coverage.uncoveredCount > 0) console.log(`  ${result.coverage.uncoveredCount} events are not in the outline yet (${result.coverage.pendingBatches} pending, ${result.coverage.failedBatches} failed batches)`);
-    for (const commit of result.commits) console.log(`  commit ${commit.sha.slice(0, 10)}  ${oneLine(commit.message, 60)}  (${commit.matchType}, ${commit.confidence})`);
-    for (const task of result.tasks) console.log(`  task ${task.id}  ${task.progressState}  ${oneLine(task.title, 60)}`);
-  } catch (error) { reportFailure(error, options, "Session detail"); }
+    const durationMs = Date.parse(session.lastActivityAt) - Date.parse(session.startedAt);
+    const coverage = result.coverage;
+    const pending = coverage && coverage.uncoveredCount > 0
+      ? `${plural(coverage.uncoveredCount, "event")} not in the outline yet${coverage.pendingBatches || coverage.failedBatches ? ` (${joinParts([
+          coverage.pendingBatches ? inTone("pending", `${plural(coverage.pendingBatches, "batch", "batches")} pending`) : null,
+          coverage.failedBatches ? inTone("failed", `${plural(coverage.failedBatches, "batch", "batches")} failed`) : null,
+        ])})` : ""}`
+      : null;
+    const rows: Row[] = [
+      { label: "Project", value: joinParts([strong(session.project.name ?? session.project.id), platformName(session.platform), personName(session.user)]) },
+      {
+        label: "Time",
+        value: joinParts([
+          `${localDateTime(session.startedAt)} ${dim(arrow())} ${localMoment(session.lastActivityAt, session.startedAt)}`,
+          Number.isFinite(durationMs) && durationMs > 0 ? formatDuration(durationMs) : null,
+        ]),
+      },
+      { label: "Activity", value: joinParts([plural(session.promptCount, "prompt"), plural(session.commitCount, "commit"), plural(session.fileCount, "file")]) },
+      { label: "Analysis", value: joinParts([stateWord(session.analysis.state), plural(session.analysis.sections, "section"), pending]) },
+    ];
+    if (result.teams.length > 0) rows.push({ label: "Teams", value: result.teams.map((team) => team.name).join(", ") });
+
+    printTitle("Session", session.id, truncate(session.title ?? "(untitled)", 60));
+    printRows(rows);
+    if (result.outline.length > 0) {
+      printSection("Outline");
+      printTable(
+        [{ header: "#" }, { header: "start" }, { header: "events", align: "right" }, { header: "title" }],
+        result.outline.map((section) => [`#${section.sequence}`, localMoment(section.startedAt, session.startedAt), String(section.eventCount), truncate(section.title, 70)]),
+      );
+    }
+    if (result.commits.length > 0) {
+      printSection("Commits");
+      printTable(
+        [{ header: "sha" }, { header: "match" }, { header: "confidence" }, { header: "message" }],
+        result.commits.map((commit) => [shortId(commit.sha), commit.matchType, commit.confidence.toFixed(2), truncate(commit.message, 70)]),
+      );
+    }
+    if (result.tasks.length > 0) {
+      printSection("Tasks");
+      printTable(
+        [{ header: "" }, { header: "" }, { header: "" }],
+        result.tasks.map((task) => [task.id, stateWord(task.progressState), truncate(task.title, 60)]),
+      );
+    }
+    printEnd(dim(`events: ${strong(`adit cloud sessions events ${session.id}${result.outline.length > 0 ? " --section 1" : ""}`)}`));
+  } catch (error) { reportFailure(error, options, "sessions show", SYNC_NOT_FOUND); }
 }
 
 export async function cloudSessionsEventsCommand(sessionId: string, options: Json & PageOpts & { section?: string; types?: string; maxChars?: string }): Promise<void> {
@@ -249,46 +457,102 @@ export async function cloudSessionsEventsCommand(sessionId: string, options: Jso
       if (!/^\d+$/.test(value) || Number(value) > max) throw new Error(`${name} must be an integer between 0 and ${max}`);
       return Number(value);
     };
-    const result = await readCloudSessionEvents(requireCloudClient(), await sessionArgument(sessionId), {
+    const resolvedId = await sessionArgument(sessionId);
+    const result = await readCloudSessionEvents(requireCloudClient(), resolvedId, {
       section: integer(options.section, "--section", 100_000), types: options.types, maxChars: integer(options.maxChars, "--max-chars", 50_000), ...pageOptions(options, 200),
     });
     if (options.json) return printJson(result);
-    console.log(`${result.events.length} of ${result.total} events${result.section ? ` in section #${result.section.sequence} ${result.section.title}` : ""}`);
-    for (const event of result.events) {
-      console.log(`#${event.sequence}  ${shortTime(event.startedAt)}  ${event.type}${event.truncated.length ? "  (truncated)" : ""}`);
-      if (event.prompt) console.log(`  prompt: ${oneLine(event.prompt, 160)}`);
-      if (event.response) console.log(`  response: ${oneLine(event.response, 160)}`);
-      if (event.tool) console.log(`  tool: ${event.tool.name ?? "?"} ${oneLine(event.tool.input, 100)}`);
-      if (event.files.length) console.log(`  files: ${event.files.join(", ")}`);
+    const scope = [result.sessionId, result.section ? `section #${result.section.sequence} ${truncate(result.section.title, 40)}` : null, options.types ? `types ${options.types}` : null];
+    if (!result.events.length) {
+      printTitle("Events", ...scope);
+      printEnd(`${marks.skip} No events ${result.section ? "in this section" : "in this range"}`);
+      return;
     }
-    if (result.nextOffset !== null) console.log(`More events: repeat with --offset ${result.nextOffset}`);
-  } catch (error) { reportFailure(error, options, "Session events"); }
+    printTitle("Events", ...scope, `${result.events.length} of ${result.total}`);
+    const first = result.events[0]?.startedAt ?? null;
+    const width = summaryColumns(16);
+    for (const event of result.events) {
+      printLine(`${strong(`#${event.sequence}`)}  ${localMoment(event.startedAt, first, { seconds: true })}  ${event.type}${event.truncated.length ? dim(" · truncated") : ""}`);
+      const rows: Row[] = [];
+      if (event.prompt) rows.push({ label: "prompt", value: truncate(event.prompt, width) });
+      if (event.response) rows.push({ label: "response", value: truncate(event.response, width) });
+      if (event.reasoning) rows.push({ label: "reasoning", value: truncate(event.reasoning, width) });
+      if (event.tool) rows.push({ label: "tool", value: truncate(joinParts([event.tool.name ?? "?", event.tool.input]), width) });
+      if (event.files.length) rows.push({ label: "files", value: truncate(event.files.join(", "), width) });
+      if (event.git?.commitSha) rows.push({ label: "commit", value: joinParts([shortId(event.git.commitSha), event.git.branch]) });
+      for (const row of rows) printLine(`    ${dim(padEnd(row.label, 9))} ${row.value}`);
+    }
+    const more = result.nextOffset !== null
+      ? `more: ${strong(commandWith(`adit cloud sessions events ${result.sessionId}`, { section: options.section, types: options.types, "max-chars": options.maxChars, limit: options.limit, offset: result.nextOffset }))}`
+      : null;
+    printEnd(dim([`${result.events.length} of ${result.total}`, more].filter(Boolean).join(" · ")));
+  } catch (error) { reportFailure(error, options, "sessions events", SYNC_NOT_FOUND); }
 }
 
 export async function cloudSessionsLinkCommand(action: "create" | "status" | "renew" | "revoke", sessionId: string, options: Json): Promise<void> {
   try {
-    const result = await cloudSessionLink(requireCloudClient(action === "status" ? 2 : 0), await sessionArgument(sessionId), action);
+    const resolvedId = await sessionArgument(sessionId);
+    const result = await cloudSessionLink(requireCloudClient(action === "status" ? 2 : 0), resolvedId, action);
     if (options.json) return printJson(result);
-    if (result.link?.revokedAt) return console.log(`Read link revoked at ${shortTime(result.link.revokedAt)}.`);
-    if (!result.link || result.active === false) return console.log("No active read link for this session.");
-    console.log(`${result.created === false ? "Existing read link" : "Read link"}: ${result.url ?? "(URL only returned on creation)"}`);
-    console.log(`Expires ${result.link.expiresAt} (server time ${result.serverNow}).`);
-  } catch (error) { reportFailure(error, options, "Read link"); }
+    printTitle("Read link", result.sessionId);
+    const link = result.link;
+    if (!link || (result.active === false && !link.revokedAt)) {
+      printEnd(`${marks.skip} No active read link ${dim("·")} create one: ${strong(`adit cloud sessions link create ${sessionId}`)}`);
+      return;
+    }
+    const minutesLeft = Math.max(0, Math.round((Date.parse(link.expiresAt) - Date.parse(result.serverNow)) / 60_000));
+    printRows([
+      {
+        label: "Status",
+        value: link.revokedAt ? stateWord("revoked") : joinParts([stateWord("active"), `${minutesLeft} min left`]),
+      },
+      { label: "Created", value: localDateTime(link.createdAt) },
+      { label: link.revokedAt ? "Revoked" : "Expires", value: localDateTime(link.revokedAt ?? link.expiresAt) },
+      { label: "URL", value: result.url ? strong(result.url) : dim("(only shown when created)") },
+    ]);
+    if (link.revokedAt) {
+      printEnd(`${marks.change} Read link revoked`);
+    } else if (action === "create" && result.created !== false) {
+      printEnd(`${marks.ok} Read link created ${dim("· valid for one hour; share the URL only with the assistant that needs it")}`);
+    } else if (action === "create") {
+      printEnd(`${marks.skip} An active link already exists ${dim("· the URL is only shown when created; revoke it to get a new one")}`);
+    } else if (action === "renew") {
+      printEnd(`${marks.ok} Extended by one hour`);
+    } else {
+      printEnd(dim(`renew: ${strong(`adit cloud sessions link renew ${sessionId}`)}`));
+    }
+  } catch (error) { reportFailure(error, options, `sessions link ${action}`, SYNC_NOT_FOUND); }
 }
 
 export async function cloudCommitsExplainCommand(sha: string, options: Json & { project?: string }): Promise<void> {
   try {
     const result = await explainCloudCommit(requireCloudClient(), sha, { project: options.project });
     if (options.json) return printJson(result);
-    console.log(`${result.commit.sha}  ${shortTime(result.commit.committedAt)}  ${result.commit.author.name}  ${oneLine(result.commit.message, 80)}`);
-    console.log(result.note);
-    for (const attribution of result.attributions) {
-      console.log(`Session ${attribution.session.id} (${oneLine(attribution.session.title ?? "untitled", 50)}) ${attribution.matchType} ${attribution.confidence}`);
-      if (attribution.prompt) console.log(`  prompt: ${oneLine(attribution.prompt.text, 200)}`);
-      if (attribution.response) console.log(`  response: ${oneLine(attribution.response.text, 200)}`);
-      if (attribution.outlineSections.length) console.log(`  outline: ${attribution.outlineSections.map((section) => `#${section.sequence} ${section.title}`).join("; ")}`);
+    const { commit } = result;
+    printTitle("Commit", shortId(commit.sha), commit.branch, localDateTime(commit.committedAt), commit.author.name);
+    printLine(commit.message.trim());
+    if (result.attributions.length === 0) {
+      printLine();
+      printLine(`${marks.skip} ${dim("no recorded session is linked to this commit")}`);
     }
-  } catch (error) { reportFailure(error, options, "Commit explanation"); }
+    const width = summaryColumns(14);
+    for (const attribution of result.attributions) {
+      printSection(
+        `Session ${attribution.session.id}`,
+        truncate(attribution.session.title ?? "untitled", 40),
+        attribution.matchType,
+        attribution.confidence.toFixed(2),
+      );
+      const rows: Row[] = [];
+      if (attribution.prompt) rows.push({ label: "prompt", value: truncate(attribution.prompt.text, width) });
+      if (attribution.response) rows.push({ label: "response", value: truncate(attribution.response.text, width) });
+      if (attribution.outlineSections.length) {
+        rows.push({ label: "outline", value: truncate(attribution.outlineSections.map((section) => `#${section.sequence} ${section.title}`).join(" · "), width) });
+      }
+      printRows(rows);
+    }
+    printEnd(dim(result.note));
+  } catch (error) { reportFailure(error, options, "commits explain", `the commit may not be synced yet; run ${strong("adit cloud sync")} in its project`); }
 }
 
 // ─── Registration ────────────────────────────────────────────────────────────

@@ -43,11 +43,11 @@ describe("history commands", () => {
     mocks.post.mockResolvedValue({ sessionId, created: true, link: { createdAt: "2026-09-30T01:00:00.000Z", expiresAt: "2026-09-30T02:00:00.000Z", revokedAt: null }, url: "https://cloud.example/api/session-context?token=adit_ctx_x", serverNow: "2026-09-30T01:00:00.000Z" });
     await cloudSessionsLinkCommand("create", sessionId, {});
     expect(mocks.post).toHaveBeenCalledExactlyOnceWith(`/api/cli/sessions/${sessionId}/context-link`, {});
-    expect(output()[0]).toContain("token=adit_ctx_x");
+    expect(output().some((line) => line.includes("token=adit_ctx_x"))).toBe(true);
     mocks.delete.mockResolvedValue({ sessionId, action: "revoke", link: { createdAt: "2026-09-30T01:00:00.000Z", expiresAt: "2026-09-30T02:00:00.000Z", revokedAt: "2026-09-30T01:30:00.000Z" }, url: null, serverNow: "2026-09-30T01:30:00.000Z" });
     await cloudSessionsLinkCommand("revoke", sessionId, {});
     expect(mocks.delete).toHaveBeenCalledExactlyOnceWith(`/api/cli/sessions/${sessionId}/context-link`);
-    expect(output()[2]).toContain("revoked");
+    expect(output().at(-1)).toContain("Read link revoked");
   });
 
   it("relays ambiguity details from the server when explaining a commit", async () => {

@@ -8,11 +8,11 @@
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join, basename, relative } from "node:path";
-import pc from "picocolors";
 import {
   loadConfig,
   openDatabase,
   closeDatabase,
+  projectManifestPath,
 } from "@varveai/adit-core";
 import type { Platform } from "@varveai/adit-core";
 import {
@@ -27,13 +27,27 @@ import {
   readConnectedPlatforms,
   writeConnectedPlatforms,
 } from "./connected-platforms.js";
-import { marks, sectionTitle } from "./cli-style.js";
-import { installSkillsCommand } from "./skills.js";
+import {
+  dim,
+  formatRow,
+  isBlockOpen,
+  joinParts,
+  marks,
+  plural,
+  printEnd,
+  printError,
+  printLine,
+  printSection,
+  printTitle,
+  shortId,
+  strong,
+} from "./cli-style.js";
+import { installSkillsWithReport, printSkillsSection, skillWarnings } from "./skills.js";
 import { runCloudSetupSection } from "./init-cloud-setup.js";
 import {
+  BUNDLED_PLATFORMS,
   buildPlatformChoices,
   diffSelection,
-  printChoiceList,
   promptPlatformSelectionFallback,
   type PlatformChoice,
 } from "./init-platform-select.js";
@@ -73,20 +87,36 @@ export async function initCommand(opts: InitOptions): Promise<void> {
   }
 }
 
+/** Every row label in init lines up at this width ("Claude Code (VS Code)"). */
+const LABEL_WIDTH = 21;
+
+function printRow(mark: string, label: string, value: string): void {
+  printLine(formatRow({ mark, label, value }, LABEL_WIDTH));
+}
+
+/** The bundle owner whose hook configuration a companion platform shares, if any. */
+function bundleOwner(platform: Platform): Platform | null {
+  for (const [owner, companions] of Object.entries(BUNDLED_PLATFORMS)) {
+    if (companions?.includes(platform)) return owner as Platform;
+  }
+  return null;
+}
+
 async function initializeProject(opts: InitOptions): Promise<void> {
   const cwd = opts.cwd ?? process.cwd();
 
-  console.log();
-  console.log("  ADIT — AI Development Intent Tracker");
-  console.log("  =====================================");
-  console.log();
-
   const { root: projectRoot, reason } = resolveInitRoot(cwd);
   if (reason === "none") {
-    console.error("  [x] Not a git repository, and no Git repositories were found one level below.");
-    console.error("      Run 'git init' first, or run this from a directory that contains repositories.");
+    printError(
+      "init",
+      "not a Git repository, and no Git repositories were found one level below",
+      `run ${strong("git init")} first, or run ${strong("adit init")} in a directory that contains repositories`,
+    );
     process.exit(1);
   }
+
+  const alreadyInitialized = existsSync(projectManifestPath(projectRoot));
+  printTitle("Init", basename(projectRoot), alreadyInitialized ? "already initialized" : null);
 
   const analysis = await analyzeProjectLayout(projectRoot);
   const plan = await prepareProjectManifest(projectRoot, analysis, {
@@ -98,66 +128,76 @@ async function initializeProject(opts: InitOptions): Promise<void> {
   });
 
   if (plan.status === "cancelled") {
-    console.log("  Initialization cancelled. Nothing was changed.");
+    printError("init", "initialization cancelled · nothing was changed");
     process.exit(1);
   }
   if (plan.status === "failed") {
+    if (isBlockOpen()) printError("init", "init stopped · nothing was changed");
     process.exit(1);
   }
 
   const manifest = plan.manifest;
   if (manifest.cloudDeletedAt) {
+    printEnd(`${marks.warn} Project deleted in ADIT Cloud · nothing else was changed`);
     return;
   }
   const migratedFrom = plan.status === "written" ? plan.migratedFrom : null;
   const config = loadConfig(projectRoot);
   const setupRoot = config.projectRoot;
-  installSkillsCommand();
+  // Skills install first, as before; their section prints after the project rows.
+  const skills = installSkillsWithReport();
 
   // --- Step 1: Clean up if --force ---
   if (opts.force) {
-    console.log("  Removing existing hooks (--force)...");
     for (const adapter of listAdapters()) {
       if (adapter.hookMappings.length === 0) continue;
       try {
         const result = await adapter.validateInstallation(setupRoot);
         if (result.valid) {
           await adapter.uninstallHooks(setupRoot);
-          console.log(`    [~] Removed ${adapter.displayName} hooks`);
+          printRow(marks.change, adapter.displayName, "hooks removed (--force)");
         }
       } catch {
         // best-effort cleanup
       }
     }
-    console.log();
   }
 
-  // --- Step 2: Data directory & database ---
-  console.log(sectionTitle("  Setup"));
-
-  const ok = marks.ok;
+  // --- Step 2: Project, data directory & database ---
+  // The manifest write already created .adit/, so the database tells a first run apart.
+  const databaseExisted = existsSync(config.dbPath);
   mkdirSync(config.dataDir, { recursive: true });
-  console.log(`  ${ok} Data directory: ${relative(setupRoot, config.dataDir) || "."}`);
-
   const db = openDatabase(config.dbPath);
   closeDatabase(db);
-  console.log(`  ${ok} Database: ${relative(setupRoot, config.dbPath)}`);
 
-  console.log(`  ${ok} Project: ${pc.bold(basename(setupRoot))}`);
-  console.log(`  ${ok} Project ID: ${manifest.projectId}`);
-  console.log(`  ${ok} Repositories: ${manifest.repositories.length}`);
-  for (const repo of manifest.repositories) {
-    const state = repo.cloudDeletedAt
-      ? " (deleted in Cloud)"
-      : repo.syncEnabled === false
-        ? " (excluded; history kept)"
-        : "";
+  const unchanged = plan.status === "unchanged";
+  const repositoryNames = manifest.repositories.map((repo) => {
     const label = repo.relativePath === "." ? "./" : repo.relativePath;
-    console.log(pc.dim(`        - ${label}${state}`));
-  }
+    const state = repo.cloudDeletedAt ? "deleted in Cloud" : repo.syncEnabled === false ? "excluded, history kept" : null;
+    return state ? `${label} ${dim(`(${state})`)}` : label;
+  });
+  const repositoryCount = plural(manifest.repositories.length, "repository", "repositories");
+  const multiRepo = manifest.repositories.some((repo) => repo.relativePath !== ".");
+  const recordedScope = manifest.repositories.length === 1 ? "the repository" : `all ${manifest.repositories.length} repositories`;
+  printRow(
+    unchanged ? marks.skip : marks.ok,
+    "Project",
+    joinParts([
+      strong(basename(setupRoot)),
+      shortId(manifest.projectId, 8),
+      unchanged ? `${repositoryCount}, unchanged` : `${repositoryCount} (${repositoryNames.join(", ")})`,
+    ]) + (multiRepo
+      ? `\n${dim(`sessions started here record work across ${recordedScope}; a child initialized on its own keeps its own sessions`)}`
+      : ""),
+  );
   if (migratedFrom) {
-    console.log(`  ${ok} Migrated existing project — identity preserved (from ${migratedFrom}).`);
+    printRow(marks.ok, "Migrated", `identity preserved ${dim(`(from ${migratedFrom})`)}`);
   }
+  printRow(
+    databaseExisted ? marks.skip : marks.ok,
+    "Data directory",
+    `${relative(setupRoot, config.dataDir) || "."} ${dim("·")} database ${relative(setupRoot, config.dbPath)}`,
+  );
 
   // Add .adit/ to .gitignore if not already there
   const gitignorePath = join(setupRoot, ".gitignore");
@@ -165,25 +205,49 @@ async function initializeProject(opts: InitOptions): Promise<void> {
     const content = readFileSync(gitignorePath, "utf-8");
     if (!content.includes(".adit/")) {
       writeFileSync(gitignorePath, content.trimEnd() + "\n.adit/\n");
-      console.log(`  ${ok} Added .adit/ to .gitignore`);
+      printRow(marks.ok, ".gitignore", "added .adit/");
     } else {
-      console.log(pc.dim("  [=] .gitignore already includes .adit/"));
+      printRow(marks.skip, ".gitignore", dim("already includes .adit/"));
     }
   } else {
     writeFileSync(gitignorePath, ".adit/\n");
-    console.log(`  ${ok} Created .gitignore with .adit/`);
+    printRow(marks.ok, ".gitignore", "created with .adit/");
   }
 
-  // --- Step 3: Platform detection & hook installation ---
-  console.log();
-  console.log(sectionTitle("  Platforms"));
+  printSkillsSection(skills, LABEL_WIDTH);
 
+  // --- Step 3: Platform detection & hook installation ---
   const aditBinaryPath = resolveAditHookBinary();
   const installed: string[] = [];
-  const skipped: string[] = [];
+  const failed: string[] = [];
+  let warnings = skillWarnings(skills);
   const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
+  const installedRow = (platform: Platform, adapter: ReturnType<typeof getAdapter>) => {
+    const owner = bundleOwner(platform);
+    printRow(
+      marks.ok,
+      adapter.displayName,
+      owner ? `shares the ${getAdapter(owner).displayName} hooks` : `${adapter.hookMappings.length} hook events installed`,
+    );
+  };
+  const notSelectedRows = (choices: PlatformChoice[], selected: Set<Platform>) => {
+    for (const choice of choices) {
+      if (selected.has(choice.platform) || choice.connected) continue;
+      printRow(
+        marks.skip,
+        choice.displayName,
+        choice.detected
+          ? dim(`detected, not selected · connect: ${strong(`adit hook install ${choice.platform}`)}`)
+          : choice.manual
+            ? dim(`not detectable · connect: ${strong(`adit hook install ${choice.platform}`)}`)
+            : dim("not found on PATH"),
+      );
+    }
+  };
+
   if (opts.platform) {
+    printSection("Platforms");
     // Explicit platform specified — install exactly that one and record it.
     const platform = (opts.platform === "cursor" ? "claude-code" : opts.platform) as Platform;
     try {
@@ -191,12 +255,20 @@ async function initializeProject(opts: InitOptions): Promise<void> {
       await adapter.installHooks(setupRoot, aditBinaryPath);
       await addConnectedPlatforms(setupRoot, [platform]);
       installed.push(adapter.displayName);
-      console.log(`  ${marks.ok} ${adapter.displayName} ${pc.dim(`— ${adapter.hookMappings.length} hook events installed`)}`);
-      await printAdvisoryWarnings(adapter, setupRoot);
+      installedRow(platform, adapter);
+      warnings += await printAdvisoryWarnings(adapter, setupRoot);
+      for (const companion of BUNDLED_PLATFORMS[platform] ?? []) {
+        installedRow(companion, getAdapter(companion));
+      }
     } catch (err) {
-      skipped.push(platform);
-      console.log(`  ${marks.fail} ${platform} — install failed: ${(err as Error).message}`);
+      failed.push(platform);
+      printRow(marks.fail, platform, `install failed: ${(err as Error).message}`);
     }
+    const connectedNow = readConnectedPlatforms(setupRoot) ?? [];
+    notSelectedRows(
+      buildPlatformChoices({ connected: connectedNow, detected: detectInstalledPlatforms(), hasRecord: true }),
+      new Set(connectedNow),
+    );
   } else {
     // Full-list selection: every supported platform is shown; connected ones
     // are pre-checked from the record, detection is annotation (and the
@@ -207,104 +279,90 @@ async function initializeProject(opts: InitOptions): Promise<void> {
     const detected = detectInstalledPlatforms();
     const choices = buildPlatformChoices({ connected, detected, hasRecord });
 
-    console.log("  Select the AI tools to record in this project:");
-    console.log(pc.dim("  Claude Code / Cursor shares one hook configuration; Cursor does not require the Claude CLI."));
     let finalChecked: Set<Platform>;
     if (!interactive) {
       // Non-interactive runs never disconnect anything: keep the current
       // connections and add newly detected CLIs, same as before.
+      printSection("Platforms", "kept current, added newly detected");
       finalChecked = new Set([
         ...choices.filter((choice) => choice.connected).map((choice) => choice.platform),
         ...choices
           .filter((choice) => choice.detected && !choice.manual)
           .map((choice) => choice.platform),
       ]);
-      printChoiceList(choices);
-      console.log("  Non-interactive run: keeping current connections and connecting newly detected tools.");
     } else {
+      printSection("Platforms");
+      printLine("Select the AI tools to record in this project:");
+      printLine(dim("Claude Code / Cursor shares one hook configuration; Cursor does not require the Claude CLI."));
       // Both widgets confirm disconnects themselves before returning.
       finalChecked = await selectPlatforms(choices);
     }
 
-    const plan = diffSelection(choices, finalChecked);
-    for (const platform of plan.toConnect) {
+    const selection = diffSelection(choices, finalChecked);
+    for (const platform of selection.toConnect) {
       try {
         const adapter = getAdapter(platform);
         await adapter.installHooks(setupRoot, aditBinaryPath);
         installed.push(adapter.displayName);
-        console.log(`  ${marks.ok} ${adapter.displayName} ${pc.dim(`— ${adapter.hookMappings.length} hook events installed`)}`);
-        await printAdvisoryWarnings(adapter, setupRoot);
+        installedRow(platform, adapter);
+        warnings += await printAdvisoryWarnings(adapter, setupRoot);
       } catch (err) {
-        skipped.push(platform);
-        console.log(`  ${marks.fail} ${platform} — install failed: ${(err as Error).message}`);
+        failed.push(platform);
+        printRow(marks.fail, platform, `install failed: ${(err as Error).message}`);
       }
     }
-    for (const platform of plan.toDisconnect) {
+    for (const platform of selection.toDisconnect) {
       try {
         const adapter = getAdapter(platform);
         await adapter.uninstallHooks(setupRoot);
-        console.log(`  ${marks.change} ${adapter.displayName} ${pc.dim("— hooks removed")}`);
+        printRow(marks.change, adapter.displayName, "hooks removed");
       } catch (err) {
-        console.log(`  ${marks.fail} ${platform} — uninstall failed: ${(err as Error).message}`);
+        failed.push(platform);
+        printRow(marks.fail, platform, `uninstall failed: ${(err as Error).message}`);
       }
     }
     // Refreshing still-connected platforms unconditionally keeps re-running
     // init as the repair path when a hook points at a removed adit install.
-    for (const platform of plan.toRefresh) {
+    for (const platform of selection.toRefresh) {
       try {
         const adapter = getAdapter(platform);
         if (adapter.hookMappings.length === 0) continue;
         await adapter.installHooks(setupRoot, aditBinaryPath);
-        console.log(pc.dim(`  [=] ${adapter.displayName} — connected, hooks refreshed`));
-        await printAdvisoryWarnings(adapter, setupRoot);
+        printRow(marks.skip, adapter.displayName, dim("connected · hooks refreshed"));
+        warnings += await printAdvisoryWarnings(adapter, setupRoot);
       } catch (err) {
-        console.log(`  ${marks.fail} ${platform} — refresh failed: ${(err as Error).message}`);
+        failed.push(platform);
+        printRow(marks.fail, platform, `refresh failed: ${(err as Error).message}`);
       }
     }
-    writeConnectedPlatforms(setupRoot, plan.finalRecord);
-    console.log(pc.dim("  Tip: run 'adit init' any time to change these."));
+    writeConnectedPlatforms(setupRoot, selection.finalRecord);
+    notSelectedRows(choices, finalChecked);
   }
 
   // --- Cloud: optional login + link (skippable, never fails init) ---
-  const cloudResult = await runCloudSetupSection({
+  await runCloudSetupSection({
     interactive,
     projectId: manifest.projectId,
     dbPath: config.dbPath,
   });
 
   // --- Summary ---
-  console.log();
   const finalConnected = readConnectedPlatforms(setupRoot) ?? [];
+  const updatedSkills = skills.skills.filter((skill) => skill.state === "updated").length;
+  const problems = warnings + failed.length;
   if (finalConnected.length > 0 || installed.length > 0) {
-    console.log(pc.bold(pc.green("  Done! ADIT is ready.")));
-    console.log();
-    if (finalConnected.length > 0) {
-      const names = finalConnected.map((platform) => getAdapter(platform).displayName);
-      console.log(`  Connected platforms: ${names.join(", ")}`);
+    if (problems > 0) {
+      printEnd(`${marks.warn} Ready with ${plural(problems, "warning")} ${dim("·")} ${joinParts([
+        `${plural(finalConnected.length || installed.length, "platform")} connected`,
+        updatedSkills > 0 ? `${plural(updatedSkills, "skill")} updated` : null,
+      ])}`);
     } else {
-      console.log(`  Installed for: ${installed.join(", ")}`);
+      const tool = finalConnected.length > 0 ? getAdapter(finalConnected[0]!).displayName : installed[0];
+      printEnd(`${marks.ok} Ready ${dim("·")} start ${tool} ${multiRepo ? "from this directory" : "here"}, then run ${strong("adit timeline")} after your first prompt`);
     }
   } else {
-    console.log(pc.bold(pc.green("  Done! ADIT data directory is ready (not recording yet).")));
-    console.log();
-    console.log("  No AI tools connected. Re-run 'adit init' after installing one,");
-    console.log("  or run 'adit hook install <platform>' to connect one manually.");
+    printEnd(`${marks.warn} Data directory ready, not recording yet ${dim("·")} connect a tool with ${strong("adit hook install <platform>")} or re-run ${strong("adit init")}`);
   }
-  if (skipped.length > 0) {
-    console.log(`  ${pc.yellow("Skipped:")} ${skipped.join(", ")}`);
-  }
-  if (manifest.repositories.some((repo) => repo.relativePath !== ".")) {
-    const repositoryScope = manifest.repositories.length === 1
-      ? "the repository"
-      : `all ${manifest.repositories.length} repositories`;
-    console.log(pc.dim(`  Tip: start Claude Code / Codex from this directory — work across ${repositoryScope} is recorded;`));
-    console.log(pc.dim("       sessions started in an independently initialized child are recorded in that child project."));
-  }
-  if (!cloudResult.linked) {
-    console.log(`\n  ${pc.cyan("Next step:")} run ${pc.bold("adit cloud link")} to connect this project to the cloud.`);
-  }
-  console.log(`\n  ${pc.cyan("Next step:")} run ${pc.bold("'adit timeline'")} after your first prompt.`);
-  console.log();
 }
 
 /**
@@ -325,20 +383,23 @@ async function selectPlatforms(choices: PlatformChoice[]): Promise<Set<Platform>
 /**
  * Print advisory validation findings after a hook install — things a
  * reinstall cannot fix, such as Codex hooks still awaiting the user's
- * approval inside Codex (/hooks). Never fails init.
+ * approval inside Codex (/hooks). Never fails init. Returns how many.
  */
 async function printAdvisoryWarnings(
   adapter: ReturnType<typeof getAdapter>,
   setupRoot: string,
-): Promise<void> {
+): Promise<number> {
+  let count = 0;
   try {
     const result = await adapter.validateInstallation(setupRoot);
     for (const check of result.checks) {
       if (check.advisory && !check.ok) {
-        console.log(`      ${marks.warn} ${check.detail}`);
+        printLine(`    ${marks.warn} ${check.detail}`);
+        count += 1;
       }
     }
   } catch {
     // advisory only
   }
+  return count;
 }

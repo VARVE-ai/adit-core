@@ -4,12 +4,23 @@
  * Displays a compact, token-efficient table of recent events.
  */
 
-import { openDatabase, closeDatabase, type AditEvent, type Actor, type EventType } from "@varveai/adit-core";
+import { basename } from "node:path";
+import { openDatabase, closeDatabase, countEvents, type AditEvent, type Actor, type EventType } from "@varveai/adit-core";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
 import { getEventSummary } from "../utils/summary.js";
-import { padRight, formatDateTime } from "../utils/format.js";
 import { createTimelineManager } from "@varveai/adit-engine";
-import pc from "picocolors";
+import {
+  dim,
+  localDateTime,
+  marks,
+  printEnd,
+  printTable,
+  printTitle,
+  shortId,
+  strong,
+  summaryColumns,
+  truncate,
+} from "./cli-style.js";
 
 export type SortField = "ACTOR" | "TIME";
 
@@ -42,8 +53,17 @@ export async function listCommand(opts: ListCommandOptions): Promise<void> {
       });
     }
 
+    const filtered = Boolean(opts.query || opts.actor || opts.type);
+    const scope = opts.query ? `matching "${opts.query}"` : opts.actor ? `actor ${opts.actor}` : opts.type ? `type ${opts.type}` : null;
+    const projectName = basename(config.projectRoot);
+
     if (events.length === 0) {
-      console.log("No events found.");
+      if (opts.json) {
+        console.log("No events found.");
+        return;
+      }
+      printTitle("Timeline", projectName, scope);
+      printEnd(`${marks.skip} ${filtered ? "No events match" : "No events recorded yet"}`);
       return;
     }
 
@@ -57,70 +77,29 @@ export async function listCommand(opts: ListCommandOptions): Promise<void> {
       return;
     }
 
-    // Print header
-    console.log(
-      pc.bold(
-        padRight("ID", 12) +
-          padRight("ACTOR", 6) +
-          padRight("TYPE", 20) +
-          padRight("TIME", 20) +
-          "SUMMARY",
-      ),
+    const limit = opts.limit ?? (opts.query ? 20 : 50);
+    const total = filtered ? null : countEvents(db, config.projectId);
+    const summaryWidth = opts.expand ? 200 : summaryColumns(64);
+    printTitle("Timeline", projectName, scope, sortField === "TIME" ? "newest first" : "by actor");
+    printTable(
+      [{ header: "id" }, { header: "time" }, { header: "actor" }, { header: "type" }, { header: "summary" }],
+      events.map((event) => [
+        shortId(event.id),
+        localDateTime(event.startedAt, { seconds: true }),
+        event.actor,
+        event.eventType,
+        truncate(getEventSummary(event, 10_000), summaryWidth),
+      ]),
     );
-    console.log(pc.dim("-".repeat(85)));
 
-    for (const event of events) {
-      const actor = actorSymbol(event.actor);
-      const time = formatDateTime(event.startedAt);
-      const summary = getSummary(event, opts.expand);
-      const idShort = event.id.substring(0, 10);
-      console.log(
-        pc.dim(padRight(idShort, 12)) +
-          colorActor(padRight(actor, 6), event.actor) +
-          padRight(event.eventType, 20) +
-          pc.dim(padRight(time, 20)) +
-          summary,
-      );
-    }
-
-    console.log(pc.dim(`\n${events.length} events shown (sorted by ${sortField}).`));
+    const shown = total !== null ? `${events.length} of ${total}` : `${events.length} shown`;
+    const more = total !== null && total > events.length
+      ? `more: ${strong(`adit timeline --limit ${Math.min(total, Math.max(limit * 2, events.length + 20))}`)}`
+      : null;
+    printEnd(dim([shown, more, `details: ${strong("adit show <id>")}`].filter(Boolean).join(" · ")));
   } finally {
     closeDatabase(db);
   }
-}
-
-function actorSymbol(actor: string): string {
-  switch (actor) {
-    case "assistant":
-      return "[A]";
-    case "user":
-      return "[U]";
-    case "tool":
-      return "[T]";
-    case "system":
-      return "[S]";
-    default:
-      return "[?]";
-  }
-}
-
-function colorActor(text: string, actor: string): string {
-  switch (actor) {
-    case "assistant":
-      return pc.green(text);
-    case "user":
-      return pc.cyan(text);
-    case "tool":
-      return pc.yellow(text);
-    case "system":
-      return pc.magenta(text);
-    default:
-      return text;
-  }
-}
-
-function getSummary(event: AditEvent, expand?: boolean): string {
-  return getEventSummary(event, expand ? 200 : 60);
 }
 
 export function sortEvents(events: AditEvent[], field: SortField): AditEvent[] {

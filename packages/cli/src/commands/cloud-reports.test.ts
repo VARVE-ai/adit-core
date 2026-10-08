@@ -22,16 +22,16 @@ describe("report commands", () => {
     expect(mocks.get).toHaveBeenCalledExactlyOnceWith(`/api/cli/usage?from=2026-09-22&to=2026-09-28&timeZone=UTC&by=member&scope=team&team=${teamId}`);
     await cloudUsageCommand({ tz: "UTC" });
     expect(mocks.get.mock.calls[1][0]).toBe("/api/cli/usage?timeZone=UTC");
-    expect(output().some((line) => line.startsWith("total"))).toBe(true);
+    expect(output().some((line) => line.trim().startsWith("total"))).toBe(true);
   });
 
   it("reads one day of reports and relays role failures", async () => {
     mocks.get.mockResolvedValueOnce({ period: {}, reports: [{ workDate: "2026-09-29", team: { name: "Web" }, member: { name: "Mia" }, state: "generated", error: null, cards: [{ stage: "in_progress", title: "Login", contribution: "Built it", evidence: [] }] }] });
     await cloudReportsDailyCommand({ date: "2026-09-29", tz: "UTC", team: teamId });
     expect(mocks.get).toHaveBeenCalledExactlyOnceWith(`/api/cli/reports/daily?date=2026-09-29&timeZone=UTC&team=${teamId}`);
-    expect(output()[1]).toContain("[in_progress] Login");
+    expect(output().some((line) => /in_progress +Login/.test(line))).toBe(true);
     await cloudReportsDailyCommand({ date: "2026/09/29", json: true });
-    expect(JSON.parse(output()[2])).toMatchObject({ ok: false, error: "--date must be a calendar date (YYYY-MM-DD)" });
+    expect(JSON.parse(output().at(-1)!)).toMatchObject({ ok: false, error: "--date must be a calendar date (YYYY-MM-DD)" });
   });
 
   it("requires a team for members and passes the feature words for progress", async () => {

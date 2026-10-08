@@ -53,6 +53,16 @@ import { isCliEntrypoint } from "./entrypoint.js";
 import { launchTui } from "./tui/index.js";
 import { withUpdateWarning } from "./update-check.js";
 import { CLI_VERSION } from "./version.js";
+import { dim, marks, outputStyle } from "./commands/cli-style.js";
+
+/** Commander's own parse errors ("error: unknown option ...") in the shared failure shape. */
+export function formatParseError(text: string): string {
+  const [first = "", ...rest] = text.trimEnd().split("\n");
+  const rail = outputStyle().rail;
+  const head = `${marks.fail}${rail ? "  " : " "}${first.replace(/^error:\s*/u, "")}`;
+  const details = rest.filter((line) => line.trim()).map((line) => `${rail ? `${dim("└")}  ` : "  "}${dim(line.trim())}`);
+  return `${[head, ...details].join("\n")}\n`;
+}
 
 export function createProgram(): Command {
   const program = new Command();
@@ -61,6 +71,8 @@ export function createProgram(): Command {
     .name("adit")
     .description("AI Development Intent Tracker — a flight recorder for AI-assisted development")
     .version(CLI_VERSION);
+  // Set before any subcommand exists so every subcommand inherits it.
+  program.configureOutput({ outputError: (text, write) => write(formatParseError(text)) });
   configureTopLevelHelp(program);
 
   program
@@ -419,10 +431,10 @@ export function createProgram(): Command {
       envHistoryCommand({ limit: parseInt(opts.limit, 10), json: opts.json }),
     );
 
-  // Self-update
+  // Self-update ("upgrade" and "self-update" stay as aliases for scripts and docs)
   program
-    .command("upgrade")
-    .alias("self-update")
+    .command("update")
+    .aliases(["upgrade", "self-update"])
     .description("Update ADIT to the latest version")
     .option("-c, --check", "Check for updates without installing")
     .action((opts) => selfUpdateCommand({ check: opts.check }));
@@ -505,7 +517,7 @@ Commands:
 
   doctor [options]           Validate installation health
   tui                        Launch the interactive terminal UI
-  upgrade [options]          Update ADIT
+  update [options]           Update ADIT
   debug                      Debug and maintenance commands
   help [command...]          display help for command
 `;
