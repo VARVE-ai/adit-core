@@ -1,0 +1,21 @@
+packages/cloud/src/project-link/link-command.ts
+  s_b10985943134af::t_e2be79abf69c49 162,180,193-195,288-289,300-301
+packages/cloud/src/project-link/types.ts
+  s_b10985943134af::t_e2be79abf69c49 172-180
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "38fff97fc3cc6bac02f3a0517668bc7c58ed3cb4",
+  "prompts": {},
+  "sessions": {
+    "s_b10985943134af": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f3014ace-2675-47a0-999e-d90e7ef88da1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "kaka-varve <yangpf@varve.ai>"
+    }
+  }
+}
