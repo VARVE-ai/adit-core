@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -86,6 +87,10 @@ vi.mock("@varveai/adit-cloud", async (importOriginal) => {
 
 import type { LinkResult } from "@varveai/adit-cloud";
 import { projectLinkCliHandler } from "./project-link.js";
+import { marks } from "./cli-style.js";
+
+const textOutput = (method: typeof console.log) => vi.mocked(method).mock.calls
+  .map((call) => stripVTControlCharacters(String(call[0])));
 
 function workspaceConfig() {
   return {
@@ -190,8 +195,8 @@ describe("projectLinkCliHandler", () => {
     await projectLinkCliHandler({});
 
     expect(process.exitCode).toBe(1);
-    const errors = vi.mocked(console.error).mock.calls.map((call) => String(call[0]));
-    expect(errors.filter((line) => line.includes("failed to link"))).toEqual(["✗ 1 of 2 repositories failed to link"]);
+    const errors = textOutput(console.error);
+    expect(errors.filter((line) => line.includes("failed to link"))).toEqual([`${stripVTControlCharacters(marks.fail)} 1 of 2 repositories failed to link`]);
   });
 
   it("prints structured JSON for workspace partial failure in JSON mode", async () => {
@@ -224,8 +229,8 @@ describe("projectLinkCliHandler", () => {
     await projectLinkCliHandler({});
 
     expect(process.exitCode).toBe(1);
-    expect(vi.mocked(console.error).mock.calls.map((call) => String(call[0]))).toEqual([
-      "✗ link: ADIT is not initialized in this project",
+    expect(textOutput(console.error)).toEqual([
+      `${stripVTControlCharacters(marks.fail)} link: ADIT is not initialized in this project`,
       "  run adit init, then retry adit cloud link",
     ]);
     expect(mocks.loadCredentials).not.toHaveBeenCalled();
@@ -240,9 +245,9 @@ describe("projectLinkCliHandler", () => {
     await projectLinkCliHandler({});
 
     expect(process.exitCode).toBe(1);
-    const errors = vi.mocked(console.error).mock.calls.map((call) => String(call[0]));
-    expect(errors.some((line) => line.includes("✗ a  no git remote 'origin'"))).toBe(true);
-    expect(errors.some((line) => line.includes("✗ b  no git remote 'origin'"))).toBe(true);
+    const errors = textOutput(console.error);
+    expect(errors.some((line) => line.includes(`${stripVTControlCharacters(marks.fail)} a  no git remote 'origin'`))).toBe(true);
+    expect(errors.some((line) => line.includes(`${stripVTControlCharacters(marks.fail)} b  no git remote 'origin'`))).toBe(true);
     expect(mocks.loadCredentials).toHaveBeenCalled();
     expect(mocks.healthGet).toHaveBeenCalled();
     expect(mocks.refreshDeletionPolicy).toHaveBeenCalled();
@@ -257,8 +262,8 @@ describe("projectLinkCliHandler", () => {
     await projectLinkCliHandler({});
 
     expect(process.exitCode).toBe(1);
-    const errors = vi.mocked(console.error).mock.calls.map((call) => String(call[0]));
-    expect(errors.some((line) => line.includes("✗ a  missing or no longer a Git repository"))).toBe(true);
+    const errors = textOutput(console.error);
+    expect(errors.some((line) => line.includes(`${stripVTControlCharacters(marks.fail)} a  missing or no longer a Git repository`))).toBe(true);
     expect(errors.some((line) => line.includes("re-run adit init if the repository list changed"))).toBe(true);
     expect(mocks.loadCredentials).toHaveBeenCalled();
     expect(mocks.linkCommand).not.toHaveBeenCalled();
@@ -287,7 +292,7 @@ describe("projectLinkCliHandler", () => {
 
     await projectLinkCliHandler({});
 
-    const lines = vi.mocked(console.log).mock.calls.map((call) => String(call[0]));
+    const lines = textOutput(console.log);
     expect(lines.some((line) => line.includes("Deleted") && line.includes("a · deleted in Cloud, not linked"))).toBe(true);
     expect(mocks.getRemoteUrl).toHaveBeenCalledTimes(1);
   });

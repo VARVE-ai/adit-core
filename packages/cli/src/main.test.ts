@@ -1,6 +1,8 @@
+import { stripVTControlCharacters } from "node:util";
 import { describe, expect, it } from "vitest";
 import type { Command } from "commander";
 import { createProgram, formatParseError, normalizeLegacyIntentCompleteArgs } from "./main.js";
+import { marks } from "./commands/cli-style.js";
 
 function findCommand(program: Command, ...path: string[]): Command {
   let current = program;
@@ -94,8 +96,9 @@ describe("CLI help", () => {
   });
 
   it("prints commander parse errors in the shared failure shape", () => {
-    expect(formatParseError("error: required option '--team <id>' not specified\n")).toBe("✗ required option '--team <id>' not specified\n");
-    expect(formatParseError("error: unknown command 'statsu'\n(Did you mean status?)\n")).toBe("✗ unknown command 'statsu'\n  (Did you mean status?)\n");
+    const fail = stripVTControlCharacters(marks.fail);
+    expect(stripVTControlCharacters(formatParseError("error: required option '--team <id>' not specified\n"))).toBe(`${fail} required option '--team <id>' not specified\n`);
+    expect(stripVTControlCharacters(formatParseError("error: unknown command 'statsu'\n(Did you mean status?)\n"))).toBe(`${fail} unknown command 'statsu'\n  (Did you mean status?)\n`);
   });
 
   it("lists cloud coding and project commands", () => {

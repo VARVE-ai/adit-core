@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -95,6 +96,7 @@ vi.mock("./cli-agent/relay-client.js", () => ({
 
 import { cloudClaudeCommand } from "./cloud-claude.js";
 import { cloudCodexCommand } from "./cloud-codex.js";
+import { marks } from "./cli-style.js";
 
 describe("cloud agent initialization guard", () => {
   let projectRoot: string;
@@ -156,8 +158,8 @@ describe("cloud agent initialization guard", () => {
     expect(process.exitCode).toBe(1);
     expect(mocks.loadCredentials).not.toHaveBeenCalled();
     expect(mocks.ensurePersistentClaudeHooksInstalled).not.toHaveBeenCalled();
-    expect(errorSpy.mock.calls.map((call) => String(call[0]))).toEqual([
-      "✗ claude: ADIT is not initialized in this project",
+    expect(errorSpy.mock.calls.map((call) => stripVTControlCharacters(String(call[0])))).toEqual([
+      `${stripVTControlCharacters(marks.fail)} claude: ADIT is not initialized in this project`,
       "  run adit init, then retry adit cloud claude",
     ]);
   });
@@ -168,8 +170,8 @@ describe("cloud agent initialization guard", () => {
     expect(process.exitCode).toBe(1);
     expect(mocks.loadCredentials).not.toHaveBeenCalled();
     expect(mocks.ensurePersistentCodexHooksInstalled).not.toHaveBeenCalled();
-    expect(errorSpy.mock.calls.map((call) => String(call[0]))).toEqual([
-      "✗ codex: ADIT is not initialized in this project",
+    expect(errorSpy.mock.calls.map((call) => stripVTControlCharacters(String(call[0])))).toEqual([
+      `${stripVTControlCharacters(marks.fail)} codex: ADIT is not initialized in this project`,
       "  run adit init, then retry adit cloud codex",
     ]);
   });
