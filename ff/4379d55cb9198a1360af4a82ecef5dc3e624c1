@@ -1,0 +1,22 @@
+packages/hooks/src/adapters/codex.test.ts
+  s_eafe3e202516c1::t_55ad214ed60944 667,685,698-732
+  s_eafe3e202516c1::t_aada784eb2ec32 733-734
+packages/hooks/src/adapters/codex-trust.ts
+  s_eafe3e202516c1::t_c50f6e9dedcf12 86-87
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ff4379d55cb9198a1360af4a82ecef5dc3e624c1",
+  "prompts": {},
+  "sessions": {
+    "s_eafe3e202516c1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11f6f-22f1-7552-a570-21e6906fde8b",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "kaka-varve <yangpf@varve.ai>"
+    }
+  }
+}
