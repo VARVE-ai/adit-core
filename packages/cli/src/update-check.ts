@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { loadCredentials } from "@varveai/adit-cloud";
 import pc from "picocolors";
+import { outputStyle, setPendingNotice, takePendingNotice } from "./commands/cli-style.js";
 import { CLI_VERSION } from "./version.js";
 
 const UPDATE_CHECK_TTL_MS = 10 * 60 * 1000;
@@ -13,6 +14,7 @@ const DEFAULT_VERSION_POLICY_URL =
   "https://adit-cloud.varve.ai/api/client-version-policy";
 const DEFAULT_UPGRADE_COMMAND = "npm install -g @varveai/adit-cli@latest";
 
+/** Commands that check the cloud version policy (a blocked version must not run them). */
 export const UPDATE_CHECK_COMMANDS = new Set([
   "init",
   "status",
@@ -23,11 +25,12 @@ export const UPDATE_CHECK_COMMANDS = new Set([
   "cloud.status",
   "cloud.sync",
   "cloud.link",
-  "cloud.intent",
-  "cloud.intent.complete",
   "cloud.claude",
   "cloud.codex",
 ]);
+
+/** Commands that also show the "update available" notice, above their closing line. */
+export const UPDATE_NOTICE_COMMANDS = new Set(["init", "status", "doctor"]);
 
 interface VersionCheckCache {
   checkedAt?: number;
@@ -67,6 +70,8 @@ export interface UpdateCheckOptions {
   stderr?: WritableLike;
   cachePath?: string;
   cloudServerUrl?: string | null;
+  /** Receives the update notice instead of stderr (the caller shows it later). */
+  onNotice?: (notice: string) => void;
 }
 
 interface UpdateWarningWrapperOptions<T extends unknown[]> {
@@ -90,13 +95,21 @@ export function withUpdateWarning<T extends unknown[]>(
       env: process.env,
       json,
       stderr: process.stderr,
+      onNotice: setPendingNotice,
     });
     if (blocked) {
       process.exitCode = 1;
       return;
     }
 
-    return handler(...args);
+    try {
+      return await handler(...args);
+    } finally {
+      // Commands that print a closing line show the notice above it; any
+      // other output path (JSON, early returns) gets it as the last line.
+      const notice = takePendingNotice();
+      if (notice) process.stderr.write(`${notice}\n`);
+    }
   };
 }
 
@@ -122,13 +135,13 @@ export async function maybeWarnForUpdate(
     stderr.write(
       formatCriticalUpdateBlock(
         policy,
-        options.json ?? false,
         shouldColorUpdateWarning(stderr, options.json ?? false),
       ),
     );
     return true;
   }
 
+  if (!UPDATE_NOTICE_COMMANDS.has(options.commandId)) return false;
   if (isUpdateCheckDisabled(env)) return false;
   if (isCi(env)) return false;
 
@@ -144,14 +157,13 @@ export async function maybeWarnForUpdate(
   if (compareVersions(currentVersion, latestVersion) >= 0) return false;
 
   const stderr = options.stderr ?? process.stderr;
-  stderr.write(
-    formatUpdateWarning(
-      currentVersion,
-      latestVersion,
-      options.json ?? false,
-      shouldColorUpdateWarning(stderr, options.json ?? false),
-    ),
+  const notice = formatUpdateWarning(
+    currentVersion,
+    latestVersion,
+    shouldColorUpdateWarning(stderr, options.json ?? false),
   );
+  if (options.onNotice) options.onNotice(notice);
+  else stderr.write(`${notice}\n`);
   return false;
 }
 
@@ -159,47 +171,30 @@ export function getVersionCheckCachePath(): string {
   return join(homedir(), ".adit", "version-check.json");
 }
 
+/** One line: "! Update available 1.0.0 → 1.2.0 · run adit update". */
 export function formatUpdateWarning(
   currentVersion: string,
   latestVersion: string,
-  json = false,
   color = false,
 ): string {
   const colors = pc.createColors(color);
-  const heading = color
-    ? colors.yellow(colors.bold("A new version of ADIT is available:"))
-    : "A new version of ADIT is available:";
-  const current = color ? colors.dim(currentVersion) : currentVersion;
-  const latest = color ? colors.cyan(latestVersion) : latestVersion;
-  const command = color
-    ? colors.green(colors.bold("adit upgrade"))
-    : "adit upgrade";
-  const lines = [
-    `${heading} ${current} -> ${latest}`,
-    `Run: ${command}`,
-  ];
-  return `${json ? "" : "\n"}${lines.join("\n")}\n\n`;
+  const unicode = outputStyle().unicode;
+  const mark = colors.yellow(unicode ? "!" : "[!]");
+  const arrow = unicode ? "→" : "->";
+  return `${mark} ${colors.dim(`Update available ${currentVersion} ${arrow} ${latestVersion} · run`)} ${colors.bold("adit update")}`;
 }
 
+/** The blocked-version failure, in the shared error shape. */
 export function formatCriticalUpdateBlock(
   policy: VersionPolicyDecision,
-  json = false,
   color = false,
 ): string {
   const colors = pc.createColors(color);
-  const heading = color
-    ? colors.red(colors.bold("ADIT update required:"))
-    : "ADIT update required:";
-  const current = color ? colors.dim(policy.currentVersion) : policy.currentVersion;
-  const command = color
-    ? colors.green(colors.bold(DEFAULT_UPGRADE_COMMAND))
-    : DEFAULT_UPGRADE_COMMAND;
-  const lines = [
-    `${heading} version ${current} is blocked by adit-cloud policy.`,
-  ];
-  lines.push(`Run: ${command}`);
-
-  return `${json ? "" : "\n"}${lines.join("\n")}\n\n`;
+  const mark = colors.red(outputStyle().unicode ? "✗" : "[x]");
+  return [
+    `${mark} ADIT update required: version ${policy.currentVersion} is blocked by adit-cloud policy`,
+    `  ${colors.dim(`run ${colors.bold(DEFAULT_UPGRADE_COMMAND)}`)}`,
+  ].join("\n") + "\n";
 }
 
 export function compareVersions(a: string, b: string): number {
@@ -285,7 +280,7 @@ async function getVersionPolicyDecision(options: {
 
 /**
  * Latest version published to npm, bypassing the local cache. Used by
- * `adit upgrade`, which is explicit and can afford a longer timeout than the
+ * `adit update`, which is explicit and can afford a longer timeout than the
  * passive post-command check. Returns null when the registry is unreachable.
  */
 export async function fetchLatestPublishedVersion(options: {

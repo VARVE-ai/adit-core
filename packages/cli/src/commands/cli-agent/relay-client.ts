@@ -1,4 +1,6 @@
 import WebSocket from "ws";
+import { loadConfig, recordAgentRuntime } from "@varveai/adit-core";
+import { CLI_VERSION } from "../../version.js";
 import type {
   CliAgentConnectionState,
   CliAgentProviderName,
@@ -111,6 +113,7 @@ export class CliAgentRelayWebSocket {
   private intentionalClose = false;
   private connectionId: string | null = null;
   private connectPending = false;
+  private stopRuntimeRecord: (() => void) | null = null;
 
   constructor(private readonly opts: RelayWsClientOptions) {}
 
@@ -128,6 +131,13 @@ export class CliAgentRelayWebSocket {
 
   connect(): void {
     if (this.intentionalClose) return;
+    if (!this.stopRuntimeRecord) {
+      try {
+        const config = loadConfig(this.opts.register.projectRoot);
+        if (config.initialization === "initialized") this.stopRuntimeRecord = recordAgentRuntime(config.dataDir, CLI_VERSION);
+      }
+      catch { /* Local diagnostics are optional. */ }
+    }
     if (this.connectPending) return;
     if (
       this.socket &&
@@ -210,6 +220,8 @@ export class CliAgentRelayWebSocket {
   }
 
   close(): void {
+    this.stopRuntimeRecord?.();
+    this.stopRuntimeRecord = null;
     this.intentionalClose = true;
     this.connectPending = false;
     if (this.reconnectTimer) {

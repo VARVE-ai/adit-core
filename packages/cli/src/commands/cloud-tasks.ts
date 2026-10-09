@@ -1,6 +1,25 @@
 import { Command, Option } from "commander";
-import { CloudClient, CloudApiError, loadCredentials, listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask, type CloudTaskPatch } from "@varveai/adit-cloud";
+import { CloudClient, CloudApiError, loadCredentials, listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask, type CloudTaskDetail, type CloudTaskList, type CloudTaskPatch } from "@varveai/adit-cloud";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
+import { NotLoggedInError, commandWith, describeFailure, reportFailure } from "./cloud-read-output.js";
+import {
+  dim,
+  joinParts,
+  localDateTime,
+  marks,
+  printEnd,
+  printError,
+  printRows,
+  printTable,
+  printTitle,
+  stateWord,
+  strong,
+  summaryColumns,
+  truncate,
+  type Row,
+} from "./cli-style.js";
+
+export { describeFailure };
 
 type Options = { json?: boolean; team?: string; project?: string; personal?: boolean; state?: string; limit?: string; offset?: string; due?: string; clearDue?: boolean; title?: string; keyPoints?: string; priority?: string; assignee?: string; expectedUpdatedAt?: string };
 
@@ -12,7 +31,7 @@ export function taskDueDate(value: string): string {
 
 export function taskPatchFromOptions(options: Options): CloudTaskPatch {
   if (options.due && options.clearDue) throw new Error("Use either --due or --clear-due");
-  if (options.state && !["not_started", "in_progress", "done"].includes(options.state)) throw new Error("Invalid task state");
+  if (options.state && !["not_started", "in_progress", "paused", "done"].includes(options.state)) throw new Error("Invalid task state");
   if (options.priority && !["high", "medium", "low"].includes(options.priority)) throw new Error("Invalid task priority");
   const patch: CloudTaskPatch = {};
   if (options.state) patch.progressState = options.state as CloudTaskPatch["progressState"];
@@ -36,7 +55,7 @@ export async function cloudTasksCommand(action: "list" | "show" | "context" | "u
   try {
     if (taskId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)) throw new Error("Use the full taskId returned by the task list");
     const credentials = loadCredentials();
-    if (!credentials) throw new Error("Not logged in. Run 'adit cloud login' first.");
+    if (!credentials) throw new NotLoggedInError();
     const client = new CloudClient(credentials.serverUrl, credentials, { maxRetries: action === "update" ? 0 : 2 });
     let localProjectId = options.project;
     if ((action === "list" || action === "scopes") && !localProjectId) {
@@ -51,10 +70,7 @@ export async function cloudTasksCommand(action: "list" | "show" | "context" | "u
       if (limit === 0) throw new Error("Limit must be between 1 and 100");
       const list = await listCloudTasks(client, { localProjectId: localProjectId!, teamId: options.team, scope: options.personal ? "personal" : undefined, state: options.state ?? "unfinished", offset: pageNumber(options.offset, 0, Number.MAX_SAFE_INTEGER), limit });
       if (!options.json) {
-        console.log(`Project: ${list.project.name ?? list.project.localProjectId}; scope: ${list.scope.teamName ?? "personal"}`);
-        console.log(`${list.tasks.length} of ${list.total} assigned tasks`);
-        for (const task of list.tasks) console.log(`${task.taskId}  ${task.progressState}  ${task.title}${task.dueAt ? `  due ${task.dueAt.slice(0, 10)}` : ""}`);
-        if (list.nextOffset !== null) console.log(`More tasks: repeat with --offset ${list.nextOffset}`);
+        printTaskList(list, options);
         return;
       }
       result = list;
@@ -63,7 +79,13 @@ export async function cloudTasksCommand(action: "list" | "show" | "context" | "u
     } else if (!taskId) {
       throw new Error("Task ID is required");
     } else if (action === "show") {
-      result = await showCloudTask(client, taskId);
+      const detail = await showCloudTask(client, taskId);
+      // Pipes and agents keep the JSON they always got; a person at a terminal gets the text view.
+      if (!options.json && process.stdout.isTTY) {
+        printTaskDetail(detail);
+        return;
+      }
+      result = detail;
     } else if (action === "context") {
       result = await cloudTaskContext(client, taskId);
     } else {
@@ -73,17 +95,80 @@ export async function cloudTasksCommand(action: "list" | "show" | "context" | "u
     }
     console.log(JSON.stringify(result, null, 2));
   } catch (error) {
-    const status = error instanceof CloudApiError ? error.status : undefined;
-    const message = error instanceof Error ? error.message : String(error);
-    if (error instanceof CloudApiError && error.body && typeof error.body === "object" && "code" in error.body && error.body.code === "TEAM_SELECTION_REQUIRED") {
-      console.log(JSON.stringify({ ...error.body, ok: false, status }, null, 2));
+    const failure = describeFailure(error);
+    if (failure.code === "TEAM_SELECTION_REQUIRED" && error instanceof CloudApiError && error.body && typeof error.body === "object") {
+      if (!options.json && process.stdout.isTTY) {
+        const teams = Array.isArray((error.body as { teams?: unknown }).teams)
+          ? ((error.body as { teams: Array<{ id?: string; name?: string }> }).teams)
+          : [];
+        printError(
+          `tasks ${action}`,
+          failure.message.replace(/\.$/u, ""),
+          `pick a team with ${strong("--team <id>")}${teams.length ? `: ${teams.map((team) => `${team.name ?? "?"} ${team.id ?? ""}`.trim()).join(", ")}` : ""}`,
+        );
+      } else {
+        console.log(JSON.stringify({ ...error.body, ok: false, status: failure.status }, null, 2));
+      }
       process.exitCode = 1;
       return;
     }
-    if (options.json) console.log(JSON.stringify({ ok: false, error: message, status, ...(status === 409 ? { action: "Read the task again and review changes before retrying." } : {}) }));
-    else console.error(`Task command failed: ${message}`);
-    process.exitCode = 1;
+    if (options.json) {
+      console.log(JSON.stringify({ ok: false, error: failure.message, status: failure.status, code: failure.code }));
+      process.exitCode = 1;
+      return;
+    }
+    reportFailure(error, options, `tasks ${action}`, `the task may be gone or not assigned to you; list yours with ${strong("adit cloud tasks list")}`);
   }
+}
+
+function printTaskList(list: CloudTaskList, options: Options): void {
+  const state = options.state ?? "unfinished";
+  const scope = [list.project.name ?? list.project.localProjectId, list.scope.teamName ? `team ${list.scope.teamName}` : "personal", state];
+  if (!list.tasks.length) {
+    printTitle("Tasks", ...scope);
+    printEnd(`${marks.skip} No ${state === "all" ? "" : `${state.replace("_", " ")} `}tasks assigned to you`);
+    return;
+  }
+  printTitle("Tasks", ...scope, `${list.tasks.length} of ${list.total}`);
+  printTable(
+    [{ header: "id" }, { header: "state" }, { header: "due" }, { header: "title" }],
+    list.tasks.map((task) => [
+      task.taskId,
+      stateWord(task.progressState),
+      task.dueAt ? task.dueAt.slice(0, 10) : "-",
+      truncate(task.title, summaryColumns(36 + 11 + 10 + 6)),
+    ]),
+  );
+  const more = list.nextOffset !== null
+    ? `more: ${strong(commandWith("adit cloud tasks list", { team: options.team, project: options.project, state: options.state === "unfinished" ? undefined : options.state, limit: options.limit === "50" ? undefined : options.limit, offset: list.nextOffset }))}`
+    : null;
+  printEnd(dim([more, `details: ${strong("adit cloud tasks show <id>")}`, `done: ${strong("adit cloud tasks update <id> --state done")}`].filter(Boolean).join(" · ")));
+}
+
+function printTaskDetail(detail: CloudTaskDetail): void {
+  const { task, permissions } = detail;
+  const rows: Row[] = [
+    { label: "State", value: stateWord(task.progressState) },
+    { label: "Priority", value: task.priority },
+    { label: "Due", value: task.dueAt ? task.dueAt.slice(0, 10) : "-" },
+  ];
+  if (task.blueprintTitle) rows.push({ label: "Intent", value: task.blueprintTitle });
+  if (task.keyPointsText) rows.push({ label: "Key points", value: task.keyPointsText.trim() });
+  rows.push({ label: "Updated", value: localDateTime(task.updatedAt) });
+  if (detail.assignableMembers.length) {
+    rows.push({ label: "Assignable", value: detail.assignableMembers.map((member) => member.name ?? member.email ?? member.id).join(", ") });
+  }
+  rows.push({
+    label: "You can",
+    value: joinParts([
+      permissions.canManage ? "manage" : null,
+      permissions.canUpdateState ? "update state" : null,
+      permissions.canUpdateDueAt ? "update due date" : null,
+    ]) || "read only",
+  });
+  printTitle("Task", task.taskId, truncate(task.title, 60));
+  printRows(rows);
+  printEnd(dim(`full record: ${strong(`adit cloud tasks show ${task.taskId} --json`)}`));
 }
 
 export function registerCloudTaskCommands(cloud: Command) {
@@ -91,13 +176,13 @@ export function registerCloudTaskCommands(cloud: Command) {
   tasks.command("list").description("List your tasks in the current project or a team")
     .option("--team <id>", "Select a team linked to this project (see tasks scopes)").option("--project <id>", "Local project ID; defaults to this initialized project")
     .option("--personal", "Query personal project tasks instead of its linked team")
-    .addOption(new Option("--state <state>", "Task state").choices(["unfinished", "all", "not_started", "in_progress", "done"]).default("unfinished"))
+    .addOption(new Option("--state <state>", "Task state").choices(["unfinished", "all", "not_started", "in_progress", "paused", "done"]).default("unfinished"))
     .option("--limit <number>", "Page size, 1-100", "50").option("--offset <number>", "Pagination offset", "0").option("--json", "Output JSON")
     .action((options) => cloudTasksCommand("list", options));
   tasks.command("scopes").description("List teams linked to the current project, not all account teams").option("--project <id>", "Local project ID; defaults to this initialized project").option("--json", "Output JSON").action((options) => cloudTasksCommand("scopes", options));
   for (const action of ["show", "context"] as const) tasks.command(`${action} <taskId>`).description(action === "show" ? "Read a task and its current version" : "Read task requirements, PRD and resource URLs (no downloads)").option("--json", "Output JSON").action((taskId, options) => cloudTasksCommand(action, options, taskId));
   tasks.command("update <taskId>").description("Update an assigned task in Cloud immediately")
-    .addOption(new Option("--state <state>", "New state").choices(["not_started", "in_progress", "done"]))
+    .addOption(new Option("--state <state>", "New state").choices(["not_started", "in_progress", "paused", "done"]))
     .option("--due <date>", "Due date, YYYY-MM-DD").option("--clear-due", "Remove due date")
     .option("--title <text>", "Task title (requires manage access)").option("--key-points <text>", "Task key points (requires manage access)")
     .addOption(new Option("--priority <priority>", "Task priority (requires manage access)").choices(["high", "medium", "low"]))

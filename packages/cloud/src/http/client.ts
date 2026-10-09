@@ -22,6 +22,8 @@ const DEFAULT_MAX_RETRIES = 5;
 const MAX_REDIRECTS = 5;
 const INITIAL_BACKOFF_MS = 2000;
 const DEFAULT_TIMEOUT_MS = 30_000;
+/** Rate-limit retries per request; they never re-send an applied write, so they sit outside maxRetries. */
+const MAX_RATE_LIMIT_RETRIES = 3;
 
 export interface CloudClientOptions {
   /** Per-request timeout in milliseconds (default: 30s) */
@@ -159,9 +161,9 @@ export class CloudClient {
     return this.request<T>("PATCH", path, body);
   }
 
-  /** DELETE request with auth */
-  async delete(path: string): Promise<void> {
-    await this.request<void>("DELETE", path);
+  /** DELETE request with auth; returns the JSON body when the server sends one. */
+  async delete<T = void>(path: string): Promise<T> {
+    return this.request<T>("DELETE", path);
   }
 
   /** Get the current credentials (may have been refreshed) */
@@ -235,8 +237,15 @@ export class CloudClient {
 
     let lastError: Error | undefined;
     let currentUrl = `${this.serverUrl}${path}`;
+    // Retries the server asks for (one token refresh, a rate limit) never
+    // re-send a request the server may have applied, so they do not consume
+    // the caller's network-failure budget: a caller with maxRetries 0 still
+    // gets them.
+    let refreshed = false;
+    let rateLimitRetries = 0;
+    let extraAttempts = 0;
 
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+    for (let attempt = 0; attempt <= this.maxRetries + extraAttempts; attempt++) {
       if (attempt > 0) {
         const backoffMs = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
         await sleep(backoffMs);
@@ -260,15 +269,27 @@ export class CloudClient {
           this.recordRequestAuthFailure(response.status, response.statusText);
           throw new CloudAuthError(
             `Authentication failed: ${response.status} ${response.statusText}`,
+            { status: response.status },
           );
         }
 
-        if (response.status === 401 && attempt === 0) {
+        if (response.status === 401 && !refreshed) {
+          refreshed = true;
           await this.refreshToken(true);
+          extraAttempts += 1;
           continue;
         }
 
         if (response.status === 429) {
+          if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
+            throw new CloudApiError(
+              `Rate limited: ${response.status} ${response.statusText}`,
+              response.status,
+              await readResponseBody(response),
+            );
+          }
+          rateLimitRetries += 1;
+          extraAttempts += 1;
           const retryAfter = response.headers.get("Retry-After");
           if (retryAfter) {
             const waitMs = parseInt(retryAfter, 10) * 1000;
@@ -306,12 +327,19 @@ export class CloudClient {
         if (!response.ok) {
           const responseBody = await readResponseBody(response);
 
-          if (response.status === 401 || response.status === 403) {
-            const code = readBodyCode(responseBody);
-            this.recordRequestAuthFailure(response.status, response.statusText, code);
-            throw new CloudAuthError(code === "client_deleted"
+          // 401 is always the login. 403 is the login only when the auth layer
+          // says so with a code (inactive or deleted device); a bare 403 from a
+          // business route is a permission denial and stays an API error whose
+          // body carries the server's reason.
+          const authCode = response.status === 401
+            ? readBodyCode(responseBody)
+            : response.status === 403 ? readAuthCode(responseBody) : undefined;
+          if (response.status === 401 || (response.status === 403 && authCode)) {
+            this.recordRequestAuthFailure(response.status, response.statusText, authCode);
+            throw new CloudAuthError(authCode === "client_deleted"
               ? "Device has been unlinked. Please run 'adit cloud login' to connect again."
               : `Authentication failed: ${response.status} ${response.statusText}`,
+              { status: response.status, code: authCode },
             );
           }
 
@@ -478,6 +506,17 @@ async function readResponseBody(response: Response): Promise<unknown> {
 function readBodyCode(body: unknown): string | undefined {
   const record = asRecord(body);
   return readString(record.code) ?? readString(record.reason) ?? readString(record.error);
+}
+
+/**
+ * Codes the auth layer attaches to a rejected request (`code`, or a bare
+ * identifier in `error`). A business route's 403 only carries a sentence.
+ */
+function readAuthCode(body: unknown): string | undefined {
+  const record = asRecord(body);
+  const error = readString(record.error);
+  return readString(record.code) ?? readString(record.reason)
+    ?? (error && /^[a-z][a-z0-9_]*$/.test(error) ? error : undefined);
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

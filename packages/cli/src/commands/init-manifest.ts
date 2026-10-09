@@ -39,6 +39,9 @@ import {
   applyRepositorySelection,
   promptRepositorySelection,
 } from "./init-repository-select.js";
+import { dim, marks, printError, printLine, promptPrefix, strong } from "./cli-style.js";
+
+const NO_REPOSITORY_HINT = `run ${strong("git init")} first, or run ${strong("adit init")} in a directory that contains repositories`;
 
 export interface InitModeFlags {
   /** Shortcut: sync only the root repository (`.`). */
@@ -86,11 +89,11 @@ async function prepareLockedManifest(
   flags: InitModeFlags,
 ): Promise<ManifestPlanResult> {
   if (flags.absorb) {
-    console.error("  [x] --absorb is no longer supported. Run adit init to register repositories while keeping child projects independent.");
+    printError("init", "--absorb is no longer supported", `run ${strong("adit init")} to register repositories; child projects stay independent`);
     return { status: "failed" };
   }
   if (flags.singleRepo && flags.multiRepo) {
-    console.error("  [x] --single-repo and --multi-repo cannot be combined.");
+    printError("init", "--single-repo and --multi-repo cannot be combined");
     return { status: "failed" };
   }
 
@@ -176,8 +179,7 @@ function resolveFlagSelection(
     for (const raw of flags.repos) {
       const normalized = normalizeRepoFlag(raw);
       if (!known.has(normalized)) {
-        console.error(`  [x] --repos: '${raw}' is not a Git repository at this project root.`);
-        console.error(`      Available: ${[...known].join(", ")}`);
+        printError("init", `--repos: '${raw}' is not a Git repository at this project root`, `available: ${[...known].join(", ")}`);
         return { kind: "failed" };
       }
       paths.add(normalized);
@@ -186,14 +188,14 @@ function resolveFlagSelection(
   }
   if (flags.singleRepo) {
     if (!analysis.root.isGitRepository) {
-      console.error("  [x] --single-repo requires the project root to be a Git repository.");
+      printError("init", "--single-repo requires the project root to be a Git repository");
       return { kind: "failed" };
     }
     return { kind: "select", paths: new Set(["."]) };
   }
   if (flags.multiRepo) {
     if (children.length === 0) {
-      console.error("  [x] --multi-repo requires at least one child Git repository.");
+      printError("init", "--multi-repo requires at least one child Git repository");
       return { kind: "failed" };
     }
     return { kind: "select", paths: new Set(children.map((child) => child.relativePath)) };
@@ -215,8 +217,7 @@ async function initFreshManifest(
 ): Promise<ManifestPlanResult> {
   const candidates = buildRepositoryCandidates(analysis);
   if (candidates.length === 0) {
-    console.error("  [x] Not a Git repository, and no Git repositories were found one level below.");
-    console.error("      Run 'git init' first, or run this from a directory that contains repositories.");
+    printError("init", "not a Git repository, and no Git repositories were found one level below", NO_REPOSITORY_HINT);
     return { status: "failed" };
   }
 
@@ -235,7 +236,7 @@ async function initFreshManifest(
     toManifestEntry(projectId, candidate, selection.has(candidate.relativePath)),
   );
   if (flagSelection.kind === "none" && candidates.length > 1 && isInteractive()) {
-    console.log();
+    printLine();
     repositories = await promptRepositorySelection(repositories);
   }
 
@@ -251,7 +252,7 @@ async function initFreshManifest(
   const legacyWorkspaceManifest = join(root, workspaceManifestRelativePath);
   if (existsSync(legacyWorkspaceManifest)) {
     rmSync(legacyWorkspaceManifest, { force: true });
-    console.log("  [~] Removed legacy workspace.json (migrated into project.json).");
+    printLine(`${marks.change} Removed the legacy workspace.json ${dim("(migrated into project.json)")}`);
   }
   return { status: "written", manifest, migratedFrom: recovered?.source ?? null };
 }
@@ -284,18 +285,16 @@ function printRepositoryCandidates(
   candidates: RepositoryCandidate[],
 ): void {
   const children = candidates.filter((candidate) => !isRootRepositoryPath(candidate.relativePath));
+  const found = `${children.length} Git ${children.length === 1 ? "repository" : "repositories"} one level below`;
   if (analysis.root.isGitRepository) {
-    const remote = analysis.root.originUrl ? "" : " (no remote)";
-    console.log(`  This directory is a Git repository${remote}`);
-    console.log(`  and contains ${children.length} Git ${children.length === 1 ? "repository" : "repositories"} one level below:`);
+    printLine(`This directory is a Git repository${analysis.root.originUrl ? "" : dim(" (no remote)")} and contains ${found}:`);
   } else {
-    console.log(`  Found ${children.length} Git ${children.length === 1 ? "repository" : "repositories"} one level below:`);
+    printLine(`Found ${found}:`);
   }
   for (const child of children) {
-    const origin = child.originUrl ? "" : "  (no remote)";
-    console.log(`    - ${child.relativePath}${origin}`);
+    printLine(`  - ${child.relativePath}${child.originUrl ? "" : dim("  (no remote)")}`);
   }
-  console.log();
+  printLine();
 }
 
 // --- Re-init of an already initialized project -------------------------------
@@ -318,28 +317,28 @@ async function reinitExistingManifest(
   let target = plan.target;
 
   if (plan.hasStructuralChanges) {
-    console.log("  Repository changes detected:");
+    printLine("Repository changes detected:");
     for (const rename of plan.renames) {
-      console.log(`    ~ ${rename.fromPath} → ${rename.toPath} (renamed, same remote — identity preserved)`);
+      printLine(`  ~ ${rename.fromPath} → ${rename.toPath} ${dim("(renamed, same remote: identity preserved)")}`);
     }
-    for (const path of plan.addedPaths) console.log(`    + ${path}`);
-    for (const path of plan.removedPaths) console.log(`    - ${path} (no longer a Git repository here)`);
-    console.log();
+    for (const path of plan.addedPaths) printLine(`  + ${path}`);
+    for (const path of plan.removedPaths) printLine(`  - ${path} ${dim("(no longer a Git repository here)")}`);
+    printLine();
 
     const hasFlags = Boolean(flags.singleRepo || flags.multiRepo || flags.repos?.length);
     const apply = hasFlags
       ? true
       : isInteractive()
-        ? await askYesNo("  Update the registered repository list?")
+        ? await askYesNo("Update the registered repository list?")
         : null;
     if (apply === null) {
-      console.log("  [!] Keeping the current repository list. Re-run 'adit init' in an interactive terminal (or with --multi-repo) to update it.");
+      printLine(`${marks.warn} Kept the current repository list · re-run ${strong("adit init")} in an interactive terminal (or with --multi-repo) to update it`);
       target = existing.repositories;
     } else if (!apply) {
-      console.log("  [=] Keeping the current repository list.");
+      printLine(`${marks.skip} Kept the current repository list`);
       target = existing.repositories;
     } else if (target.length === 0) {
-      console.error("  [x] No Git repositories left here — a project needs at least one.");
+      printError("init", "no Git repositories left here; a project needs at least one");
       return { status: "failed" };
     }
   }
@@ -349,13 +348,13 @@ async function reinitExistingManifest(
   if (flagSelection.kind === "select" && !flags.multiRepo) {
     target = applyRepositorySelection(target, flagSelection.paths);
   } else if (flagSelection.kind === "none" && isInteractive() && target.length > 0) {
-    console.log();
+    printLine();
     target = await promptRepositorySelection(target);
   }
 
   const upgrade = existing.schemaVersion !== MANIFEST_SCHEMA_VERSION;
   if (!upgrade && !existing.mergedIntoProjectId && sameRepositories(target, existing.repositories)) {
-    console.log(`  [=] Repository settings unchanged (${existing.repositories.length} ${existing.repositories.length === 1 ? "repository" : "repositories"}).`);
+    // init reports the unchanged repository settings in its Project row.
     return { status: "unchanged", manifest: existing };
   }
 
@@ -370,11 +369,11 @@ async function reinitExistingManifest(
   };
   writeProjectManifest(root, manifest);
   if (plan.hasStructuralChanges || !sameRepositories(target, existing.repositories)) {
-    console.log("  [+] Updated project manifest.");
+    printLine(`${marks.ok} Updated the project manifest`);
   } else if (plan.needsRewrite) {
-    console.log("  [+] Recorded repository identities in the manifest.");
+    printLine(`${marks.ok} Recorded repository identities in the manifest`);
   } else {
-    console.log(`  [+] Upgraded project manifest to schema ${MANIFEST_SCHEMA_VERSION}.`);
+    printLine(`${marks.ok} Upgraded the project manifest to schema ${MANIFEST_SCHEMA_VERSION}`);
   }
   return { status: "written", manifest, migratedFrom: null };
 }
@@ -384,34 +383,34 @@ async function reinitializeCloudDeletedProject(
   existing: ProjectManifest,
   analysis: ProjectLayoutAnalysis,
 ): Promise<ManifestPlanResult> {
-  console.log("  [!] This project was deleted in ADIT Cloud.");
+  printLine(`${marks.warn} This project was deleted in ADIT Cloud`);
   if (!isInteractive()) {
-    console.log("      Re-run 'adit init' in an interactive terminal to create it as a new project.");
+    printLine(dim(`  re-run ${strong("adit init")} in an interactive terminal to create it as a new project`));
     return { status: "unchanged", manifest: existing };
   }
 
   const confirmed = await askYesNo(
-    "  Create a new project identity and allow it to sync again?",
+    "Create a new project identity and allow it to sync again?",
   );
   if (!confirmed) {
-    console.log("  [=] Keeping the deleted project identity.");
+    printLine(`${marks.skip} Kept the deleted project identity`);
     return { status: "unchanged", manifest: existing };
   }
 
   const replacement = createReplacementProjectManifest(existing, analysis);
   if (!replacement) {
-    console.error("  [x] Not a Git repository, and no Git repositories were found one level below.");
+    printError("init", "not a Git repository, and no Git repositories were found one level below", NO_REPOSITORY_HINT);
     return { status: "failed" };
   }
 
   let repositories = replacement.repositories;
   if (repositories.length > 1) {
-    console.log();
+    printLine();
     repositories = await promptRepositorySelection(repositories);
   }
   const manifest = { ...replacement, repositories };
   writeProjectManifest(root, manifest);
-  console.log(`  [+] Created a new project identity: ${manifest.projectId}`);
+  printLine(`${marks.ok} Created a new project identity ${strong(manifest.projectId)}`);
   return { status: "written", manifest, migratedFrom: null };
 }
 
@@ -627,20 +626,23 @@ function isInteractive(): boolean {
 }
 
 async function confirmManifestRebuild(err: ProjectManifestError): Promise<boolean> {
-  console.error(`  [x] Project manifest is damaged: ${err.message}`);
-  console.error("      Restore .adit/project.json from a backup, or rebuild it now —");
-  console.error("      the project identity is recovered from local data when possible.");
   if (!isInteractive()) {
-    console.error("      Re-run 'adit init' in an interactive terminal to rebuild it.");
+    printError(
+      "init",
+      `project manifest is damaged: ${err.message}`,
+      `restore .adit/project.json from a backup, or re-run ${strong("adit init")} in an interactive terminal to rebuild it`,
+    );
     return false;
   }
-  return askYesNo("  Rebuild the project manifest now?");
+  printLine(`${marks.fail} Project manifest is damaged: ${err.message}`, { stream: "stderr" });
+  printLine(dim("  restore .adit/project.json from a backup, or rebuild it now; the identity is recovered from local data when possible"), { stream: "stderr" });
+  return askYesNo("Rebuild the project manifest now?");
 }
 
 async function askYesNo(question: string): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = await rl.question(`${question} (y/N): `);
+    const answer = await rl.question(`${promptPrefix()}${question} ${dim("(y/N)")} `);
     return ["y", "yes"].includes(answer.trim().toLowerCase());
   } finally {
     rl.close();

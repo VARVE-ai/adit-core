@@ -24,8 +24,22 @@ import {
   removeConnectedPlatform,
   writeConnectedPlatforms,
 } from "./connected-platforms.js";
+import { basename } from "node:path";
 import pc from "picocolors";
-import { marks, sectionTitle } from "./cli-style.js";
+import {
+  dim,
+  marks,
+  plural,
+  printEnd,
+  printRows,
+  printSection,
+  printTable,
+  printTitle,
+  rowLabelWidth,
+  shortenPaths,
+  stateWord,
+  strong,
+} from "./cli-style.js";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
 
 export interface UninstallHooksResult {
@@ -101,7 +115,7 @@ export async function pluginInstallCommand(
 
     if (adapter.hookMappings.length === 0) {
       if (!opts?.json) {
-        console.log(pc.dim(`  [-] ${adapter.displayName} — detected but not yet supported`));
+        console.log(pc.dim(`  ${marks.skip} ${adapter.displayName} — detected but not yet supported`));
       }
       continue;
     }
@@ -432,7 +446,7 @@ async function uninstallSinglePlatform(
         error: (err as Error).message,
       }));
     } else {
-      console.error(`  [x] Failed to remove hooks for ${adapter.displayName}: ${(err as Error).message}`);
+      console.error(`  ${marks.fail} Failed to remove hooks for ${adapter.displayName}: ${(err as Error).message}`);
     }
     process.exit(1);
   }
@@ -472,15 +486,11 @@ export async function pluginListCommand(
     return;
   }
 
-  console.log();
-  console.log(sectionTitle("  Available Platforms"));
-  console.log();
-
+  const statusRank = { installed: 0, available: 1, "not supported": 2 } as const;
+  const entries: Array<{ adapter: PlatformAdapter; status: keyof typeof statusRank }> = [];
   for (const adapter of adapters) {
-    const isImplemented = adapter.hookMappings.length > 0;
-    let status = "not yet supported";
-
-    if (isImplemented) {
+    let status: keyof typeof statusRank = "not supported";
+    if (adapter.hookMappings.length > 0) {
       try {
         const result = await adapter.validateInstallation(projectRoot);
         status = result.valid ? "installed" : "available";
@@ -488,22 +498,22 @@ export async function pluginListCommand(
         status = "available";
       }
     }
-
-    const mark =
-      status === "installed" ? marks.ok :
-      status === "available" ? pc.dim("[ ]") : pc.dim("[-]");
-
-    console.log(`  ${mark} ${adapter.displayName} ${pc.dim(`(${adapter.platform})`)}`);
-    if (isImplemented) {
-      console.log(pc.dim(`      ${adapter.hookMappings.length} hook events: ${adapter.hookMappings.map((m) => m.platformEvent).join(", ")}`));
-    } else {
-      console.log(pc.dim("      Stub — contributions welcome"));
-    }
+    entries.push({ adapter, status });
   }
+  entries.sort((a, b) => statusRank[a.status] - statusRank[b.status]);
+  const installedCount = entries.filter((entry) => entry.status === "installed").length;
 
-  console.log();
-  console.log(pc.dim(`  ${pc.green("[+]")} installed  [ ] available  [-] not yet supported`));
-  console.log();
+  printTitle("Platforms", `${installedCount} installed`);
+  printTable(
+    [{ header: "platform" }, { header: "id" }, { header: "status" }, { header: "hooks" }],
+    entries.map(({ adapter, status }) => [
+      adapter.displayName,
+      adapter.platform,
+      stateWord(status),
+      adapter.hookMappings.length > 0 ? String(adapter.hookMappings.length) : "-",
+    ]),
+  );
+  printEnd(dim(`install: ${strong("adit hook install <id>")}`));
 }
 
 /** adit hook validate [platform] */
@@ -530,10 +540,8 @@ export async function pluginValidateCommand(
     if (opts?.json) {
       console.log(JSON.stringify({ platforms: [], valid: false }));
     } else {
-      console.log();
-      console.log("  No AI platforms detected in this project.");
-      console.log("  Run 'adit hook validate <platform>' for a specific platform.");
-      console.log();
+      printTitle("Hook check", basename(config.projectRoot));
+      printEnd(`${marks.skip} No AI platforms detected · run ${strong("adit hook validate <platform>")} for a specific one`);
     }
     return;
   }
@@ -542,12 +550,8 @@ export async function pluginValidateCommand(
     platform: string;
     displayName: string;
     valid: boolean;
-    checks: Array<{ name: string; ok: boolean; detail: string }>;
+    checks: Array<{ name: string; ok: boolean; detail: string; advisory?: boolean }>;
   }> = [];
-
-  if (!opts?.json) {
-    console.log();
-  }
 
   for (const platform of platforms) {
     const adapter = getAdapterSafe(platform);
@@ -561,22 +565,15 @@ export async function pluginValidateCommand(
       valid: result.valid,
       checks: result.checks,
     });
-
-    if (!opts?.json) {
-      console.log(`  ${adapter.displayName}`);
-      for (const check of result.checks) {
-        const symbol = check.ok ? "+" : check.advisory ? "!" : "x";
-        console.log(`    [${symbol}] ${check.name}: ${check.detail}`);
-      }
-      console.log(result.valid ? "    All checks passed." : "    Some checks failed.");
-      console.log();
-    }
   }
 
   if (opts?.json) {
     const allValid = results.every((r) => r.valid);
     console.log(JSON.stringify({ platforms: results, valid: allValid }, null, 2));
+    return;
   }
+
+  printHookChecks(basename(config.projectRoot), results, config.projectRoot);
 }
 
 /** Validate a single platform */
@@ -592,15 +589,50 @@ async function validateSinglePlatform(
     return;
   }
 
-  console.log();
-  console.log(`  Hook validation: ${adapter.displayName}`);
-  console.log();
-  for (const check of result.checks) {
-    const symbol = check.ok ? "+" : check.advisory ? "!" : "x";
-    console.log(`  [${symbol}] ${check.name}: ${check.detail}`);
+  printHookChecks(
+    adapter.displayName,
+    [{ displayName: adapter.displayName, checks: result.checks }],
+    projectRoot,
+  );
+}
+
+/** One section per platform, one row per check, and a closing count. */
+function printHookChecks(
+  scope: string,
+  results: Array<{
+    displayName: string;
+    checks: Array<{ name: string; ok: boolean; detail: string; advisory?: boolean }>;
+  }>,
+  projectRoot: string,
+): void {
+  const kind = (check: { ok: boolean; advisory?: boolean }) =>
+    check.ok ? "ok" as const : check.advisory ? "warn" as const : "fail" as const;
+  const labelWidth = rowLabelWidth(results.flatMap((result) => result.checks.map((check) => ({ label: check.name }))));
+  const describe = (detail: string) => {
+    const text = shortenPaths(detail, projectRoot);
+    return text.charAt(0).toLowerCase() + text.slice(1);
+  };
+
+  printTitle("Hook check", scope);
+  for (const result of results) {
+    printSection(result.displayName);
+    printRows(
+      result.checks.map((check) => ({ mark: marks[kind(check)], label: check.name, value: describe(check.detail) })),
+      labelWidth,
+    );
   }
-  console.log(result.valid ? "\n  All checks passed." : "\n  Some checks failed.");
-  console.log();
+
+  const all = results.flatMap((result) => result.checks);
+  const failed = all.filter((check) => kind(check) === "fail").length;
+  const warned = all.filter((check) => kind(check) === "warn").length;
+  const passed = all.filter((check) => kind(check) === "ok").length;
+  if (failed > 0) {
+    printEnd(`${marks.fail} ${plural(failed, "check")} failed · run ${strong("adit doctor --fix")} to repair`);
+  } else if (warned > 0) {
+    printEnd(`${marks.warn} ${plural(warned, "warning")}, ${plural(passed, "check")} passed`);
+  } else {
+    printEnd(`${marks.ok} All ${plural(passed, "check")} passed`);
+  }
 }
 
 function getAdapterSafe(platform: Platform): PlatformAdapter | null {

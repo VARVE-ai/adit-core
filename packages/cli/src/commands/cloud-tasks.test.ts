@@ -3,8 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ get: vi.fn(), patch: vi.fn(), credentials: vi.fn(), config: vi.fn() }));
 vi.mock("@varveai/adit-cloud", async (original) => ({ ...await original<typeof import("@varveai/adit-cloud")>(), loadCredentials: mocks.credentials, CloudClient: class { get = mocks.get; patch = mocks.patch; } }));
 vi.mock("./project-initialization.js", () => ({ loadInitializedProjectConfig: mocks.config }));
-import { CloudApiError } from "@varveai/adit-cloud";
-import { cloudTasksCommand, registerCloudTaskCommands, taskDueDate, taskPatchFromOptions } from "./cloud-tasks.js";
+import { CloudApiError, CloudAuthError } from "@varveai/adit-cloud";
+import { cloudTasksCommand, describeFailure, registerCloudTaskCommands, taskDueDate, taskPatchFromOptions } from "./cloud-tasks.js";
 
 const taskId = "a1111111-1111-4111-8111-111111111111";
 const updatedAt = "2026-09-22T01:00:00.000Z";
@@ -110,5 +110,34 @@ describe("cloud task commands", () => {
     expect(mocks.get).not.toHaveBeenCalled();
     await cloudTasksCommand("update", { state: "done", json: true }, "Fix upload");
     expect(mocks.patch).not.toHaveBeenCalled();
+  });
+
+  it("prints the server's reason and status instead of a generic API error", async () => {
+    const reason = "The task is done and frozen; owner, dates and estimate can no longer change";
+    mocks.patch.mockRejectedValue(new CloudApiError("API error: 409 Conflict", 409, { error: reason }));
+    await cloudTasksCommand("update", { due: "2026-10-01", expectedUpdatedAt: updatedAt, json: true }, taskId);
+    expect(JSON.parse(vi.mocked(console.log).mock.calls[0][0])).toEqual({ ok: false, error: reason, status: 409 });
+    await cloudTasksCommand("update", { due: "2026-10-01", expectedUpdatedAt: updatedAt }, taskId);
+    expect(vi.mocked(console.error)).toHaveBeenCalledWith(`✗ tasks update: ${reason} (409)`);
+    expect(describeFailure(new CloudApiError("API error: 500 Internal Server Error", 500, "<html>"))).toEqual({ message: "API error: 500 Internal Server Error", status: 500, code: undefined });
+  });
+
+  it("distinguishes a permission denial from a login failure", async () => {
+    mocks.patch.mockRejectedValueOnce(new CloudApiError("API error: 403 Forbidden", 403, { error: "Only the responsible member can manage tasks" }));
+    await cloudTasksCommand("update", { title: "Renamed", expectedUpdatedAt: updatedAt, json: true }, taskId);
+    expect(JSON.parse(vi.mocked(console.log).mock.calls[0][0])).toEqual({ ok: false, error: "Only the responsible member can manage tasks", status: 403 });
+    mocks.get.mockRejectedValueOnce(new CloudAuthError("Authentication failed: 401 Unauthorized", { status: 401, code: "invalid_or_expired_token" }));
+    await cloudTasksCommand("show", { json: true }, taskId);
+    expect(JSON.parse(vi.mocked(console.log).mock.calls[1][0])).toEqual({ ok: false, error: "Authentication failed: 401 Unauthorized", status: 401, code: "invalid_or_expired_token" });
+  });
+
+  it("accepts the paused state for listing and updating", async () => {
+    mocks.get.mockResolvedValue({ tasks: [], total: 0, nextOffset: null });
+    await cloudTasksCommand("list", { project: "chosen-project", state: "paused", json: true });
+    expect(mocks.get.mock.calls[0][0]).toContain("state=paused");
+    mocks.patch.mockResolvedValue({ task: { taskId, progressState: "paused" } });
+    await cloudTasksCommand("update", { state: "paused", expectedUpdatedAt: updatedAt, json: true }, taskId);
+    expect(mocks.patch).toHaveBeenCalledExactlyOnceWith(`/api/cli/tasks/${taskId}`, { patch: { progressState: "paused" }, expectedUpdatedAt: updatedAt });
+    expect(taskPatchFromOptions({ state: "paused" })).toEqual({ progressState: "paused" });
   });
 });

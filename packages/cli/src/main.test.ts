@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Command } from "commander";
-import { createProgram, normalizeLegacyIntentCompleteArgs } from "./main.js";
+import { createProgram, formatParseError, normalizeLegacyIntentCompleteArgs } from "./main.js";
 
 function findCommand(program: Command, ...path: string[]): Command {
   let current = program;
@@ -44,7 +44,8 @@ describe("CLI help", () => {
     expect(help).toContain("cloud");
     expect(help).toContain("debug");
     expect(help).toContain("hook");
-    expect(help).toContain("upgrade [options]");
+    expect(help).toContain("update [options]");
+    expect(help).not.toContain("upgrade");
     expect(help).toContain("timeline|list [options]");
     expect(help).toContain("uninstall [options]");
     expect(help).toContain("help [command...]");
@@ -84,11 +85,17 @@ describe("CLI help", () => {
     expect(findCommand(createProgram(), "ls").name()).toBe("timeline");
   });
 
-  it("keeps self-update as a compatibility alias for upgrade", () => {
-    const upgradeCommand = findCommand(createProgram(), "upgrade");
+  it("names the self-update command update and keeps upgrade and self-update as aliases", () => {
+    const updateCommand = findCommand(createProgram(), "update");
 
-    expect(upgradeCommand.aliases()).toContain("self-update");
-    expect(findCommand(createProgram(), "self-update").name()).toBe("upgrade");
+    expect(updateCommand.aliases()).toEqual(["upgrade", "self-update"]);
+    expect(findCommand(createProgram(), "upgrade").name()).toBe("update");
+    expect(findCommand(createProgram(), "self-update").name()).toBe("update");
+  });
+
+  it("prints commander parse errors in the shared failure shape", () => {
+    expect(formatParseError("error: required option '--team <id>' not specified\n")).toBe("✗ required option '--team <id>' not specified\n");
+    expect(formatParseError("error: unknown command 'statsu'\n(Did you mean status?)\n")).toBe("✗ unknown command 'statsu'\n  (Did you mean status?)\n");
   });
 
   it("lists cloud coding and project commands", () => {
@@ -98,7 +105,8 @@ describe("CLI help", () => {
     expect(cloudHelp).toContain("claude [options] [cliArgs...]");
     expect(cloudHelp).toContain("codex [options] [cliArgs...]");
     expect(cloudHelp).toContain("link [options]");
-    expect(cloudHelp).toContain("intent [options]");
+    expect(cloudHelp).not.toContain("intent [options]");
+    for (const group of ["projects", "teams", "sessions", "commits", "usage", "reports", "team"]) expect(cloudHelp).toContain(group);
     expect(cloudHelp).not.toContain("repositories [options]");
     expect(cloudHelp).not.toContain("transcript");
   });
@@ -129,33 +137,19 @@ describe("CLI help", () => {
     expect(debugPerfHelp).toContain("clear [options]");
   });
 
-  it("documents the actual intent completion syntax", () => {
-    const intentHelp = findCommand(
-      createProgram(),
-      "cloud",
-      "intent",
-    ).helpInformation();
-
-    expect(intentHelp).toContain(
-      "Usage: adit cloud intent [options] [command]",
-    );
-    expect(intentHelp).toContain("--id <id>");
-    expect(intentHelp).toContain("complete [options] <id>");
-  });
-
   it("supports nested help paths beyond one level", async () => {
-    const help = await parseAndCapture(["help", "cloud", "intent"]);
+    const help = await parseAndCapture(["help", "cloud", "tasks"]);
 
-    expect(help).toContain("Usage: adit cloud intent [options] [command]");
-    expect(help).toContain("complete [options] <id>");
+    expect(help).toContain("Usage: adit cloud tasks [options] [command]");
+    expect(help).toContain("update [options] <taskId>");
     expect(help).not.toContain("Usage: adit cloud [options] [command]");
   });
 
-  it("shows leaf help for intent completion", async () => {
-    const help = await parseAndCapture(["help", "cloud", "intent", "complete"]);
+  it("shows leaf help for task updates", async () => {
+    const help = await parseAndCapture(["help", "cloud", "tasks", "update"]);
 
-    expect(help).toContain("Usage: adit cloud intent complete [options] <id>");
-    expect(help).toContain("--phase <number>");
+    expect(help).toContain("Usage: adit cloud tasks update [options] <taskId>");
+    expect(help).toContain("--state <state>");
   });
 
   it("supports nested help for leaf commands", async () => {

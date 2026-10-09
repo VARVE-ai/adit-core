@@ -156,15 +156,10 @@ describe("cloud agent initialization guard", () => {
     expect(process.exitCode).toBe(1);
     expect(mocks.loadCredentials).not.toHaveBeenCalled();
     expect(mocks.ensurePersistentClaudeHooksInstalled).not.toHaveBeenCalled();
-    expect(errorSpy).toHaveBeenCalledWith([
-      "ADIT is not initialized in this project.",
-      "",
-      "Run:",
-      "  adit init",
-      "",
-      "Then retry:",
-      "  adit cloud claude",
-    ].join("\n"));
+    expect(errorSpy.mock.calls.map((call) => String(call[0]))).toEqual([
+      "✗ claude: ADIT is not initialized in this project",
+      "  run adit init, then retry adit cloud claude",
+    ]);
   });
 
   it("refuses cloud codex before project initialization side effects", async () => {
@@ -173,15 +168,10 @@ describe("cloud agent initialization guard", () => {
     expect(process.exitCode).toBe(1);
     expect(mocks.loadCredentials).not.toHaveBeenCalled();
     expect(mocks.ensurePersistentCodexHooksInstalled).not.toHaveBeenCalled();
-    expect(errorSpy).toHaveBeenCalledWith([
-      "ADIT is not initialized in this project.",
-      "",
-      "Run:",
-      "  adit init",
-      "",
-      "Then retry:",
-      "  adit cloud codex",
-    ].join("\n"));
+    expect(errorSpy.mock.calls.map((call) => String(call[0]))).toEqual([
+      "✗ codex: ADIT is not initialized in this project",
+      "  run adit init, then retry adit cloud codex",
+    ]);
   });
 
   it("allows cloud codex from an initialized workspace root without a git repository", async () => {

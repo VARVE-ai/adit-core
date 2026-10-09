@@ -33,7 +33,7 @@ const PLUGIN_FILENAME = "adit.js";
 const ADIT_COMMAND = {
   filename: "adit.md",
   content: `---
-description: ADIT — manage cloud project linking and development intents
+description: ADIT — manage cloud project linking
 ---
 
 **Requested action:** \`$ARGUMENTS\`
@@ -43,8 +43,7 @@ description: ADIT — manage cloud project linking and development intents
 Parse the requested action above and follow the **first matching rule**:
 
 1. Action is \`link\` (with optional flags) → call the \`adit_link\` tool. Map flags: \`--force\` → \`force: true\`, \`--skip-docs\` → \`skipDocs: true\`, \`--skip-commits\` → \`skipCommits: true\`, \`--dry-run\` → \`dryRun: true\`.
-2. Action is \`intent\` (with optional flags) → call the \`adit_intent\` tool. Map flags: \`--id <value>\` → \`id: "<value>"\`, \`--state <value>\` → \`state: "<value>"\`.
-3. No action, empty arguments, or unrecognized action → display the **Help** section below as your response. Do not call any tools.
+2. No action, empty arguments, or unrecognized action → display the **Help** section below as your response. Do not call any tools.
 
 ---
 
@@ -54,7 +53,7 @@ Display the following when no valid action is provided:
 
 ### ADIT Cloud
 
-ADIT tracks your AI-assisted development sessions, links project context to the cloud, and helps you manage development intents (plans).
+ADIT tracks your AI-assisted development sessions and links project context to the cloud.
 
 **Usage:** \`/adit <action> [options]\`
 
@@ -69,21 +68,10 @@ Uploads git metadata (branches, commits) and project documents for intent planni
 | \`--skip-commits\` | Skip commit history upload |
 | \`--dry-run\` | Preview what would be uploaded |
 
-#### \`intent\` — View development intents
-
-Shows intents (development plans) and tasks from the connected adit-cloud project.
-
-| Option | Description |
-|---|---|
-| \`--id <id>\` | Show a specific intent by ID |
-| \`--state <state>\` | Filter by state (e.g. \`capture\`, \`execution\`, \`shipped\`) |
-
 #### Examples
 
 - \`/adit link\` — link the project with defaults
 - \`/adit link --force --skip-docs\` — re-link, git metadata only
-- \`/adit intent\` — list all intents
-- \`/adit intent --state execution\` — show active intents
 
 > **Before linking:** the project must be initialized — run \`adit init\` in the project root once. Link only connects an already initialized project; it never changes the project structure.
 >
@@ -101,8 +89,8 @@ function generateToolsContent(): string {
     "/**",
     " * ADIT custom tools for OpenCode.",
     " *",
-    " * Provides adit_link and adit_intent tools that the LLM can call",
-    " * to interact with adit-cloud project linking and intent management.",
+    " * Provides the adit_link tool that the LLM can call",
+    " * to link the project to adit-cloud.",
     " *",
     " * @varveai/adit-auto-generated — reinstall with: adit plugin install opencode",
     " */",
@@ -163,97 +151,6 @@ function generateToolsContent(): string {
     "        }",
     "      }",
     '      return lines.join("\\n");',
-    "    } catch {",
-    "      return stdout;",
-    "    }",
-    "  },",
-    "});",
-    "",
-    "export const intent = tool({",
-    "  description:",
-    '    "Show intents (development plans) and tasks from the connected adit-cloud project.",',
-    "  args: {",
-    '    id: tool.schema.string().optional().describe("Intent ID to show detailed view with all tasks"),',
-    '    state: tool.schema.string().optional().describe("Filter intents by state (e.g. capture, execution, shipped)"),',
-    "  },",
-    "  async execute(args, context) {",
-    '    const flags: string[] = ["--json"];',
-    '    if (args.id) flags.push("--id", args.id);',
-    '    if (args.state) flags.push("--state", args.state);',
-    "",
-    '    const cmd = ["adit", "cloud", "intent", ...flags];',
-    "    const result = await Bun.$`${cmd}`.cwd(context.directory).nothrow().quiet();",
-    "    const stdout = result.stdout.toString().trim();",
-    "    const stderr = result.stderr.toString().trim();",
-    "",
-    "    if (result.exitCode !== 0) {",
-    '      return "Intent query failed: " + (stderr || stdout || "Unknown error");',
-    "    }",
-    "",
-    "    try {",
-    "      const data = JSON.parse(stdout);",
-    "",
-    "      // Single intent detail",
-    "      if (data.intent) {",
-    "        const i = data.intent;",
-    "        const progress = i.taskCount > 0",
-    '          ? i.completedTaskCount + "/" + i.taskCount + " tasks completed"',
-    '          : "no tasks";',
-    "        const lines = [",
-    '          "### " + i.title,',
-    '          "",',
-    '          "| Field | Value |",',
-    '          "|---|---|",',
-    '          "| State | " + i.state + " |",',
-    '          "| Goal | " + i.businessGoal + " |",',
-    '          "| Progress | " + progress + " |",',
-    "        ];",
-    '        if (i.linkedBranches && i.linkedBranches.length > 0) {',
-    '          lines.push("| Branches | " + i.linkedBranches.join(", ") + " |");',
-    "        }",
-    "        if (i.tasks && i.tasks.length > 0) {",
-    '          lines.push("");',
-    '          lines.push("#### Tasks");',
-    '          lines.push("");',
-    '          lines.push("| Phase | Task | Status |");',
-    '          lines.push("|---|---|---|");',
-    "          for (const t of i.tasks) {",
-    '            const phase = t.phaseTitle || "Phase " + t.phase;',
-    '            lines.push("| " + phase + " | " + t.title + (t.description ? " — " + t.description : "") + " | " + t.approvalStatus + " |");',
-    "          }",
-    "        }",
-    '        if (i.acceptanceMd) {',
-    '          lines.push("");',
-    '          lines.push("#### Acceptance Criteria");',
-    '          lines.push("");',
-    '          lines.push(i.acceptanceMd);',
-    "        }",
-    '        return lines.join("\\n");',
-    "      }",
-    "",
-    "      // Intent list",
-    "      if (data.intents) {",
-    "        if (data.intents.length === 0) {",
-    '          return "No intents found for this project. Create intents on adit-cloud first.";',
-    "        }",
-    '        const lines = ["**" + data.intents.length + " intent(s):**", ""];',
-    '        lines.push("| ID | State | Intent | Progress | Goal |");',
-    '        lines.push("|---|---|---|---|---|");',
-    "        for (const i of data.intents) {",
-    "          const progress = i.taskCount > 0",
-    '            ? i.completedTaskCount + "/" + i.taskCount',
-    '            : "—";',
-    '          const branches = i.linkedBranches && i.linkedBranches.length > 0',
-    '            ? " (" + i.linkedBranches.join(", ") + ")"',
-    '            : "";',
-    '          lines.push("| " + i.id + " | " + i.state + " | " + i.title + branches + " | " + progress + " | " + i.businessGoal + " |");',
-    "        }",
-    '        lines.push("");',
-    '        lines.push("Use `/adit intent --id <id>` to see details for a specific intent.");',
-    '        return lines.join("\\n");',
-    "      }",
-    "",
-    '      return JSON.stringify(data, null, 2);',
     "    } catch {",
     "      return stdout;",
     "    }",
@@ -730,7 +627,7 @@ export const opencodeAdapter: PlatformAdapter = {
     const toolPath = join(projectRoot, ".opencode", "tools", ADIT_TOOLS.filename);
     const toolExists = existsSync(toolPath);
     checks.push({
-      name: "Custom tools (adit_link, adit_intent)",
+      name: "Custom tools (adit_link)",
       ok: toolExists,
       detail: toolExists ? toolPath : "Not found",
     });

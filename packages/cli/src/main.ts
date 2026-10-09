@@ -43,18 +43,26 @@ import { registerCloudCliAgentCommands } from "./commands/cloud-cli-agent.js";
 import { cloudClaudeCommand } from "./commands/cloud-claude.js";
 import { cloudCodexCommand } from "./commands/cloud-codex.js";
 import { registerCloudTaskCommands } from "./commands/cloud-tasks.js";
+import { registerCloudHistoryCommands } from "./commands/cloud-history.js";
+import { registerCloudReportCommands } from "./commands/cloud-reports.js";
 import { dbClearEventsCommand } from "./commands/db.js";
 import { perfCommand, perfClearCommand } from "./commands/perf.js";
-import {
-  projectLinkCliHandler,
-  projectIntentCliHandler,
-} from "./commands/project-link.js";
-import { completeCliHandler } from "./commands/complete.js";
+import { projectLinkCliHandler } from "./commands/project-link.js";
 import { selfUpdateCommand } from "./commands/self-update.js";
 import { isCliEntrypoint } from "./entrypoint.js";
 import { launchTui } from "./tui/index.js";
 import { withUpdateWarning } from "./update-check.js";
 import { CLI_VERSION } from "./version.js";
+import { dim, marks, outputStyle } from "./commands/cli-style.js";
+
+/** Commander's own parse errors ("error: unknown option ...") in the shared failure shape. */
+export function formatParseError(text: string): string {
+  const [first = "", ...rest] = text.trimEnd().split("\n");
+  const rail = outputStyle().rail;
+  const head = `${marks.fail}${rail ? "  " : " "}${first.replace(/^error:\s*/u, "")}`;
+  const details = rest.filter((line) => line.trim()).map((line) => `${rail ? `${dim("└")}  ` : "  "}${dim(line.trim())}`);
+  return `${[head, ...details].join("\n")}\n`;
+}
 
 export function createProgram(): Command {
   const program = new Command();
@@ -63,6 +71,8 @@ export function createProgram(): Command {
     .name("adit")
     .description("AI Development Intent Tracker — a flight recorder for AI-assisted development")
     .version(CLI_VERSION);
+  // Set before any subcommand exists so every subcommand inherits it.
+  program.configureOutput({ outputError: (text, write) => write(formatParseError(text)) });
   configureTopLevelHelp(program);
 
   program
@@ -256,6 +266,8 @@ export function createProgram(): Command {
   // Cloud sync
   const cloudCmd = program.command("cloud").description("Cloud sync commands");
   registerCloudTaskCommands(cloudCmd);
+  registerCloudHistoryCommands(cloudCmd);
+  registerCloudReportCommands(cloudCmd);
 
   cloudCmd
     .command("login")
@@ -321,33 +333,6 @@ export function createProgram(): Command {
         json: opts.json,
       });
     }));
-
-  // cloud intent — list/view intents, with complete subcommand
-  const intentCmd = cloudCmd
-    .command("intent")
-    .description("Manage intents from connected project")
-    .option("--id <id>", "Intent ID")
-    .option("--state <state>", "Filter by intent state")
-    .option("--json", "Output as JSON")
-    .action(withUpdateWarning("cloud.intent", (opts) =>
-      projectIntentCliHandler({
-        id: opts.id,
-        state: opts.state,
-        json: opts.json,
-      }),
-    ));
-
-  intentCmd
-    .command("complete <id>")
-    .description("Complete a phase or entire intent")
-    .option("--phase <number>", "Complete a specific phase (1-99)")
-    .option("--json", "Output as JSON")
-    .action(withUpdateWarning("cloud.intent.complete", (intentId, opts) =>
-      completeCliHandler(intentId, {
-        phase: opts.phase ? parseInt(opts.phase, 10) : undefined,
-        json: opts.json,
-      }),
-    ));
 
   // Debug and maintenance commands
   const debugCmd = program
@@ -446,10 +431,10 @@ export function createProgram(): Command {
       envHistoryCommand({ limit: parseInt(opts.limit, 10), json: opts.json }),
     );
 
-  // Self-update
+  // Self-update ("upgrade" and "self-update" stay as aliases for scripts and docs)
   program
-    .command("upgrade")
-    .alias("self-update")
+    .command("update")
+    .aliases(["upgrade", "self-update"])
     .description("Update ADIT to the latest version")
     .option("-c, --check", "Check for updates without installing")
     .action((opts) => selfUpdateCommand({ check: opts.check }));
@@ -532,7 +517,7 @@ Commands:
 
   doctor [options]           Validate installation health
   tui                        Launch the interactive terminal UI
-  upgrade [options]          Update ADIT
+  update [options]           Update ADIT
   debug                      Debug and maintenance commands
   help [command...]          display help for command
 `;

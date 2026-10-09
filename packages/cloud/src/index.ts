@@ -68,14 +68,13 @@ export {
   type SyncBatch,
 } from "./sync/serializer.js";
 export { triggerAutoSync } from "./sync/auto-sync.js";
+export { formatUpgradeNotice } from "./sync/runtime-report.js";
+export type { RuntimeReport, UpgradeNotice } from "./sync/runtime-report.js";
 
 // Project Link
 export {
   linkCommand,
   WorkspaceLinkPartialFailureError,
-  intentCommand,
-  formatIntentList,
-  formatIntentDetail,
   collectRemoteUrl,
   collectBranches,
   branchHeadMap,
@@ -97,12 +96,7 @@ export {
   type LinkResult,
   type WorkspaceRepositoryResult,
   type WorkspaceRepositoryFailure,
-  type IntentResult,
   type LinkOptions,
-  type IntentOptions,
-  type IntentSummary,
-  type IntentDetail,
-  type TaskSlice,
   type StepTiming,
   type GitBranch,
   type GitCommit,
@@ -114,13 +108,6 @@ export {
   type GitSyncSkipReason,
 } from "./project-link/index.js";
 
-// Bulk Task Update
-export { bulkTaskUpdateCommand } from "./project-link/bulk-task.js";
-export type {
-  BulkTaskFilter,
-  BulkTaskUpdate,
-  BulkTaskUpdateOptions,
-  BulkTaskUpdateResult,
-} from "./project-link/types.js";
 export { listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask } from "./tasks.js";
+export * from "./cli-reads.js";
 export type { CloudTask, CloudTaskList, CloudTaskDetail, CloudTaskContext, CloudTaskPatch, CloudTaskState } from "./tasks.js";

@@ -36,7 +36,7 @@ describe("runCloudSetupSection", () => {
     const result = await runCloudSetupSection({ ...base, interactive: true, deps: d });
     expect(result.linked).toBe(true);
     expect(d.askYes).not.toHaveBeenCalled();
-    expect(output.join("\n")).toContain("[=] Project already linked");
+    expect(output.join("\n")).toContain("already linked · cloud.example.com");
   });
 
   it("skips entirely on non-interactive runs", async () => {
@@ -44,7 +44,7 @@ describe("runCloudSetupSection", () => {
     const result = await runCloudSetupSection({ ...base, interactive: false, deps: d });
     expect(result.linked).toBe(false);
     expect(d.login).not.toHaveBeenCalled();
-    expect(output.join("\n")).toContain("skipped (non-interactive)");
+    expect(output.join("\n")).toContain("not linked · run adit cloud link when ready");
   });
 
   it("logged in but not linked asks one link question", async () => {
@@ -69,7 +69,7 @@ describe("runCloudSetupSection", () => {
     expect(result.linked).toBe(false);
     expect(d.login).not.toHaveBeenCalled();
     expect(d.link).not.toHaveBeenCalled();
-    expect(output.join("\n")).toContain("Skipped");
+    expect(output.join("\n")).toContain("skipped · run adit cloud link when ready");
   });
 
   it("a failed login stops before link and never fails init", async () => {
@@ -77,13 +77,13 @@ describe("runCloudSetupSection", () => {
     const result = await runCloudSetupSection({ ...base, interactive: true, deps: d });
     expect(result.linked).toBe(false);
     expect(d.link).not.toHaveBeenCalled();
-    expect(output.join("\n")).toContain("Login not completed");
+    expect(output.join("\n")).toContain("login not completed");
   });
 
   it("a failed link reports and returns unlinked", async () => {
     const d = deps({ isLoggedIn: () => true, link: vi.fn(async () => false) });
     const result = await runCloudSetupSection({ ...base, interactive: true, deps: d });
     expect(result.linked).toBe(false);
-    expect(output.join("\n")).toContain("Link failed");
+    expect(output.join("\n")).toContain("link failed");
   });
 });

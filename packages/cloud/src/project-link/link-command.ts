@@ -159,6 +159,7 @@ async function linkWorkspaceProject(
     if (!repository) continue;
 
     logWorkspaceRepositoryStart(index + 1, repositories.length, repository, log);
+    options.onRepositoryStart?.({ index: index + 1, total: repositories.length, relativePath: repository.relativePath });
 
     try {
       const result = await linkRepositoryCommand(
@@ -176,6 +177,7 @@ async function linkWorkspaceProject(
       );
       results.push(result);
       logWorkspaceRepositoryResult(index + 1, repositories.length, result, log);
+      options.onRepositoryDone?.({ index: index + 1, total: repositories.length, result: toWorkspaceRepositoryResult(result) });
     } catch (error) {
       const failure: WorkspaceLinkFailure = {
         localRepositoryId: repository.localRepositoryId,
@@ -188,6 +190,9 @@ async function linkWorkspaceProject(
       };
       failures.push(failure);
       logWorkspaceRepositoryFailure(index + 1, repositories.length, failure, log);
+      const { error: _error, ...reported } = failure;
+      void _error;
+      options.onRepositoryDone?.({ index: index + 1, total: repositories.length, failure: reported });
     }
   }
 
@@ -280,7 +285,8 @@ export async function linkCommand(
   if (!repository) {
     throw new Error("No Git repositories found for project link.");
   }
-  return linkRepositoryCommand(
+  options.onRepositoryStart?.({ index: 1, total: 1, relativePath: repository.relativePath });
+  const result = await linkRepositoryCommand(
     db,
     client,
     repository,
@@ -291,6 +297,8 @@ export async function linkCommand(
     serverUrl,
     options,
   );
+  options.onRepositoryDone?.({ index: 1, total: 1, result: toWorkspaceRepositoryResult(result) });
+  return result;
 }
 
 async function linkRepositoryCommand(

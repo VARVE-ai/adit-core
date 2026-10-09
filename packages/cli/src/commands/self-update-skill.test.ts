@@ -9,7 +9,7 @@ afterEach(() => { vi.restoreAllMocks(); mocks.execFileSync.mockReset(); });
 describe("upgraded skill installation", () => {
   it("runs the freshly installed script instead of the old in-memory template", () => {
     installUpgradedTaskSkill();
-    expect(mocks.execFileSync).toHaveBeenCalledWith(process.execPath, [resolve(dirname(realpathSync(process.argv[1])), "install-task-skill.js")], { stdio: "inherit", env: process.env });
+    expect(mocks.execFileSync).toHaveBeenCalledWith(process.execPath, [resolve(dirname(realpathSync(process.argv[1])), "install-skills.js")], { stdio: "inherit", env: process.env });
   });
   it("reports installation failures without pretending the skill was installed", () => {
     mocks.execFileSync.mockImplementation(() => { throw new Error("denied"); });

@@ -447,4 +447,98 @@ describe("recordGitCommits", () => {
     });
     closeDatabase(db);
   });
+
+  it("keeps the heredoc message of a quiet commit whose output names no sha", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "adit-git-commit-heredoc-"));
+    tempDirs.push(projectRoot);
+
+    const command = [
+      "git add -A && git commit -q -F - <<'MSG'",
+      "feat: record prompt cache hits",
+      "",
+      "- Parse cached input tokens from the usage payload.",
+      "MSG",
+      "echo \"commit B: $(git log -1 --format='%h %s')\"",
+    ].join("\n");
+    const transcriptPath = join(projectRoot, "turn.jsonl");
+    writeFileSync(transcriptPath, [
+      JSON.stringify({ type: "user", sessionId: "claude-1", message: { content: "commit it" } }),
+      JSON.stringify({
+        type: "assistant",
+        sessionId: "claude-1",
+        message: { content: [{ type: "tool_use", id: "tool-1", name: "Bash", input: { command } }] },
+      }),
+      JSON.stringify({
+        type: "user",
+        sessionId: "claude-1",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: "tool-1", content: "commit B: 148d016a feat: record prompt cache hits" }],
+        },
+        toolUseResult: { stdout: "commit B: 148d016a feat: record prompt cache hits", stderr: "", interrupted: false },
+      }),
+    ].join("\n"));
+
+    const dbPath = join(projectRoot, ".adit", "adit.sqlite");
+    const db = openDatabase(dbPath);
+    const config: AditConfig = {
+      projectRoot,
+      dataDir: join(projectRoot, ".adit"),
+      dbPath,
+      clientId: "client-1",
+      projectId: "project-1",
+      projectType: "repo",
+      repositories: [{
+        localRepositoryId: "repo-1",
+        relativePath: ".",
+        displayName: "repo",
+        repositoryUrl: null,
+        canonicalRepoKey: null,
+        path: projectRoot,
+      }],
+      initialization: "initialized",
+      captureEnv: false,
+    };
+    insertSession(db, {
+      id: "session-1",
+      projectId: config.projectId,
+      clientId: config.clientId,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: new Date().toISOString(),
+      vclockJson: "{}",
+      platformSessionId: "claude-1",
+    });
+    const ctx = {
+      db,
+      config,
+      session: {
+        id: "session-1",
+        projectId: config.projectId,
+        clientId: config.clientId,
+        sessionType: "interactive" as const,
+        platform: "claude-code" as const,
+        startedAt: new Date().toISOString(),
+        metadataJson: null,
+        vclockJson: "{}",
+        platformSessionId: "claude-1",
+        deletedAt: null,
+      },
+    };
+
+    await recordGitCommits(ctx, {
+      cwd: projectRoot,
+      hookType: "stop",
+      platformCli: "claude-code",
+      platformSessionId: "claude-1",
+      transcriptPath,
+    }, createTimelineManager(db, config));
+
+    const events = queryEvents(db, { eventType: "git_commit", limit: 10 });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ responseText: "feat: record prompt cache hits", gitHeadSha: null });
+    expect(JSON.parse(events[0].toolInputJson ?? "{}")).toMatchObject({
+      commitMessage: "feat: record prompt cache hits\n\n- Parse cached input tokens from the usage payload.",
+    });
+    closeDatabase(db);
+  });
 });

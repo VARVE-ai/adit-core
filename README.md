@@ -71,7 +71,7 @@ events to ADIT's normalized hook model.
 | --- | --- | --- |
 | Claude Code | Supported | Installs hook entries in `.claude/settings.local.json` and slash command files under `.claude/commands/` |
 | Claude Code VS Code | Supported | Uses the Claude Code hook mechanism with VS Code-aware platform detection |
-| OpenCode | Supported | Generates `.opencode/plugins/adit.ts`, slash commands, and LLM-callable tools `adit_link` and `adit_intent` |
+| OpenCode | Supported | Generates `.opencode/plugins/adit.ts`, slash commands, and the LLM-callable tool `adit_link` |
 | Cursor | Supported | Shares `.claude/settings.local.json`; platform is identified from Cursor payloads, not the model |
 | Codex | Supported | Installs hook entries in `.codex/hooks.json`; approve them once inside Codex via `/hooks` (ADIT never edits the user-level Codex config) |
 | Gemini CLI | Supported | Installs hook entries in `.gemini/settings.json` |
@@ -267,18 +267,28 @@ Common timeline options include `--limit`, `--actor`, `--type`,
 | Command | Description |
 | --- | --- |
 | `adit cloud link` | Upload Git metadata and project documents to adit-cloud |
-| `adit cloud intent` | List or inspect connected project intents |
-| `adit cloud intent complete <id>` | Complete one phase or an entire intent |
 | `adit cloud tasks list --json` | Query your unfinished tasks using the current project's linked team, or its personal scope if no team is linked |
 | `adit cloud tasks scopes --json` | List only the current project's accessible linked teams; use `tasks list --team <id>` if more than one is linked |
 | `adit cloud tasks show <taskId> --json` | Read an assigned task, permissions and current update timestamp |
 | `adit cloud tasks context <taskId> --json` | Read the task, current PRD and attachment/sketch URLs without downloading files |
 | `adit cloud tasks update <taskId> --state done --json` | Update Cloud immediately and record task history |
+| `adit cloud projects list --json` | Projects you can read: your own and the team projects your role allows |
+| `adit cloud teams list --json` | Your teams with your role (owner, lead or member) in each |
+| `adit cloud sessions current --json` | The session recorded in this directory, its unsynced events and whether Cloud has it |
+| `adit cloud sessions search <query> --from <date> --to <date> --json` | Find sessions by words in their outline titles, keywords or descriptions |
+| `adit cloud sessions list --from <date> --to <date> --json` | Sessions in a period, newest first |
+| `adit cloud sessions show <sessionId> --json` | A session's summary and outline (`current` stands for this session) |
+| `adit cloud sessions events <sessionId> --section <n> --json` | A session's events by outline section or page, truncated per field |
+| `adit cloud sessions link create <sessionId> --json` | One-hour read link for another assistant; also `status`, `renew`, `revoke` |
+| `adit cloud commits explain <sha> --json` | The prompts and responses recorded around a commit |
+| `adit cloud usage --by model --json` | Token usage and estimated cost, by model, day, session or team member |
+| `adit cloud reports daily --json` | Daily work reports as work cards with evidence |
+| `adit cloud team members --team <id> --json` | A team's members and roles |
+| `adit cloud team progress --team <id> --member <id> --query <text> --json` | A member's tasks, sessions, evidence and commits for a feature |
 
 `adit cloud link` supports `--force`, `--skip-docs`, `--skip-commits`,
-`--dry-run`, and `--json`. The same project-link and intent
-flows are also exposed as `/adit link` and `/adit intent` in supported
-platform integrations.
+`--dry-run`, and `--json`. The same project-link flow is also exposed as
+`/adit link` in supported platform integrations.
 
 Link only connects an already initialized project: it reads the repository
 list from `.adit/project.json`, validates every repository and its `origin`
@@ -298,7 +308,7 @@ clone or on a new machine), link prints a notice — nothing is merged.
 | `adit debug db clear-events` | Clear local events, sessions, diffs, and environment snapshots |
 | `adit debug perf stats` | Show performance stats |
 | `adit debug perf clear` | Clear performance logs |
-| `adit upgrade` | Update ADIT or check for updates |
+| `adit update` | Update ADIT or check for updates (`--check`); `upgrade` and `self-update` still work as aliases |
 
 ## Interactive TUI
 
@@ -418,7 +428,8 @@ Files larger than 500 KB are skipped with a warning.
 | `ADIT_AUTH_TOKEN` | Static JWT token for CI/CD or non-interactive auth | unset |
 | `ADIT_DEBUG` | Enable debug output and the hook debug log (`$TMPDIR/adit-hook-debug.jsonl`, size-capped) | unset |
 | `ADIT_CODEX_BIN` | Override Codex binary used by cloud coding commands | unset |
-| `ADIT_INSTALL_DIR` | Override the upgrade install directory | unset |
+| `ADIT_INSTALL_DIR` | Override the `adit update` install directory | unset |
+| `ADIT_PLAIN` | Set to `1` to print command output without the ┌ │ └ frame (it is already off when output is piped); `NO_COLOR` turns colors off | unset |
 
 ## Reply Token Usage
 
@@ -436,14 +447,22 @@ Capture begins with subsequent prompts. Deploy a Cloud version that accepts
 reply usage before upgrading Core; older Cloud versions leave usage pending
 and report a missing acknowledgement rather than silently lose it.
 
-## Task Skill
+## Skills
 
-The `adit-tasks` skill is installed automatically by `adit init`, `adit upgrade`,
-and published npm installs with lifecycle scripts enabled. It is placed in
-`~/.agents/skills/adit-tasks/SKILL.md` and `~/.claude/skills/adit-tasks/SKILL.md`.
-Already-running AI sessions may need restarting to discover it. Upgrades refresh
+Three skills are installed automatically by `adit init`, `adit update`, and
+published npm installs with lifecycle scripts enabled: `adit-tasks` (the user's
+own tasks), `adit-history` (sessions, commits and read links) and
+`adit-reports` (daily and weekly reports, token usage, team progress). Each is
+placed in `~/.agents/skills/<name>/SKILL.md` and `~/.claude/skills/<name>/SKILL.md`.
+Already-running AI sessions may need restarting to discover them. Upgrades refresh
 unmodified ADIT-owned copies; custom or unrelated existing skills are not overwritten.
-If lifecycle scripts were disabled, run `adit init` to install the skill.
+If lifecycle scripts were disabled, run `adit init` to install the skills.
+
+The history and report commands work from any directory; only
+`adit cloud sessions current` reads the local project database, because the
+session recorded here and its unsynced events are only known locally. Dates are
+calendar days sent with this machine's time zone. Team queries about other
+members are allowed for owners and leads; members can only query themselves.
 
 Ask your AI assistant "What tasks do I still need to finish?" and then select a
 task to implement. The skill queries live data and keeps the real task ID,
