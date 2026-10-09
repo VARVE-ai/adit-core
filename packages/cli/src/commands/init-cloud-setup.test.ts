@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runCloudSetupSection, type CloudSetupDeps } from "./init-cloud-setup.js";
 
@@ -9,7 +10,7 @@ describe("runCloudSetupSection", () => {
     originalLog = console.log;
     output = [];
     console.log = ((...args: unknown[]) => {
-      output.push(args.join(" "));
+      output.push(stripVTControlCharacters(args.join(" ")));
     }) as never;
   });
 

@@ -1,3 +1,5 @@
+import { stripVTControlCharacters } from "node:util";
+import pc from "picocolors";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   displayWidth,
@@ -28,13 +30,14 @@ function setTerminal(isTTY: boolean): void {
 
 function captured(): { out: string[]; err: string[] } {
   return {
-    out: vi.mocked(console.log).mock.calls.map((call) => String(call[0])),
-    err: vi.mocked(console.error).mock.calls.map((call) => String(call[0])),
+    out: vi.mocked(console.log).mock.calls.map((call) => stripVTControlCharacters(String(call[0]))),
+    err: vi.mocked(console.error).mock.calls.map((call) => stripVTControlCharacters(String(call[0]))),
   };
 }
 
 beforeEach(() => {
   resetOutputState();
+  vi.stubEnv("TERM", "xterm-256color");
   delete process.env.ADIT_PLAIN;
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -42,6 +45,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setTerminal(originalIsTTY);
+  vi.unstubAllEnvs();
   if (originalPlain === undefined) delete process.env.ADIT_PLAIN;
   else process.env.ADIT_PLAIN = originalPlain;
   resetOutputState();
@@ -87,7 +91,7 @@ describe("text measurement", () => {
       [{ header: "id" }, { header: "name" }, { header: "email" }],
       [["1", "\u6768\u9e4f\u98de", "a@example.com"], ["2", "Li", "b@example.com"]],
     );
-    expect(lines).toEqual([
+    expect(lines.map(stripVTControlCharacters)).toEqual([
       "id  name    email",
       "1   \u6768\u9e4f\u98de  a@example.com",
       "2   Li      b@example.com",
@@ -95,7 +99,7 @@ describe("text measurement", () => {
   });
 
   it("right-aligns numeric columns", () => {
-    expect(formatTable([{ header: "n", align: "right" }, { header: "x" }], [["5", "a"], ["123", "b"]])).toEqual([
+    expect(formatTable([{ header: "n", align: "right" }, { header: "x" }], [["5", "a"], ["123", "b"]]).map(stripVTControlCharacters)).toEqual([
       "  n  x",
       "  5  a",
       "123  b",
@@ -103,12 +107,12 @@ describe("text measurement", () => {
   });
 
   it("aligns continuation lines of a row under its value", () => {
-    expect(formatRow({ label: "Uploads", value: "events\ndiffs" }, 9)).toBe("Uploads    events\n           diffs");
-    expect(formatRow({ mark: "+", label: "A", value: "x" }, 3)).toBe("+ A    x");
+    expect(stripVTControlCharacters(formatRow({ label: "Uploads", value: "events\ndiffs" }, 9))).toBe("Uploads    events\n           diffs");
+    expect(stripVTControlCharacters(formatRow({ mark: "+", label: "A", value: "x" }, 3))).toBe("+ A    x");
   });
 
   it("colors known state words only", () => {
-    expect(stateWord("ready")).toBe("ready");
+    expect(stateWord("ready")).toBe(pc.green("ready"));
     expect(stateWord("custom")).toBe("custom");
   });
 
@@ -129,6 +133,16 @@ describe("text measurement", () => {
 });
 
 describe("block output", () => {
+  it("prints ASCII failure marks without rails on a non-Unicode terminal", () => {
+    vi.stubEnv("TERM", "linux");
+    for (const key of ["WT_SESSION", "TERMINUS_SUBLIME", "ConEmuTask", "TERM_PROGRAM", "TERMINAL_EMULATOR"]) {
+      vi.stubEnv(key, undefined);
+    }
+    setTerminal(true);
+    printError("link", "not logged in", "run adit cloud login");
+    expect(captured().err).toEqual(["[x] link: not logged in", "  run adit cloud login"]);
+  });
+
   it("prints the plain shape when stdout is not a terminal", () => {
     setTerminal(false);
     printTitle("Status", "adit", "3 repos");

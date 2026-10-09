@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ get: vi.fn(), patch: vi.fn(), credentials: vi.fn(), config: vi.fn() }));
@@ -5,6 +6,7 @@ vi.mock("@varveai/adit-cloud", async (original) => ({ ...await original<typeof i
 vi.mock("./project-initialization.js", () => ({ loadInitializedProjectConfig: mocks.config }));
 import { CloudApiError, CloudAuthError } from "@varveai/adit-cloud";
 import { cloudTasksCommand, describeFailure, registerCloudTaskCommands, taskDueDate, taskPatchFromOptions } from "./cloud-tasks.js";
+import { marks } from "./cli-style.js";
 
 const taskId = "a1111111-1111-4111-8111-111111111111";
 const updatedAt = "2026-09-22T01:00:00.000Z";
@@ -118,7 +120,8 @@ describe("cloud task commands", () => {
     await cloudTasksCommand("update", { due: "2026-10-01", expectedUpdatedAt: updatedAt, json: true }, taskId);
     expect(JSON.parse(vi.mocked(console.log).mock.calls[0][0])).toEqual({ ok: false, error: reason, status: 409 });
     await cloudTasksCommand("update", { due: "2026-10-01", expectedUpdatedAt: updatedAt }, taskId);
-    expect(vi.mocked(console.error)).toHaveBeenCalledWith(`✗ tasks update: ${reason} (409)`);
+    expect(vi.mocked(console.error).mock.calls.map((call) => stripVTControlCharacters(String(call[0]))))
+      .toContain(`${stripVTControlCharacters(marks.fail)} tasks update: ${reason} (409)`);
     expect(describeFailure(new CloudApiError("API error: 500 Internal Server Error", 500, "<html>"))).toEqual({ message: "API error: 500 Internal Server Error", status: 500, code: undefined });
   });
 
