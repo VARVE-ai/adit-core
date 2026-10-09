@@ -83,7 +83,8 @@ export function findUntrustedCodexHookStates(
   const trusted = readTrustedHookStates(configText);
   return states.filter((state) => {
     const entry = trusted.get(state.key);
-    return !entry || entry.enabled !== true || entry.trustedHash !== state.trustedHash;
+    // Codex defaults to enabled when the field is omitted; trust still needs a matching hash.
+    return !entry || entry.enabled === false || entry.trustedHash !== state.trustedHash;
   });
 }
 

@@ -664,7 +664,7 @@ describe("Codex CLI Hook Chaining", () => {
       expect(result.checks[2].detail).toContain("/hooks");
     });
 
-    it("reports hook trust once the user approved the hooks inside Codex", async () => {
+    it.each([true, false])("reports approved hook trust with explicit enablement: %s", async (explicitEnabled) => {
       await codexAdapter.installHooks(projectRoot, "npx adit-hook");
       // Simulate the approval Codex records when the user accepts the hooks
       // via /hooks — the same key/hash scheme ADIT reads back.
@@ -682,7 +682,7 @@ describe("Codex CLI Hook Chaining", () => {
         join(codexHome, "config.toml"),
         states.flatMap((state) => [
           `[hooks.state.${JSON.stringify(state.key)}]`,
-          "enabled = true",
+          ...(explicitEnabled ? ["enabled = true"] : []),
           `trusted_hash = ${JSON.stringify(state.trustedHash)}`,
           "",
         ]).join("\n"),
@@ -693,6 +693,43 @@ describe("Codex CLI Hook Chaining", () => {
       expect(result.valid).toBe(true);
       const trustCheck = result.checks.find((c) => c.name === "Codex hook trust");
       expect(trustCheck?.ok).toBe(true);
+    });
+
+    it.each([
+      { name: "explicitly disabled", enabled: false, hash: "matching" },
+      { name: "missing approval hash", enabled: undefined, hash: "missing" },
+      { name: "changed approval hash", enabled: undefined, hash: "changed" },
+    ])("warns for one $name hook alongside approved default-enabled hooks", async ({ enabled, hash }) => {
+      await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+      const hooksPath = join(projectRoot, ".codex", "hooks.json");
+      const states = buildCodexHookStatesForEntries({
+        hooksPath,
+        hooks: readHooks(projectRoot).hooks as Record<string, unknown>,
+        matchesEntry: () => true,
+      });
+      const configText = states.flatMap((state) => {
+        const isInterrupt = state.key.endsWith(":interrupt:0:0");
+        return [
+          `[hooks.state.${JSON.stringify(state.key)}]`,
+          ...(isInterrupt && enabled !== undefined ? [`enabled = ${enabled}`] : []),
+          ...(isInterrupt && hash === "missing" ? [] : [
+            `trusted_hash = ${JSON.stringify(isInterrupt && hash === "changed" ? "sha256:outdated" : state.trustedHash)}`,
+          ]),
+          "",
+        ];
+      }).join("\n");
+      const configPath = join(codexHome, "config.toml");
+      writeFileSync(configPath, configText);
+
+      const result = await codexAdapter.validateInstallation(projectRoot);
+
+      expect(result.valid).toBe(true);
+      expect(result.checks.find((c) => c.name === "Codex hook trust")).toMatchObject({
+        ok: false,
+        advisory: true,
+        detail: expect.stringContaining("1 hook(s) not yet approved"),
+      });
+      expect(readFileSync(configPath, "utf-8")).toBe(configText);
     });
 
     it("detects old ADIT hook commands as needing upgrade", async () => {
