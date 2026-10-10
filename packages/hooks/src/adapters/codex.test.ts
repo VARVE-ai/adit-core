@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
@@ -403,6 +403,57 @@ describe("Codex CLI Hook Chaining", () => {
     expect(second).toEqual(third);
   });
 
+  it("preserves approved hook positions when another tool was added after ADIT", async () => {
+    await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+    const config = readHooks(projectRoot);
+    const hooks = config.hooks as Record<string, unknown[]>;
+    for (const entries of Object.values(hooks)) {
+      entries.push({ hooks: [{ type: "command", command: "other-tool", timeout: 30 }] });
+    }
+    writeHooks(projectRoot, config);
+    const states = buildCodexHookStatesForEntries({
+      hooksPath: join(projectRoot, ".codex", "hooks.json"), hooks, matchesEntry: () => true,
+    });
+    const approval = states.map((state) =>
+      `[hooks.state.${JSON.stringify(state.key)}]\ntrusted_hash = "${state.trustedHash}"\n`,
+    ).join("\n");
+    writeFileSync(join(codexHome, "config.toml"), approval);
+
+    await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    expect(readHooks(projectRoot)).toEqual(config);
+    const result = await codexAdapter.validateInstallation(projectRoot);
+    expect(result.checks.find((c) => c.name === "Codex hook trust")?.ok).toBe(true);
+    expect(readFileSync(join(codexHome, "config.toml"), "utf8")).toBe(approval);
+  });
+
+  it("does not rewrite an unchanged hooks file on refresh", async () => {
+    await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+    const hooksPath = join(projectRoot, ".codex", "hooks.json");
+    const original = JSON.stringify(readHooks(projectRoot));
+    writeFileSync(hooksPath, original);
+    utimesSync(hooksPath, new Date(1000000), new Date(1000000));
+    const modified = statSync(hooksPath).mtimeMs;
+
+    await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    expect(readFileSync(hooksPath, "utf8")).toBe(original);
+    expect(statSync(hooksPath).mtimeMs).toBe(modified);
+  });
+
+  it.skipIf(process.platform !== "win32")("preserves approved command spelling across Windows path casing changes", async () => {
+    const script = join(projectRoot, "hooks", "dist", "index.js");
+    mkdirSync(join(script, ".."), { recursive: true });
+    writeFileSync(script, "");
+    await codexAdapter.installHooks(projectRoot, `node "${script}"`);
+    const original = readFileSync(join(projectRoot, ".codex", "hooks.json"), "utf8");
+
+    await codexAdapter.installHooks(projectRoot.toLowerCase(), `node "${script.toLowerCase()}"`);
+
+    expect(readFileSync(join(projectRoot, ".codex", "hooks.json"), "utf8")).toBe(original);
+    expect((await codexAdapter.validateInstallation(projectRoot.toLowerCase())).valid).toBe(true);
+  });
+
   it("validateInstallation detects ADIT hooks in chained configuration", async () => {
     // Other tool installed first
     writeHooks(projectRoot, {
@@ -612,6 +663,32 @@ describe("Codex CLI Hook Chaining", () => {
   });
 
   describe("validateInstallation", () => {
+    it("reads Codex's literal TOML keys and keeps approvals after refresh", async () => {
+      await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+      const states = buildCodexHookStatesForEntries({
+        hooksPath: join(projectRoot, ".codex", "hooks.json"),
+        hooks: readHooks(projectRoot).hooks as Record<string, unknown>,
+        matchesEntry: () => true,
+      });
+      const trustRoot = process.platform === "win32" ? projectRoot.toLowerCase() : projectRoot;
+      const config = [
+        `[projects.'${trustRoot}'] # Codex workspace`,
+        "trust_level = 'trusted'",
+        ...states.flatMap((state) => [
+          `[hooks.state.'${state.key}'] # approved in Codex`,
+          `trusted_hash = '${state.trustedHash}'`,
+        ]),
+      ].join("\n");
+      writeFileSync(join(codexHome, "config.toml"), config);
+
+      await codexAdapter.installHooks(projectRoot, "npx adit-hook");
+
+      const result = await codexAdapter.validateInstallation(projectRoot);
+      expect(result.checks.find((c) => c.name === "Codex hook trust")?.ok).toBe(true);
+      expect(result.checks.find((c) => c.name === "Codex workspace trust")?.ok).toBe(true);
+      expect(readFileSync(join(codexHome, "config.toml"), "utf8")).toBe(config);
+    });
+
     it("detects valid installation with all hooks", async () => {
       // Install hooks
       await codexAdapter.installHooks(projectRoot, "npx adit-hook");
