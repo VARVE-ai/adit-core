@@ -44,6 +44,15 @@ function tempDir(): string {
   return dir;
 }
 
+/** Codex reports the rollout file of every thread it keeps on each hook. */
+function codexRollout(dir: string, threadId: string): string {
+  const sessionsDir = join(dir, "codex-sessions");
+  mkdirSync(sessionsDir, { recursive: true });
+  const path = join(sessionsDir, `rollout-${threadId}.jsonl`);
+  writeFileSync(path, JSON.stringify({ type: "session_meta", payload: { id: threadId } }) + "\n");
+  return path;
+}
+
 describe("initHookContext", () => {
   let dir: string;
   let dbPath: string;
@@ -101,7 +110,7 @@ describe("initHookContext", () => {
       dir,
       "codex",
       "codex-platform-session",
-      { projectRoot: dir },
+      { projectRoot: dir, transcriptPath: codexRollout(dir, "codex-platform-session") },
     );
 
     expect(ctx?.session.id).not.toBe("claude-session");
@@ -309,6 +318,34 @@ describe("initHookContext", () => {
     expect(row.count).toBe(1);
   });
 
+  it("does not record a Codex thread that Codex itself keeps no transcript for", async () => {
+    // App-generated helper requests (e.g. next-message suggestions) run as
+    // ephemeral threads: every hook of such a thread reports no transcript.
+    const { initHookContext } = await loadContextModule();
+    const options = { projectRoot: dir, transcriptPath: null };
+    // Prompt submit, then stop of the same helper thread.
+    expect(await initHookContext(dir, "codex", "codex-ephemeral", options)).toBeNull();
+    expect(await initHookContext(dir, "codex", "codex-ephemeral", options)).toBeNull();
+
+    const row = db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
+    expect(row.count).toBe(0);
+    expect(existsSync(join(dir, ".adit", "hook-session-projects"))).toBe(false);
+  });
+
+  it("keeps recording a known Codex session when a later hook carries no transcript", async () => {
+    const { initHookContext } = await loadContextModule();
+    const first = await initHookContext(dir, "codex", "codex-kept", {
+      projectRoot: dir,
+      transcriptPath: codexRollout(dir, "codex-kept"),
+    });
+    const sessionId = first!.session.id;
+    closeDatabase(first!.db);
+
+    const later = await initHookContext(dir, "codex", "codex-kept", { projectRoot: dir });
+    expect(later?.session.id).toBe(sessionId);
+    closeDatabase(later!.db);
+  });
+
   it("binds a conversation once across parent/child hooks, cwd changes and module reloads", async () => {
     const child = join(dir, "test4");
     mkdirSync(join(child, ".git"), { recursive: true });
@@ -319,7 +356,10 @@ describe("initHookContext", () => {
     });
     closeDatabase(openDatabase(join(child, ".adit", "adit.sqlite")));
     const firstModule = await loadContextModule();
-    const parent = await firstModule.initHookContext(dir, "codex", "parent-session", { projectRoot: dir });
+    const parent = await firstModule.initHookContext(dir, "codex", "parent-session", {
+      projectRoot: dir,
+      transcriptPath: codexRollout(dir, "parent-session"),
+    });
     const parentSessionId = parent!.session.id;
     closeDatabase(parent!.db);
     const reloaded = await loadContextModule();
@@ -329,7 +369,10 @@ describe("initHookContext", () => {
     closeDatabase(continued!.db);
     // A fresh conversation launched from the child picks the child even if
     // the platform also invokes the inherited parent hook.
-    const own = await reloaded.initHookContext(child, "codex", "child-session", { projectRoot: dir });
+    const own = await reloaded.initHookContext(child, "codex", "child-session", {
+      projectRoot: dir,
+      transcriptPath: codexRollout(dir, "child-session"),
+    });
     expect(own!.session.projectId).toBe("test4-independent");
     const childSessionId = own!.session.id;
     closeDatabase(own!.db);
@@ -384,7 +427,7 @@ describe("initHookContext", () => {
       childRepo,
       "codex",
       "codex-platform-session",
-      { projectRoot: workspaceRoot },
+      { projectRoot: workspaceRoot, transcriptPath: codexRollout(dir, "codex-platform-session") },
     );
 
     expect(ctx?.config.projectRoot).toBe(workspaceRoot);

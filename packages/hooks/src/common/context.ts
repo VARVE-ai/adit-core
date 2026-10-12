@@ -104,6 +104,9 @@ export async function initHookContext(
           closeDatabase(candidateDb);
         }
       }
+      // A conversation Codex itself does not keep is never recorded; checked
+      // before binding so it leaves no trace at all.
+      if (!owner && isEphemeralCodexThread(platform, options.transcriptPath)) return null;
       config = owner ?? initial;
       if (config.initialization !== "initialized" || !existsSync(config.dbPath)) return null;
       const saved = bindSessionProject(platform, platformSessionId, config);
@@ -188,6 +191,19 @@ export async function initHookContext(
   }
 
   return { db, config, session };
+}
+
+/**
+ * Codex runs app-generated helper requests (next-message suggestions, memory
+ * consolidation, ...) as ephemeral threads: it keeps no rollout file for them
+ * and reports `transcript_path: null` on every hook, while a thread it keeps
+ * reports its rollout path from the first hook on. A Codex conversation first
+ * seen without a transcript is one Codex itself does not keep, so it is not
+ * recorded either. Matching on the platform's own persistence keeps this
+ * independent of the helper prompts' wording.
+ */
+function isEphemeralCodexThread(platform: Platform, transcriptPath: string | null | undefined): boolean {
+  return platform === "codex" && !transcriptPath;
 }
 
 /**
