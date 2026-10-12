@@ -1,0 +1,30 @@
+packages/hooks/src/common/context.ts
+  s_8daf39cb053aca::t_50ce666d82adf8 107-108
+  s_8daf39cb053aca::t_681d7c844c768f 109
+  s_8daf39cb053aca::t_1388a3223955fd 197-208
+  s_8daf39cb053aca::t_d20537fcf4aecf 196
+packages/hooks/src/common/context.test.ts
+  s_8daf39cb053aca::t_068b5d3fc5afe0 47-55
+  s_8daf39cb053aca::t_5bdddddd8199aa 325-328
+  s_8daf39cb053aca::t_53b025dd6a04bb 359-362
+  s_8daf39cb053aca::t_e1a4415ec15539 321-324,329-348
+  s_8daf39cb053aca::t_2ead7fc996da4f 372-375
+  s_8daf39cb053aca::t_b537790cdce2de 430
+  s_8daf39cb053aca::t_8fba438e6e9d09 113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cf853e46a94337e5fba7cfce4d58d239638c5fd5",
+  "prompts": {},
+  "sessions": {
+    "s_8daf39cb053aca": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "464492c4-1ace-40bb-8d4a-6737470e6607",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "kaka-varve <yangpf@varve.ai>"
+    }
+  }
+}
