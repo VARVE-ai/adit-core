@@ -10,6 +10,13 @@ afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: 
 function home() { const directory = mkdtempSync(join(tmpdir(), "adit-skills-")); homes.push(directory); return directory; }
 
 describe("skill installation", () => {
+  it("documents explicit task creation, scope selection and safe uncertain-outcome handling", () => {
+    expect(TASK_SKILL).toContain('adit cloud tasks create --title');
+    expect(TASK_SKILL).toContain('Create only when the user asks');
+    expect(TASK_SKILL).toContain('TEAM_SELECTION_REQUIRED');
+    expect(TASK_SKILL).toContain('do not blindly retry');
+    expect(TASK_SKILL).toContain('blueprintId null');
+  });
   it("installs every skill into both agent locations and is idempotent", () => {
     const directory = home();
     const result = installSkills(directory);
