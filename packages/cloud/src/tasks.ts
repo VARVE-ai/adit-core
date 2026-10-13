@@ -41,6 +41,26 @@ export interface CloudTaskPatch {
   assigneeId?: string;
 }
 
+export interface CloudTaskCreate {
+  localProjectId: string;
+  teamId?: string;
+  scope?: "personal";
+  title: string;
+  keyPointsText: string;
+  priority?: "high" | "medium" | "low";
+  dueAt?: string;
+}
+
+export interface CloudTaskCreated {
+  project: CloudTaskList["project"];
+  scope: CloudTaskList["scope"];
+  task: CloudTask;
+}
+
+export function createCloudTask(client: CloudClient, input: CloudTaskCreate): Promise<CloudTaskCreated> {
+  return client.post("/api/cli/tasks", input);
+}
+
 export function listCloudTasks(client: CloudClient, input: { localProjectId: string; teamId?: string; scope?: "personal"; state?: string; offset?: number; limit?: number }): Promise<CloudTaskList> {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(input)) if (value !== undefined) params.set(key, String(value));

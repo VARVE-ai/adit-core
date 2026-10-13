@@ -1,8 +1,11 @@
 import { stripVTControlCharacters } from "node:util";
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ get: vi.fn(), patch: vi.fn(), credentials: vi.fn(), config: vi.fn() }));
-vi.mock("@varveai/adit-cloud", async (original) => ({ ...await original<typeof import("@varveai/adit-cloud")>(), loadCredentials: mocks.credentials, CloudClient: class { get = mocks.get; patch = mocks.patch; } }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), clientOptions: vi.fn(), credentials: vi.fn(), config: vi.fn() }));
+vi.mock("@varveai/adit-cloud", async (original) => ({ ...await original<typeof import("@varveai/adit-cloud")>(), loadCredentials: mocks.credentials, CloudClient: class {
+  get = mocks.get; post = mocks.post; patch = mocks.patch;
+  constructor(_url: string, _credentials: unknown, options: unknown) { mocks.clientOptions(options); }
+} }));
 vi.mock("./project-initialization.js", () => ({ loadInitializedProjectConfig: mocks.config }));
 import { CloudApiError, CloudAuthError } from "@varveai/adit-cloud";
 import { cloudTasksCommand, describeFailure, registerCloudTaskCommands, taskDueDate, taskPatchFromOptions } from "./cloud-tasks.js";
@@ -21,6 +24,56 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); process.exitCode = undefined; });
 
 describe("cloud task commands", () => {
+  it("creates an independent task in the current project without automatic write retries", async () => {
+    const result = { task: { taskId, blueprintId: null, progressState: "not_started" }, project: { name: "Test project" }, scope: { teamName: "Team" } };
+    mocks.post.mockResolvedValue(result);
+    const cloud = new Command();
+    registerCloudTaskCommands(cloud);
+    await cloud.parseAsync(["tasks", "create", "--title", "  Booking conflicts  ", "--key-points", "Reject duplicate bookings", "--due", "2026-10-12", "--priority", "high", "--json"], { from: "user" });
+    expect(mocks.config).toHaveBeenCalledWith("adit cloud tasks create");
+    expect(mocks.clientOptions).toHaveBeenCalledWith({ maxRetries: 0 });
+    expect(mocks.post).toHaveBeenCalledExactlyOnceWith("/api/cli/tasks", {
+      localProjectId: "local-project", title: "Booking conflicts", keyPointsText: "Reject duplicate bookings",
+      dueAt: "2026-10-12T00:00:00.000Z", priority: "high", teamId: undefined, scope: undefined,
+    });
+    expect(JSON.parse(vi.mocked(console.log).mock.calls[0][0])).toEqual(result);
+    expect(mocks.get).not.toHaveBeenCalled();
+  });
+
+  it("preserves explicit personal and team scopes during creation", async () => {
+    mocks.post.mockResolvedValue({ task: { taskId } });
+    await cloudTasksCommand("create", { title: "Task", keyPoints: "Requirements", project: "selected", personal: true, json: true });
+    expect(mocks.config).not.toHaveBeenCalled();
+    expect(mocks.post.mock.calls[0][1]).toMatchObject({ localProjectId: "selected", scope: "personal" });
+    await cloudTasksCommand("create", { title: "Task", keyPoints: "Requirements", team: taskId, json: true });
+    expect(mocks.post.mock.calls[1][1]).toMatchObject({ localProjectId: "local-project", teamId: taskId });
+  });
+
+  it("does not create with missing initialization or invalid fields", async () => {
+    for (const options of [
+      { title: " " }, { title: "x".repeat(201) }, { keyPoints: " " },
+      { keyPoints: "x".repeat(20001) }, { due: "2026-02-29" }, { priority: "urgent" },
+      { team: taskId, personal: true },
+    ]) await cloudTasksCommand("create", { title: "Task", keyPoints: "Requirements", json: true, ...options });
+    mocks.config.mockReturnValue(null);
+    await cloudTasksCommand("create", { title: "Task", keyPoints: "Requirements", json: true });
+    expect(mocks.post).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("surfaces team selection and creation failures without trying another scope", async () => {
+    const body = { error: "Choose a linked team", code: "TEAM_SELECTION_REQUIRED", teams: [{ id: taskId, name: "Team" }] };
+    mocks.post.mockRejectedValueOnce(new CloudApiError(body.error, 400, body));
+    await cloudTasksCommand("create", { title: "Task", keyPoints: "Requirements", json: true });
+    expect(JSON.parse(vi.mocked(console.log).mock.calls[0][0])).toMatchObject({ ...body, ok: false });
+    expect(mocks.post).toHaveBeenCalledTimes(1);
+    mocks.post.mockRejectedValueOnce(new Error("Request timed out"));
+    await cloudTasksCommand("create", { title: "Task", keyPoints: "Requirements", json: true });
+    expect(JSON.parse(vi.mocked(console.log).mock.calls[1][0])).toMatchObject({ ok: false, error: "Request timed out" });
+    expect(mocks.post).toHaveBeenCalledTimes(2);
+    expect(mocks.get).not.toHaveBeenCalled();
+  });
+
   it("uses the current local project and preserves real task IDs and pagination", async () => {
     const result = { tasks: [{ taskId, title: "Fix upload" }], total: 60, nextOffset: 50 };
     mocks.get.mockResolvedValue(result);

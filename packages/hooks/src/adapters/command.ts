@@ -7,6 +7,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type { Platform } from "@varveai/adit-core";
 import type { AditHookType } from "./types.js";
 
@@ -134,6 +135,11 @@ export function mergeAditHookEntries(
 
 /** Check whether an ADIT hook command has been upgraded with a fixed project root. */
 export function isFixedProjectRootHookCommand(command: string, projectRoot: string): boolean {
+  if (process.platform === "win32") {
+    const pinnedRoot = extractPinnedProjectRoot(command);
+    return isAditHookCommand(command) && pinnedRoot !== null &&
+      resolve(pinnedRoot).toLowerCase() === resolve(projectRoot).toLowerCase();
+  }
   const encodedProjectRoot = encodeProjectRoot(projectRoot);
   return isAditHookCommand(command) &&
     (

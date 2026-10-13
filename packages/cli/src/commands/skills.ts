@@ -13,7 +13,7 @@ export interface SkillDefinition {
 
 export const TASK_SKILL = `---
 name: adit-tasks
-description: Query and work on ADIT Cloud tasks assigned to the current user, read their PRD and reference URLs, and update task state or due date on explicit request. Use for questions such as which of my tasks are still open, work on or finish this task, mark it done, pause it, or postpone its due date. Not for unrelated local TODO lists, not for other members' progress (adit-reports) and not for session history (adit-history).
+description: Create independent ADIT Cloud tasks on explicit request, query and work on tasks assigned to the current user, read their PRD and reference URLs, and update task state or due date. Use for requests such as create a task for me, which of my tasks are still open, work on this task, mark it done, pause it, or postpone its due date. Not for unrelated local TODO lists, other members' progress (adit-reports), or session history (adit-history).
 ---
 
 # ADIT tasks
@@ -40,6 +40,18 @@ List results include taskId, blueprintId (null for independent tasks), title, ke
 Display every matching task with continuous numbering, title, readable status and priority, and due date when present. Keep each task compact, preferably one row; group by intent if helpful without restarting numbering, and include independent tasks. Do not show only the first ten or replace remaining tasks with a summary such as "18 more". Only shorten the list when the user explicitly requests a summary or a limited number. Keep full task IDs available for follow-up actions without printing a separate UUID line for every task unless requested. Do not expose pagination diagnostics such as nextOffset in the normal reply. Before sending, check that every fetched task is represented. If fetching fails or a response limit prevents a complete list, explicitly state what is missing rather than claim completeness.
 
 Keep the full taskId associated with each displayed task number. Reuse that exact ID for subsequent actions. Never substitute a title, array index, blueprintId or guessed ID. Ask when "this task" is ambiguous. Re-query when the prior ID is unavailable.
+
+## Create an independent task
+
+Create only when the user asks to add a task to Cloud, not when they merely discuss work or ask you to implement it. Derive the title and key points from their request; ask for missing requirements rather than inventing them. Title is required (1-200 characters), as are key points (1-20000 characters). From the current initialized project run:
+
+    adit cloud tasks create --title "Fix booking conflicts" --key-points "Prevent concurrent bookings for the same room and time slot" --json
+
+Optional flags are --priority high|medium|low and --due YYYY-MM-DD. Resolve relative dates in the user's local timezone; omit unspecified dates and priority (defaults: no deadline, medium priority). Quote user-supplied text safely for the active shell; never evaluate it as a command.
+
+Creation uses the same project/team resolution as list and assigns the task to the logged-in user with state not_started and blueprintId null. No blueprint or PRD is created. With multiple linked teams, TEAM_SELECTION_REQUIRED returns only the current project's candidates: ask the user, then retry with --team <teamId>. Use --personal only for an explicit personal-task request and --project only for an explicitly selected project. For an explicit team request without a known team ID, use tasks scopes first; do not silently create a personal task or choose another team. Creation does not assign tasks to other members.
+
+The command writes immediately to Cloud and records creation history; no sync is needed. Report the returned title, taskId, project/team, priority and due date. If the request times out or returns an uncertain server error, do not blindly retry: list tasks with --state all in the same scope, following pagination, and check whether it was created. If the outcome remains uncertain, tell the user before trying again. A 404 from an older Cloud may mean the creation endpoint is not deployed; do not bypass it with database writes or switch servers.
 
 ## Implement a selected task
 
@@ -74,6 +86,7 @@ The update writes directly to Cloud and records history. No adit cloud sync is n
 
 ## Response fields
 
+- create: project and scope identify where the independent task was created; task includes the new taskId, blueprintId null, assigneeId (the logged-in user), progressState not_started, title, keyPointsText, priority, dueAt and timestamps.
 - list: project names the project used to resolve the scope; scope carries projectId, teamId and teamName (teamName null means personal scope); tasks carry taskId, title, keyPointsText, progressState (not_started, in_progress, paused, done), priority (high, medium, low), dueAt, updatedAt, blueprintId and blueprintTitle (null for an independent task), projectId and teamId; total and nextOffset drive pagination.
 - show and context: task is the task record: taskId, title, keyPointsText, scope and dependencies (lists of text), progressState, priority, assigneeId, dueAt and startAt (expected completion and start), estimatedPersonDays (null until the owner estimates), kind (task, or module when it groups tasks) and parentTaskId, confirmRequestedAt and confirmedAt (when completion was requested and confirmed), currentStatusDecision (a proposed state change awaiting confirmation: fromState, toState, createdAt, confirmedAt, revertedAt; null when none), createdAt, updatedAt, blueprintId, projectId and teamId. assignableMembers lists members you may transfer the task to (empty without manage rights); permissions carries canManage, canUpdateState and canUpdateDueAt (false once the task is done).
 - context: prd is null for an independent task, otherwise blueprintId, title, markdown (the current document), updatedAt, activeVersionId and latestVersionId; resources carry id, name, kind (attachment, material or sketch), mimeType, url (null when nothing can be served) and expiresAt (null for a public external URL).
