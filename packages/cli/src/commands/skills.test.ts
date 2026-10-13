@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { HISTORY_SKILL, REPORTS_SKILL, SKILLS, TASK_SKILL, installSkills } from "./skills.js";
+import { SKILLS, installSkills } from "./skills.js";
 
 const homes: string[] = [];
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
@@ -15,7 +15,7 @@ describe("skill installation", () => {
     const result = installSkills(directory);
     expect(result.errors).toEqual([]);
     expect(result.installed).toEqual(["agents", "claude"].flatMap((base) => SKILLS.map((skill) => join(directory, `.${base}`, "skills", skill.name, "SKILL.md"))));
-    expect(result.installed.map((path) => readFileSync(path, "utf8"))).toEqual([TASK_SKILL, HISTORY_SKILL, REPORTS_SKILL, TASK_SKILL, HISTORY_SKILL, REPORTS_SKILL]);
+    expect(result.installed.map((path) => readFileSync(path, "utf8"))).toEqual(["agents", "claude"].flatMap(() => SKILLS.map(skill => skill.content)));
     expect(installSkills(directory).unchanged).toEqual(result.installed);
   });
 
