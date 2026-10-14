@@ -44,6 +44,7 @@ import { cloudClaudeCommand } from "./commands/cloud-claude.js";
 import { cloudCodexCommand } from "./commands/cloud-codex.js";
 import { registerCloudTaskCommands } from "./commands/cloud-tasks.js";
 import { registerCloudHistoryCommands } from "./commands/cloud-history.js";
+import { registerCloudMemoryCommands } from "./commands/cloud-memories.js";
 import { registerCloudReportCommands } from "./commands/cloud-reports.js";
 import { dbClearEventsCommand } from "./commands/db.js";
 import { perfCommand, perfClearCommand } from "./commands/perf.js";
@@ -71,6 +72,8 @@ export function createProgram(): Command {
     .name("adit")
     .description("AI Development Intent Tracker — a flight recorder for AI-assisted development")
     .version(CLI_VERSION);
+  // Subcommands such as memory history own their --version option.
+  program.enablePositionalOptions();
   // Set before any subcommand exists so every subcommand inherits it.
   program.configureOutput({ outputError: (text, write) => write(formatParseError(text)) });
   configureTopLevelHelp(program);
@@ -267,6 +270,7 @@ export function createProgram(): Command {
   const cloudCmd = program.command("cloud").description("Cloud sync commands");
   registerCloudTaskCommands(cloudCmd);
   registerCloudHistoryCommands(cloudCmd);
+  registerCloudMemoryCommands(cloudCmd);
   registerCloudReportCommands(cloudCmd);
 
   cloudCmd

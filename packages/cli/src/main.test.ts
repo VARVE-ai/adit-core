@@ -40,6 +40,23 @@ async function parseAndCapture(args: string[]): Promise<string> {
 }
 
 describe("CLI help", () => {
+  it.each(["show", "history"])("passes memory %s --version to the nested command", async action => {
+    const program = createProgram().exitOverride();
+    configureOutput(program, () => {});
+    let received: Record<string, unknown> | undefined;
+    findCommand(program, "cloud", "memories", action).action(options => { received = options; });
+    await program.parseAsync(["node", "adit", "cloud", "memories", action, "--scope", "personal", "--version", "2", "--json"]);
+    expect(received).toMatchObject({ scope: "personal", version: "2", json: true });
+  });
+
+  it("keeps the top-level CLI version flag available", async () => {
+    const program = createProgram().exitOverride();
+    const chunks: string[] = [];
+    configureOutput(program, text => chunks.push(text));
+    await expect(program.parseAsync(["node", "adit", "--version"])).rejects.toMatchObject({ code: "commander.version", exitCode: 0 });
+    expect(chunks.join("").trim()).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
   it("lists the current top-level commands", () => {
     const help = createProgram().helpInformation();
 
