@@ -1,5 +1,5 @@
 import { Command, Option } from "commander";
-import { CloudClient, CloudApiError, loadCredentials, listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask, type CloudTaskDetail, type CloudTaskList, type CloudTaskPatch } from "@varveai/adit-cloud";
+import { CloudClient, CloudApiError, loadCredentials, createCloudTask, listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask, type CloudTaskCreate, type CloudTaskDetail, type CloudTaskList, type CloudTaskPatch } from "@varveai/adit-cloud";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
 import { NotLoggedInError, commandWith, describeFailure, reportFailure } from "./cloud-read-output.js";
 import {
@@ -51,20 +51,41 @@ function pageNumber(value: string | undefined, fallback: number, max: number) {
   return Number(value);
 }
 
-export async function cloudTasksCommand(action: "list" | "show" | "context" | "update" | "scopes", options: Options = {}, taskId?: string): Promise<void> {
+export async function cloudTasksCommand(action: "create" | "list" | "show" | "context" | "update" | "scopes", options: Options = {}, taskId?: string): Promise<void> {
   try {
     if (taskId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)) throw new Error("Use the full taskId returned by the task list");
     const credentials = loadCredentials();
     if (!credentials) throw new NotLoggedInError();
-    const client = new CloudClient(credentials.serverUrl, credentials, { maxRetries: action === "update" ? 0 : 2 });
+    const client = new CloudClient(credentials.serverUrl, credentials, { maxRetries: action === "update" || action === "create" ? 0 : 2 });
     let localProjectId = options.project;
-    if ((action === "list" || action === "scopes") && !localProjectId) {
+    if ((action === "list" || action === "scopes" || action === "create") && !localProjectId) {
       const config = loadInitializedProjectConfig(`adit cloud tasks ${action}`);
-      if (!config) throw new Error("Initialize and link the current project before querying its tasks or teams.");
+      if (!config) throw new Error("Initialize and link the current project before working with its tasks or teams.");
       localProjectId = config.projectId;
     }
     let result: unknown;
-    if (action === "list") {
+    if (action === "create") {
+      if (options.team && options.personal) throw new Error("Select either --team or --personal");
+      const title = options.title?.trim(), keyPointsText = options.keyPoints?.trim();
+      if (!title || title.length > 200) throw new Error("Task title must contain 1-200 characters");
+      if (!keyPointsText || keyPointsText.length > 20000) throw new Error("Task key points must contain 1-20000 characters");
+      if (options.priority && !["high", "medium", "low"].includes(options.priority)) throw new Error("Invalid task priority");
+      const created = await createCloudTask(client, {
+        localProjectId: localProjectId!, teamId: options.team, scope: options.personal ? "personal" : undefined,
+        title, keyPointsText, priority: options.priority as CloudTaskCreate["priority"], dueAt: options.due ? taskDueDate(options.due) : undefined,
+      });
+      if (!options.json) {
+        printTitle("Task created", created.project.name ?? created.project.localProjectId, created.scope.teamName ? `team ${created.scope.teamName}` : "personal");
+        printRows([
+          { label: "ID", value: created.task.taskId }, { label: "Title", value: created.task.title },
+          { label: "State", value: stateWord(created.task.progressState) }, { label: "Priority", value: created.task.priority },
+          { label: "Due", value: created.task.dueAt?.slice(0, 10) ?? "-" },
+        ]);
+        printEnd(`${marks.ok} Independent task assigned to you`);
+        return;
+      }
+      result = created;
+    } else if (action === "list") {
       if (options.team && options.personal) throw new Error("Select either --team or --personal");
       const limit = pageNumber(options.limit, 50, 100);
       if (limit === 0) throw new Error("Limit must be between 1 and 100");
@@ -172,7 +193,16 @@ function printTaskDetail(detail: CloudTaskDetail): void {
 }
 
 export function registerCloudTaskCommands(cloud: Command) {
-  const tasks = cloud.command("tasks").description("Query and update tasks assigned to you");
+  const tasks = cloud.command("tasks").description("Create independent tasks, query and update tasks assigned to you");
+  tasks.command("create").description("Create an independent task assigned to you in Cloud")
+    .requiredOption("--title <text>", "Task title, 1-200 characters")
+    .requiredOption("--key-points <text>", "Task requirements, 1-20000 characters")
+    .option("--team <id>", "Select a team linked to this project (see tasks scopes)")
+    .option("--project <id>", "Local project ID; defaults to this initialized project")
+    .option("--personal", "Create in the personal project instead of its linked team")
+    .option("--due <date>", "Due date, YYYY-MM-DD")
+    .addOption(new Option("--priority <priority>", "Task priority; defaults to medium").choices(["high", "medium", "low"]))
+    .option("--json", "Output JSON").action((options) => cloudTasksCommand("create", options));
   tasks.command("list").description("List your tasks in the current project or a team")
     .option("--team <id>", "Select a team linked to this project (see tasks scopes)").option("--project <id>", "Local project ID; defaults to this initialized project")
     .option("--personal", "Query personal project tasks instead of its linked team")

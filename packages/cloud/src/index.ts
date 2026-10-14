@@ -108,7 +108,7 @@ export {
   type GitSyncSkipReason,
 } from "./project-link/index.js";
 
-export { listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask } from "./tasks.js";
+export { createCloudTask, listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask } from "./tasks.js";
 export * from "./cli-reads.js";
 export * from "./memories.js";
-export type { CloudTask, CloudTaskList, CloudTaskDetail, CloudTaskContext, CloudTaskPatch, CloudTaskState } from "./tasks.js";
+export type { CloudTask, CloudTaskList, CloudTaskDetail, CloudTaskContext, CloudTaskPatch, CloudTaskState, CloudTaskCreate, CloudTaskCreated } from "./tasks.js";

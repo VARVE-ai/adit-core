@@ -13,6 +13,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { Platform } from "@varveai/adit-core";
 import type {
   PlatformAdapter,
@@ -26,13 +27,15 @@ import {
   buildAditHookCommand,
   classifyAditHookEntries,
   describeHookValidation,
+  extractHookScriptPath,
+  extractPinnedProjectRoot,
   isAditHookCommand,
   isFixedProjectRootHookCommand,
-  mergeAditHookEntries,
 } from "./command.js";
 import {
   buildCodexHookStatesForEntries,
   findUntrustedCodexHookStates,
+  parseCodexTrustTableKey,
   resolveCodexHookTrustConfigPath,
 } from "./codex-trust.js";
 
@@ -259,10 +262,11 @@ export const codexAdapter: PlatformAdapter = {
     const existingHooks = (hooksConfig.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 
-    // Merge: strip ADIT entries from every event (including events ADIT no
-    // longer installs, so upgrades leave nothing behind), keep other tools'
-    // entries, then append this release's ADIT entries.
-    const mergedHooks = mergeAditHookEntries(existingHooks, newHooks);
+    // Codex includes the array position in its approval key. Replace in
+    // place so refreshing ADIT does not invalidate unchanged hooks.
+    const mergedHooks = mergeCodexHookEntries(existingHooks, newHooks);
+
+    if (isDeepStrictEqual(existingHooks, mergedHooks)) return;
 
     hooksConfig.hooks = mergedHooks;
     writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2) + "\n");
@@ -320,6 +324,54 @@ export const codexAdapter: PlatformAdapter = {
     // config are left in place on purpose — ADIT no longer edits that file.
   },
 };
+
+function mergeCodexHookEntries(
+  existingHooks: Record<string, unknown>,
+  newHooks: Record<string, unknown[]>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = {};
+  for (const event of new Set([...Object.keys(existingHooks), ...Object.keys(newHooks)])) {
+    const existing = existingHooks[event];
+    const replacements = [...(newHooks[event] ?? [])];
+    if (!Array.isArray(existing) && replacements.length === 0) {
+      merged[event] = existing;
+      continue;
+    }
+    const entries: unknown[] = [];
+    for (const entry of Array.isArray(existing) ? existing : []) {
+      if (!entryContainsAditHook(entry)) entries.push(entry);
+      else if (replacements.length > 0) {
+        const replacement = replacements.shift();
+        entries.push(isDeepStrictEqual(normalizeCodexEntryPaths(entry), normalizeCodexEntryPaths(replacement))
+          ? entry
+          : replacement);
+      }
+    }
+    entries.push(...replacements);
+    if (entries.length > 0) merged[event] = entries;
+  }
+  return merged;
+}
+
+// Keep the approved command spelling when only Windows path casing or
+// separators differ. Other command or hook changes still replace the entry.
+function normalizeCodexEntryPaths(entry: unknown): unknown {
+  if (process.platform !== "win32" || !entry || typeof entry !== "object") return entry;
+  const raw = entry as Record<string, unknown>;
+  if (!Array.isArray(raw.hooks)) return entry;
+  return { ...raw, hooks: raw.hooks.map((hook: Record<string, unknown>) => {
+    if (!hook || typeof hook.command !== "string") return hook;
+    let command = hook.command;
+    const root = extractPinnedProjectRoot(command);
+    if (root) {
+      command = command.replace(/--project-root-b64([= ])[A-Za-z0-9_-]+/u,
+        (_match, separator: string) => `--project-root-b64${separator}${Buffer.from(resolve(root).toLowerCase()).toString("base64url")}`);
+    }
+    const script = extractHookScriptPath(command);
+    if (script) command = command.replace(script, resolve(script).toLowerCase());
+    return { ...hook, command };
+  }) };
+}
 
 function configHasAditHooks(hooksPath: string): boolean {
   if (!existsSync(hooksPath)) return false;
@@ -390,23 +442,22 @@ function readTextFile(path: string): string | null {
  */
 function isCodexWorkspaceTrusted(configText: string | null, projectRoot: string): boolean {
   if (!configText) return false;
-  const wanted = resolve(projectRoot);
+  const normalize = (path: string) => process.platform === "win32"
+    ? resolve(path).toLowerCase()
+    : resolve(path);
+  const wanted = normalize(projectRoot);
   let inWantedProject = false;
   for (const line of configText.split(/\r?\n/u)) {
-    const header = line.match(/^\s*\[projects\.("(?:\\.|[^"\\])*")\]\s*$/u);
-    if (header?.[1]) {
-      try {
-        inWantedProject = resolve(JSON.parse(header[1]) as string) === wanted;
-      } catch {
-        inWantedProject = false;
-      }
+    const projectPath = parseCodexTrustTableKey(line, "projects");
+    if (projectPath !== null) {
+      inWantedProject = normalize(projectPath) === wanted;
       continue;
     }
-    if (/^\s*\[[^\]]+\]\s*$/u.test(line)) {
+    if (/^\s*\[/u.test(line)) {
       inWantedProject = false;
       continue;
     }
-    if (inWantedProject && /^\s*trust_level\s*=\s*"trusted"\s*(?:#.*)?$/u.test(line)) {
+    if (inWantedProject && /^\s*trust_level\s*=\s*(?:"trusted"|'trusted')\s*(?:#.*)?$/u.test(line)) {
       return true;
     }
   }
