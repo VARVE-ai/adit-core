@@ -19,6 +19,9 @@ function query(params: object): string {
 
 export interface CloudPeriodParams { from?: string | null; to?: string | null; timeZone?: string | null }
 export interface CloudScopeParams { project?: string | null; team?: string | null; member?: string | null }
+export type CloudReadScope = "me" | "visible";
+export interface CloudReadScopeParams { scope?: CloudReadScope | null }
+export interface CloudReadScopeSummary { kind: CloudReadScope; description: string }
 export interface CloudPageParams { offset?: number | null; limit?: number | null }
 
 export interface CloudPeriod { from: string | null; to: string | null; timeZone: string }
@@ -40,7 +43,7 @@ export interface CloudSessionSummary {
 /** A list or search row: only the analysis state travels with it. */
 export type CloudSessionRow = Omit<CloudSessionSummary, "analysis"> & { analysis: { state: CloudSessionAnalysis["state"] } };
 export interface CloudSessionMatch { kind: "outline"; sequence: number; title: string; field: "title" | "keywords" | "description"; snippet: string }
-export interface CloudSessionList { sessions: CloudSessionRow[]; total: number; nextOffset: number | null; period: CloudPeriod; scope: { description: string } }
+export interface CloudSessionList { sessions: CloudSessionRow[]; total: number; nextOffset: number | null; period: CloudPeriod; scope: CloudReadScopeSummary }
 export interface CloudSessionSearch extends Omit<CloudSessionList, "sessions"> { query: string; searchMode: string; sessions: Array<CloudSessionRow & { score: number; matches: CloudSessionMatch[] }>; scopeTruncated: boolean }
 export interface CloudOutlineSection { sequence: number; title: string; keywords: string[]; description: string | null; startedAt: string; endedAt: string; eventCount: number }
 export interface CloudSessionDetail {
@@ -58,6 +61,7 @@ export interface CloudSessionEvents { sessionId: string; section: { sequence: nu
 export interface CloudContextLink { createdAt: string; expiresAt: string; revokedAt: string | null }
 export interface CloudContextLinkResult { sessionId: string; created?: boolean; action?: string; active?: boolean; link: CloudContextLink | null; url: string | null; serverNow: string }
 export interface CloudCommitExplanation {
+  scope: CloudReadScopeSummary;
   commit: { sha: string; message: string; author: { name: string; email: string }; committedAt: string; branch: string | null; projects: Array<{ id: string; name: string | null }> };
   attributions: Array<{
     session: { id: string; title: string | null; platform: string; startedAt: string; user: CloudPerson | null };
@@ -86,8 +90,18 @@ export interface CloudTeamProgress {
 
 const id = encodeURIComponent;
 
-export function listCloudProjects(client: CloudClient, input: { q?: string | null; kind?: string | null } = {}): Promise<{ projects: CloudProject[] }> {
-  return client.get(`/api/cli/projects${query(input)}`);
+/** Older servers ignore unknown query parameters; never present their broader results as scoped. */
+async function scopedGet<T extends { scope: CloudReadScopeSummary }>(client: CloudClient, path: string, scope: CloudReadScope): Promise<T> {
+  const result = await client.get<T>(path);
+  if (result.scope?.kind !== scope) {
+    throw new Error("Cloud did not confirm the requested scope. Update the Cloud server before using scoped history queries.");
+  }
+  return result;
+}
+
+export function listCloudProjects(client: CloudClient, input: { q?: string | null; kind?: string | null } & CloudReadScopeParams = {}): Promise<{ projects: CloudProject[]; scope: CloudReadScopeSummary }> {
+  const scope = input.scope ?? (input.kind === "team" ? "visible" : "me");
+  return scopedGet(client, `/api/cli/projects${query({ ...input, scope })}`, scope);
 }
 export function listCloudTeams(client: CloudClient): Promise<{ teams: CloudTeam[] }> {
   return client.get("/api/cli/teams");
@@ -98,11 +112,13 @@ export function listCloudTeamMembers(client: CloudClient, teamId: string): Promi
 export function cloudTeamProgress(client: CloudClient, teamId: string, input: { member: string; q?: string | null } & CloudPeriodParams): Promise<CloudTeamProgress> {
   return client.get(`/api/cli/teams/${id(teamId)}/progress${query(input)}`);
 }
-export function listCloudSessions(client: CloudClient, input: CloudScopeParams & CloudPeriodParams & CloudPageParams): Promise<CloudSessionList> {
-  return client.get(`/api/cli/sessions${query(input)}`);
+export function listCloudSessions(client: CloudClient, input: CloudReadScopeParams & CloudScopeParams & CloudPeriodParams & CloudPageParams): Promise<CloudSessionList> {
+  const scope = input.scope ?? "me";
+  return scopedGet(client, `/api/cli/sessions${query({ ...input, scope })}`, scope);
 }
-export function searchCloudSessions(client: CloudClient, input: { q: string } & CloudScopeParams & CloudPeriodParams & CloudPageParams): Promise<CloudSessionSearch> {
-  return client.get(`/api/cli/sessions/search${query(input)}`);
+export function searchCloudSessions(client: CloudClient, input: { q: string } & CloudReadScopeParams & CloudScopeParams & CloudPeriodParams & CloudPageParams): Promise<CloudSessionSearch> {
+  const scope = input.scope ?? "me";
+  return scopedGet(client, `/api/cli/sessions/search${query({ ...input, scope })}`, scope);
 }
 export function showCloudSession(client: CloudClient, sessionId: string): Promise<CloudSessionDetail> {
   return client.get(`/api/cli/sessions/${id(sessionId)}`);
@@ -117,8 +133,9 @@ export function cloudSessionLink(client: CloudClient, sessionId: string, action:
   if (action === "revoke") return client.delete<CloudContextLinkResult>(path);
   return client.get(path);
 }
-export function explainCloudCommit(client: CloudClient, sha: string, input: { project?: string | null } = {}): Promise<CloudCommitExplanation> {
-  return client.get(`/api/cli/commits/${id(sha)}${query(input)}`);
+export function explainCloudCommit(client: CloudClient, sha: string, input: { project?: string | null } & CloudReadScopeParams = {}): Promise<CloudCommitExplanation> {
+  const scope = input.scope ?? "me";
+  return scopedGet(client, `/api/cli/commits/${id(sha)}${query({ ...input, scope })}`, scope);
 }
 export function cloudUsage(client: CloudClient, input: { scope?: string | null; by?: string | null } & CloudScopeParams & CloudPeriodParams): Promise<CloudUsage> {
   return client.get(`/api/cli/usage${query(input)}`);

@@ -272,19 +272,30 @@ Common timeline options include `--limit`, `--actor`, `--type`,
 | `adit cloud tasks show <taskId> --json` | Read an assigned task, permissions and current update timestamp |
 | `adit cloud tasks context <taskId> --json` | Read the task, current PRD and attachment/sketch URLs without downloading files |
 | `adit cloud tasks update <taskId> --state done --json` | Update Cloud immediately and record task history |
-| `adit cloud projects list --json` | Projects you can read: your own and the team projects your role allows |
+| `adit cloud projects list --json` | Your own projects; add `--scope visible` to include team projects your role allows |
 | `adit cloud teams list --json` | Your teams with your role (owner, lead or member) in each |
 | `adit cloud sessions current --json` | The session recorded in this directory, its unsynced events and whether Cloud has it |
-| `adit cloud sessions search <query> --from <date> --to <date> --json` | Find sessions by words in their outline titles, keywords or descriptions |
-| `adit cloud sessions list --from <date> --to <date> --json` | Sessions in a period, newest first |
+| `adit cloud sessions search <query> --from <date> --to <date> --json` | Find your sessions by words in their outline titles, keywords or descriptions |
+| `adit cloud sessions list --from <date> --to <date> --json` | Your sessions in a period, newest first |
 | `adit cloud sessions show <sessionId> --json` | A session's summary and outline (`current` stands for this session) |
 | `adit cloud sessions events <sessionId> --section <n> --json` | A session's events by outline section or page, truncated per field |
 | `adit cloud sessions link create <sessionId> --json` | One-hour read link for another assistant; also `status`, `renew`, `revoke` |
-| `adit cloud commits explain <sha> --json` | The prompts and responses recorded around a commit |
+| `adit cloud commits explain <sha> --json` | Your session prompts and responses recorded around a commit |
 | `adit cloud usage --by model --json` | Token usage and estimated cost, by model, day, session or team member |
 | `adit cloud reports daily --json` | Daily work reports as work cards with evidence |
 | `adit cloud team members --team <id> --json` | A team's members and roles |
 | `adit cloud team progress --team <id> --member <id> --query <text> --json` | A member's tasks, sessions, evidence and commits for a feature |
+
+`projects list`, `sessions list`, `sessions search` and `commits explain` accept
+`--scope me|visible` and default to `me`. `visible` includes only data your
+existing permissions allow; an empty result never expands the scope. Session
+ownership, not the Git author name, determines whose commit explanations are
+included. Team, project and member filters narrow the selected scope;
+`--scope me --member <someone-else>` is an error. Project `--kind personal|team`
+remains supported: `--kind team` without `--scope` keeps its old meaning, while
+explicit `--scope me --kind team` is an error. JSON responses echo `scope.kind`;
+update the Cloud server before the CLI, since an older server cannot confirm
+these scope guarantees and its query results are rejected by the new CLI.
 
 `adit cloud link` supports `--force`, `--skip-docs`, `--skip-commits`,
 `--dry-run`, and `--json`. The same project-link flow is also exposed as

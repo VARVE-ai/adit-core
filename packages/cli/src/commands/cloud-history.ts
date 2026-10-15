@@ -23,6 +23,7 @@ import {
   readCloudSessionEvents,
   searchCloudSessions,
   showCloudSession,
+  type CloudReadScope,
   type CloudSessionAnalysis,
   type CloudSessionDetail,
 } from "@varveai/adit-cloud";
@@ -66,7 +67,7 @@ import {
   type Row,
 } from "./cli-style.js";
 
-type ScopeOptions = { project?: string; team?: string; member?: string };
+type ScopeOptions = { scope?: CloudReadScope; project?: string; team?: string; member?: string };
 type PeriodOptions = { from?: string; to?: string; tz?: string };
 type PageOpts = { offset?: string; limit?: string };
 type Json = { json?: boolean };
@@ -190,7 +191,7 @@ async function sessionArgument(value: string): Promise<string> {
 // ─── Command handlers ────────────────────────────────────────────────────────
 
 function scopeParams(options: ScopeOptions) {
-  return { project: options.project, team: options.team, member: options.member };
+  return { scope: options.scope ?? "me", project: options.project, team: options.team, member: options.member };
 }
 
 const SYNC_NOT_FOUND = `run ${strong("adit cloud sync")} in the project directory, then retry`;
@@ -215,17 +216,18 @@ function periodLabel(period: { from: string | null; to: string | null }): string
   return `${period.from ?? "any"} ${arrow()} ${period.to ?? "any"}`;
 }
 
-export async function cloudProjectsCommand(options: Json & { query?: string; kind?: string }): Promise<void> {
+export async function cloudProjectsCommand(options: Json & { scope?: CloudReadScope; query?: string; kind?: string }): Promise<void> {
   try {
-    const result = await listCloudProjects(requireCloudClient(), { q: options.query, kind: options.kind });
+    if (options.scope === "me" && options.kind === "team") throw new Error("--scope me cannot be combined with --kind team; use --scope visible");
+    const result = await listCloudProjects(requireCloudClient(), { q: options.query, kind: options.kind, scope: options.scope });
     if (options.json) return printJson(result);
-    const filters = [options.query ? `matching "${options.query}"` : null, options.kind ?? null];
+    const filters = [result.scope.description, options.query ? `matching "${options.query}"` : null, options.kind ?? null];
     if (!result.projects.length) {
       printTitle("Projects", ...filters);
-      printEnd(`${marks.skip} No projects visible to you`);
+      printEnd(`${marks.skip} No projects in this scope`);
       return;
     }
-    printTitle("Projects", ...filters, `${result.projects.length} visible`);
+    printTitle("Projects", ...filters, String(result.projects.length));
     printTable(
       [{ header: "id" }, { header: "kind" }, { header: "name" }, { header: "teams" }, { header: "last activity" }],
       result.projects.map((project) => [
@@ -368,7 +370,7 @@ export async function cloudSessionsSearchCommand(query: string, options: Json & 
   try {
     const result = await searchCloudSessions(requireCloudClient(), { q: query, ...scopeParams(options), ...periodOptions(options), ...pageOptions(options, 50) });
     if (options.json) return printJson(result);
-    const scope = [`"${query}"`, `${result.searchMode} search`, result.scopeTruncated ? "newest sessions only" : null];
+    const scope = [result.scope.description, `"${query}"`, `${result.searchMode} search`, result.scopeTruncated ? "newest sessions only" : null];
     if (!result.sessions.length) {
       printTitle("Sessions", ...scope);
       printEnd(`${marks.skip} No sessions match ${dim("· only outline titles, keywords and descriptions are searched")}`);
@@ -524,16 +526,16 @@ export async function cloudSessionsLinkCommand(action: "create" | "status" | "re
   } catch (error) { reportFailure(error, options, `sessions link ${action}`, SYNC_NOT_FOUND); }
 }
 
-export async function cloudCommitsExplainCommand(sha: string, options: Json & { project?: string }): Promise<void> {
+export async function cloudCommitsExplainCommand(sha: string, options: Json & { scope?: CloudReadScope; project?: string }): Promise<void> {
   try {
-    const result = await explainCloudCommit(requireCloudClient(), sha, { project: options.project });
+    const result = await explainCloudCommit(requireCloudClient(), sha, { project: options.project, scope: options.scope });
     if (options.json) return printJson(result);
     const { commit } = result;
-    printTitle("Commit", shortId(commit.sha), commit.branch, localDateTime(commit.committedAt), commit.author.name);
+    printTitle("Commit", shortId(commit.sha), result.scope.description, commit.branch, localDateTime(commit.committedAt), commit.author.name);
     printLine(commit.message.trim());
     if (result.attributions.length === 0) {
       printLine();
-      printLine(`${marks.skip} ${dim("no recorded session is linked to this commit")}`);
+      printLine(`${marks.skip} ${dim("no recorded session in this scope is linked to this commit")}`);
     }
     const width = summaryColumns(14);
     for (const attribution of result.attributions) {
@@ -559,6 +561,7 @@ export async function cloudCommitsExplainCommand(sha: string, options: Json & { 
 
 function withScope(command: Command): Command {
   return command
+    .addOption(new Option("--scope <scope>", "me: your sessions; visible: all sessions you may read").choices(["me", "visible"]).default("me"))
     .option("--project <id>", "Project ID from 'projects list'")
     .option("--team <id>", "Team ID from 'teams list'")
     .option("--member <id>", "Member ID from 'team members' (owners and leads only)");
@@ -575,9 +578,10 @@ function withPage(command: Command, maxLimit: number): Command {
 
 export function registerCloudHistoryCommands(cloud: Command): void {
   const projects = cloud.command("projects").description("Projects you can read");
-  projects.command("list").description("List your projects and the team projects your role allows")
+  projects.command("list").description("List your projects; use --scope visible to include readable team projects")
+    .addOption(new Option("--scope <scope>", "me: your projects (default); visible: all readable projects; legacy --kind team implies visible when omitted").choices(["me", "visible"]))
     .option("--query <text>", "Filter by project or repository name")
-    .addOption(new Option("--kind <kind>", "Only personal or team projects").choices(["personal", "team"]))
+    .addOption(new Option("--kind <kind>", "Legacy filter: personal (owned by you) or team (owned by others)").choices(["personal", "team"]))
     .option("--json", "Output JSON").action((options) => cloudProjectsCommand(options));
 
   const teams = cloud.command("teams").description("Teams you belong to");
@@ -600,7 +604,8 @@ export function registerCloudHistoryCommands(cloud: Command): void {
   }
 
   const commits = cloud.command("commits").description("Synced git commits");
-  commits.command("explain <sha>").description("Show the prompts and responses recorded around a commit")
+  commits.command("explain <sha>").description("Show your prompts and responses recorded around a commit")
+    .addOption(new Option("--scope <scope>", "me: your linked sessions; visible: all readable linked sessions").choices(["me", "visible"]).default("me"))
     .option("--project <id>", "Project ID when a short SHA is ambiguous")
     .option("--json", "Output JSON").action((sha, options) => cloudCommitsExplainCommand(sha, options));
 }
