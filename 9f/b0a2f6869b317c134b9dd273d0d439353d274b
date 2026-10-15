@@ -1,0 +1,27 @@
+README.md
+  s_deb536f598bd6c::t_9a53b9c3761b1c 275,278-279,283,289-298
+  s_deb536f598bd6c::t_76b616e42d733a 299
+packages/cli/src/commands/cloud-history.ts
+  s_deb536f598bd6c::t_1d8bc1e035d03f 26,70,194,219,221-222,224,227,230,373,529,531,534,538,564,581-582,584,607-608
+packages/cloud/src/cli-reads.ts
+  s_deb536f598bd6c::t_1d8bc1e035d03f 22-24,46,64,102-103,115,119,136
+  s_deb536f598bd6c::t_e639dab88a91cd 93-101,104,116-117,120-121,137-138
+packages/cli/src/commands/cloud-history.test.ts
+  s_deb536f598bd6c::t_9a53b9c3761b1c 5-6,21,24,29,31,60-119
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9fb0a2f6869b317c134b9dd273d0d439353d274b",
+  "prompts": {},
+  "sessions": {
+    "s_deb536f598bd6c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13ec2-1fdf-7993-ba56-74ea87381aa9",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "kaka-varve <yangpf@varve.ai>"
+    }
+  }
+}
