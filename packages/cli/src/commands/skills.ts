@@ -53,6 +53,20 @@ Creation uses the same project/team resolution as list and assigns the task to t
 
 The command writes immediately to Cloud and records creation history; no sync is needed. Report the returned title, taskId, project/team, priority and due date. If the request times out or returns an uncertain server error, do not blindly retry: list tasks with --state all in the same scope, following pagination, and check whether it was created. If the outcome remains uncertain, tell the user before trying again. A 404 from an older Cloud may mean the creation endpoint is not deployed; do not bypass it with database writes or switch servers.
 
+### Image attachments
+
+When the user supplies images for a task, pass each readable local file with --image (PNG, JPG, JPEG, WebP or GIF, up to 10 MB each):
+
+    adit cloud tasks create --title "Fix layout" --key-points "Match the attached reference" --image "./screenshots/current.png" --image "./screenshots/expected.png" --json
+
+Use actual local paths supplied by the user or available through the environment's attachment tools. Do not invent a path for an image shown only in chat. If its bytes are unavailable, ask for a readable file path. The CLI validates all files before creating the task. Attachments are uploaded immediately and appear in the web task details; no sync is needed.
+
+To add images to an existing assigned task, or retry pending images after a partial failure:
+
+    adit cloud tasks attach <taskId> --image "./screenshots/expected.png" --json
+
+Creation and image upload are separate writes. An upload failure returns ok:false, taskCreated:true, the existing taskId, successful attachments and pendingImages, with a nonzero exit code. Report this partial result; do not recreate the task. Retry only the pending files using attach. The same filename and bytes uploaded by the same user to the same task are deduplicated, including retries after a lost response. If attach fails, stop and report the returned reason. Never claim all images were attached when only task creation succeeded.
+
 ## Implement a selected task
 
 "Complete/work on this task" means implement it, NOT set its state to done. First run:

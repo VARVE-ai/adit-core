@@ -1,9 +1,12 @@
 import { stripVTControlCharacters } from "node:util";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), patch: vi.fn(), clientOptions: vi.fn(), credentials: vi.fn(), config: vi.fn() }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), postForm: vi.fn(), patch: vi.fn(), clientOptions: vi.fn(), credentials: vi.fn(), config: vi.fn() }));
 vi.mock("@varveai/adit-cloud", async (original) => ({ ...await original<typeof import("@varveai/adit-cloud")>(), loadCredentials: mocks.credentials, CloudClient: class {
-  get = mocks.get; post = mocks.post; patch = mocks.patch;
+  get = mocks.get; post = mocks.post; postForm = mocks.postForm; patch = mocks.patch;
   constructor(_url: string, _credentials: unknown, options: unknown) { mocks.clientOptions(options); }
 } }));
 vi.mock("./project-initialization.js", () => ({ loadInitializedProjectConfig: mocks.config }));
@@ -24,6 +27,67 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); process.exitCode = undefined; });
 
 describe("cloud task commands", () => {
+  it("creates once with multiple images, reports partial success and supports attach-only recovery", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "adit-images-"));
+    const first = join(dir, "参考 image.png"), second = join(dir, "expected.gif");
+    writeFileSync(first, Buffer.from("89504e470d0a1a0a", "hex"));
+    writeFileSync(second, "GIF89a");
+    try {
+      mocks.post.mockResolvedValue({ task: { taskId } });
+      const attachment = { id: "image-1", taskId, displayName: "参考 image.png" };
+      mocks.postForm.mockResolvedValueOnce({ attachment }).mockRejectedValueOnce(new Error("Request timed out"));
+      const cloud = new Command();
+      registerCloudTaskCommands(cloud);
+      await cloud.parseAsync(["tasks", "create", "--title", "Images", "--key-points", "Compare", "--image", first, "--image", second, "--json"], { from: "user" });
+      expect(mocks.post).toHaveBeenCalledTimes(1);
+      expect(mocks.postForm).toHaveBeenCalledTimes(2);
+      expect(mocks.postForm.mock.calls[0][0]).toBe(`/api/cli/tasks/${taskId}/attachments`);
+      const file = (mocks.postForm.mock.calls[0][1] as FormData).get("file") as File;
+      expect(file.name).toBe("参考 image.png");
+      expect(file.type).toBe("image/png");
+      expect(Buffer.from(await file.arrayBuffer()).toString("hex")).toBe("89504e470d0a1a0a");
+      expect(JSON.parse(vi.mocked(console.log).mock.calls[0][0])).toMatchObject({ ok: false, taskCreated: true, taskId, attachments: [attachment], pendingImages: [second] });
+      expect(process.exitCode).toBe(1);
+      process.exitCode = undefined;
+      mocks.postForm.mockResolvedValueOnce({ attachment: { id: "image-2", taskId, displayName: "expected.gif" } });
+      await cloud.parseAsync(["tasks", "attach", taskId, "--image", second, "--json"], { from: "user" });
+      expect(mocks.post).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(vi.mocked(console.log).mock.calls[1][0])).toMatchObject({ ok: true, taskId, attachments: [{ id: "image-2" }] });
+      expect(process.exitCode).toBeUndefined();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("validates every image before creating a task", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "adit-images-"));
+    try {
+      const valid = join(dir, "valid.png");
+      writeFileSync(valid, Buffer.from("89504e470d0a1a0a", "hex"));
+      for (const [name, bytes] of [["fake.png", Buffer.from("not an image")], ["empty.jpg", Buffer.alloc(0)], ["large.png", Buffer.alloc(10 * 1024 * 1024 + 1)], ["unsupported.svg", Buffer.from("<svg/>")]] as const) {
+        const invalid = join(dir, name);
+        writeFileSync(invalid, bytes);
+        await cloudTasksCommand("create", { title: "Images", keyPoints: "Compare", image: [valid, invalid], json: true });
+      }
+      await cloudTasksCommand("create", { title: "Images", keyPoints: "Compare", image: [join(dir, "missing.png")], json: true });
+      expect(mocks.post).not.toHaveBeenCalled();
+      expect(mocks.postForm).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("includes all uploaded images in a successful creation result and deduplicates repeated paths", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "adit-images-"));
+    try {
+      const path = join(dir, "image.png");
+      writeFileSync(path, Buffer.from("89504e470d0a1a0a", "hex"));
+      const created = { task: { taskId } }, attachment = { id: "image", taskId };
+      mocks.post.mockResolvedValue(created);
+      mocks.postForm.mockResolvedValue({ attachment });
+      await cloudTasksCommand("create", { title: "Images", keyPoints: "Compare", image: [path, path], json: true });
+      expect(mocks.postForm).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(vi.mocked(console.log).mock.calls[0][0])).toEqual({ ...created, attachments: [attachment] });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("creates an independent task in the current project without automatic write retries", async () => {
     const result = { task: { taskId, blueprintId: null, progressState: "not_started" }, project: { name: "Test project" }, scope: { teamName: "Team" } };
     mocks.post.mockResolvedValue(result);

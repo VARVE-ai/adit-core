@@ -2,6 +2,7 @@ import { Command, Option } from "commander";
 import { CloudClient, CloudApiError, loadCredentials, createCloudTask, listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask, type CloudTaskCreate, type CloudTaskDetail, type CloudTaskList, type CloudTaskPatch } from "@varveai/adit-cloud";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
 import { NotLoggedInError, commandWith, describeFailure, reportFailure } from "./cloud-read-output.js";
+import { prepareTaskImages, uploadTaskImages } from "./cloud-task-images.js";
 import {
   dim,
   joinParts,
@@ -21,7 +22,7 @@ import {
 
 export { describeFailure };
 
-type Options = { json?: boolean; team?: string; project?: string; personal?: boolean; state?: string; limit?: string; offset?: string; due?: string; clearDue?: boolean; title?: string; keyPoints?: string; priority?: string; assignee?: string; expectedUpdatedAt?: string };
+type Options = { json?: boolean; team?: string; project?: string; personal?: boolean; state?: string; limit?: string; offset?: string; due?: string; clearDue?: boolean; title?: string; keyPoints?: string; priority?: string; assignee?: string; expectedUpdatedAt?: string; image?: string[] };
 
 export function taskDueDate(value: string): string {
   const date = new Date(`${value}T00:00:00.000Z`);
@@ -51,12 +52,12 @@ function pageNumber(value: string | undefined, fallback: number, max: number) {
   return Number(value);
 }
 
-export async function cloudTasksCommand(action: "create" | "list" | "show" | "context" | "update" | "scopes", options: Options = {}, taskId?: string): Promise<void> {
+export async function cloudTasksCommand(action: "create" | "attach" | "list" | "show" | "context" | "update" | "scopes", options: Options = {}, taskId?: string): Promise<void> {
   try {
     if (taskId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)) throw new Error("Use the full taskId returned by the task list");
     const credentials = loadCredentials();
     if (!credentials) throw new NotLoggedInError();
-    const client = new CloudClient(credentials.serverUrl, credentials, { maxRetries: action === "update" || action === "create" ? 0 : 2 });
+    const client = new CloudClient(credentials.serverUrl, credentials, { maxRetries: ["update", "create", "attach"].includes(action) ? 0 : 2 });
     let localProjectId = options.project;
     if ((action === "list" || action === "scopes" || action === "create") && !localProjectId) {
       const config = loadInitializedProjectConfig(`adit cloud tasks ${action}`);
@@ -70,21 +71,30 @@ export async function cloudTasksCommand(action: "create" | "list" | "show" | "co
       if (!title || title.length > 200) throw new Error("Task title must contain 1-200 characters");
       if (!keyPointsText || keyPointsText.length > 20000) throw new Error("Task key points must contain 1-20000 characters");
       if (options.priority && !["high", "medium", "low"].includes(options.priority)) throw new Error("Invalid task priority");
+      const images = await prepareTaskImages(options.image);
       const created = await createCloudTask(client, {
         localProjectId: localProjectId!, teamId: options.team, scope: options.personal ? "personal" : undefined,
         title, keyPointsText, priority: options.priority as CloudTaskCreate["priority"], dueAt: options.due ? taskDueDate(options.due) : undefined,
       });
+      const uploaded = images.length ? await uploadTaskImages(client, created.task.taskId, images) : null;
+      if (uploaded && !uploaded.ok) {
+        process.exitCode = 1;
+        if (options.json) console.log(JSON.stringify({ ...created, ...uploaded, taskCreated: true }, null, 2));
+        else printImageFailure(uploaded);
+        return;
+      }
       if (!options.json) {
         printTitle("Task created", created.project.name ?? created.project.localProjectId, created.scope.teamName ? `team ${created.scope.teamName}` : "personal");
         printRows([
           { label: "ID", value: created.task.taskId }, { label: "Title", value: created.task.title },
           { label: "State", value: stateWord(created.task.progressState) }, { label: "Priority", value: created.task.priority },
           { label: "Due", value: created.task.dueAt?.slice(0, 10) ?? "-" },
+          ...(uploaded ? [{ label: "Images", value: `${uploaded.attachments.length} uploaded: ${uploaded.attachments.map(file => file.displayName).join(", ")}` }] : []),
         ]);
         printEnd(`${marks.ok} Independent task assigned to you`);
         return;
       }
-      result = created;
+      result = uploaded ? { ...created, attachments: uploaded.attachments } : created;
     } else if (action === "list") {
       if (options.team && options.personal) throw new Error("Select either --team or --personal");
       const limit = pageNumber(options.limit, 50, 100);
@@ -99,6 +109,17 @@ export async function cloudTasksCommand(action: "create" | "list" | "show" | "co
       result = await client.get(`/api/cli/tasks/scopes?${new URLSearchParams({ localProjectId: localProjectId! })}`);
     } else if (!taskId) {
       throw new Error("Task ID is required");
+    } else if (action === "attach") {
+      if (!options.image?.length) throw new Error("Provide at least one --image <path>");
+      const images = await prepareTaskImages(options.image);
+      const uploaded = await uploadTaskImages(client, taskId, images);
+      if (!uploaded.ok) process.exitCode = 1;
+      if (!options.json) {
+        if (!uploaded.ok) printImageFailure(uploaded);
+        else { printTitle("Task images", taskId); printRows(uploaded.attachments.map(file => ({ label: "Uploaded", value: file.displayName }))); printEnd(`${marks.ok} ${uploaded.attachments.length} image(s) attached`); }
+        return;
+      }
+      result = uploaded;
     } else if (action === "show") {
       const detail = await showCloudTask(client, taskId);
       // Pipes and agents keep the JSON they always got; a person at a terminal gets the text view.
@@ -140,6 +161,14 @@ export async function cloudTasksCommand(action: "create" | "list" | "show" | "co
     }
     reportFailure(error, options, `tasks ${action}`, `the task may be gone or not assigned to you; list yours with ${strong("adit cloud tasks list")}`);
   }
+}
+
+function printImageFailure(result: Extract<Awaited<ReturnType<typeof uploadTaskImages>>, { ok: false }>) {
+  printTitle("Task images incomplete", result.taskId);
+  printRows([{ label: "Task ID", value: result.taskId },
+    { label: "Uploaded", value: String(result.attachments.length) },
+    ...result.pendingImages.map(path => ({ label: "Pending", value: path }))]);
+  printError("image upload", result.error, result.recovery);
 }
 
 function printTaskList(list: CloudTaskList, options: Options): void {
@@ -201,8 +230,12 @@ export function registerCloudTaskCommands(cloud: Command) {
     .option("--project <id>", "Local project ID; defaults to this initialized project")
     .option("--personal", "Create in the personal project instead of its linked team")
     .option("--due <date>", "Due date, YYYY-MM-DD")
+    .option("--image <path>", "Attach an image (repeat for multiple files; max 10 MB each)", (value: string, previous: string[]) => [...previous, value], [])
     .addOption(new Option("--priority <priority>", "Task priority; defaults to medium").choices(["high", "medium", "low"]))
     .option("--json", "Output JSON").action((options) => cloudTasksCommand("create", options));
+  tasks.command("attach <taskId>").description("Upload images to an existing assigned task; identical uploads are deduplicated")
+    .requiredOption("--image <path>", "Local PNG, JPG, JPEG, WebP or GIF (repeat for multiple files; max 10 MB each)", (value: string, previous: string[]) => [...previous, value], [])
+    .option("--json", "Output JSON").action((taskId, options) => cloudTasksCommand("attach", options, taskId));
   tasks.command("list").description("List your tasks in the current project or a team")
     .option("--team <id>", "Select a team linked to this project (see tasks scopes)").option("--project <id>", "Local project ID; defaults to this initialized project")
     .option("--personal", "Query personal project tasks instead of its linked team")
