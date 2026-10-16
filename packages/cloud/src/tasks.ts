@@ -57,6 +57,22 @@ export interface CloudTaskCreated {
   task: CloudTask;
 }
 
+export interface CloudTaskAttachment {
+  id: string;
+  taskId: string;
+  uploadedById: string;
+  displayName: string;
+  mimeType: string;
+  fileSize: number;
+  createdAt: string;
+}
+
+export function uploadCloudTaskImage(client: CloudClient, taskId: string, file: File): Promise<{ attachment: CloudTaskAttachment }> {
+  const form = new FormData();
+  form.set("file", file);
+  return client.postForm(`/api/cli/tasks/${encodeURIComponent(taskId)}/attachments`, form);
+}
+
 export function createCloudTask(client: CloudClient, input: CloudTaskCreate): Promise<CloudTaskCreated> {
   return client.post("/api/cli/tasks", input);
 }

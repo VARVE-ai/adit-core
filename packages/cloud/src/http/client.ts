@@ -156,6 +156,11 @@ export class CloudClient {
     return this.request<T>("POST", path, body);
   }
 
+  /** Let fetch set the multipart boundary; preserve the normal authentication flow. */
+  async postForm<T>(path: string, body: FormData): Promise<T> {
+    return this.request<T>("POST", path, body);
+  }
+
   /** PATCH request with auth */
   async patch<T>(path: string, body: unknown): Promise<T> {
     return this.request<T>("PATCH", path, body);
@@ -253,15 +258,17 @@ export class CloudClient {
 
       try {
         const url = currentUrl;
+        const multipart = body instanceof FormData;
         const headers: Record<string, string> = {
           Authorization: `Bearer ${this.credentials.accessToken}`,
-          "Content-Type": "application/json",
+          ...(multipart ? {} : { "Content-Type": "application/json" }),
         };
 
         const response = await fetch(url, {
           method,
           headers,
-          body: body !== undefined ? JSON.stringify(body) : undefined,
+          body: body instanceof FormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
+          ...(multipart ? { redirect: "error" as const } : {}),
           signal: this.requestSignal(),
         });
 

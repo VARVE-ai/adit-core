@@ -39,6 +39,28 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("CloudClient token refresh", () => {
+  it("preserves multipart files and the fetch-generated boundary when replaying after token refresh", async () => {
+    const credentials = makeCreds({ expiresAt: new Date(Date.now() + 3600000).toISOString() });
+    saveCredentials(credentials);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ error: "Invalid token", code: "invalid_or_expired_token" }, 401))
+      .mockResolvedValueOnce(jsonResponse({ accessToken: "new-access", refreshToken: "new-refresh", expiresIn: 3600 }))
+      .mockResolvedValueOnce(jsonResponse({ attachment: { id: "image-1" } }));
+    const body = new FormData();
+    body.append("file", new File(["GIF89a"], "reference.gif", { type: "image/gif" }));
+    const client = new CloudClient("http://cloud.test", credentials, { maxRetries: 0 });
+    await expect(client.postForm("/api/cli/tasks/task-1/attachments", body)).resolves.toEqual({ attachment: { id: "image-1" } });
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(3);
+    for (const index of [0, 2]) {
+      const init = vi.mocked(fetch).mock.calls[index][1]!;
+      expect(init.body).toBe(body);
+      expect(init.redirect).toBe("error");
+      expect(new Headers(init.headers).has("content-type")).toBe(false);
+      expect(new Headers(init.headers).get("authorization")).toBe(index === 0 ? "Bearer old-access" : "Bearer new-access");
+    }
+    expect(await (body.get("file") as File).text()).toBe("GIF89a");
+  });
+
   beforeEach(() => {
     mkdirSync(join(tempHome, ".adit"), { recursive: true });
     vi.stubGlobal("fetch", vi.fn());
