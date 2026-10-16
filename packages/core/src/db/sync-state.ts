@@ -6,6 +6,7 @@
  */
 
 import type Database from "better-sqlite3";
+import { normalizeServerUrl } from "../server-url.js";
 
 export interface SyncState {
   serverUrl: string;
@@ -22,7 +23,7 @@ export function getSyncState(
 ): SyncState | null {
   const row = db
     .prepare("SELECT * FROM sync_state WHERE server_url = ?")
-    .get(serverUrl) as Record<string, unknown> | undefined;
+    .get(normalizeServerUrl(serverUrl)) as Record<string, unknown> | undefined;
 
   if (!row) return null;
 
@@ -65,7 +66,7 @@ export function upsertSyncState(
          ELSE sync_state.sync_version
        END`,
   ).run(
-    state.serverUrl,
+    normalizeServerUrl(state.serverUrl),
     state.clientId,
     state.lastSyncedEventId,
     state.lastSyncedAt,
@@ -91,7 +92,7 @@ export function applyAuthoritativeSyncState(
          ELSE sync_state.sync_version
        END`,
   ).run(
-    state.serverUrl,
+    normalizeServerUrl(state.serverUrl),
     state.clientId,
     state.lastSyncedEventId,
     state.lastSyncedAt,
@@ -104,5 +105,7 @@ export function clearSyncState(
   db: Database.Database,
   serverUrl: string,
 ): void {
-  db.prepare("DELETE FROM sync_state WHERE server_url = ?").run(serverUrl);
+  db.prepare("DELETE FROM sync_state WHERE server_url = ?").run(
+    normalizeServerUrl(serverUrl),
+  );
 }

@@ -108,7 +108,6 @@ import {
 } from "./provider-collaboration.js";
 export { buildClaudeCloudRelayEnv } from "./capabilities.js";
 export { normalizeClaudeTodoWriteInput } from "./todos.js";
-export type { ClaudeTodoItem, ClaudeTodoPriority, ClaudeTodoStatus } from "./todos.js";
 export { normalizeClaudeSdkTranscriptEntrypoints } from "./transcripts.js";
 
 interface PendingPrompt {
@@ -2384,7 +2383,11 @@ export class ClaudeCodeProvider extends EventEmitter implements CliAgentProvider
 
   private pushEvent(type: string, payload: Record<string, unknown>): void {
     if (type === "error" && this.ownerValue === "web") {
-      writeCliAgentErrorToTerminal("adit claude", payload);
+      writeCliAgentErrorToTerminal(
+        "adit claude",
+        payload,
+        (message) => this.notices.debug(message),
+      );
     }
     this.opts.onEvent?.({ type, payload });
   }

@@ -55,14 +55,6 @@ describe("ClaudeTranscriptSync", () => {
 
       const sync = new ClaudeTranscriptSync();
       sync.noteHook({
-        eventType: "SessionStart",
-        sessionId,
-        body: {
-          session_id: sessionId,
-          transcript_path: transcriptPath,
-        },
-      });
-      sync.noteHook({
         eventType: "UserPromptSubmit",
         sessionId,
         body: {
@@ -255,7 +247,7 @@ describe("ClaudeTranscriptSync", () => {
 
       const sync = new ClaudeTranscriptSync();
       sync.noteHook({
-        eventType: "SessionStart",
+        eventType: "UserPromptSubmit",
         sessionId,
         body: {
           session_id: sessionId,
@@ -307,7 +299,7 @@ describe("ClaudeTranscriptSync", () => {
 
       const sync = new ClaudeTranscriptSync();
       sync.noteHook({
-        eventType: "SessionStart",
+        eventType: "UserPromptSubmit",
         sessionId,
         body: {
           session_id: sessionId,

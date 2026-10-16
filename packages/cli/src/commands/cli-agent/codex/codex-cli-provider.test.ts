@@ -10,11 +10,14 @@ const mocks = vi.hoisted(() => ({
   appStart: vi.fn(),
   appRequest: vi.fn(),
   appStop: vi.fn(),
+  appStopAndWait: vi.fn(),
+  hasRolloutHistory: vi.fn(),
   deferredSystemSkillsStderr: false,
   clearDeferredSystemSkillsStderr: vi.fn(),
   flushDeferredSystemSkillsStderr: vi.fn(),
   appServerOptions: null as null | {
     onNotification?: (message: unknown) => void;
+    onError?: (error: Error) => void;
   },
   resumeWatcherOptions: null as null | {
     cwd: string;
@@ -40,6 +43,16 @@ vi.mock("node:child_process", () => ({
 
 vi.mock("./codex-app-server-client.js", () => ({
   CODEX_DEFAULT_MODE_REQUEST_USER_INPUT_FEATURE: "default_mode_request_user_input",
+  CodexAppServerExitError: class CodexAppServerExitError extends Error {
+    constructor(
+      readonly code: number | null,
+      readonly signal: NodeJS.Signals | null,
+      readonly diagnostics: readonly string[],
+    ) {
+      super(`Codex app-server exited (${signal ?? code ?? "unknown"})`);
+      this.name = "CodexAppServerExitError";
+    }
+  },
   CodexAppServerClient: class {
     constructor(options: unknown) {
       mocks.appServerOptions = options as typeof mocks.appServerOptions;
@@ -59,6 +72,10 @@ vi.mock("./codex-app-server-client.js", () => ({
 
     stop() {
       return mocks.appStop();
+    }
+
+    stopAndWait() {
+      return mocks.appStopAndWait();
     }
 
     hasDeferredSystemSkillsStderr() {
@@ -90,6 +107,10 @@ vi.mock("./codex-resume-log-watcher.js", () => ({
   },
 }));
 
+vi.mock("./local-rollout.js", () => ({
+  hasCodexRolloutHistory: (...args: unknown[]) => mocks.hasRolloutHistory(...args),
+}));
+
 vi.mock("./codex-model-config-watcher.js", () => ({
   startCodexModelConfigWatcher: (options: unknown) => {
     mocks.modelWatcherOptions = options as typeof mocks.modelWatcherOptions;
@@ -113,6 +134,7 @@ import {
   normalizeCodexReclaimInput,
   promptInputForCodexMode,
 } from "./provider.js";
+import { CodexAppServerExitError } from "./codex-app-server-client.js";
 import { createRelayNotices } from "../relay-console.js";
 import {
   LOCAL_CLI_EXIT_WAIT_MS,
@@ -223,6 +245,9 @@ beforeEach(() => {
   mocks.resumeWatcherOptions = null;
   mocks.modelWatcherOptions = null;
   mocks.savedThreadIds.clear();
+  mocks.appStop.mockReset();
+  mocks.appStopAndWait.mockImplementation(async () => { mocks.appStop(); });
+  mocks.hasRolloutHistory.mockResolvedValue(false);
   mocks.isSavedThread.mockImplementation((options: unknown) => {
     const threadId = (options as { threadId?: string }).threadId;
     return typeof threadId === "string" && mocks.savedThreadIds.has(threadId);
@@ -1346,6 +1371,7 @@ describe("CodexCliProvider takeover", () => {
     expect(mocks.isSavedThread).toHaveBeenCalledWith({
       cwd: "/tmp/project",
       threadId: "019e2110-d96f-7e40-882e-b524fa9148e4",
+      onDiagnostic: expect.any(Function),
     });
     expect(mocks.spawn).toHaveBeenCalledWith(
       "codex",
@@ -1385,6 +1411,306 @@ describe("CodexCliProvider takeover", () => {
     expect(provider.state.resumeSessionId).toBe(localSessionId);
 
     provider.stop();
+  });
+
+  it.each([
+    {
+      args: ["--enable", "hooks", "resume"],
+      retainedArgs: ["--enable", "hooks"],
+    },
+    {
+      args: ["resume", "old-session", "continue working", "--model", "gpt-test"],
+      retainedArgs: ["--model", "gpt-test"],
+    },
+    {
+      args: ["resume", "--last", "--all", "--include-non-interactive", "--no-alt-screen"],
+      retainedArgs: ["--no-alt-screen"],
+    },
+    {
+      args: ["--model", "resume", "--config", "model_reasoning_effort=high", "initial task"],
+      retainedArgs: ["--model", "resume", "--config", "model_reasoning_effort=high"],
+    },
+    {
+      args: ["fork", "old-session", "--image", "input.png", "initial task", "--sandbox", "read-only"],
+      retainedArgs: ["--sandbox", "read-only"],
+    },
+  ])("does not replay startup input on local handoff: $args", async ({ args, retainedArgs }) => {
+    const sessionId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    mocks.savedThreadIds.add(sessionId);
+    const provider = new CodexCliProvider({ bin: "codex", args, cwd: "/tmp/project" });
+
+    try {
+      expect(mocks.spawn).toHaveBeenCalledWith(
+        "codex",
+        args,
+        expect.objectContaining({ cwd: "/tmp/project" }),
+      );
+      provider.noteLocalSession(sessionId);
+      for (const cycle of [1, 2]) {
+        await provider.takeover();
+        mocks.spawn.mockClear();
+        mocks.appRequest.mockClear();
+
+        await provider.releaseToLocal();
+
+        expect(mocks.spawn, `handoff ${cycle}`).toHaveBeenCalledTimes(1);
+        expect(mocks.spawn.mock.calls[0]?.slice(0, 2)).toEqual([
+          "codex", ["resume", sessionId, ...retainedArgs],
+        ]);
+        expect(mocks.appRequest).not.toHaveBeenCalledWith("turn/start", expect.anything());
+        expect(provider.state.owner).toBe("local");
+        expect(provider.state.activeSessionId).toBe(sessionId);
+      }
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("drops the startup session and prompt when switching local sessions", async () => {
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: ["resume", "old-session", "initial task", "--enable", "hooks"],
+      cwd: "/tmp/project",
+    });
+    try {
+      mocks.spawn.mockClear();
+      await provider.switchSession("new-session");
+
+      expect(mocks.spawn).toHaveBeenCalledTimes(1);
+      expect(mocks.spawn.mock.calls[0]?.slice(0, 2)).toEqual([
+        "codex", ["resume", "new-session", "--enable", "hooks"],
+      ]);
+      expect(provider.state.activeSessionId).toBe("new-session");
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("does not replay startup selection or prompt when returning to an empty local session", async () => {
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: ["--enable", "hooks", "resume", "--last", "old-session", "initial task"],
+      cwd: "/tmp/project",
+    });
+    try {
+      await provider.takeover();
+      mocks.spawn.mockClear();
+      await provider.releaseToLocal();
+
+      expect(mocks.spawn).toHaveBeenCalledTimes(1);
+      expect(mocks.spawn.mock.calls[0]?.slice(0, 2)).toEqual([
+        "codex", ["--enable", "hooks"],
+      ]);
+      expect(provider.state.activeSessionId).toBeNull();
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("does not replay startup input when Web takeover falls back to local control", async () => {
+    const sessionId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    const handleRequest = mocks.appRequest.getMockImplementation();
+    mocks.appRequest.mockImplementation((method: string, params: unknown) => {
+      if (method === "thread/resume") throw new Error("test resume failure");
+      return handleRequest?.(method, params);
+    });
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: ["resume", "old-session", "initial task", "--enable", "hooks"],
+      cwd: "/tmp/project",
+    });
+    try {
+      provider.noteLocalSession(sessionId);
+      mocks.spawn.mockClear();
+      await expect(provider.takeover()).rejects.toThrow("test resume failure");
+
+      expect(mocks.spawn).toHaveBeenCalledTimes(1);
+      expect(mocks.spawn.mock.calls[0]?.slice(0, 2)).toEqual([
+        "codex", ["resume", sessionId, "--enable", "hooks"],
+      ]);
+      expect(provider.state.owner).toBe("local");
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("selects the Web thread before stopping the app-server", async () => {
+    const sessionId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    let appServerStopped = false;
+    mocks.savedThreadIds.add(sessionId);
+    mocks.appStop.mockImplementation(() => {
+      appServerStopped = true;
+    });
+    mocks.isSavedThread.mockImplementation(() => !appServerStopped);
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+    });
+
+    await provider.takeover();
+    mocks.spawn.mockClear();
+
+    await provider.releaseToLocal();
+
+    expect(mocks.spawn).toHaveBeenCalledWith(
+      "codex",
+      ["resume", sessionId],
+      expect.objectContaining({ cwd: "/tmp/project" }),
+    );
+
+    provider.stop();
+  });
+
+  it("resumes a non-empty Web thread when the saved-thread check fails", async () => {
+    const sessionId = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+    });
+
+    await provider.takeover();
+    await provider.sendPrompt("hello");
+    mocks.isSavedThread.mockReturnValue(false);
+    mocks.spawn.mockClear();
+
+    await provider.releaseToLocal();
+
+    expect(mocks.spawn).toHaveBeenCalledWith(
+      "codex",
+      ["resume", sessionId],
+      expect.objectContaining({ cwd: "/tmp/project" }),
+    );
+    expect(provider.state.activeSessionId).toBe(sessionId);
+
+    provider.stop();
+  });
+
+  it("resumes the current loaded thread after switching A -> B -> A", async () => {
+    const a = "019e2110-d96f-7e40-882e-b524fa9148e4";
+    const b = "019e2110-d96f-7e40-882e-b524fa9148e5";
+    mocks.savedThreadIds.add(b);
+    const provider = new CodexCliProvider({ bin: "codex", args: [], cwd: "/tmp/project" });
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("test");
+      await provider.switchSession(b);
+      await provider.switchSession(a);
+      expect(provider.state.resumeSessionId).toBe(a);
+      mocks.spawn.mockClear();
+      await provider.releaseToLocal();
+      expect(mocks.spawn).toHaveBeenCalledWith("codex", ["resume", a], expect.anything());
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("recovers rollout history when the SQLite index does not contain the current thread", async () => {
+    const provider = new CodexCliProvider({ bin: "codex", args: [], cwd: "/tmp/project" });
+    try {
+      await provider.takeover();
+      mocks.hasRolloutHistory.mockResolvedValue(true);
+      mocks.spawn.mockClear();
+      await provider.releaseToLocal();
+      expect(mocks.spawn).toHaveBeenCalledWith("codex",
+        ["resume", "019e2110-d96f-7e40-882e-b524fa9148e4"], expect.anything());
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("preserves the session and Web control when rollout verification fails", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({ bin: "codex", args: [], cwd: "/tmp/project",
+      onEvent: (event) => events.push(event) });
+    try {
+      await provider.takeover();
+      const id = provider.state.activeSessionId;
+      mocks.hasRolloutHistory.mockRejectedValue(new Error("rollout unreadable"));
+      mocks.spawn.mockClear();
+      await expect(provider.releaseToLocal()).rejects.toThrow("rollout unreadable");
+      expect(mocks.spawn).not.toHaveBeenCalled();
+      expect(mocks.appStopAndWait).not.toHaveBeenCalled();
+      expect(provider.state).toMatchObject({ owner: "web", activeSessionId: id });
+      expect(events).toContainEqual(expect.objectContaining({ type: "error",
+        payload: expect.objectContaining({ sessionId: id, message: "rollout unreadable" }) }));
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("waits for app-server exit and coalesces repeated local handoffs", async () => {
+    const provider = new CodexCliProvider({ bin: "codex", args: [], cwd: "/tmp/project" });
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("test");
+      let finishStop!: () => void;
+      mocks.appStopAndWait.mockImplementation(() => new Promise<void>((resolve) => { finishStop = resolve; }));
+      mocks.spawn.mockClear();
+      const release = provider.releaseToLocal();
+      const repeated = provider.releaseToLocal();
+      await tick();
+      expect(mocks.spawn).not.toHaveBeenCalled();
+      expect(mocks.appStopAndWait).toHaveBeenCalledTimes(1);
+      await expect(provider.switchSession("another-session")).rejects.toThrow("returning to local control");
+      await expect(provider.sendPrompt("late prompt")).rejects.toThrow("returning to local control");
+      await expect(provider.startNewSession()).rejects.toThrow("returning to local control");
+      finishStop();
+      await Promise.all([release, repeated]);
+      expect(mocks.spawn).toHaveBeenCalledTimes(1);
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("does not start local Codex on an exit timeout and allows retry with the same session", async () => {
+    const provider = new CodexCliProvider({ bin: "codex", args: [], cwd: "/tmp/project" });
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("test");
+      const id = provider.state.activeSessionId;
+      mocks.appStopAndWait.mockRejectedValueOnce(new Error("app-server did not exit"));
+      mocks.spawn.mockClear();
+      await expect(provider.releaseToLocal()).rejects.toThrow("did not exit");
+      expect(mocks.spawn).not.toHaveBeenCalled();
+      expect(provider.state).toMatchObject({ owner: "web", activeSessionId: id });
+      await provider.releaseToLocal();
+      expect(mocks.spawn).toHaveBeenCalledWith("codex", ["resume", id], expect.anything());
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it("does not restart local Codex if stopped during handoff", async () => {
+    const provider = new CodexCliProvider({ bin: "codex", args: [], cwd: "/tmp/project" });
+    await provider.takeover();
+    await provider.sendPrompt("test");
+    let finishStop!: () => void;
+    mocks.appStopAndWait.mockImplementation(() => new Promise<void>((resolve) => { finishStop = resolve; }));
+    mocks.spawn.mockClear();
+    const release = provider.releaseToLocal();
+    await tick();
+    provider.stop();
+    finishStop();
+    await release;
+    expect(mocks.spawn).not.toHaveBeenCalled();
+    expect(provider.state.owner).toBe("stopped");
+  });
+
+  it("never replaces a known session with missing history with a new session", async () => {
+    const provider = new CodexCliProvider({ bin: "codex", args: [], cwd: "/tmp/project" });
+    try {
+      await provider.takeover();
+      const id = "019e2110-d96f-7e40-882e-b524fa9148e5";
+      provider.noteLocalSession(id);
+      mocks.spawn.mockClear();
+      await expect(provider.releaseToLocal()).rejects.toThrow("Cannot verify history");
+      expect(mocks.spawn).not.toHaveBeenCalled();
+      expect(provider.state).toMatchObject({ owner: "web", activeSessionId: id, resumeSessionId: id });
+    } finally {
+      provider.stop();
+    }
   });
 
   it("resumes a bound pending Web session when releasing Web control", async () => {
@@ -2666,8 +2992,77 @@ describe("CodexCliProvider app-server errors", () => {
     await tick();
 
     expect(errorEvents(events)).toEqual([
-      expect.objectContaining({ message: "upstream 400", sessionId: thread }),
-      expect.objectContaining({ message: "legacy shape", sessionId: thread }),
+      expect.objectContaining({
+        title: "Codex operation failed",
+        message: "upstream 400",
+        sessionId: thread,
+      }),
+      expect.objectContaining({
+        title: "Codex operation failed",
+        message: "legacy shape",
+        sessionId: thread,
+      }),
+    ]);
+
+    provider.stop();
+  });
+
+  it("shows a friendly app-server exit message and keeps raw diagnostics off the terminal", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const notices = createRelayNotices("codex", {
+      write: () => undefined,
+      debugEnabled: () => false,
+    });
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      notices,
+      onEvent: (event) => events.push(event),
+    });
+    await provider.takeover();
+
+    mocks.appServerOptions?.onError?.(new CodexAppServerExitError(1, null, [
+      "2026-08-27T01:57:09.015013Z ERROR codex_models_manager::manager: failed to refresh available models: timeout waiting for child process to exit",
+    ]));
+
+    expect(errorEvents(events)).toContainEqual(expect.objectContaining({
+      title: "Codex connection interrupted",
+      message: expect.stringContaining("Retry the Web action"),
+    }));
+    const terminalOutput = stderrWrite.mock.calls.map(([text]) => String(text)).join("");
+    expect(terminalOutput).toContain("Codex connection interrupted");
+    expect(terminalOutput).toContain("type /local here");
+    expect(terminalOutput).not.toContain("codex_models_manager::manager");
+    expect(terminalOutput).not.toContain("timeout waiting for child process to exit");
+
+    provider.stop();
+  });
+
+  it("does not duplicate an app-server failure through the active prompt", async () => {
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const provider = new CodexCliProvider({
+      bin: "codex",
+      args: [],
+      cwd: "/tmp/project",
+      onEvent: (event) => events.push(event),
+    });
+    await provider.takeover();
+    const exitError = new CodexAppServerExitError(1, null, []);
+    const originalRequest = mocks.appRequest.getMockImplementation();
+    mocks.appRequest.mockImplementation((method: string, params: unknown) => {
+      if (method === "turn/start") {
+        mocks.appServerOptions?.onError?.(exitError);
+        return Promise.reject(exitError);
+      }
+      return originalRequest?.(method, params);
+    });
+
+    await expect(provider.sendPrompt("hello")).rejects.toBe(exitError);
+
+    expect(errorEvents(events)).toEqual([
+      expect.objectContaining({ title: "Codex connection interrupted" }),
     ]);
 
     provider.stop();

@@ -12,11 +12,6 @@ export function padRight(s: string, len: number): string {
   return s.length >= len ? s.substring(0, len) : s + " ".repeat(len - s.length);
 }
 
-/** Pad a string to the left with spaces */
-export function padLeft(s: string, len: number): string {
-  return s.length >= len ? s : " ".repeat(len - s.length) + s;
-}
-
 /** Format a duration into a human-readable "time ago" string */
 export function timeAgo(isoOrDate: string | Date): string {
   const date = typeof isoOrDate === "string" ? new Date(isoOrDate) : isoOrDate;

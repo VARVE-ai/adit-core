@@ -1,15 +1,14 @@
 export { openDatabase, closeDatabase } from "./connection.js";
-export { migrations } from "./migrations.js";
 
 export {
   insertSession,
   getSessionById,
-  getActiveSession,
+  getLatestSession,
   getSessionByPlatformSessionId,
-  reviveSession,
-  mergeSessionMetadata,
-  endSession,
-  endStaleSessions,
+  insertSessionPlatformAlias,
+  listSessionPlatformAliases,
+  listRecentSessions,
+  mergeSessionInto,
   listSessions,
   type CreateSessionInput,
 } from "./sessions.js";
@@ -20,6 +19,7 @@ export {
   getEventById,
   queryEvents,
   getEventsBySession,
+  getLastEventOfSession,
   updateEventStatus,
   updateEventLabels,
   searchEvents,
@@ -38,16 +38,6 @@ export {
 } from "./diffs.js";
 
 export {
-  insertPlan,
-  getPlanById,
-  listPlans,
-  getChildPlans,
-  updatePlanStatus,
-  updatePlanContent,
-  type CreatePlanInput,
-} from "./plans.js";
-
-export {
   insertEnvSnapshot,
   getEnvSnapshotById,
   getLatestEnvSnapshot,
@@ -62,23 +52,3 @@ export {
   clearSyncState,
   type SyncState,
 } from "./sync-state.js";
-
-export {
-  getSessionRepoHeads,
-  upsertSessionRepoHead,
-  type SessionRepoHead,
-} from "./session-repo-heads.js";
-
-export {
-  upsertTranscriptUpload,
-  getTranscriptUpload,
-  getTranscriptUploadById,
-  listPendingTranscriptUploads,
-  markTranscriptUploaded,
-  markTranscriptUploadFailed,
-  resetTranscriptUpload,
-  countActiveTranscriptUploads,
-  type TranscriptUpload,
-  type TranscriptUploadStatus,
-  type UpsertTranscriptUploadInput,
-} from "./transcript-uploads.js";

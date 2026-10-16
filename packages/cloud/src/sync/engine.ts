@@ -18,8 +18,9 @@ import {
 } from "@varveai/adit-core";
 import type { ProjectType, SyncState } from "@varveai/adit-core";
 import type { CloudClient } from "../http/client.js";
-import { buildSyncBatch, batchRecordCount, countUnsyncedRecords } from "./serializer.js";
+import { buildSyncBatch, batchRecordCount, countUnsyncedEvents } from "./serializer.js";
 import { handleConflicts, type SyncConflict } from "./conflicts.js";
+import { acknowledgeEventTokenUsage, syncTokenUsage } from "./token-usage.js";
 
 export type { SyncConflict } from "./conflicts.js";
 
@@ -49,6 +50,7 @@ export interface SyncRepositoryPayload {
 }
 
 interface PushResponse {
+  eventTokenUsageAcknowledgements?: { id: string; revision: number }[];
   accepted: number;
   duplicates: number;
   conflicts: SyncConflict[];
@@ -206,18 +208,8 @@ export class SyncEngine {
         lastSyncedAt = serverStatus.lastSyncedAt;
 
         if (cursor) {
-          const unsyncedWithCursor = countUnsyncedRecords(
-            this.db,
-            cursor,
-            lastSyncedAt,
-            this.projectId,
-          );
-          const totalLocal = countUnsyncedRecords(
-            this.db,
-            null,
-            null,
-            this.projectId,
-          );
+          const unsyncedWithCursor = countUnsyncedEvents(this.db, cursor, this.projectId);
+          const totalLocal = countUnsyncedEvents(this.db, null, this.projectId);
           if (unsyncedWithCursor === 0 && totalLocal > 0) {
             if (process.env.ADIT_DEBUG) {
               process.stderr.write(
@@ -253,13 +245,16 @@ export class SyncEngine {
           diffByteCapApplied,
           payloadByteCapApplied,
           payload,
-        } = this.buildSizedPush(cursor, lastSyncedAt, syncVersion, isNewProject);
+        } = this.buildSizedPush(cursor, syncVersion, isNewProject);
         if (count === 0) break; // All synced
 
         const response = await this.client.post<PushResponse>(
           "/api/sync/push",
           payload,
         );
+        acknowledgeEventTokenUsage(this.db, payload.batch.events, response, {
+          projectId: this.projectId, serverUrl: this.serverUrl, cloudClientId: this.cloudClientId,
+        });
 
         result.accepted += response.accepted;
         result.duplicates += response.duplicates;
@@ -315,8 +310,22 @@ export class SyncEngine {
         // still unsynced.
         if (count < this.batchSize && !diffByteCapApplied && !payloadByteCapApplied) break;
       }
-
-
+      const usage = await syncTokenUsage(this.db, async (batch) => {
+        const response = await this.client.post<PushResponse>("/api/sync/push",
+          this.createPushPayload(batch, syncVersion, isNewProject));
+        syncVersion = response.newSyncVersion;
+        persistSyncState(this.db, {
+          serverUrl: this.serverUrl, clientId: this.cloudClientId,
+          lastSyncedEventId: cursor, lastSyncedAt: new Date().toISOString(), syncVersion,
+        });
+        return response;
+      }, {
+        projectId: this.projectId, serverUrl: this.serverUrl, cloudClientId: this.cloudClientId,
+      });
+      result.accepted += usage.accepted;
+      result.duplicates += usage.duplicates;
+      result.batches += usage.batches;
+      result.totalRecords += usage.totalRecords;
       return result;
     };
 
@@ -339,7 +348,6 @@ export class SyncEngine {
 
   private buildSizedPush(
     cursor: string | null,
-    lastSyncedAt: string | null,
     syncVersion: number,
     isNewProject: boolean,
   ): SizedSyncPush {
@@ -350,7 +358,6 @@ export class SyncEngine {
       const { batch, diffByteCapApplied } = buildSyncBatch(
         this.db,
         cursor,
-        lastSyncedAt,
         this.projectId,
         this.cloudClientId,
         limit,

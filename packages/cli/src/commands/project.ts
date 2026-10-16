@@ -6,10 +6,10 @@
  */
 
 import { existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
 import { deleteCheckpointRef, listCheckpointRefs } from "@varveai/adit-engine";
 import { uninstallInstalledPlatformHooks } from "./plugin.js";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
+import { marks } from "./cli-style.js";
 
 export interface ProjectUninstallResult {
   ok: boolean;
@@ -18,16 +18,9 @@ export interface ProjectUninstallResult {
   dataDir: string;
   uninstalled: string[];
   dataRemoved: boolean;
-  generatedFilesRemoved: number;
   checkpointRefsRemoved: number;
   errors?: string[];
 }
-
-const initGeneratedFiles = [
-  ".claude/skills/generate-docs.md",
-  ".opencode/commands/generate-docs.md",
-  ".cursor/rules/generate-docs.mdc",
-];
 
 export async function projectUninstallCommand(opts?: {
   yes?: boolean;
@@ -71,21 +64,18 @@ export async function projectUninstallCommand(opts?: {
 
   console.log();
   for (const displayName of result.uninstalled) {
-    console.log(`  [~] Removed ${displayName} hooks`);
+    console.log(`  ${marks.change} Removed ${displayName} hooks`);
   }
   if (result.uninstalled.length === 0) {
     console.log("  No ADIT hooks found to remove.");
   }
   if (result.dataRemoved) {
-    console.log(`  [~] Removed data directory: ${result.dataDir}`);
+    console.log(`  ${marks.change} Removed data directory: ${result.dataDir}`);
   } else {
-    console.log(`  [-] Data directory not found: ${result.dataDir}`);
+    console.log(`  ${marks.skip} Data directory not found: ${result.dataDir}`);
   }
-  console.log(
-    `  [~] Removed ${result.generatedFilesRemoved} init-generated file${result.generatedFilesRemoved === 1 ? "" : "s"}`,
-  );
   for (const err of result.errors ?? []) {
-    console.error(`  [x] ${err}`);
+    console.error(`  ${marks.fail} ${err}`);
   }
   console.log();
 
@@ -99,9 +89,6 @@ export async function uninstallProject(
   const errors: string[] = [];
   const hooksResult = await uninstallInstalledPlatformHooks(projectRoot);
   errors.push(...hooksResult.errors);
-
-  const generatedCleanup = removeInitGeneratedFiles(projectRoot);
-  errors.push(...generatedCleanup.errors);
 
   let dataRemoved = false;
   if (existsSync(dataDir)) {
@@ -134,29 +121,7 @@ export async function uninstallProject(
     dataDir,
     uninstalled: hooksResult.uninstalled,
     dataRemoved,
-    generatedFilesRemoved: generatedCleanup.removed,
     checkpointRefsRemoved,
     errors: errors.length > 0 ? errors : undefined,
   };
-}
-
-function removeInitGeneratedFiles(projectRoot: string): {
-  removed: number;
-  errors: string[];
-} {
-  const errors: string[] = [];
-  let removed = 0;
-
-  for (const relativePath of initGeneratedFiles) {
-    const filePath = join(projectRoot, relativePath);
-    if (!existsSync(filePath)) continue;
-    try {
-      rmSync(filePath, { force: true });
-      removed++;
-    } catch (err) {
-      errors.push(`Failed to remove ${relativePath}: ${(err as Error).message}`);
-    }
-  }
-
-  return { removed, errors };
 }

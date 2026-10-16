@@ -7,14 +7,15 @@
  */
 
 import { existsSync } from "node:fs";
-import pc from "picocolors";
+import { basename } from "node:path";
 import {
   ProjectManifestError,
-  discoverWorkspaceRepositories,
+  computeRepositoryDrift,
+  readProjectManifest,
   loadConfig,
   openDatabase,
   closeDatabase,
-  getActiveSession,
+  getLatestSession,
   countEvents,
   queryEvents,
   getSyncState,
@@ -28,8 +29,26 @@ import {
 } from "@varveai/adit-engine";
 import { getAdapter } from "@varveai/adit-hooks/adapters";
 import { ensureConnectedPlatformsRecorded } from "./connected-platforms.js";
-import { statusDot, joinDim, sectionHeader, horizontalRule, timeAgo } from "../utils/format.js";
-import { truncate } from "../utils/summary.js";
+import { timeAgo } from "../utils/format.js";
+import {
+  dim,
+  formatCount,
+  inTone,
+  joinParts,
+  localMoment,
+  marks,
+  plural,
+  printEnd,
+  printError,
+  printLine,
+  printRows,
+  printTitle,
+  shortId,
+  stateWord,
+  strong,
+  truncate,
+  type Row,
+} from "./cli-style.js";
 
 /** Display-name map for platforms (matches adapter displayName but avoids import) */
 const platformLabel: Record<string, string> = {
@@ -50,12 +69,11 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
       if (opts?.json) {
         console.log(JSON.stringify({ initialized: false, corrupt: true, reason: err.message }, null, 2));
       } else {
-        console.log();
-        console.log(`${statusDot(false)} ${pc.bold("Project configuration damaged")}`);
-        console.log();
-        console.log(pc.dim(err.message));
-        console.log(pc.dim("Restore .adit/project.json from a backup, or run 'adit init' to rebuild it."));
-        console.log();
+        printError(
+          "status",
+          `ADIT project configuration is damaged: ${err.message}`,
+          `restore .adit/project.json from a backup, or run ${strong("adit init")} to rebuild it`,
+        );
       }
       process.exitCode = 1;
       return;
@@ -76,18 +94,17 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
     if (opts?.json) {
       console.log(JSON.stringify({ initialized: false, migrationNeeded: legacy }, null, 2));
     } else {
-      console.log();
-      console.log(`${statusDot(false)} ${pc.bold(legacy ? "Migration needed" : "Not initialized")}`);
-      console.log();
+      printTitle("Status", basename(config.projectRoot));
       if (legacy) {
-        console.log(pc.dim("ADIT has been upgraded. Run 'adit init' here to migrate —"));
-        console.log(pc.dim("your project identity and history are preserved. Recording is paused until then."));
+        printRows([{ label: "State", value: `${stateWord("paused")} · ADIT was upgraded and this project needs a one-time migration` }]);
+        printEnd(`${marks.warn} Migration needed · run ${strong("adit init")} here (identity and history are kept)`);
       } else if (config.initialization === "initialized") {
-        console.log(pc.dim("The local database is missing. Run 'adit init' to rebuild it."));
+        printRows([{ label: "State", value: `${stateWord("paused")} · the local database is missing` }]);
+        printEnd(`${marks.warn} Database missing · run ${strong("adit init")} to rebuild it`);
       } else {
-        console.log(pc.dim("Run 'adit init' to get started."));
+        printRows([{ label: "State", value: "not initialized" }]);
+        printEnd(`${marks.skip} Not initialized · run ${strong("adit init")} to get started`);
       }
-      console.log();
     }
     return;
   }
@@ -120,16 +137,16 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
   // 3. Database + session info
   const db = openDatabase(config.dbPath);
   let latestPromptText: string | null = null;
+  let lastSyncedAt: string | null = null;
 
   try {
-    // Active session
-    const session = getActiveSession(db, config.projectId, config.clientId);
+    // Most recently active session, derived from its events.
+    const session = getLatestSession(db, config.projectId, config.clientId);
     status.session = session
       ? {
           id: session.id,
           platform: session.platform,
           startedAt: session.startedAt,
-          status: session.status,
         }
       : null;
 
@@ -170,6 +187,7 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
       // @varveai/adit-cloud not available
     }
     const syncState = getSyncState(db, syncServerUrl ?? "");
+    lastSyncedAt = syncState?.lastSyncedAt ?? null;
     if (syncState?.lastSyncedEventId) {
       const row = db.prepare(
         `SELECT COUNT(*) as cnt FROM events e
@@ -182,33 +200,20 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
       (status.events as Record<string, unknown>).unsynced = totalEvents;
     }
 
-    // Failed transcript uploads — permanently stalled until manually reset
-    try {
-      const failedRow = db
-        .prepare(
-          `SELECT COUNT(*) as cnt FROM transcript_uploads WHERE status = 'failed'`,
-        )
-        .get() as { cnt: number };
-      status.failedTranscripts = failedRow.cnt;
-    } catch {
-      status.failedTranscripts = 0;
-    }
   } finally {
     closeDatabase(db);
   }
 
   // 4. Git info
-  if (config.projectType === "workspace") {
-    const registered = config.repositories.map((repo) => repo.relativePath);
-    const discovered = discoverWorkspaceRepositories(config.projectRoot).map(
-      (repo) => repo.relativePath,
-    );
+  const manifest = readProjectManifest(config.projectRoot);
+  if (manifest && manifest.repositories.some((repo) => repo.relativePath !== ".")) {
+    const drift = computeRepositoryDrift(config.projectRoot, manifest);
     status.git = {
       workspace: true,
-      repositories: config.repositories.length,
-      registered,
-      unregistered: discovered.filter((path) => !registered.includes(path)),
-      missingRepositories: registered.filter((path) => !discovered.includes(path)),
+      repositories: drift.registered.length,
+      registered: drift.registered,
+      unregistered: drift.unregistered,
+      missingRepositories: drift.missing,
     };
   } else {
     const [branch, headSha, dirty] = await Promise.all([
@@ -232,7 +237,6 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
     return;
   }
 
-  const ruleWidth = 50;
   const hooksStatus = status.hooks as {
     allInstalled: boolean;
     installed: string[];
@@ -252,7 +256,6 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
         lastAuthFailure?: { at: string; stage: string; message: string } | null;
       }
     | undefined;
-  const failedTranscripts = (status.failedTranscripts as number) ?? 0;
   const git = status.git as
     | {
         workspace: true;
@@ -268,128 +271,100 @@ export async function statusCommand(opts?: { json?: boolean }): Promise<void> {
         dirty: boolean;
       };
 
-  // ── Status line ──────────────────────────────
-  console.log();
-  const isActive = session !== null;
-  const hooksList = hooksStatus.installed.length > 0
-    ? hooksStatus.installed.join(", ")
-    : null;
-  const branchLabel = git.workspace
-    ? pc.cyan("multi-repo")
-    : git.branch ? pc.cyan(git.branch) : pc.yellow("detached");
-
-  console.log(
-    joinDim([
-      `${statusDot(isActive)} ${pc.bold(isActive ? "Active" : "Idle")}`,
-      hooksList,
-      git.workspace ? `${git.repositories} repos` : `branch ${branchLabel}`,
-    ]),
-  );
-
-  // ── Session card ─────────────────────────────
-  console.log();
-  console.log(sectionHeader("Session", ruleWidth));
-  console.log();
-
+  const now = new Date().toISOString();
+  const rows: Row[] = [];
   if (session) {
-    const label = platformLabel[session.platform] ?? session.platform;
-    const shortId = session.id.substring(0, 12);
-    console.log(joinDim([pc.bold(label), pc.dim(shortId)]));
-
-    // Latest prompt (Entire-style quoted line)
+    rows.push({
+      label: "Session",
+      value: joinParts([
+        stateWord("active"),
+        platformLabel[session.platform] ?? session.platform,
+        strong(shortId(session.id)),
+        `started ${localMoment(session.startedAt, now)} ${dim(`(${timeAgo(session.startedAt)})`)}`,
+        plural(events.total, "event"),
+      ]),
+    });
     if (latestPromptText) {
-      const cleaned = latestPromptText.replace(/\n/g, " ").trim();
-      console.log(pc.dim("> ") + `"${truncate(cleaned, 60)}"`);
+      rows.push({ label: "Prompt", value: `"${truncate(latestPromptText, 72)}"` });
     }
-
-    // Stats line
-    const statsLine = joinDim([
-      `started ${timeAgo(session.startedAt)}`,
-      `${events.total} events`,
-    ]);
-    console.log(pc.dim(statsLine));
   } else {
-    console.log(pc.dim("No active session"));
+    rows.push({ label: "Session", value: joinParts([stateWord("idle"), "no sessions recorded yet"]) });
   }
-
-  // ── Git ──────────────────────────────────────
-  console.log();
-  console.log(sectionHeader("Git", ruleWidth));
-  console.log();
 
   if (git.workspace) {
-    console.log(joinDim([
-      "multi-repo project",
-      `${git.repositories} repositories`,
-    ]));
-    for (const path of git.registered) {
-      const missing = git.missingRepositories.includes(path);
-      console.log(pc.dim(`  - ${path}`) + (missing ? pc.yellow("  (missing)") : ""));
-    }
+    const repositories = git.registered.map((path) =>
+      git.missingRepositories.includes(path) ? `${path} ${stateWord("missing")}` : path,
+    );
+    rows.push({ label: "Git", value: repositories.length > 0 ? repositories.join(", ") : "-" });
   } else {
-    const headShort = git.head ?? "unknown";
-    const treeStatus = git.dirty
-      ? pc.yellow("dirty")
-      : pc.green("clean");
-    console.log(joinDim([
-      `branch ${branchLabel}`,
-      headShort,
-      treeStatus,
-    ]));
+    rows.push({
+      label: "Git",
+      value: joinParts([
+        git.branch ? `branch ${git.branch}` : "detached HEAD",
+        git.head,
+        git.dirty ? inTone("warning", "uncommitted changes") : "clean",
+      ]),
+    });
   }
 
-  // ── Sync ─────────────────────────────────────
-  console.log();
-  console.log(sectionHeader("Sync", ruleWidth));
-  console.log();
+  const loggedIn = cloud?.loggedIn === true;
+  rows.push({
+    label: "Cloud",
+    value: loggedIn
+      ? joinParts([
+          "logged in",
+          lastSyncedAt ? `last sync ${localMoment(lastSyncedAt, now)}` : "never synced",
+          events.unsynced > 0 ? inTone("unsynced", `${formatCount(events.unsynced)} unsynced`) : "all synced",
+        ])
+      : `not logged in ${dim("· events stay on this machine")}`,
+  });
 
-  if (events.unsynced === 0) {
-    console.log(pc.green("all events synced"));
-  } else {
-    console.log(pc.yellow(`${events.unsynced} events unsynced`));
-  }
+  const hookNames = [
+    ...hooksStatus.installed,
+    ...hooksStatus.missing.map((name) => `${name} ${inTone("warning", "(incomplete)")}`),
+  ];
+  rows.push({ label: "Hooks", value: hookNames.length > 0 ? hookNames.join(", ") : "none connected" });
 
-  // ── Warnings (only if issues) ────────────────
+  // Issues that need the user; the closing line points at the most useful action.
   const warnings: string[] = [];
+  if (hookNames.length === 0) {
+    warnings.push(`no AI tools connected · run ${strong("adit init")}`);
+  }
   if (missingPlatforms.length > 0) {
-    warnings.push(`hooks incomplete: ${missingPlatforms.join(", ")}`);
+    warnings.push(`hooks incomplete for ${missingPlatforms.join(", ")} · run ${strong("adit doctor --fix")}`);
   }
   if (git.workspace && git.unregistered.length > 0) {
-    warnings.push(
-      `unregistered repositories: ${git.unregistered.join(", ")} — run 'adit init' to add them`,
-    );
+    warnings.push(`unregistered repositories: ${git.unregistered.join(", ")} · run ${strong("adit init")} to add them`);
   }
   if (git.workspace && git.missingRepositories.length > 0) {
-    warnings.push(
-      `registered repositories missing: ${git.missingRepositories.join(", ")} — run 'adit init' to update the list`,
-    );
+    warnings.push(`registered repositories missing: ${git.missingRepositories.join(", ")} · run ${strong("adit init")} to update the list`);
   }
   if (cloud?.syncDisabled) {
-    warnings.push(
-      "cloud auto-sync paused after repeated failures — run 'adit cloud sync' to retry now (auto-resumes within 1h)",
-    );
+    warnings.push(`cloud auto-sync paused after repeated failures · run ${strong("adit cloud sync")} to retry now (resumes within 1h)`);
   }
   if (cloud?.lastAuthFailure) {
-    warnings.push(
-      `cloud auth failing (${cloud.lastAuthFailure.stage}, ${timeAgo(cloud.lastAuthFailure.at)}): re-run 'adit cloud login'`,
-    );
-  }
-  if (failedTranscripts > 0) {
-    warnings.push(
-      `${failedTranscripts} transcript upload(s) stopped after repeated failures — see 'adit cloud transcript status'`,
-    );
-  }
-  if (warnings.length > 0) {
-    console.log();
-    console.log(sectionHeader("Warnings", ruleWidth));
-    console.log();
-    for (const warning of warnings) {
-      console.log(pc.yellow(warning));
-    }
+    warnings.push(`cloud login failing (${cloud.lastAuthFailure.stage}, ${timeAgo(cloud.lastAuthFailure.at)}) · run ${strong("adit cloud login")}`);
   }
 
-  // ── Footer ───────────────────────────────────
-  console.log();
-  console.log(horizontalRule(ruleWidth));
-  console.log();
+  const projectName = basename(config.projectRoot);
+  printTitle(
+    "Status",
+    projectName,
+    git.workspace ? plural(git.repositories, "repo") : git.branch ? `branch ${git.branch}` : "detached",
+  );
+  printRows(rows);
+  if (warnings.length > 0) {
+    printLine();
+    for (const warning of warnings) printLine(`${marks.warn} ${warning}`);
+  }
+
+  if (warnings.length > 0) {
+    printEnd(`${marks.warn} ${plural(warnings.length, "issue")} need attention`);
+  } else if (loggedIn && events.unsynced > 0) {
+    printEnd(`${marks.warn} ${plural(events.unsynced, "event")} not synced · run ${strong("adit cloud sync")}`);
+  } else if (!loggedIn) {
+    printEnd(`${marks.skip} Recording locally · run ${strong("adit cloud login")} to sync to Cloud`);
+  } else {
+    printEnd(`${marks.ok} Recording · all events synced`);
+  }
 }

@@ -8,10 +8,10 @@ import { HOOK_POST_SCRIPT, buildCloudHookCommand, quoteHookCommandArg } from "./
  * GOLDEN TEST — do not update casually.
  *
  * Codex's hook trust hash covers the full command string. If this output
- * changes by even one byte, every existing [hooks.state] trust entry for the
+ * changes by even one byte, every existing [hooks.state] approval for the
  * relay hooks flips to "Modified" and Codex silently skips them until the
- * next installCodexHooks run re-trusts. Any intentional change here must be
- * paired with that trust-migration understanding.
+ * user re-approves them inside Codex (/hooks). Any intentional change here
+ * must be paired with that trust-migration understanding.
  *
  * Last migration 2026-07-08: dropped the empty-string endpoint placeholder
  * (Codex's shell-less Windows spawn swallows empty args, shifting argv and
@@ -22,6 +22,13 @@ const GOLDEN_CODEX_RELAY_COMMAND =
   `node -e "try{const a=process.argv[1]===undefined?'':process.argv[1];const argIsUrl=a.startsWith('http');const envE=process.env.ADIT_CLOUD_CODEX_HOOK_ENDPOINT===undefined?'':process.env.ADIT_CLOUD_CODEX_HOOK_ENDPOINT;const e=argIsUrl?a:envE;if(!e)process.exit(0);const argQ=process.argv[2]===undefined?'':process.argv[2];const envQ=process.env.ADIT_CLOUD_CODEX_HOOK_MARKER===undefined?'':process.env.ADIT_CLOUD_CODEX_HOOK_MARKER;const q=argIsUrl?argQ:(envQ!==''?envQ:a);let u=new URL(e);if(q&&!u.search.includes(q)){const s=u.search?'&':'?';u=new URL(u.toString()+s+q)}const m=u.protocol==='https:'?require('https'):require('http');let d='';let done=false;const finish=()=>{if(done)return;done=true;process.exit(0)};process.stdin.setEncoding('utf8');process.stdin.on('data',c=>{d+=c});process.stdin.on('end',()=>{try{const r=m.request(u,{method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(d)},timeout:3000},res=>{res.resume();res.on('end',finish)});r.on('timeout',()=>{r.destroy();finish()});r.on('error',finish);r.end(d)}catch{finish()}});setTimeout(finish,3500).unref();}catch{process.exit(0)}" "from=adit-cloud-codex-env"`;
 
 describe("buildCloudHookCommand", () => {
+  it("bounds Interrupt relay execution below the three-second hook limit", () => {
+    const command = buildCloudHookCommand("", "from=adit-cloud-codex-env", 2500);
+    expect(command).toContain("timeout:2000");
+    expect(command).toContain("setTimeout(finish,2500).unref()");
+    expect(command).not.toContain("timeout:3000");
+  });
+
   it("produces the byte-exact codex relay command (trust-hash golden)", () => {
     expect(buildCloudHookCommand("", "from=adit-cloud-codex-env"))
       .toBe(GOLDEN_CODEX_RELAY_COMMAND);

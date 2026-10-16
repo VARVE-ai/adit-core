@@ -39,7 +39,7 @@ import {
   trimRelayEventQueue,
   type InFlightReliableEventBatch,
 } from "./cli-agent/reliable-event-queue.js";
-import { loadInitializedGitOrWorkspaceProjectConfig } from "./project-initialization.js";
+import { loadInitializedProjectConfig } from "./project-initialization.js";
 import type {
   CliAgentRelayEvent,
   PromptImageAttachment,
@@ -355,7 +355,7 @@ async function drainCommandQueue(input: {
 }
 
 export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void> {
-  const config = loadInitializedGitOrWorkspaceProjectConfig("adit cloud codex");
+  const config = loadInitializedProjectConfig("adit cloud codex");
   if (!config) return;
 
   const credentials = loadCredentials();
@@ -400,6 +400,7 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
     projectRoot: config.projectRoot,
     terminalId,
     serverUrl,
+    suppressInteractiveNotices: Boolean(process.stderr.isTTY),
   });
 
   try {
@@ -577,7 +578,7 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
           enqueueEvents(transcriptSync.toolEvents(sessionId, body));
         }
       }
-      if (event.type === "Stop") {
+      if (event.type === "Stop" || event.type === "Interrupt") {
         if (isLocalOwner) {
           const transcriptEvents = transcriptSync.drainSession(sessionId);
           if (transcriptEvents.length > 0) {
@@ -601,6 +602,11 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
       if (stopping) return;
       stopping = true;
       notices.shutdown(signal);
+      try {
+        // Deliberate shutdown: tell the relay now so the final offline feed
+        // record is written immediately instead of after the grace delay.
+        if (provider) ws.sendHeartbeat(provider.state, "offline");
+      } catch {}
       provider?.stop();
       ws.close();
       try {

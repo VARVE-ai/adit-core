@@ -2,22 +2,22 @@
  * `adit doctor` — Validate ADIT installation health.
  *
  * Checks: git repo, data dir, database, hooks, adit-hook binary,
- * SQLite integrity, stale sessions, and disk usage.
+ * SQLite integrity and disk usage.
  *
  * `adit doctor --fix` attempts automatic fixes.
  * `adit doctor --json` outputs results as JSON.
  */
 
 import { existsSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join, relative } from "node:path";
 import {
-  discoverWorkspaceRepositories,
+  computeRepositoryDrift,
+  readProjectManifest,
+  resolveActiveManifestRepositories,
   openDatabase,
   closeDatabase,
   projectManifestPath,
   queryEvents,
-  listSessions,
-  endSession,
 } from "@varveai/adit-core";
 import { getRemoteUrl } from "@varveai/adit-engine";
 import {
@@ -26,8 +26,20 @@ import {
   resolveAditHookBinary,
   type PlatformAdapter,
 } from "@varveai/adit-hooks/adapters";
-import pc from "picocolors";
-import { marks, sectionTitle } from "./cli-style.js";
+import {
+  dim,
+  formatBytes,
+  joinParts,
+  marks,
+  plural,
+  printEnd,
+  printLine,
+  printRows,
+  printSection,
+  printTitle,
+  shortenPaths,
+  strong,
+} from "./cli-style.js";
 import { ensureConnectedPlatformsRecorded } from "./connected-platforms.js";
 import { checkAditHookBinary } from "./doctor-hooks.js";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
@@ -47,16 +59,19 @@ export async function doctorCommand(
   if (!config) return;
 
   // 1. Project manifest — the single authority on identity and members.
-  const typeLabel = config.projectType === "workspace" ? "multi-repo" : "single-repo";
+  const manifest = readProjectManifest(config.projectRoot);
+  const registeredRepositories = manifest
+    ? resolveActiveManifestRepositories(config.projectRoot, manifest)
+    : config.repositories;
   checks.push({
     name: "Project manifest",
     ok: true,
-    detail: `${typeLabel} · ${config.repositories.length} repositories · ${projectManifestPath(config.projectRoot)}`,
+    detail: `${registeredRepositories.length} ${registeredRepositories.length === 1 ? "repository" : "repositories"} · ${projectManifestPath(config.projectRoot)}`,
   });
 
   // 1b. Registered repositories exist and are Git repositories (soft check —
   //     doctor reports drift, only `adit init` may change the list).
-  const missingRepos = config.repositories
+  const missingRepos = registeredRepositories
     .filter((repo) => !existsSync(join(repo.path, ".git")))
     .map((repo) => repo.relativePath);
   checks.push({
@@ -64,13 +79,13 @@ export async function doctorCommand(
     ok: missingRepos.length === 0,
     detail:
       missingRepos.length === 0
-        ? `${config.repositories.length} registered, all present`
+        ? `${registeredRepositories.length} registered, all present`
         : `missing: ${missingRepos.join(", ")} — run 'adit init' to update the list`,
   });
 
   // 1c. Every present repository has a git remote 'origin'.
   const reposWithoutOrigin: string[] = [];
-  for (const repo of config.repositories) {
+  for (const repo of registeredRepositories) {
     if (missingRepos.includes(repo.relativePath)) continue;
     const remoteUrl = await getRemoteUrl(repo.path).catch(() => null);
     if (!remoteUrl) reposWithoutOrigin.push(repo.relativePath === "." ? repo.displayName : repo.relativePath);
@@ -84,12 +99,10 @@ export async function doctorCommand(
         : `no origin: ${reposWithoutOrigin.join(", ")} — add one with 'git remote add origin <url>'`,
   });
 
-  // 1d. Multi-repo drift: repositories on disk that are not registered.
-  if (config.projectType === "workspace") {
-    const registered = config.repositories.map((repo) => repo.relativePath);
-    const unregistered = discoverWorkspaceRepositories(config.projectRoot)
-      .map((repo) => repo.relativePath)
-      .filter((path) => !registered.includes(path));
+  // 1d. Drift for projects with member repositories: repositories on disk
+  //     that are not registered.
+  if (manifest && manifest.repositories.some((repo) => repo.relativePath !== ".")) {
+    const unregistered = computeRepositoryDrift(config.projectRoot, manifest).unregistered;
     checks.push({
       name: "Unregistered repositories",
       ok: unregistered.length === 0,
@@ -125,8 +138,9 @@ export async function doctorCommand(
   });
 
   // 4. SQLite integrity
+  let integrityOk: boolean | null = null;
   if (db && dbOk) {
-    let integrityOk = false;
+    integrityOk = false;
     try {
       const result = db.pragma("integrity_check") as Array<{ integrity_check: string }>;
       integrityOk = result.length === 1 && result[0].integrity_check === "ok";
@@ -168,9 +182,15 @@ export async function doctorCommand(
   let hooksOk = implementedAdapters.length > 0;
   const hooksDetails: string[] = [];
   const adaptersNeedingFix: typeof implementedAdapters = [];
+  const platformResults: Array<{
+    name: string;
+    valid: boolean;
+    checks: Array<{ name: string; ok: boolean; detail: string; advisory?: boolean }>;
+  }> = [];
 
   for (const adapter of implementedAdapters) {
     const result = await adapter.validateInstallation(config.projectRoot);
+    platformResults.push({ name: adapter.displayName, valid: result.valid, checks: result.checks });
     if (result.valid) {
       // Advisory checks don't fail validation (reinstall can't fix them),
       // but the user still needs to see them.
@@ -215,34 +235,16 @@ export async function doctorCommand(
     });
   }
 
-  // 8. Stale sessions
-  let staleCount = 0;
-  const staleSessions: string[] = [];
-  if (db && dbOk) {
-    const sessions = listSessions(db, config.projectId);
-    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    for (const s of sessions) {
-      if (s.status === "active" && s.startedAt < dayAgo) {
-        staleCount++;
-        staleSessions.push(s.id);
-      }
-    }
-  }
-  checks.push({
-    name: "Stale sessions",
-    ok: staleCount === 0,
-    detail: staleCount > 0 ? `${staleCount} sessions active >24h` : "No stale sessions",
-    fixable: staleCount > 0,
-  });
-
-  // 9. Disk space
+  // 8. Disk space
   let diskOk = true;
   let diskDetail = "OK";
+  let databaseBytes: number | null = null;
   try {
     const stat = statSync(config.dataDir);
     if (stat.isDirectory()) {
       // Simple check: if adit.sqlite > 100MB, warn
       const dbStat = statSync(config.dbPath);
+      databaseBytes = dbStat.size;
       const sizeMB = dbStat.size / (1024 * 1024);
       diskOk = sizeMB < 100;
       diskDetail = `Database: ${sizeMB.toFixed(1)}MB${sizeMB >= 100 ? " (large)" : ""}`;
@@ -257,21 +259,8 @@ export async function doctorCommand(
   });
 
   // Attempt fixes if --fix
+  const fixes: string[] = [];
   if (opts?.fix) {
-    const fixes: string[] = [];
-
-    // Fix stale sessions
-    if (staleCount > 0 && db) {
-      for (const sid of staleSessions) {
-        try {
-          endSession(db, sid, "completed");
-          fixes.push(`Closed stale session: ${sid.substring(0, 10)}`);
-        } catch {
-          // ignore
-        }
-      }
-    }
-
     // Fix missing platform hooks.
     if (!hooksOk) {
       for (const adapter of adaptersNeedingFix) {
@@ -281,13 +270,6 @@ export async function doctorCommand(
         } catch {
           // ignore
         }
-      }
-    }
-
-    if (fixes.length > 0 && !opts.json) {
-      console.log(`\n${pc.green("Fixes applied:")}`);
-      for (const fix of fixes) {
-        console.log(`  ${pc.green("[*]")} ${fix}`);
       }
     }
   }
@@ -303,22 +285,114 @@ export async function doctorCommand(
     return;
   }
 
-  console.log(sectionTitle("ADIT Health Check") + "\n");
-  let allOk = true;
-  for (const check of checks) {
-    const mark = check.ok ? marks.ok : marks.fail;
-    const fixTag = !check.ok && check.fixable ? pc.cyan(" (--fix)") : "";
-    // Passing details are secondary; a failing check's detail is the payload.
-    const detail = check.ok ? pc.dim(check.detail) : check.detail;
-    console.log(`  ${mark} ${check.name}: ${detail}${fixTag}`);
-    if (!check.ok) allOk = false;
+  // The text view regroups the same facts: one row per repository concern,
+  // one per database, and one per connected platform instead of a single
+  // "Hooks config" line.
+  type Kind = "ok" | "warn" | "fail";
+  const view: Array<{ kind: Kind; label: string; value: string }> = [];
+  const root = config.projectRoot;
+  const inProject = (text: string) => shortenPaths(text, root);
+  const relativePath = (path: string) => {
+    const relativeValue = relative(root, path);
+    return relativeValue && !relativeValue.startsWith("..") ? relativeValue : path;
+  };
+
+  view.push({ kind: "ok", label: "Project manifest", value: inProject(checks[0]?.detail ?? "") });
+
+  const repositoryProblems = [
+    missingRepos.length > 0 ? `missing: ${missingRepos.join(", ")} · run ${strong("adit init")} to update the list` : null,
+    reposWithoutOrigin.length > 0 ? `no origin: ${reposWithoutOrigin.join(", ")} · add one with ${strong("git remote add origin <url>")}` : null,
+  ];
+  view.push(
+    repositoryProblems.some(Boolean)
+      ? { kind: "fail", label: "Repositories", value: joinParts(repositoryProblems) }
+      : { kind: "ok", label: "Repositories", value: `${registeredRepositories.length} registered, all present, all have an origin` },
+  );
+
+  const unregisteredCheck = checks.find((check) => check.name === "Unregistered repositories");
+  if (unregisteredCheck) {
+    view.push(
+      unregisteredCheck.ok
+        ? { kind: "ok", label: "Unregistered", value: "none" }
+        : { kind: "warn", label: "Unregistered", value: `${unregisteredCheck.detail.replace(/ — run 'adit init' to add them$/u, "")} · run ${strong("adit init")} to add them` },
+    );
   }
 
-  console.log(
-    allOk
-      ? `\n${pc.bold(pc.green("All checks passed."))}`
-      : `\n${pc.red("Some checks failed.")} Run ${pc.bold("'adit doctor --fix'")} to attempt repairs.`,
+  view.push(
+    dataDirOk
+      ? { kind: "ok", label: "Data directory", value: relativePath(config.dataDir) }
+      : { kind: "fail", label: "Data directory", value: `missing · run ${strong("adit init")} first` },
   );
+
+  if (!dbOk) {
+    view.push({ kind: "fail", label: "Database", value: `cannot open ${relativePath(config.dbPath)}` });
+  } else {
+    view.push({
+      kind: integrityOk === false ? "fail" : diskOk ? "ok" : "warn",
+      label: "Database",
+      value: joinParts([
+        relativePath(config.dbPath),
+        databaseBytes !== null ? `${formatBytes(databaseBytes)}${diskOk ? "" : " (large)"}` : null,
+        integrityOk === false ? "integrity check failed" : "integrity ok",
+      ]),
+    });
+  }
+
+  const binaryLocation = binaryCheck.detail.replace(/^Available via /u, "").replace(/^node "(.+)"$/u, "$1");
+  view.push(
+    binaryCheck.ok
+      ? { kind: "ok", label: "Hook binary", value: inProject(binaryLocation) }
+      : { kind: "fail", label: "Hook binary", value: binaryCheck.detail },
+  );
+
+  view.push({
+    kind: implementedAdapters.length > 0 ? "ok" : "fail",
+    label: "Platforms",
+    value: implementedAdapters.length > 0
+      ? implementedAdapters.map((adapter) => adapter.displayName).join(", ")
+      : `none connected · run ${strong("adit init")} to connect your AI tools`,
+  });
+
+  for (const platform of platformResults) {
+    const warnings = platform.checks.filter((check) => check.advisory && !check.ok);
+    const failures = platform.checks.filter((check) => !check.ok && !check.advisory);
+    const label = `${platform.name} hooks`;
+    if (!platform.valid) {
+      view.push({
+        kind: "fail",
+        label,
+        value: `${joinParts(failures.map((check) => inProject(check.detail)))} ${dim("(fix: adit doctor --fix)")}`,
+      });
+    } else if (warnings.length > 0) {
+      view.push({ kind: "warn", label, value: joinParts(warnings.map((check) => inProject(check.detail))) });
+    } else {
+      const configuration = platform.checks.find((check) => check.name === "Hook configuration");
+      const detail = configuration ? inProject(configuration.detail) : "registered";
+      view.push({ kind: "ok", label, value: detail.charAt(0).toLowerCase() + detail.slice(1) });
+    }
+  }
+
+  printTitle("Health check", basename(root));
+  printRows(view.map((row) => ({ mark: marks[row.kind], label: row.label, value: row.value })));
+
+  if (fixes.length > 0) {
+    printSection("Fixes");
+    for (const fix of fixes) printLine(`${marks.change} ${fix}`);
+  }
+
+  const failed = view.filter((row) => row.kind === "fail").length;
+  const warned = view.filter((row) => row.kind === "warn").length;
+  const passed = view.filter((row) => row.kind === "ok").length;
+  if (fixes.length > 0) {
+    printEnd(`${marks.change} ${plural(fixes.length, "fix", "fixes")} applied · run ${strong("adit doctor")} again to confirm`);
+  } else if (failed > 0) {
+    const fixable = checks.some((check) => !check.ok && check.fixable);
+    printEnd(`${marks.fail} ${plural(failed, "check")} failed${fixable ? ` · run ${strong("adit doctor --fix")} to repair` : ""}`);
+  } else if (warned > 0) {
+    printEnd(`${marks.warn} ${plural(warned, "warning")}, ${plural(passed, "check")} passed`);
+  } else {
+    printEnd(`${marks.ok} All ${plural(passed, "check")} passed`);
+  }
 }
 
 function isImplementedAdapter(adapter: PlatformAdapter): boolean {

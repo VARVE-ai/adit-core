@@ -2,11 +2,18 @@
  * Typed error classes for cloud API operations.
  */
 
-/** Authentication failure (401, expired token, revoked) */
+/** Authentication failure (401, expired token, revoked or inactive device) */
 export class CloudAuthError extends Error {
-  constructor(message: string) {
+  /** HTTP status of the rejected request, when the failure came from a response. */
+  readonly status?: number;
+  /** Machine-readable failure code from the server, when it sent one. */
+  readonly code?: string;
+
+  constructor(message: string, details?: { status?: number; code?: string }) {
     super(message);
     this.name = "CloudAuthError";
+    this.status = details?.status;
+    this.code = details?.code;
   }
 }
 

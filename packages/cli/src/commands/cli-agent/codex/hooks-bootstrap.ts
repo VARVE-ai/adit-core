@@ -1,12 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import {
-  ADIT_CLOUD_CODEX_HOOK_TRUST_BLOCK,
-  buildCodexHookStatesForEntries,
-  codexAdapter,
-  installCodexHookTrustConfig,
-  resolveAditHookBinary,
-} from "@varveai/adit-hooks/adapters";
+import { codexAdapter, resolveAditHookBinary } from "@varveai/adit-hooks/adapters";
 import { buildCloudHookCommand } from "../hook-post-script.js";
 
 const CODEX_CLOUD_HOOK_MARKER = "from=adit-cloud-codex-env";
@@ -45,7 +39,6 @@ export function installCodexHooks(opts: {
   cwd: string;
   endpoint: string;
   marker: string;
-  codexHome?: string;
   persistent?: boolean;
 }): InstalledHooks {
   const codexDir = path.join(opts.cwd, ".codex");
@@ -63,32 +56,22 @@ export function installCodexHooks(opts: {
   const hooks = asObject(existing.hooks) ?? {};
   existing.hooks = hooks;
 
-  setCodexHook(hooks, "SessionStart", {
-    matcher: "startup|resume",
-    hooks: [{ type: "command", command, timeout: 30 }],
-  }, hookMarker);
+  removeCodexHook(hooks, "SessionStart", hookMarker);
   setCodexHook(hooks, "UserPromptSubmit", {
     hooks: [{ type: "command", command, timeout: 30 }],
   }, hookMarker);
   setCodexHook(hooks, "Stop", {
     hooks: [{ type: "command", command, timeout: 30 }],
   }, hookMarker);
+  setCodexHook(hooks, "Interrupt", {
+    hooks: [{ type: "command", command: buildCloudHookCommand("", hookMarker, 2500), timeout: 3 }],
+  }, hookMarker);
   setCodexHook(hooks, "PostToolUse", {
     hooks: [{ type: "command", command, timeout: 30 }],
   }, hookMarker);
 
-  const hookStates = buildCodexHookStatesForEntries({
-    hooksPath,
-    hooks,
-    matchesEntry: (entry) => codexEntryHasMarker(entry, hookMarker),
-  });
-  const cleanupTrustConfig = installCodexHookTrustConfig({
-    codexHome: opts.codexHome,
-    blockName: ADIT_CLOUD_CODEX_HOOK_TRUST_BLOCK,
-    marker: hookMarker,
-    states: hookStates,
-  });
-
+  // The user-level Codex config is never touched: the user approves these
+  // relay hooks inside Codex (/hooks), same as the persistent ADIT hooks.
   fs.writeFileSync(hooksPath, JSON.stringify(existing, null, 2) + "\n");
 
   return {
@@ -124,7 +107,6 @@ export function installCodexHooks(opts: {
       } catch {
         // Leave hooks untouched on cleanup failures.
       }
-      cleanupTrustConfig();
       if (!codexDirExisted) {
         try {
           fs.rmdirSync(codexDir);
@@ -141,10 +123,26 @@ function setCodexHook(
   marker: string,
 ): void {
   const existing = Array.isArray(hooks[eventName]) ? hooks[eventName] as unknown[] : [];
-  hooks[eventName] = [
-    ...existing.filter((item) => !codexEntryHasMarker(item, marker)),
-    entry,
-  ];
+  let replaced = false;
+  const next = existing.flatMap((item) => {
+    if (!codexEntryHasMarker(item, marker)) return [item];
+    if (replaced) return [];
+    replaced = true;
+    return [entry];
+  });
+  if (!replaced) next.push(entry);
+  hooks[eventName] = next;
+}
+
+function removeCodexHook(
+  hooks: Record<string, unknown>,
+  eventName: string,
+  marker: string,
+): void {
+  const existing = Array.isArray(hooks[eventName]) ? hooks[eventName] as unknown[] : [];
+  const filtered = existing.filter((item) => !codexEntryHasMarker(item, marker));
+  if (filtered.length === 0) delete hooks[eventName];
+  else hooks[eventName] = filtered;
 }
 
 function codexEntryHasMarker(entry: unknown, marker: string): boolean {

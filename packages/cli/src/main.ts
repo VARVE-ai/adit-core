@@ -42,26 +42,28 @@ import {
 import { registerCloudCliAgentCommands } from "./commands/cloud-cli-agent.js";
 import { cloudClaudeCommand } from "./commands/cloud-claude.js";
 import { cloudCodexCommand } from "./commands/cloud-codex.js";
+import { registerCloudTaskCommands } from "./commands/cloud-tasks.js";
+import { registerCloudHistoryCommands } from "./commands/cloud-history.js";
+import { registerCloudMemoryCommands } from "./commands/cloud-memories.js";
+import { registerCloudReportCommands } from "./commands/cloud-reports.js";
 import { dbClearEventsCommand } from "./commands/db.js";
-import {
-  transcriptEnableCommand,
-  transcriptDisableCommand,
-  transcriptStatusCommand,
-  transcriptUploadCommand,
-  transcriptResetCommand,
-} from "./commands/transcript.js";
 import { perfCommand, perfClearCommand } from "./commands/perf.js";
-import {
-  projectLinkCliHandler,
-  projectIntentCliHandler,
-} from "./commands/project-link.js";
-import { completeCliHandler } from "./commands/complete.js";
+import { projectLinkCliHandler } from "./commands/project-link.js";
 import { selfUpdateCommand } from "./commands/self-update.js";
-import { docsScaffoldCommand, docsValidateCommand } from "./commands/docs.js";
 import { isCliEntrypoint } from "./entrypoint.js";
 import { launchTui } from "./tui/index.js";
 import { withUpdateWarning } from "./update-check.js";
 import { CLI_VERSION } from "./version.js";
+import { dim, marks, outputStyle } from "./commands/cli-style.js";
+
+/** Commander's own parse errors ("error: unknown option ...") in the shared failure shape. */
+export function formatParseError(text: string): string {
+  const [first = "", ...rest] = text.trimEnd().split("\n");
+  const rail = outputStyle().rail;
+  const head = `${marks.fail}${rail ? "  " : " "}${first.replace(/^error:\s*/u, "")}`;
+  const details = rest.filter((line) => line.trim()).map((line) => `${rail ? `${dim("└")}  ` : "  "}${dim(line.trim())}`);
+  return `${[head, ...details].join("\n")}\n`;
+}
 
 export function createProgram(): Command {
   const program = new Command();
@@ -70,6 +72,10 @@ export function createProgram(): Command {
     .name("adit")
     .description("AI Development Intent Tracker — a flight recorder for AI-assisted development")
     .version(CLI_VERSION);
+  // Subcommands such as memory history own their --version option.
+  program.enablePositionalOptions();
+  // Set before any subcommand exists so every subcommand inherits it.
+  program.configureOutput({ outputError: (text, write) => write(formatParseError(text)) });
   configureTopLevelHelp(program);
 
   program
@@ -85,11 +91,23 @@ export function createProgram(): Command {
     )
     .option(
       "--single-repo",
-      "Initialize this Git repository as a single-repo project",
+      "Include only this Git repository (shortcut for --repos .)",
     )
     .option(
       "--multi-repo",
-      "Initialize this directory as a multi-repo project containing its child Git repositories",
+      "Include every child Git repository; on re-init also apply repository list changes without asking",
+    )
+    .option(
+      "--repos <paths>",
+      "Comma-separated repository paths to include (use . for this directory), e.g. --repos .,api,web",
+    )
+    .option(
+      "--detach",
+      "Deprecated alias: init always creates an independent project without changing its parent",
+    )
+    .option(
+      "--absorb",
+      "Unsupported legacy option; parent and child projects now remain independent",
     )
     .action(withUpdateWarning("init", (opts) =>
       initCommand({
@@ -98,6 +116,11 @@ export function createProgram(): Command {
         force: opts.force,
         singleRepo: opts.singleRepo,
         multiRepo: opts.multiRepo,
+        repos: typeof opts.repos === "string"
+          ? opts.repos.split(",").map((path: string) => path.trim()).filter(Boolean)
+          : undefined,
+        detach: opts.detach,
+        absorb: opts.absorb,
       }),
     ));
 
@@ -193,10 +216,9 @@ export function createProgram(): Command {
   exportCmd
     .command("event <id>")
     .description("Export a single event bundle")
-    .option("-f, --format <fmt>", "Output format (json)", "json")
     .option("-o, --output <path>", "Output file path")
     .action((id, opts) =>
-      exportCommand(id, { format: opts.format, output: opts.output }),
+      exportCommand(id, { output: opts.output }),
     );
 
   exportCmd
@@ -206,8 +228,8 @@ export function createProgram(): Command {
     .option("-o, --output <path>", "Output file path")
     .option("--from <date>", "Start date filter")
     .option("--to <date>", "End date filter")
-    .option("--include-diffs", "Include full diffs")
-    .option("--include-env", "Include environment snapshots")
+    .option("--include-diffs", "Include full diffs (jsonl format only)")
+    .option("--include-env", "Include environment snapshots (jsonl format only)")
     .option("--gzip", "Compress output with gzip")
     .action((sessionId, opts) =>
       exportSessionCommand(sessionId, {
@@ -246,6 +268,10 @@ export function createProgram(): Command {
 
   // Cloud sync
   const cloudCmd = program.command("cloud").description("Cloud sync commands");
+  registerCloudTaskCommands(cloudCmd);
+  registerCloudHistoryCommands(cloudCmd);
+  registerCloudMemoryCommands(cloudCmd);
+  registerCloudReportCommands(cloudCmd);
 
   cloudCmd
     .command("login")
@@ -265,7 +291,7 @@ export function createProgram(): Command {
 
   cloudCmd
     .command("sync")
-    .description("Push unsynced records to cloud")
+    .description("Push conversation records, then linked Git metadata")
     .option("--json", "Output as JSON")
     .action(withUpdateWarning("cloud.sync", (opts) =>
       cloudSyncCommand({ json: opts.json }),
@@ -294,52 +320,12 @@ export function createProgram(): Command {
     codex: withUpdateWarning("cloud.codex", cloudCodexCommand),
   });
 
-  // Transcript upload management (under cloud)
-  const transcriptCmd = cloudCmd
-    .command("transcript")
-    .description("Manage transcript upload to cloud");
-
-  transcriptCmd
-    .command("enable")
-    .description("Enable automatic transcript upload (default)")
-    .action(() => transcriptEnableCommand());
-
-  transcriptCmd
-    .command("disable")
-    .description("Disable automatic transcript upload")
-    .action(() => transcriptDisableCommand());
-
-  transcriptCmd
-    .command("status")
-    .description("Show transcript upload status")
-    .option("--json", "Output as JSON")
-    .action(withUpdateWarning("cloud.transcript.status", (opts) =>
-      transcriptStatusCommand({ json: opts.json }),
-    ));
-
-  transcriptCmd
-    .command("upload")
-    .description("Manually trigger transcript uploads")
-    .option("--json", "Output as JSON")
-    .action(withUpdateWarning("cloud.transcript.upload", (opts) =>
-      transcriptUploadCommand({ json: opts.json }),
-    ));
-
-  transcriptCmd
-    .command("reset <id>")
-    .description("Reset a failed transcript for re-upload")
-    .option("--json", "Output as JSON")
-    .action(withUpdateWarning("cloud.transcript.reset", (id, opts) =>
-      transcriptResetCommand(id, { json: opts.json }),
-    ));
-
   cloudCmd
     .command("link")
     .description("Link this project to adit-cloud")
     .option("-f, --force", "Clear cache and re-link from scratch")
     .option("--skip-docs", "Skip document upload")
     .option("--skip-commits", "Skip commit history upload")
-    .option("--skip-qualify", "Skip document quality check")
     .option("--dry-run", "Preview without uploading")
     .option("--json", "Output result as JSON")
     .action(withUpdateWarning("cloud.link", async (opts) => {
@@ -347,38 +333,10 @@ export function createProgram(): Command {
         force: opts.force,
         skipDocs: opts.skipDocs,
         skipCommits: opts.skipCommits,
-        skipQualify: opts.skipQualify,
         dryRun: opts.dryRun,
         json: opts.json,
       });
     }));
-
-  // cloud intent — list/view intents, with complete subcommand
-  const intentCmd = cloudCmd
-    .command("intent")
-    .description("Manage intents from connected project")
-    .option("--id <id>", "Intent ID")
-    .option("--state <state>", "Filter by intent state")
-    .option("--json", "Output as JSON")
-    .action(withUpdateWarning("cloud.intent", (opts) =>
-      projectIntentCliHandler({
-        id: opts.id,
-        state: opts.state,
-        json: opts.json,
-      }),
-    ));
-
-  intentCmd
-    .command("complete <id>")
-    .description("Complete a phase or entire intent")
-    .option("--phase <number>", "Complete a specific phase (1-99)")
-    .option("--json", "Output as JSON")
-    .action(withUpdateWarning("cloud.intent.complete", (intentId, opts) =>
-      completeCliHandler(intentId, {
-        phase: opts.phase ? parseInt(opts.phase, 10) : undefined,
-        json: opts.json,
-      }),
-    ));
 
   // Debug and maintenance commands
   const debugCmd = program
@@ -477,40 +435,13 @@ export function createProgram(): Command {
       envHistoryCommand({ limit: parseInt(opts.limit, 10), json: opts.json }),
     );
 
-  // Self-update
+  // Self-update ("upgrade" and "self-update" stay as aliases for scripts and docs)
   program
-    .command("upgrade")
-    .alias("self-update")
+    .command("update")
+    .aliases(["upgrade", "self-update"])
     .description("Update ADIT to the latest version")
     .option("-c, --check", "Check for updates without installing")
     .action((opts) => selfUpdateCommand({ check: opts.check }));
-
-  // Document management
-  const docsCmd = program
-    .command("docs")
-    .description("Project document scaffolding and validation");
-
-  docsCmd
-    .command("scaffold [type]")
-    .description("Generate a project document template")
-    .option("-o, --output <path>", "Output directory (default: docs/)")
-    .action((type, opts) => docsScaffoldCommand(type, { output: opts.output }));
-
-  docsCmd
-    .command("validate [path]")
-    .description("Validate project document(s) against structural spec")
-    .option(
-      "-t, --threshold <n>",
-      "Quality threshold (0-1, default: 0.6)",
-      "0.6",
-    )
-    .option("--json", "Output as JSON")
-    .action((path, opts) =>
-      docsValidateCommand(path, {
-        json: opts.json,
-        threshold: parseFloat(opts.threshold),
-      }),
-    );
 
   // TUI — interactive terminal interface
   program
@@ -586,12 +517,11 @@ Commands:
   snapshot                   Show event diffs and environment snapshots
   cloud                      Sync and connect with adit-cloud
   hook                       Manage AI platform hook integrations
-  docs                       Scaffold and validate project documents
   export                     Export event or session data
 
   doctor [options]           Validate installation health
   tui                        Launch the interactive terminal UI
-  upgrade [options]          Update ADIT
+  update [options]           Update ADIT
   debug                      Debug and maintenance commands
   help [command...]          display help for command
 `;

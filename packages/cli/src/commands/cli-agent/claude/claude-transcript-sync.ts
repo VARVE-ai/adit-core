@@ -39,10 +39,6 @@ export class ClaudeTranscriptSync {
     const transcriptPath = readString(input.body.transcript_path);
     if (transcriptPath) session.transcriptPath = transcriptPath;
 
-    if (input.eventType === "SessionStart") {
-      session.startedAt = Date.now();
-    }
-
     if (input.eventType === "UserPromptSubmit" && !session.firstPromptAt) {
       session.firstPromptAt = Date.now();
     }

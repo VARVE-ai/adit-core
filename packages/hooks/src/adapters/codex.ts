@@ -6,14 +6,14 @@
  * All clients share the same hooks.json format and event schema.
  * Handles installation into .codex/hooks.json.
  *
- * Key differences from Claude Code:
- * - SessionStart uses matcher "startup|resume"
- * - PostToolUse uses matcher "Bash"
- * - Hooks must be trusted via [hooks.state] entries in $CODEX_HOME/config.toml
+ * Codex only runs project hooks the user has approved inside Codex (via
+ * /hooks); approvals live in $CODEX_HOME/config.toml. ADIT reads that file
+ * to report approval status but never writes to it.
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { Platform } from "@varveai/adit-core";
 import type {
   PlatformAdapter,
@@ -27,26 +27,32 @@ import {
   buildAditHookCommand,
   classifyAditHookEntries,
   describeHookValidation,
+  extractHookScriptPath,
+  extractPinnedProjectRoot,
   isAditHookCommand,
   isFixedProjectRootHookCommand,
 } from "./command.js";
 import {
-  ADIT_CODEX_HOOK_TRUST_BLOCK,
   buildCodexHookStatesForEntries,
-  codexHookTrustMarkerForPath,
   findUntrustedCodexHookStates,
-  removeCodexHookTrustConfig,
+  parseCodexTrustTableKey,
   resolveCodexHookTrustConfigPath,
-  upsertCodexHookTrustConfig,
 } from "./codex-trust.js";
 
 /** Timeout for Codex hooks — in SECONDS (not ms like Claude Code) */
 const HOOK_TIMEOUT = 30;
 
 const HOOK_MAPPINGS: HookMapping[] = [
-  { platformEvent: "SessionStart", aditHandler: "session-start", matcher: "startup|resume" },
   { platformEvent: "UserPromptSubmit", aditHandler: "prompt-submit" },
   { platformEvent: "Stop", aditHandler: "stop" },
+  { platformEvent: "Interrupt", aditHandler: "stop" },
+  // Working-tree snapshots around shell commands. Codex reports every
+  // exec_command call (also the ones issued from `exec` scripts) as a
+  // PreToolUse/PostToolUse pair with tool_name "Bash", a tool_use_id and the
+  // turn_id, so shell-driven edits that leave no FileChange record are still
+  // attributed to the turn.
+  { platformEvent: "PreToolUse", aditHandler: "pre-tool-use", matcher: "Bash" },
+  { platformEvent: "PostToolUse", aditHandler: "post-tool-use", matcher: "Bash" },
 ];
 
 export const codexAdapter: PlatformAdapter = {
@@ -67,54 +73,42 @@ export const codexAdapter: PlatformAdapter = {
       platformCli: "codex",
       platformSessionId: raw.session_id as string | undefined,
       transcriptPath: raw.transcript_path as string | undefined,
+      turnId: raw.turn_id as string | undefined,
       // Prompt
       prompt: raw.prompt as string | undefined,
       // Stop
       stopReason: raw.stop_reason as string | undefined,
       lastAssistantMessage: raw.last_assistant_message as string | undefined,
       stopHookActive: raw.stop_hook_active as boolean | undefined,
-      // Tool use (from PostToolUse)
+      // Tool use (PreToolUse / PostToolUse)
       toolName: raw.tool_name as string | undefined,
+      toolUseId: raw.tool_use_id as string | undefined,
       toolInput: raw.tool_input as Record<string, unknown> | undefined,
       toolOutput: raw.tool_response as Record<string, unknown> | undefined,
-      // Session lifecycle
-      sessionSource: raw.source as string | undefined,
-      sessionEndReason: raw.reason as string | undefined,
-      // Common metadata (present in all events)
-      permissionMode: raw.permission_mode as string | undefined,
-      model: raw.model as string | undefined,
       rawPlatformData: raw,
     };
   },
 
   generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
-    const makeHookEntry = (hookType: AditHookType) => [
+    const makeHookEntry = (hookType: AditHookType, matcher?: string, timeout = HOOK_TIMEOUT) => [
       {
+        ...(matcher ? { matcher } : {}),
         hooks: [{
           type: "command",
           command: buildAditHookCommand(aditBinaryPath, "codex", hookType, projectRoot),
-          timeout: HOOK_TIMEOUT,
+          timeout,
         }],
       },
     ];
-    const makeMatcherEntry = (matcher: string, hookType: AditHookType) => [
-      {
-        matcher,
-        hooks: [{
-          type: "command",
-          command: buildAditHookCommand(aditBinaryPath, "codex", hookType, projectRoot),
-          timeout: HOOK_TIMEOUT,
-        }],
-      },
-    ];
-
     return {
       configPath: ".codex/hooks.json",
       content: {
         hooks: {
-          SessionStart: makeMatcherEntry("startup|resume", "session-start"),
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
+          Interrupt: makeHookEntry("stop", undefined, 3),
+          PreToolUse: makeHookEntry("pre-tool-use", "Bash"),
+          PostToolUse: makeHookEntry("post-tool-use", "Bash"),
         },
       },
     };
@@ -201,14 +195,18 @@ export const codexAdapter: PlatformAdapter = {
       })
       : [];
     const untrustedStates = findUntrustedCodexHookStates(trustConfig, hookStates);
+    // Advisory: ADIT never writes the user-level Codex config, so approval
+    // can only happen inside Codex — reinstalling cannot fix it and it must
+    // not fail `valid`.
     checks.push({
       name: "Codex hook trust",
       ok: hooksFound && hookStates.length > 0 && untrustedStates.length === 0,
+      advisory: true,
       detail: !hooksFound
-        ? "No ADIT Codex hooks found to trust"
+        ? "No ADIT Codex hooks found to approve"
         : untrustedStates.length === 0
-          ? `All ADIT hooks trusted in ${trustConfigPath}`
-          : `${untrustedStates.length} hook(s) need review in Codex. Run 'adit plugin install codex' or open /hooks.`,
+          ? `All ADIT hooks approved in ${trustConfigPath}`
+          : `${untrustedStates.length} hook(s) not yet approved in Codex — open this project in Codex and run /hooks to approve them (Codex skips unapproved hooks silently)`,
     });
 
     // Codex only loads project-scoped hooks in trusted workspaces (>= 0.122).
@@ -231,7 +229,11 @@ export const codexAdapter: PlatformAdapter = {
     };
   },
 
-  async installHooks(projectRoot: string, aditBinaryPath: string): Promise<void> {
+  async installHooks(
+    projectRoot: string,
+    aditBinaryPath: string,
+    options?: { hookProjectRoot?: string },
+  ): Promise<void> {
     const codexDir = join(projectRoot, ".codex");
     if (!existsSync(codexDir)) {
       mkdirSync(codexDir, { recursive: true });
@@ -256,65 +258,34 @@ export const codexAdapter: PlatformAdapter = {
       }
     }
 
-    const hookConfig = this.generateHookConfig(aditBinaryPath, projectRoot);
+    const hookConfig = this.generateHookConfig(aditBinaryPath, options?.hookProjectRoot ?? projectRoot);
     const existingHooks = (hooksConfig.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 
-    // Merge hook entries per event key: preserve other tools' hooks,
-    // remove stale ADIT entries, then append new ADIT entries.
-    const mergedHooks: Record<string, unknown[]> = { ...existingHooks };
-    for (const [eventKey, aditEntries] of Object.entries(newHooks)) {
-      const existing = Array.isArray(mergedHooks[eventKey]) ? mergedHooks[eventKey] : [];
+    // Codex includes the array position in its approval key. Replace in
+    // place so refreshing ADIT does not invalidate unchanged hooks.
+    const mergedHooks = mergeCodexHookEntries(existingHooks, newHooks);
 
-      // Remove stale ADIT entries (same logic as uninstallHooks)
-      const nonAditEntries = existing.filter(
-        (raw) => {
-          const entry = raw as { command?: string; hooks?: Array<{ command?: string }> };
-          if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return false;
-          if (Array.isArray(entry.hooks)) {
-            return !entry.hooks.some(
-              (h) => typeof h.command === "string" && isAditHookCommand(h.command),
-            );
-          }
-          return true;
-        },
-      );
-
-      // Append new ADIT entries after other tools' hooks
-      mergedHooks[eventKey] = [...nonAditEntries, ...aditEntries];
-    }
+    if (isDeepStrictEqual(existingHooks, mergedHooks)) return;
 
     hooksConfig.hooks = mergedHooks;
     writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2) + "\n");
 
     // The hooks feature is stable and enabled by default on Codex >= 0.124
     // (ADIT's baseline), so no [features] toggle is written here.
-
-    const hookStates = buildCodexHookStatesForEntries({
-      hooksPath,
-      hooks: mergedHooks,
-      matchesEntry: (entry) => entryContainsAditHook(entry),
-    });
-    upsertCodexHookTrustConfig({
-      blockName: ADIT_CODEX_HOOK_TRUST_BLOCK,
-      marker: codexHookTrustMarkerForPath(hooksPath),
-      states: hookStates,
-    });
+    //
+    // The user-level Codex config ($CODEX_HOME/config.toml) is deliberately
+    // left alone: the user approves these hooks inside Codex via /hooks.
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {
-    const hooksPath = join(projectRoot, ".codex", "hooks.json");
-    if (configHasAditHooks(hooksPath)) return true;
-
-    const trustConfig = readTextFile(resolveCodexHookTrustConfigPath());
-    const marker = codexHookTrustMarkerForPath(hooksPath);
-    return trustConfig !== null && trustConfig.includes(`>>> ${ADIT_CODEX_HOOK_TRUST_BLOCK} ${marker}`);
+    // Project files only. Older ADIT versions left trust blocks in the
+    // user-level Codex config; that residue is not evidence of an install
+    // and ADIT no longer touches the file.
+    return configHasAditHooks(join(projectRoot, ".codex", "hooks.json"));
   },
 
   async hasProjectHooks(projectRoot: string): Promise<boolean> {
-    // Project files only: leftover user-level trust config (which survives
-    // deleting the project's .codex/) must not make a fresh project look
-    // connected. hasHooks keeps the looser semantics for uninstall cleanup.
     return configHasAditHooks(join(projectRoot, ".codex", "hooks.json"));
   },
 
@@ -349,13 +320,58 @@ export const codexAdapter: PlatformAdapter = {
         // Ignore parse errors
       }
     }
-
-    removeCodexHookTrustConfig({
-      blockName: ADIT_CODEX_HOOK_TRUST_BLOCK,
-      marker: codexHookTrustMarkerForPath(hooksPath),
-    });
+    // Trust blocks written by older ADIT versions into the user-level Codex
+    // config are left in place on purpose — ADIT no longer edits that file.
   },
 };
+
+function mergeCodexHookEntries(
+  existingHooks: Record<string, unknown>,
+  newHooks: Record<string, unknown[]>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = {};
+  for (const event of new Set([...Object.keys(existingHooks), ...Object.keys(newHooks)])) {
+    const existing = existingHooks[event];
+    const replacements = [...(newHooks[event] ?? [])];
+    if (!Array.isArray(existing) && replacements.length === 0) {
+      merged[event] = existing;
+      continue;
+    }
+    const entries: unknown[] = [];
+    for (const entry of Array.isArray(existing) ? existing : []) {
+      if (!entryContainsAditHook(entry)) entries.push(entry);
+      else if (replacements.length > 0) {
+        const replacement = replacements.shift();
+        entries.push(isDeepStrictEqual(normalizeCodexEntryPaths(entry), normalizeCodexEntryPaths(replacement))
+          ? entry
+          : replacement);
+      }
+    }
+    entries.push(...replacements);
+    if (entries.length > 0) merged[event] = entries;
+  }
+  return merged;
+}
+
+// Keep the approved command spelling when only Windows path casing or
+// separators differ. Other command or hook changes still replace the entry.
+function normalizeCodexEntryPaths(entry: unknown): unknown {
+  if (process.platform !== "win32" || !entry || typeof entry !== "object") return entry;
+  const raw = entry as Record<string, unknown>;
+  if (!Array.isArray(raw.hooks)) return entry;
+  return { ...raw, hooks: raw.hooks.map((hook: Record<string, unknown>) => {
+    if (!hook || typeof hook.command !== "string") return hook;
+    let command = hook.command;
+    const root = extractPinnedProjectRoot(command);
+    if (root) {
+      command = command.replace(/--project-root-b64([= ])[A-Za-z0-9_-]+/u,
+        (_match, separator: string) => `--project-root-b64${separator}${Buffer.from(resolve(root).toLowerCase()).toString("base64url")}`);
+    }
+    const script = extractHookScriptPath(command);
+    if (script) command = command.replace(script, resolve(script).toLowerCase());
+    return { ...hook, command };
+  }) };
+}
 
 function configHasAditHooks(hooksPath: string): boolean {
   if (!existsSync(hooksPath)) return false;
@@ -426,23 +442,22 @@ function readTextFile(path: string): string | null {
  */
 function isCodexWorkspaceTrusted(configText: string | null, projectRoot: string): boolean {
   if (!configText) return false;
-  const wanted = resolve(projectRoot);
+  const normalize = (path: string) => process.platform === "win32"
+    ? resolve(path).toLowerCase()
+    : resolve(path);
+  const wanted = normalize(projectRoot);
   let inWantedProject = false;
   for (const line of configText.split(/\r?\n/u)) {
-    const header = line.match(/^\s*\[projects\.("(?:\\.|[^"\\])*")\]\s*$/u);
-    if (header?.[1]) {
-      try {
-        inWantedProject = resolve(JSON.parse(header[1]) as string) === wanted;
-      } catch {
-        inWantedProject = false;
-      }
+    const projectPath = parseCodexTrustTableKey(line, "projects");
+    if (projectPath !== null) {
+      inWantedProject = normalize(projectPath) === wanted;
       continue;
     }
-    if (/^\s*\[[^\]]+\]\s*$/u.test(line)) {
+    if (/^\s*\[/u.test(line)) {
       inWantedProject = false;
       continue;
     }
-    if (inWantedProject && /^\s*trust_level\s*=\s*"trusted"\s*(?:#.*)?$/u.test(line)) {
+    if (inWantedProject && /^\s*trust_level\s*=\s*(?:"trusted"|'trusted')\s*(?:#.*)?$/u.test(line)) {
       return true;
     }
   }

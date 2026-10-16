@@ -43,8 +43,12 @@ export const claudeVscodeAdapter: PlatformAdapter = {
     return claudeCodeAdapter.hasHooks?.(projectRoot) ?? false;
   },
 
-  async installHooks(projectRoot: string, aditBinaryPath: string): Promise<void> {
-    return claudeCodeAdapter.installHooks(projectRoot, aditBinaryPath);
+  async installHooks(
+    projectRoot: string,
+    aditBinaryPath: string,
+    options?: { hookProjectRoot?: string },
+  ): Promise<void> {
+    return claudeCodeAdapter.installHooks(projectRoot, aditBinaryPath, options);
   },
 
   async uninstallHooks(projectRoot: string): Promise<void> {

@@ -2,23 +2,26 @@
  * Agent file mutation types.
  *
  * A mutation is a single file change explicitly performed by the agent via a
- * file-editing tool (Write/Edit/MultiEdit/NotebookEdit for Claude; fileChange
- * for Codex). Shell-driven indirect changes are only represented when the
- * transcript exposes a concrete written path.
+ * file-editing tool (Write/Edit/MultiEdit/NotebookEdit for Claude; the
+ * FileChange item Codex records for apply_patch), or — for a shell command
+ * (Claude's Bash tool, Codex's exec_command) — a change inferred from
+ * working-tree snapshots taken around the command (source
+ * "<platform>-bash-snapshot").
  */
 
 export type MutationKind = "add" | "update" | "delete" | "rename";
 
-export type MutationStatus = "running" | "completed" | "failed";
+export type MutationStatus = "completed" | "failed";
 
 export type MutationSource =
   | "claude-write-tool"
   | "claude-edit-tool"
   | "claude-multiedit-tool"
   | "claude-notebookedit-tool"
-  | "codex-filechange"
-  | "codex-patch-apply-end"
-  | "codex-bash-output"
+  | "claude-bash-snapshot"
+  | "codex-bash-snapshot"
+  | "cursor-bash-snapshot"
+  | "codex-file-change"
   | "gemini-write-file"
   | "gemini-replace"
   | "gemini-edit"
@@ -33,7 +36,7 @@ export interface MutationOmitted {
 }
 
 export interface AgentFileMutation {
-  provider: "claude-code" | "claude-vscode" | "codex" | "gemini" | "cursor" | "cursor-vscode";
+  provider: "claude-code" | "claude-vscode" | "codex" | "gemini" | "cursor";
   toolUseId: string;
   toolName: string;
   path: string;

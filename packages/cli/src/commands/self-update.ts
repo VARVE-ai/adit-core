@@ -1,16 +1,108 @@
 /**
- * `adit upgrade` — Update ADIT to the latest version.
+ * `adit update` — Update ADIT to the latest version (aliases: upgrade, self-update).
  *
- * Detects the installation directory (source-install via git clone),
- * pulls the latest changes, rebuilds, and re-registers commands.
- * Falls back to re-running the install script if the install dir
- * cannot be determined.
+ * Two install flavours:
+ * - Source install (git clone, developers): pull, reinstall deps, rebuild.
+ * - Package-manager install (npm / pnpm / yarn / bun, users): look up the
+ *   latest published version and run the matching global install command.
  */
 
-import { execSync, type ExecSyncOptions } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { execFileSync, execSync, type ExecSyncOptions } from "node:child_process";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve, dirname } from "node:path";
+import { compareVersions, fetchLatestPublishedVersion } from "../update-check.js";
 import { CLI_VERSION } from "../version.js";
+import { installSkillsCommand } from "./skills.js";
+
+export function installUpgradedTaskSkill() {
+  try {
+    execFileSync(process.execPath, [resolve(dirname(realpathSync(process.argv[1])), "install-skills.js")], { stdio: "inherit", env: process.env });
+  } catch {
+    console.warn("Task skill installation failed. Run 'adit init' after fixing installation permissions.");
+  }
+}
+
+const PACKAGE_NAME = "@varveai/adit-cli";
+
+export type GlobalPackageManager = "npm" | "pnpm" | "yarn" | "bun";
+
+/**
+ * Guess which package manager owns the global install from where the CLI
+ * entry script lives (each manager keeps globals under a recognizable path).
+ * `ADIT_UPGRADE_COMMAND` in the environment overrides the guess entirely.
+ */
+export function detectGlobalPackageManager(scriptPath: string): GlobalPackageManager {
+  const normalized = scriptPath.replace(/\\/gu, "/").toLowerCase();
+  if (normalized.includes("/.bun/")) return "bun";
+  if (normalized.includes("/pnpm/") || normalized.includes("/.pnpm/")) return "pnpm";
+  if (normalized.includes("/yarn/") || normalized.includes("/.yarn/")) return "yarn";
+  return "npm";
+}
+
+export function buildGlobalUpgradeCommand(
+  packageManager: GlobalPackageManager,
+  version: string = "latest",
+): string {
+  const spec = `${PACKAGE_NAME}@${version}`;
+  switch (packageManager) {
+    case "pnpm":
+      return `pnpm add -g ${spec}`;
+    case "yarn":
+      return `yarn global add ${spec}`;
+    case "bun":
+      return `bun add -g ${spec}`;
+    default:
+      return `npm install -g ${spec}`;
+  }
+}
+
+/** Upgrade path for npm / pnpm / yarn / bun global installs. */
+async function upgradePackageInstall(opts?: { check?: boolean }): Promise<void> {
+  const packageManager = detectGlobalPackageManager(process.argv[1] ?? "");
+  console.log(`Checking npm for the latest ${PACKAGE_NAME} ...`);
+  const latest = await fetchLatestPublishedVersion();
+
+  if (latest && compareVersions(CLI_VERSION, latest) >= 0) {
+    console.log(`Already up to date (v${CLI_VERSION}).`);
+    if (!opts?.check) installSkillsCommand();
+    return;
+  }
+  if (!latest) {
+    console.log("Could not reach the npm registry to compare versions.");
+    if (opts?.check) {
+      process.exitCode = 1;
+      return;
+    }
+  } else {
+    console.log(`Update available: v${CLI_VERSION} -> v${latest}`);
+    if (opts?.check) return;
+  }
+
+  const command =
+    process.env.ADIT_UPGRADE_COMMAND?.trim() ||
+    buildGlobalUpgradeCommand(packageManager, latest ?? "latest");
+  console.log();
+  console.log(`Running: ${command}`);
+  console.log();
+  try {
+    execSync(command, { stdio: "inherit", env: process.env });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error();
+    console.error("Upgrade failed.");
+    if (/EACCES|permission denied/iu.test(message)) {
+      console.error("The global install directory is not writable by your user.");
+    }
+    console.error(`Run it yourself to see the full output:\n  ${command}`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log();
+  console.log(
+    `Updated successfully: v${CLI_VERSION} -> v${latest ?? "latest"}. Run \`adit --version\` to confirm.`,
+  );
+  installUpgradedTaskSkill();
+}
 
 /** Default install location used by install.sh */
 const DEFAULT_INSTALL_DIR = resolve(
@@ -69,8 +161,7 @@ export async function selfUpdateCommand(opts?: {
   const installDir = resolveInstallDir();
 
   if (!installDir) {
-    console.log("Installed via npm. To update:");
-    console.log("  npm update -g @varveai/adit-cli");
+    await upgradePackageInstall(opts);
     return;
   }
 
@@ -109,6 +200,7 @@ export async function selfUpdateCommand(opts?: {
     const latestVer = readVersionFromPackageJson(installDir);
     if (latestVer === CLI_VERSION) {
       console.log(`Already up to date (v${CLI_VERSION}).`);
+      if (!opts?.check) installSkillsCommand();
       return;
     }
   }
@@ -142,7 +234,7 @@ export async function selfUpdateCommand(opts?: {
     console.error(
       "Failed to pull latest changes. You may have local modifications.",
     );
-    console.error("Try: git -C " + installDir + " stash && adit upgrade");
+    console.error("Try: git -C " + installDir + " stash && adit update");
     process.exitCode = 1;
     return;
   }
@@ -179,6 +271,8 @@ export async function selfUpdateCommand(opts?: {
     process.exitCode = 1;
     return;
   }
+
+  installUpgradedTaskSkill();
 
   // Step 4: Report
   const newVer = readVersionFromPackageJson(installDir);

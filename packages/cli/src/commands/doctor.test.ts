@@ -7,8 +7,8 @@ const mocks = vi.hoisted(() => ({
   closeDatabase: vi.fn(),
   queryEvents: vi.fn(),
   listSessions: vi.fn(),
-  endSession: vi.fn(),
   discoverWorkspaceRepositories: vi.fn(() => [] as Array<{ relativePath: string }>),
+  readProjectManifest: vi.fn((): { repositories: Array<{ relativePath: string; repositoryId?: string }> } | null => null),
   getRemoteUrl: vi.fn(async () => "https://example.com/repo.git" as string | null),
   detectPlatform: vi.fn(),
   detectPlatforms: vi.fn(),
@@ -27,9 +27,34 @@ vi.mock("@varveai/adit-core", () => ({
   closeDatabase: mocks.closeDatabase,
   queryEvents: mocks.queryEvents,
   listSessions: mocks.listSessions,
-  endSession: mocks.endSession,
   discoverWorkspaceRepositories: mocks.discoverWorkspaceRepositories,
+  readProjectManifest: mocks.readProjectManifest,
   projectManifestPath: (projectRoot: string) => `${projectRoot}/.adit/project.json`,
+  resolveActiveManifestRepositories: (
+    projectRoot: string,
+    manifest: { repositories: Array<{ relativePath: string; repositoryId?: string }> },
+  ) =>
+    manifest.repositories.map((entry) => ({
+      localRepositoryId: entry.repositoryId ?? entry.relativePath,
+      relativePath: entry.relativePath,
+      displayName: entry.relativePath,
+      repositoryUrl: null,
+      canonicalRepoKey: null,
+      path: entry.relativePath === "." ? projectRoot : `${projectRoot}/${entry.relativePath}`,
+    })),
+  computeRepositoryDrift: (
+    projectRoot: string,
+    manifest: { repositories: Array<{ relativePath: string }> },
+  ) => {
+    const registered = manifest.repositories.map((entry) => entry.relativePath);
+    const discovered = mocks.discoverWorkspaceRepositories(projectRoot).map((repo) => repo.relativePath);
+    return {
+      registered,
+      discovered,
+      unregistered: discovered.filter((path) => !registered.includes(path)),
+      missing: registered.filter((path) => !discovered.includes(path)),
+    };
+  },
 }));
 
 vi.mock("@varveai/adit-engine", () => ({
@@ -118,7 +143,7 @@ describe("doctorCommand", () => {
         .join("\n"),
     );
 
-    expect(output).toContain("Hooks config: No platforms connected — run 'adit init'");
+    expect(output).toMatch(/✗ Platforms +none connected · run adit init to connect your AI tools/);
     expect(output).not.toContain("Unknown Platform settings");
     expect(output).not.toContain("Unknown Platform support");
   });
@@ -140,6 +165,9 @@ describe("doctorCommand", () => {
         path: "/workspace/api",
       }],
     });
+    mocks.readProjectManifest.mockReturnValue({
+      repositories: [{ relativePath: "api", repositoryId: "repo-api" }],
+    });
     mocks.discoverWorkspaceRepositories.mockReturnValue([
       { relativePath: "api" },
       { relativePath: "new-service" },
@@ -153,10 +181,10 @@ describe("doctorCommand", () => {
         .join("\n"),
     );
 
-    expect(output).toContain("Project manifest: multi-repo · 1 repositories");
+    expect(output).toMatch(/✓ Project manifest +1 repository/);
     // /workspace/api does not exist on disk — reported as drift, never auto-fixed
-    expect(output).toContain("missing: api — run 'adit init' to update the list");
-    expect(output).toContain("Unregistered repositories: new-service — run 'adit init' to add them");
+    expect(output).toMatch(/✗ Repositories +missing: api · run adit init to update the list/);
+    expect(output).toMatch(/! Unregistered +new-service · run adit init to add them/);
     expect(output).not.toContain("git check skipped");
   });
 
@@ -194,8 +222,8 @@ describe("doctorCommand", () => {
         .join("\n"),
     );
 
-    expect(output).toContain("Hooks config: Claude Code: OK");
-    expect(output).not.toContain("Codex:");
+    expect(output).toMatch(/✓ Claude Code hooks +all hooks registered/);
+    expect(output).not.toContain("Codex");
   });
 });
 

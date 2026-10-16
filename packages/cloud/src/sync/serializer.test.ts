@@ -12,7 +12,7 @@ import {
   insertSession,
   openDatabase,
 } from "@varveai/adit-core";
-import { buildSyncBatch, countUnsyncedEvents, countUnsyncedRecords } from "./serializer.js";
+import { buildSyncBatch, countUnsyncedEvents } from "./serializer.js";
 
 const PROJECT_ID = "proj-serializer";
 const LOCAL_CLIENT_ID = "local-client";
@@ -112,7 +112,7 @@ describe("sync serializer", () => {
       responseText: "Later session started",
     });
 
-    const { batch } = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
+    const { batch } = buildSyncBatch(db, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
 
     expect(batch.sessions.map((s) => s.id)).toEqual([firstSessionId, laterSessionId]);
     expect(batch.events.map((e) => e.id)).toEqual([
@@ -121,6 +121,8 @@ describe("sync serializer", () => {
       "01H000000000000000000000030",
     ]);
     expect(batch.events.some((e) => e.event_type === "prompt_submit")).toBe(true);
+    expect(batch).not.toHaveProperty("plans");
+    expect(batch.events[0]).not.toHaveProperty("plan_task_id");
   });
 
   it("includes a prompt once the same session has a following assistant response", () => {
@@ -150,7 +152,7 @@ describe("sync serializer", () => {
       responseText: "done",
     });
 
-    const { batch } = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
+    const { batch } = buildSyncBatch(db, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
 
     expect(batch.events.map((e) => e.id)).toEqual([
       "01H000000000000000000000010",
@@ -159,45 +161,50 @@ describe("sync serializer", () => {
     ]);
   });
 
-  it("compares mutable record timestamps across SQLite and ISO timezone formats", () => {
-    const olderSessionId = "01H000000000000000000000001";
-    const newerSessionId = "01H000000000000000000000002";
-    const cursor = "01H000000000000000000000099";
-    const lastSyncedAt = "2026-07-13T08:30:00.000Z";
-    insertTestSession(db, olderSessionId);
-    insertTestSession(db, newerSessionId);
+  it("does not upload a Session without a new Event", () => {
+    const eventSessionId = "01H000000000000000000000001";
+    const idleSessionId = "01H000000000000000000000002";
+    insertTestSession(db, eventSessionId);
+    insertTestSession(db, idleSessionId);
+    insertTestEvent(db, {
+      id: "01H000000000000000000000010",
+      sessionId: eventSessionId,
+      eventType: "prompt_submit",
+      sequence: 1,
+      promptText: "question",
+    });
 
-    db.prepare("UPDATE sessions SET ended_at = ?, status = 'completed' WHERE id = ?")
-      .run("2026-07-13T16:00:00+08:00", olderSessionId);
-    db.prepare("UPDATE sessions SET ended_at = ?, status = 'completed' WHERE id = ?")
-      .run("2026-07-13T17:00:00+08:00", newerSessionId);
-    db.prepare(
-      `INSERT INTO plans (
-        id, project_id, plan_type, title, content_md, status,
-        created_at, updated_at, vclock_json
-      ) VALUES (?, ?, 'task', 'Mixed timestamp plan', '# Plan', 'active', ?, ?, '{}')`,
-    ).run(
+    const { batch } = buildSyncBatch(db, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
+
+    expect(batch.events.map((event) => event.id)).toEqual(["01H000000000000000000000010"]);
+    expect(batch.sessions.map((session) => session.id)).toEqual([eventSessionId]);
+    expect(batch.sessions.some((session) => session.id === idleSessionId)).toBe(false);
+  });
+
+  it("keeps Event and unique parent Session records within the batch budget", () => {
+    const sessionIds = [
+      "01H000000000000000000000001",
+      "01H000000000000000000000002",
       "01H000000000000000000000003",
-      PROJECT_ID,
-      "2026-07-13 08:00:00",
-      "2026-07-13 09:00:00",
-    );
+    ];
+    sessionIds.forEach((sessionId, index) => {
+      insertTestSession(db, sessionId);
+      insertTestEvent(db, {
+        id: `01H00000000000000000000001${index}`,
+        sessionId,
+        eventType: "prompt_submit",
+        sequence: 1,
+        promptText: `question ${index}`,
+      });
+    });
 
-    const { batch } = buildSyncBatch(
-      db,
-      cursor,
-      lastSyncedAt,
-      PROJECT_ID,
-      CLOUD_CLIENT_ID,
-      500,
-    );
+    const { batch } = buildSyncBatch(db, null, PROJECT_ID, CLOUD_CLIENT_ID, 4);
 
-    expect(batch.sessions.map((session) => session.id)).toEqual([newerSessionId]);
-    expect(batch.plans.map((plan) => plan.id)).toEqual([
-      "01H000000000000000000000003",
-    ]);
-    expect(countUnsyncedRecords(db, cursor, lastSyncedAt, PROJECT_ID)).toBe(1);
-    expect(countUnsyncedEvents(db, cursor, PROJECT_ID)).toBe(0);
+    expect(batch.events).toHaveLength(2);
+    expect(batch.sessions).toHaveLength(2);
+    expect(batch.sessions.map((session) => session.id)).toEqual(
+      batch.events.map((event) => event.session_id),
+    );
   });
 
   it("counts only events toward the auto-sync threshold", () => {
@@ -221,8 +228,6 @@ describe("sync serializer", () => {
 
     expect(countUnsyncedEvents(db, null, PROJECT_ID)).toBe(2);
     expect(countUnsyncedEvents(db, "01H000000000000000000000010", PROJECT_ID)).toBe(1);
-    // countUnsyncedRecords additionally counts the new session row
-    expect(countUnsyncedRecords(db, null, null, PROJECT_ID)).toBe(3);
   });
 
   it("keeps environment snapshots local and excludes them from sync batches", () => {
@@ -240,7 +245,7 @@ describe("sync serializer", () => {
       vclockJson: "{}",
     });
 
-    const { batch } = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
+    const { batch } = buildSyncBatch(db, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
     const localSnapshotCount = db
       .prepare("SELECT COUNT(*) AS count FROM env_snapshots")
       .get() as { count: number };
@@ -277,7 +282,7 @@ describe("sync serializer", () => {
       responseText: "done",
     });
 
-    const { batch } = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
+    const { batch } = buildSyncBatch(db, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
 
     expect(batch.events.map((e) => e.id)).toEqual([
       "01H000000000000000000000010",
@@ -307,7 +312,7 @@ describe("sync serializer", () => {
       });
     }
 
-    const first = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
+    const first = buildSyncBatch(db, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
 
     // Only the first event fits under the cap; it ships WITH its diff.
     expect(first.diffByteCapApplied).toBe(true);
@@ -318,7 +323,6 @@ describe("sync serializer", () => {
     const second = buildSyncBatch(
       db,
       "01H000000000000000000000010",
-      null,
       PROJECT_ID,
       CLOUD_CLIENT_ID,
       500,
@@ -347,7 +351,7 @@ describe("sync serializer", () => {
     // batchSize 2: the session + event consume the whole record budget,
     // leaving remaining=0 at the diff step. Diffs are exempt from the
     // count budget — dropping them here would orphan them forever.
-    const { batch } = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 2);
+    const { batch } = buildSyncBatch(db, null, PROJECT_ID, CLOUD_CLIENT_ID, 2);
 
     expect(batch.events.map((e) => e.id)).toEqual(["01H000000000000000000000010"]);
     expect(batch.diffs.map((d) => d.event_id)).toEqual(["01H000000000000000000000010"]);
@@ -372,7 +376,6 @@ describe("sync serializer", () => {
 
     const { batch, diffByteCapApplied } = buildSyncBatch(
       db,
-      null,
       null,
       PROJECT_ID,
       CLOUD_CLIENT_ID,
@@ -402,7 +405,7 @@ describe("sync serializer", () => {
       toolInputJson: JSON.stringify({ command: "git status" }),
     });
 
-    const { batch } = buildSyncBatch(db, null, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
+    const { batch } = buildSyncBatch(db, null, PROJECT_ID, CLOUD_CLIENT_ID, 500);
     const event = batch.events[0];
 
     expect(event.prompt_text).toBe(prompt);

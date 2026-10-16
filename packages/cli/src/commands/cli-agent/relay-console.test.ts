@@ -136,7 +136,7 @@ describe("createRelayStatusReporter", () => {
     vi.useRealTimers();
   });
 
-  function makeReporter(opts: { debugEnabled?: boolean } = {}) {
+  function makeReporter(opts: { debugEnabled?: boolean; suppressInteractiveNotices?: boolean } = {}) {
     const { notices, output } = makeNotices({ debugEnabled: opts.debugEnabled ?? false });
     const reporter = createRelayStatusReporter({
       notices,
@@ -145,6 +145,7 @@ describe("createRelayStatusReporter", () => {
       terminalId: "terminal-1",
       serverUrl: "http://localhost:3000",
       unreachableDelayMs: 10_000,
+      suppressInteractiveNotices: opts.suppressInteractiveNotices,
     });
     return { reporter, output };
   }
@@ -248,5 +249,39 @@ describe("createRelayStatusReporter", () => {
     expect(output).toEqual([
       "[adit claude] debug: ws retry #3 in 4s: connect ECONNREFUSED 127.0.0.1:3001\n",
     ]);
+  });
+
+  it("does not write outage and recovery notices over an interactive TUI", () => {
+    const { reporter, output } = makeReporter({
+      suppressInteractiveNotices: true,
+    });
+    reporter.helloOk(hello());
+    output.length = 0;
+
+    reporter.relayError(new Error("connect ECONNREFUSED 127.0.0.1:3001"));
+    vi.advanceTimersByTime(10_000);
+    expect(output).toEqual([]);
+
+    reporter.helloOk(hello());
+    expect(output).toEqual([]);
+  });
+
+  it("keeps suppressed status notices available through debug output", () => {
+    const { reporter, output } = makeReporter({
+      debugEnabled: true,
+      suppressInteractiveNotices: true,
+    });
+    reporter.helloOk(hello());
+    output.length = 0;
+
+    reporter.relayError(new Error("connect ECONNREFUSED 127.0.0.1:3001"));
+    vi.advanceTimersByTime(10_000);
+    expect(output).toEqual([
+      "[adit claude] debug: status: Cloud relay unreachable (connect ECONNREFUSED 127.0.0.1:3001) — retrying in background…\n",
+    ]);
+
+    output.length = 0;
+    reporter.helloOk(hello());
+    expect(output).toContain("[adit claude] debug: status: Cloud relay reconnected.\n");
   });
 });

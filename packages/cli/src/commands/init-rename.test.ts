@@ -30,6 +30,12 @@ vi.mock("@varveai/adit-engine", () => ({
   getRemoteUrl: mocks.getRemoteUrl,
 }));
 
+// Skill installation writes into the real home directory; keep tests from touching it.
+vi.mock("./skills.js", () => ({
+  installSkillsWithReport: vi.fn(() => ({ result: { installed: [], unchanged: [], skipped: [], errors: [] }, skills: [] })),
+  printSkillsSection: vi.fn(),
+  skillWarnings: vi.fn(() => 0),
+}));
 vi.mock("@varveai/adit-hooks/adapters", () => ({
   detectPlatforms: mocks.detectPlatforms,
   detectInstalledPlatforms: mocks.detectInstalledPlatforms,
@@ -128,7 +134,7 @@ describe("initCommand member repository renames", () => {
     await initCommand({ cwd: root, multiRepo: true });
 
     const after = readProjectManifest(root)!;
-    for (const repo of after.repositories) {
+    for (const repo of after.repositories.filter((r) => r.syncEnabled !== false)) {
       expect(repo.repositoryId).not.toBe(apiId);
     }
   });
@@ -157,7 +163,7 @@ describe("initCommand member repository renames", () => {
     );
   });
 
-  it("drops unmatched removed entries and mints fresh identities for new repos", async () => {
+  it("retains removed identities as excluded and mints fresh identities for new repos", async () => {
     addRepo("api", "https://example.com/api.git");
     addRepo("web", "https://example.com/web.git");
     await initCommand({ cwd: root, multiRepo: true });
@@ -171,7 +177,7 @@ describe("initCommand member repository renames", () => {
     await initCommand({ cwd: root, multiRepo: true });
 
     const after = readProjectManifest(root)!;
-    expect(after.repositories.map((repo) => repo.relativePath)).toEqual(["svc", "web"]);
+    expect(after.repositories.filter((r) => r.syncEnabled !== false).map((repo) => repo.relativePath)).toEqual(["svc", "web"]);
     expect(after.repositories.find((repo) => repo.relativePath === "svc")!.repositoryId).not.toBe(apiId);
   });
 

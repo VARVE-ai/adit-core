@@ -39,6 +39,28 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("CloudClient token refresh", () => {
+  it("preserves multipart files and the fetch-generated boundary when replaying after token refresh", async () => {
+    const credentials = makeCreds({ expiresAt: new Date(Date.now() + 3600000).toISOString() });
+    saveCredentials(credentials);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ error: "Invalid token", code: "invalid_or_expired_token" }, 401))
+      .mockResolvedValueOnce(jsonResponse({ accessToken: "new-access", refreshToken: "new-refresh", expiresIn: 3600 }))
+      .mockResolvedValueOnce(jsonResponse({ attachment: { id: "image-1" } }));
+    const body = new FormData();
+    body.append("file", new File(["GIF89a"], "reference.gif", { type: "image/gif" }));
+    const client = new CloudClient("http://cloud.test", credentials, { maxRetries: 0 });
+    await expect(client.postForm("/api/cli/tasks/task-1/attachments", body)).resolves.toEqual({ attachment: { id: "image-1" } });
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(3);
+    for (const index of [0, 2]) {
+      const init = vi.mocked(fetch).mock.calls[index][1]!;
+      expect(init.body).toBe(body);
+      expect(init.redirect).toBe("error");
+      expect(new Headers(init.headers).has("content-type")).toBe(false);
+      expect(new Headers(init.headers).get("authorization")).toBe(index === 0 ? "Bearer old-access" : "Bearer new-access");
+    }
+    expect(await (body.get("file") as File).text()).toBe("GIF89a");
+  });
+
   beforeEach(() => {
     mkdirSync(join(tempHome, ".adit"), { recursive: true });
     vi.stubGlobal("fetch", vi.fn());
@@ -136,4 +158,101 @@ describe("CloudClient token refresh", () => {
     expect(String(call[0])).toBe("http://cloud.test/api/test");
     expect((call[1]?.headers as Record<string, string>).Authorization).toBe("Bearer fresh-access");
   });
+  for (const authType of ["device", "token"] as const) {
+    it("explains device deletion for " + authType + " uploads", async () => {
+      const credentials = makeCreds({ authType, expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      saveCredentials(credentials);
+      vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ code: "client_deleted" }, 403));
+      const client = new CloudClient("http://cloud.test", credentials);
+      await expect(client.post("/api/sync/push", {})).rejects.toThrow("Device has been unlinked");
+      expect(vi.mocked(fetch)).toHaveBeenCalledOnce();
+      expect(loadCredentials()?.lastAuthFailure?.code).toBe("client_deleted");
+    });
+  }
+  it("explains device deletion when its access token has already expired", async () => {
+    const credentials = makeCreds();
+    saveCredentials(credentials);
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ error: "client_deleted" }, 403));
+    await expect(new CloudClient("http://cloud.test", credentials).post("/api/sync/push", {})).rejects.toThrow("Device has been unlinked");
+    expect(vi.mocked(fetch)).toHaveBeenCalledOnce();
+  });
+
+  const future = () => new Date(Date.now() + 3_600_000).toISOString();
+  async function settle<T>(pending: Promise<T>): Promise<T> {
+    const outcome = pending.then((value) => ({ value }), (error) => ({ error }));
+    for (let i = 0; i < 6; i++) await vi.advanceTimersByTimeAsync(10_000);
+    const result = await outcome;
+    if ("error" in result) throw result.error;
+    return result.value;
+  }
+
+  it("reports a permission denial as an API error carrying the server's reason", async () => {
+    const credentials = makeCreds({ expiresAt: future() });
+    saveCredentials(credentials);
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ error: "Only the responsible member can manage tasks" }, 403));
+    const client = new CloudClient("http://cloud.test", credentials, { maxRetries: 0 });
+    await expect(client.patch("/api/cli/tasks/task-1", { patch: {} })).rejects.toMatchObject({ name: "CloudApiError", status: 403, body: { error: "Only the responsible member can manage tasks" } });
+    expect(vi.mocked(fetch)).toHaveBeenCalledOnce();
+    expect(loadCredentials()?.lastAuthFailure).toBeUndefined();
+  });
+
+  it("keeps a 403 with an auth code as an auth failure with its status and code", async () => {
+    const credentials = makeCreds({ expiresAt: future() });
+    saveCredentials(credentials);
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ error: "Linked device is inactive", code: "client_inactive" }, 403));
+    const client = new CloudClient("http://cloud.test", credentials, { maxRetries: 0 });
+    await expect(client.get("/api/cli/tasks")).rejects.toMatchObject({ name: "CloudAuthError", status: 403, code: "client_inactive" });
+    expect(loadCredentials()?.lastAuthFailure?.code).toBe("client_inactive");
+  });
+
+  it("retries once after refreshing a rejected token even with a zero retry budget", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const credentials = makeCreds({ expiresAt: future() });
+      saveCredentials(credentials);
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(jsonResponse({ error: "Invalid token", code: "invalid_or_expired_token" }, 401))
+        .mockResolvedValueOnce(jsonResponse({ accessToken: "new-access", refreshToken: "new-refresh", expiresIn: 3600 }))
+        .mockResolvedValueOnce(jsonResponse({ task: { id: "task-1" } }));
+      const client = new CloudClient("http://cloud.test", credentials, { maxRetries: 0 });
+      await expect(settle(client.patch("/api/cli/tasks/task-1", { patch: { progressState: "done" } }))).resolves.toEqual({ task: { id: "task-1" } });
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(3);
+      const retry = vi.mocked(fetch).mock.calls[2];
+      expect(String(retry[0])).toBe("http://cloud.test/api/cli/tasks/task-1");
+      expect((retry[1]?.headers as Record<string, string>).Authorization).toBe("Bearer new-access");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a rate-limited write after Retry-After even with a zero retry budget", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const credentials = makeCreds({ expiresAt: future() });
+      saveCredentials(credentials);
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Slow down" }), { status: 429, statusText: "Too Many Requests", headers: { "Retry-After": "1", "Content-Type": "application/json" } }))
+        .mockResolvedValueOnce(jsonResponse({ task: { id: "task-1" } }));
+      const client = new CloudClient("http://cloud.test", credentials, { maxRetries: 0 });
+      await expect(settle(client.patch("/api/cli/tasks/task-1", { patch: { progressState: "done" } }))).resolves.toEqual({ task: { id: "task-1" } });
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up on persistent rate limiting with the real status instead of a network error", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const credentials = makeCreds({ expiresAt: future() });
+      saveCredentials(credentials);
+      vi.mocked(fetch).mockImplementation(async () => jsonResponse({ error: "Slow down" }, 429));
+      const client = new CloudClient("http://cloud.test", credentials, { maxRetries: 0 });
+      await expect(settle(client.get("/api/cli/tasks"))).rejects.toMatchObject({ name: "CloudApiError", status: 429, body: { error: "Slow down" } });
+      expect(vi.mocked(fetch)).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
 });

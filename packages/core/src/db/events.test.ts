@@ -71,6 +71,16 @@ describe("Events CRUD", () => {
     expect(event!.promptText).toBe("Hello, Claude!");
   });
 
+  it("reads numeric reply usage without parsing private request evidence", () => {
+    insertEvent(db, { id: "reply", sessionId, sequence: 1, eventType: "assistant_response", actor: "assistant",
+      responseText: "Done", startedAt: new Date().toISOString(), vclockJson: "{}" });
+    db.prepare(`UPDATE events SET token_usage_json = 'not parsed on reads', token_usage_turn_id = 'turn',
+      token_usage_revision = 1, token_requests = 1, token_observations = 0, token_incomplete = 0,
+      token_input = 100, token_output = 20, token_total = 120 WHERE id = 'reply'`).run();
+    expect(getEventById(db, "reply")?.tokenUsage).toMatchObject({ requests: 1, inputTokens: 100, outputTokens: 20, totalTokens: 120 });
+    expect(getEventById(db, "reply")?.tokenUsage).not.toHaveProperty("records");
+  });
+
   it("queries events by type and actor", () => {
     insertEvent(db, {
       id: "evt-001",
@@ -179,7 +189,6 @@ describe("Events CRUD", () => {
       eventType: "assistant_response",
       actor: "assistant",
       gitBranch: "main",
-      checkpointSha: "aaa111",
       startedAt: new Date().toISOString(),
       vclockJson: '{"test-client": 1}',
     });
@@ -190,7 +199,6 @@ describe("Events CRUD", () => {
       eventType: "assistant_response",
       actor: "assistant",
       gitBranch: "feature/auth",
-      checkpointSha: "bbb222",
       startedAt: new Date().toISOString(),
       vclockJson: '{"test-client": 2}',
     });
@@ -213,10 +221,6 @@ describe("Events CRUD", () => {
     expect(featureEvents).toHaveLength(1);
     expect(featureEvents[0].id).toBe("evt-002");
 
-    // Combined filter: branch + checkpoint
-    const mainCheckpoints = queryEvents(db, { gitBranch: "main", hasCheckpoint: true });
-    expect(mainCheckpoints).toHaveLength(1);
-    expect(mainCheckpoints[0].id).toBe("evt-001");
   });
 
   it("gets events by session ordered by sequence", () => {

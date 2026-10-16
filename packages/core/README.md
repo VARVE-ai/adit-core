@@ -1,6 +1,6 @@
 # @varveai/adit-core
 
-Core types, SQLite database access, configuration, sync primitives, content redaction, and native install checks for ADIT.
+Core types, SQLite database access, configuration, and sync primitives for ADIT.
 
 ## Install
 

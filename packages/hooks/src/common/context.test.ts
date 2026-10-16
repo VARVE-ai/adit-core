@@ -3,18 +3,20 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   closeDatabase,
   createClock,
-  endSession,
+  getEventsBySession,
   getSessionById,
+  insertEventAutoSeq,
   insertSession,
   loadConfig,
   openDatabase,
+  parseLabels,
   serialize,
   writeProjectManifest,
 } from "@varveai/adit-core";
@@ -30,10 +32,25 @@ async function loadContextModule(): Promise<typeof import("./context.js")> {
   return import("./context.js");
 }
 
+const testHome = vi.hoisted(() => ({ path: "" }));
+vi.mock("node:os", async (importOriginal) => ({
+  ...await importOriginal<typeof import("node:os")>(),
+  homedir: () => testHome.path,
+}));
+
 function tempDir(): string {
   const dir = join(tmpdir(), `adit-hook-context-${randomBytes(8).toString("hex")}`);
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+/** Codex reports the rollout file of every thread it keeps on each hook. */
+function codexRollout(dir: string, threadId: string): string {
+  const sessionsDir = join(dir, "codex-sessions");
+  mkdirSync(sessionsDir, { recursive: true });
+  const path = join(sessionsDir, `rollout-${threadId}.jsonl`);
+  writeFileSync(path, JSON.stringify({ type: "session_meta", payload: { id: threadId } }) + "\n");
+  return path;
 }
 
 describe("initHookContext", () => {
@@ -45,6 +62,7 @@ describe("initHookContext", () => {
 
   beforeEach(() => {
     dir = tempDir();
+    testHome.path = dir;
     mkdirSync(join(dir, ".adit"), { recursive: true });
     dbPath = join(dir, ".adit", "adit.sqlite");
     const now = new Date().toISOString();
@@ -92,7 +110,7 @@ describe("initHookContext", () => {
       dir,
       "codex",
       "codex-platform-session",
-      { projectRoot: dir },
+      { projectRoot: dir, transcriptPath: codexRollout(dir, "codex-platform-session") },
     );
 
     expect(ctx?.session.id).not.toBe("claude-session");
@@ -102,7 +120,7 @@ describe("initHookContext", () => {
     closeDatabase(ctx!.db);
   });
 
-  it("reattaches to a closed session on resume and revives it instead of duplicating", async () => {
+  it("reattaches to the same platform session id without duplicating", async () => {
     insertSession(db, {
       id: "resumed-session",
       projectId,
@@ -113,8 +131,6 @@ describe("initHookContext", () => {
       vclockJson: serialize(createClock(clientId)),
       platformSessionId: "claude-platform-resume",
     });
-    endSession(db, "resumed-session", "completed");
-
     const { initHookContext } = await loadContextModule();
     const ctx = await initHookContext(
       dir,
@@ -124,16 +140,166 @@ describe("initHookContext", () => {
     );
 
     expect(ctx?.session.id).toBe("resumed-session");
-    expect(ctx?.session.status).toBe("active");
-    expect(ctx?.session.endedAt).toBeNull();
-    const persisted = getSessionById(ctx!.db, "resumed-session");
-    expect(persisted?.status).toBe("active");
-    expect(persisted?.endedAt).toBeNull();
+    const row = ctx!.db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
+    expect(row.count).toBe(1);
 
     closeDatabase(ctx!.db);
   });
 
-  it("reuses active session only when no platform session id is available", async () => {
+  it("attaches a client-side fork to the original project even after entering an independent child", async () => {
+    const originalPsid = "claude-original";
+    const forkPsid = "claude-fork";
+    const transcriptsDir = join(dir, "transcripts");
+    mkdirSync(transcriptsDir, { recursive: true });
+    const line = (type: string, uuid: string, sessionId: string) =>
+      JSON.stringify({ type, uuid, sessionId, message: { role: type, content: [{ type: "text", text: "x" }] } });
+    writeFileSync(
+      join(transcriptsDir, `${originalPsid}.jsonl`),
+      [line("user", "u1", originalPsid), line("assistant", "a1", originalPsid), line("user", "u2", originalPsid)].join("\n") + "\n",
+    );
+    const forkPath = join(transcriptsDir, `${forkPsid}.jsonl`);
+    writeFileSync(
+      forkPath,
+      [line("user", "u1", forkPsid), line("assistant", "a1", forkPsid), line("user", "u2-edited", forkPsid)].join("\n") + "\n",
+    );
+    insertSession(db, {
+      id: "original-session",
+      projectId,
+      clientId,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      vclockJson: serialize(createClock(clientId)),
+      platformSessionId: originalPsid,
+    });
+
+    const child = join(dir, "test4");
+    mkdirSync(join(child, ".git"), { recursive: true });
+    const now = new Date().toISOString();
+    writeProjectManifest(child, { schemaVersion: 3, projectId: "child", repositories: [{ relativePath: "." }], createdAt: now, updatedAt: now });
+    closeDatabase(openDatabase(join(child, ".adit", "adit.sqlite")));
+    const { initHookContext } = await loadContextModule();
+    const first = await initHookContext(child, "claude-code", forkPsid, {
+      projectRoot: child,
+      transcriptPath: forkPath,
+    });
+    expect(first?.session.id).toBe("original-session");
+    closeDatabase(first!.db);
+
+    // Later hooks for the fork id resolve through the alias — still one session.
+    const again = await initHookContext(dir, "claude-code", forkPsid, { projectRoot: dir });
+    expect(again?.session.id).toBe("original-session");
+    const row = again!.db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
+    expect(row.count).toBe(1);
+    const alias = again!.db
+      .prepare("SELECT session_id FROM session_platform_aliases WHERE platform_session_id = ?")
+      .get(forkPsid) as { session_id: string } | undefined;
+    expect(alias?.session_id).toBe("original-session");
+    closeDatabase(again!.db);
+  });
+
+  it("defers the fork check until the platform writes the transcript, then folds the placeholder into the original", async () => {
+    const originalPsid = "claude-original";
+    const forkPsid = "claude-fork";
+    const transcriptsDir = join(dir, "transcripts");
+    mkdirSync(transcriptsDir, { recursive: true });
+    const line = (type: string, uuid: string, sessionId: string) =>
+      JSON.stringify({ type, uuid, sessionId, message: { role: type, content: [{ type: "text", text: "x" }] } });
+    writeFileSync(
+      join(transcriptsDir, `${originalPsid}.jsonl`),
+      [line("user", "u1", originalPsid), line("assistant", "a1", originalPsid), line("user", "u2", originalPsid)].join("\n") + "\n",
+    );
+    insertSession(db, {
+      id: "original-session",
+      projectId,
+      clientId,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      vclockJson: serialize(createClock(clientId)),
+      platformSessionId: originalPsid,
+    });
+    insertEventAutoSeq(db, {
+      id: "abandoned-prompt",
+      sessionId: "original-session",
+      eventType: "prompt_submit",
+      actor: "user",
+      promptText: "typo verison",
+      startedAt: new Date().toISOString(),
+      status: "success",
+      vclockJson: serialize(createClock(clientId)),
+    });
+
+    // UserPromptSubmit of the fork: Claude Code has not written its transcript yet.
+    const forkPath = join(transcriptsDir, `${forkPsid}.jsonl`);
+    const { initHookContext } = await loadContextModule();
+    const first = await initHookContext(dir, "claude-code", forkPsid, { projectRoot: dir, transcriptPath: forkPath });
+    expect(first?.session.id).not.toBe("original-session");
+    expect(JSON.parse(first!.session.metadataJson ?? "{}").forkCheckPending).toBe(true);
+    const placeholderId = first!.session.id;
+    insertEventAutoSeq(first!.db, {
+      id: "resent-prompt",
+      sessionId: placeholderId,
+      eventType: "prompt_submit",
+      actor: "user",
+      promptText: "typo version, fixed",
+      startedAt: new Date().toISOString(),
+      status: "success",
+      vclockJson: serialize(createClock(clientId)),
+    });
+    closeDatabase(first!.db);
+
+    // The transcript lands after that hook returned; the next hook can read it.
+    writeFileSync(
+      forkPath,
+      [line("user", "u1", forkPsid), line("assistant", "a1", forkPsid), line("user", "u2-edited", forkPsid)].join("\n") + "\n",
+    );
+    const second = await initHookContext(dir, "claude-code", forkPsid, { projectRoot: dir, transcriptPath: forkPath });
+    expect(second?.session.id).toBe("original-session");
+    const events = getEventsBySession(second!.db, "original-session");
+    expect(events.map((e) => [e.id, e.sequence])).toEqual([["abandoned-prompt", 1], ["resent-prompt", 2]]);
+    expect(parseLabels(events[0]!.labelsJson)).toEqual(["superseded"]);
+    expect(getSessionById(second!.db, placeholderId)?.deletedAt).not.toBeNull();
+    closeDatabase(second!.db);
+
+    // Later hooks resolve through the alias, with or without a transcript path.
+    const third = await initHookContext(dir, "claude-code", forkPsid, { projectRoot: dir });
+    expect(third?.session.id).toBe("original-session");
+    const live = third!.db.prepare("SELECT COUNT(*) AS count FROM sessions WHERE deleted_at IS NULL").get() as { count: number };
+    expect(live.count).toBe(1);
+    closeDatabase(third!.db);
+  });
+
+  it("starts a new session when the transcript does not continue an existing one", async () => {
+    const transcriptsDir = join(dir, "transcripts");
+    mkdirSync(transcriptsDir, { recursive: true });
+    const freshPath = join(transcriptsDir, "claude-fresh.jsonl");
+    writeFileSync(freshPath, JSON.stringify({ type: "user", uuid: "z1", sessionId: "claude-fresh" }) + "\n");
+    insertSession(db, {
+      id: "other-session",
+      projectId,
+      clientId,
+      sessionType: "interactive",
+      platform: "claude-code",
+      startedAt: new Date().toISOString(),
+      vclockJson: serialize(createClock(clientId)),
+      platformSessionId: "claude-other",
+    });
+    writeFileSync(join(transcriptsDir, "claude-other.jsonl"), JSON.stringify({ type: "user", uuid: "o1", sessionId: "claude-other" }) + "\n");
+
+    const { initHookContext } = await loadContextModule();
+    const ctx = await initHookContext(dir, "claude-code", "claude-fresh", {
+      projectRoot: dir,
+      transcriptPath: freshPath,
+    });
+    expect(ctx?.session.id).not.toBe("other-session");
+    expect(JSON.parse(ctx!.session.metadataJson ?? "{}").transcriptPath).toBe(freshPath);
+    const row = ctx!.db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
+    expect(row.count).toBe(2);
+    closeDatabase(ctx!.db);
+  });
+
+  it("ignores hooks without a platform session id instead of guessing a session", async () => {
     insertSession(db, {
       id: "legacy-session",
       projectId,
@@ -147,9 +313,92 @@ describe("initHookContext", () => {
     const { initHookContext } = await loadContextModule();
     const ctx = await initHookContext(dir, "claude-code", undefined, { projectRoot: dir });
 
-    expect(ctx?.session.id).toBe("legacy-session");
+    expect(ctx).toBeNull();
+    const row = db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
+    expect(row.count).toBe(1);
+  });
 
-    closeDatabase(ctx!.db);
+  it("does not record a Codex thread that Codex itself keeps no transcript for", async () => {
+    // App-generated helper requests (e.g. next-message suggestions) run as
+    // ephemeral threads: every hook of such a thread reports no transcript.
+    const { initHookContext } = await loadContextModule();
+    const options = { projectRoot: dir, transcriptPath: null };
+    // Prompt submit, then stop of the same helper thread.
+    expect(await initHookContext(dir, "codex", "codex-ephemeral", options)).toBeNull();
+    expect(await initHookContext(dir, "codex", "codex-ephemeral", options)).toBeNull();
+
+    const row = db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number };
+    expect(row.count).toBe(0);
+    expect(existsSync(join(dir, ".adit", "hook-session-projects"))).toBe(false);
+  });
+
+  it("keeps recording a known Codex session when a later hook carries no transcript", async () => {
+    const { initHookContext } = await loadContextModule();
+    const first = await initHookContext(dir, "codex", "codex-kept", {
+      projectRoot: dir,
+      transcriptPath: codexRollout(dir, "codex-kept"),
+    });
+    const sessionId = first!.session.id;
+    closeDatabase(first!.db);
+
+    const later = await initHookContext(dir, "codex", "codex-kept", { projectRoot: dir });
+    expect(later?.session.id).toBe(sessionId);
+    closeDatabase(later!.db);
+  });
+
+  it("binds a conversation once across parent/child hooks, cwd changes and module reloads", async () => {
+    const child = join(dir, "test4");
+    mkdirSync(join(child, ".git"), { recursive: true });
+    const now = new Date().toISOString();
+    writeProjectManifest(child, {
+      schemaVersion: 3, projectId: "test4-independent", repositories: [{ relativePath: "." }],
+      createdAt: now, updatedAt: now,
+    });
+    closeDatabase(openDatabase(join(child, ".adit", "adit.sqlite")));
+    const firstModule = await loadContextModule();
+    const parent = await firstModule.initHookContext(dir, "codex", "parent-session", {
+      projectRoot: dir,
+      transcriptPath: codexRollout(dir, "parent-session"),
+    });
+    const parentSessionId = parent!.session.id;
+    closeDatabase(parent!.db);
+    const reloaded = await loadContextModule();
+    const continued = await reloaded.initHookContext(child, "codex", "parent-session", { projectRoot: child });
+    expect(continued!.session.id).toBe(parentSessionId);
+    expect(continued!.config.projectRoot).toBe(dir);
+    closeDatabase(continued!.db);
+    // A fresh conversation launched from the child picks the child even if
+    // the platform also invokes the inherited parent hook.
+    const own = await reloaded.initHookContext(child, "codex", "child-session", {
+      projectRoot: dir,
+      transcriptPath: codexRollout(dir, "child-session"),
+    });
+    expect(own!.session.projectId).toBe("test4-independent");
+    const childSessionId = own!.session.id;
+    closeDatabase(own!.db);
+    const ownContinued = await reloaded.initHookContext(dir, "codex", "child-session", { projectRoot: child });
+    expect(ownContinued!.session.id).toBe(childSessionId);
+    expect(ownContinued!.config.projectRoot).toBe(child);
+    closeDatabase(ownContinued!.db);
+    expect((db.prepare("SELECT COUNT(*) AS count FROM sessions").get() as { count: number }).count).toBe(1);
+  });
+
+  it("keeps pre-upgrade parent history when a child installs its own hooks", async () => {
+    insertSession(db, {
+      id: "before-upgrade", projectId, clientId, sessionType: "interactive", platform: "codex",
+      startedAt: new Date().toISOString(), vclockJson: serialize(createClock(clientId)),
+      platformSessionId: "legacy-parent-session",
+    });
+    const child = join(dir, "test4");
+    mkdirSync(join(child, ".git"), { recursive: true });
+    const now = new Date().toISOString();
+    writeProjectManifest(child, { schemaVersion: 3, projectId: "test4", repositories: [{ relativePath: "." }], createdAt: now, updatedAt: now });
+    closeDatabase(openDatabase(join(child, ".adit", "adit.sqlite")));
+    const { initHookContext } = await loadContextModule();
+    const result = await initHookContext(child, "codex", "legacy-parent-session", { projectRoot: child });
+    expect(result!.session.id).toBe("before-upgrade");
+    expect(result!.config.projectRoot).toBe(dir);
+    closeDatabase(result!.db);
   });
 
   it("uses fixed project root for config and DB while preserving runtime cwd metadata", async () => {
@@ -178,7 +427,7 @@ describe("initHookContext", () => {
       childRepo,
       "codex",
       "codex-platform-session",
-      { projectRoot: workspaceRoot },
+      { projectRoot: workspaceRoot, transcriptPath: codexRollout(dir, "codex-platform-session") },
     );
 
     expect(ctx?.config.projectRoot).toBe(workspaceRoot);

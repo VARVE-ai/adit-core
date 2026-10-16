@@ -9,9 +9,9 @@
  * hook functions. The generated plugin listens for OpenCode events and
  * spawns `adit-hook` via child process to keep ADIT fail-open.
  *
- * OpenCode stores session data in SQLite (not a single transcript JSONL
- * like Claude Code), so transcript upload is not applicable here.
- * All hook events are synced to the ADIT server directly.
+ * OpenCode stores session data in SQLite rather than a transcript JSONL.
+ * The generated plugin exports a local JSONL snapshot so ADIT can recover
+ * assistant response text for the local timeline.
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
@@ -33,7 +33,7 @@ const PLUGIN_FILENAME = "adit.js";
 const ADIT_COMMAND = {
   filename: "adit.md",
   content: `---
-description: ADIT — manage cloud project linking and development intents
+description: ADIT — manage cloud project linking
 ---
 
 **Requested action:** \`$ARGUMENTS\`
@@ -43,8 +43,7 @@ description: ADIT — manage cloud project linking and development intents
 Parse the requested action above and follow the **first matching rule**:
 
 1. Action is \`link\` (with optional flags) → call the \`adit_link\` tool. Map flags: \`--force\` → \`force: true\`, \`--skip-docs\` → \`skipDocs: true\`, \`--skip-commits\` → \`skipCommits: true\`, \`--dry-run\` → \`dryRun: true\`.
-2. Action is \`intent\` (with optional flags) → call the \`adit_intent\` tool. Map flags: \`--id <value>\` → \`id: "<value>"\`, \`--state <value>\` → \`state: "<value>"\`.
-3. No action, empty arguments, or unrecognized action → display the **Help** section below as your response. Do not call any tools.
+2. No action, empty arguments, or unrecognized action → display the **Help** section below as your response. Do not call any tools.
 
 ---
 
@@ -54,7 +53,7 @@ Display the following when no valid action is provided:
 
 ### ADIT Cloud
 
-ADIT tracks your AI-assisted development sessions, links project context to the cloud, and helps you manage development intents (plans).
+ADIT tracks your AI-assisted development sessions and links project context to the cloud.
 
 **Usage:** \`/adit <action> [options]\`
 
@@ -69,21 +68,10 @@ Uploads git metadata (branches, commits) and project documents for intent planni
 | \`--skip-commits\` | Skip commit history upload |
 | \`--dry-run\` | Preview what would be uploaded |
 
-#### \`intent\` — View development intents
-
-Shows intents (development plans) and tasks from the connected adit-cloud project.
-
-| Option | Description |
-|---|---|
-| \`--id <id>\` | Show a specific intent by ID |
-| \`--state <state>\` | Filter by state (e.g. \`capture\`, \`execution\`, \`shipped\`) |
-
 #### Examples
 
 - \`/adit link\` — link the project with defaults
 - \`/adit link --force --skip-docs\` — re-link, git metadata only
-- \`/adit intent\` — list all intents
-- \`/adit intent --state execution\` — show active intents
 
 > **Before linking:** the project must be initialized — run \`adit init\` in the project root once. Link only connects an already initialized project; it never changes the project structure.
 >
@@ -101,8 +89,8 @@ function generateToolsContent(): string {
     "/**",
     " * ADIT custom tools for OpenCode.",
     " *",
-    " * Provides adit_link and adit_intent tools that the LLM can call",
-    " * to interact with adit-cloud project linking and intent management.",
+    " * Provides the adit_link tool that the LLM can call",
+    " * to link the project to adit-cloud.",
     " *",
     " * @varveai/adit-auto-generated — reinstall with: adit plugin install opencode",
     " */",
@@ -136,7 +124,6 @@ function generateToolsContent(): string {
     "",
     "    try {",
     "      const data = JSON.parse(stdout);",
-    '      const q = data.qualified ? "qualified" : "not qualified";',
     "      const lines = [",
     '        "**Project linked successfully!**",',
     '        "",',
@@ -146,9 +133,8 @@ function generateToolsContent(): string {
     '        "| Server | " + data.serverUrl + " |",',
     '        "| Branches | " + data.branchCount + " |",',
     '        "| Commits | " + data.commitCount + " |",',
-    '        "| Documents | " + data.documentCount + " (" + q + ") |",',
+    '        "| Documents | " + data.documentCount + " |",',
     "      ];",
-    '      if (data.score !== null) lines.push("| Quality | " + (data.score * 100).toFixed(0) + "% |");',
     "      if (data.stepTimings && data.stepTimings.length > 0) {",
     '        lines.push("");',
     '        lines.push("**Step timings:**");',
@@ -171,97 +157,6 @@ function generateToolsContent(): string {
     "  },",
     "});",
     "",
-    "export const intent = tool({",
-    "  description:",
-    '    "Show intents (development plans) and tasks from the connected adit-cloud project.",',
-    "  args: {",
-    '    id: tool.schema.string().optional().describe("Intent ID to show detailed view with all tasks"),',
-    '    state: tool.schema.string().optional().describe("Filter intents by state (e.g. capture, execution, shipped)"),',
-    "  },",
-    "  async execute(args, context) {",
-    '    const flags: string[] = ["--json"];',
-    '    if (args.id) flags.push("--id", args.id);',
-    '    if (args.state) flags.push("--state", args.state);',
-    "",
-    '    const cmd = ["adit", "cloud", "intent", ...flags];',
-    "    const result = await Bun.$`${cmd}`.cwd(context.directory).nothrow().quiet();",
-    "    const stdout = result.stdout.toString().trim();",
-    "    const stderr = result.stderr.toString().trim();",
-    "",
-    "    if (result.exitCode !== 0) {",
-    '      return "Intent query failed: " + (stderr || stdout || "Unknown error");',
-    "    }",
-    "",
-    "    try {",
-    "      const data = JSON.parse(stdout);",
-    "",
-    "      // Single intent detail",
-    "      if (data.intent) {",
-    "        const i = data.intent;",
-    "        const progress = i.taskCount > 0",
-    '          ? i.completedTaskCount + "/" + i.taskCount + " tasks completed"',
-    '          : "no tasks";',
-    "        const lines = [",
-    '          "### " + i.title,',
-    '          "",',
-    '          "| Field | Value |",',
-    '          "|---|---|",',
-    '          "| State | " + i.state + " |",',
-    '          "| Goal | " + i.businessGoal + " |",',
-    '          "| Progress | " + progress + " |",',
-    "        ];",
-    '        if (i.linkedBranches && i.linkedBranches.length > 0) {',
-    '          lines.push("| Branches | " + i.linkedBranches.join(", ") + " |");',
-    "        }",
-    "        if (i.tasks && i.tasks.length > 0) {",
-    '          lines.push("");',
-    '          lines.push("#### Tasks");',
-    '          lines.push("");',
-    '          lines.push("| Phase | Task | Status |");',
-    '          lines.push("|---|---|---|");',
-    "          for (const t of i.tasks) {",
-    '            const phase = t.phaseTitle || "Phase " + t.phase;',
-    '            lines.push("| " + phase + " | " + t.title + (t.description ? " — " + t.description : "") + " | " + t.approvalStatus + " |");',
-    "          }",
-    "        }",
-    '        if (i.acceptanceMd) {',
-    '          lines.push("");',
-    '          lines.push("#### Acceptance Criteria");',
-    '          lines.push("");',
-    '          lines.push(i.acceptanceMd);',
-    "        }",
-    '        return lines.join("\\n");',
-    "      }",
-    "",
-    "      // Intent list",
-    "      if (data.intents) {",
-    "        if (data.intents.length === 0) {",
-    '          return "No intents found for this project. Create intents on adit-cloud first.";',
-    "        }",
-    '        const lines = ["**" + data.intents.length + " intent(s):**", ""];',
-    '        lines.push("| ID | State | Intent | Progress | Goal |");',
-    '        lines.push("|---|---|---|---|---|");',
-    "        for (const i of data.intents) {",
-    "          const progress = i.taskCount > 0",
-    '            ? i.completedTaskCount + "/" + i.taskCount',
-    '            : "—";',
-    '          const branches = i.linkedBranches && i.linkedBranches.length > 0',
-    '            ? " (" + i.linkedBranches.join(", ") + ")"',
-    '            : "";',
-    '          lines.push("| " + i.id + " | " + i.state + " | " + i.title + branches + " | " + progress + " | " + i.businessGoal + " |");',
-    "        }",
-    '        lines.push("");',
-    '        lines.push("Use `/adit intent --id <id>` to see details for a specific intent.");',
-    '        return lines.join("\\n");',
-    "      }",
-    "",
-    '      return JSON.stringify(data, null, 2);',
-    "    } catch {",
-    "      return stdout;",
-    "    }",
-    "  },",
-    "});",
-    "",
   ];
   return lines.join("\n");
 }
@@ -274,25 +169,13 @@ const HOOK_MAPPINGS: HookMapping[] = [
   { platformEvent: "chat.message", aditHandler: "prompt-submit" },
   // OpenCode has no "stop" hook key; session.idle fires when the assistant
   // finishes a response turn and is the correct trigger for checkpoints.
-  // session.idle also triggers a forced cloud sync so data is flushed before
-  // the user exits (since /exit does not reliably fire a session-end event).
   { platformEvent: "session.idle", aditHandler: "stop" },
-  { platformEvent: "session.created", aditHandler: "session-start" },
-  { platformEvent: "session.deleted", aditHandler: "session-end" },
-  // /exit does not fire session.deleted; command.executed is intercepted
-  // synchronously in the plugin to flush cloud sync before process exit.
-  { platformEvent: "command.executed", aditHandler: "session-end" },
 ];
 
 /** Map OpenCode hook/event types to ADIT hook types */
 const EVENT_TO_ADIT: Record<string, AditHookType> = {
   "chat.message": "prompt-submit",
   "session.idle": "stop",
-  "session-start": "session-start",
-  "session-end": "session-end",
-  "session.created": "session-start",
-  "session.deleted": "session-end",
-  "session.error": "session-end",
 };
 
 /** Check if a file is an ADIT-generated plugin */
@@ -309,10 +192,7 @@ function isAditPlugin(content: string): boolean {
  *
  * Hooked events:
  * - chat.message (user)       → prompt-submit (prompt from parts[].text)
- * - session.idle              → stop (checkpoint + forced cloud sync; AI finished)
- * - session.created/deleted   → session-start/session-end
- * - session.error             → session-end
- * - command.executed          → session-end (exit/quit/q only, synchronous)
+ * - session.idle              → stop (AI finished)
  *
  * Note: OpenCode's Plugin API has no "stop" hook key. The equivalent is the
  * "session.idle" event, which fires when the assistant finishes a response.
@@ -320,15 +200,8 @@ function isAditPlugin(content: string): boolean {
  * (TextPart items with type === "text"). Session has no model field — model
  * info comes from the chat.message input arg instead.
  *
- * Note: /exit (/quit, /q) does NOT fire session.deleted — OpenCode just
- * terminates the process. We use two layers of defense:
- * 1. command.executed: fires for slash commands, uses spawnSync to block until
- *    the session-end hook (and cloud sync) completes before the process exits.
- * 2. process.on('exit'): safety net that fires session-end synchronously if
- *    command.executed never fired (e.g. OpenCode calls process.exit() directly).
- *    Also handles SIGINT (Ctrl+C) and SIGTERM by flushing then re-raising.
- * The active session ID is tracked via session.created/deleted, and a
- * sessionEndFired flag prevents duplicate session-end calls.
+ * The active session ID is tracked via session.created/deleted so session.idle
+ * can use the same stable identity on every prompt and stop.
  */
 function generatePluginContent(aditBinaryPath: string, projectRoot?: string): string {
   // Split the binary path into command + args for spawning.
@@ -373,26 +246,9 @@ function spawnAditHook(hookType, data) {
   }
 }
 
-// Synchronous variant used on /exit — we must block until ADIT finishes
-// because the process is about to terminate and a detached child would be
-// orphaned before it completes the cloud sync.
-function spawnAditHookSync(hookType, data) {
-  try {
-    spawnSync(ADIT_CMD, [...ADIT_BASE_ARGS, hookType], {
-      input: JSON.stringify(data),
-      stdio: ["pipe", "ignore", "ignore"],
-      env: { ...process.env, OPENCODE: "1" },
-      timeout: 10000,
-    });
-  } catch (e) {
-    // fail-open
-  }
-}
-
 // ---------------------------------------------------------------------------
-// Transcript collection — fetch messages from OpenCode's local HTTP API
-// and write them as JSONL so the existing transcript upload pipeline can
-// handle them identically to Claude Code transcripts.
+// Transcript collection — export messages to a local JSONL file so the
+// unified hook handler can recover assistant response text.
 // ---------------------------------------------------------------------------
 
 /**
@@ -408,7 +264,7 @@ function spawnAditHookSync(hookType, data) {
  */
 /**
  * Export session messages via "opencode export <sessionID>" CLI command
- * and write them as JSONL for the transcript upload pipeline.
+ * and write them as JSONL for local timeline recovery.
  *
  * OpenCode TUI does not expose an HTTP API — the SDK client's baseUrl
  * defaults to localhost:4096 which is only used by "opencode serve".
@@ -581,38 +437,9 @@ exports.AditPlugin = async (ctx) => {
   const cwd = ctx.directory || ctx.worktree || process.cwd();
   const client = ctx.client;
 
-  // Track the active session ID so we can fire session-end on /exit.
-  // OpenCode does not fire session.deleted when the user types /exit —
-  // it just terminates the process. We intercept command.executed to
-  // detect exit commands and block until the sync finishes.
+  // Track the active session ID so session.idle uses the exact identity
+  // captured at session creation.
   let activeSessionId = undefined;
-  let sessionEndFired = false;
-
-  // Safety net: fire session-end synchronously on process exit.
-  // OpenCode may not emit command.executed for /exit — it might call
-  // process.exit() directly. Node's 'exit' event fires synchronously
-  // and spawnSync works inside it, ensuring cloud sync completes
-  // before the process terminates.
-  function flushOnExit() {
-    if (sessionEndFired || !activeSessionId) return;
-    sessionEndFired = true;
-    spawnAditHookSync("session-end", {
-      cwd,
-      session_id: activeSessionId,
-      reason: "exit",
-    });
-    activeSessionId = undefined;
-  }
-  process.on("exit", flushOnExit);
-  // SIGINT (Ctrl+C) and SIGTERM need to re-raise after flushing so the
-  // process actually terminates with the expected exit code / signal.
-  function handleSignal(signal) {
-    flushOnExit();
-    process.removeListener(signal, handleSignal);
-    process.kill(process.pid, signal);
-  }
-  process.on("SIGINT", handleSignal.bind(null, "SIGINT"));
-  process.on("SIGTERM", handleSignal.bind(null, "SIGTERM"));
 
   const hooks = {
     // Capture user prompts.
@@ -659,7 +486,7 @@ exports.AditPlugin = async (ctx) => {
             // use a different internal format.
             var idleSessionId = activeSessionId || props.sessionID;
 
-            // Export transcript via "opencode export" CLI and write JSONL.
+            // Export transcript locally so the stop hook can recover the reply.
             var transcriptPath = null;
             if (idleSessionId) {
               try {
@@ -680,61 +507,13 @@ exports.AditPlugin = async (ctx) => {
           case "session.created": {
             const info = props.info || {};
             activeSessionId = info.id;
-            sessionEndFired = false;
-            spawnAditHook("session-start", {
-              cwd,
-              session_id: info.id,
-              source: "startup",
-            });
             break;
           }
           case "session.deleted": {
             const info = props.info || {};
             if (activeSessionId === info.id) {
               activeSessionId = undefined;
-              sessionEndFired = true;
             }
-            spawnAditHook("session-end", {
-              cwd,
-              session_id: info.id,
-              reason: "deleted",
-            });
-            break;
-          }
-          case "session.error": {
-            // sessionID is optional in session.error — fall back to activeSessionId
-            const errorSessionId = props.sessionID || activeSessionId;
-            if (activeSessionId && activeSessionId === errorSessionId) {
-              activeSessionId = undefined;
-              sessionEndFired = true;
-            }
-            if (!errorSessionId) break;
-            spawnAditHook("session-end", {
-              cwd,
-              session_id: errorSessionId,
-              reason: "error",
-              error: props.error,
-            });
-            break;
-          }
-
-          // --- /exit, /quit, /q interception ---
-          // session.deleted does NOT fire on /exit — OpenCode just terminates.
-          // command.executed fires for ALL slash commands with { name, sessionID }.
-          // We must use spawnSync here so the cloud sync finishes before exit.
-          case "command.executed": {
-            const cmdName = (props.name || "").toLowerCase();
-            const isExit = cmdName === "exit" || cmdName === "quit" || cmdName === "q";
-            if (!isExit) break;
-            const exitSessionId = props.sessionID || activeSessionId;
-            if (!exitSessionId) break;
-            activeSessionId = undefined;
-            sessionEndFired = true;
-            spawnAditHookSync("session-end", {
-              cwd,
-              session_id: exitSessionId,
-              reason: "exit",
-            });
             break;
           }
         }
@@ -764,17 +543,13 @@ export const opencodeAdapter: PlatformAdapter = {
       hookType: aditHookType,
       platformCli: "opencode",
       platformSessionId: raw.session_id as string | undefined,
-      // Transcript (JSONL written by plugin from OpenCode API)
+      // Local transcript used to recover the assistant reply
       transcriptPath: raw.transcript_path as string | undefined,
       // Prompt
       prompt: raw.prompt as string | undefined,
       // Stop
       stopReason: raw.stop_reason as string | undefined,
       lastAssistantMessage: raw.last_assistant_message as string | undefined,
-      // Session lifecycle
-      sessionSource: raw.source as string | undefined,
-      sessionEndReason: raw.reason as string | undefined,
-      model: raw.model as string | undefined,
       // Notification (tool_result, tool_error, session_diff)
       notificationMessage: raw.message as string | undefined,
       notificationTitle: raw.title as string | undefined,
@@ -852,7 +627,7 @@ export const opencodeAdapter: PlatformAdapter = {
     const toolPath = join(projectRoot, ".opencode", "tools", ADIT_TOOLS.filename);
     const toolExists = existsSync(toolPath);
     checks.push({
-      name: "Custom tools (adit_link, adit_intent)",
+      name: "Custom tools (adit_link)",
       ok: toolExists,
       detail: toolExists ? toolPath : "Not found",
     });
@@ -863,13 +638,17 @@ export const opencodeAdapter: PlatformAdapter = {
     };
   },
 
-  async installHooks(projectRoot: string, aditBinaryPath: string): Promise<void> {
+  async installHooks(
+    projectRoot: string,
+    aditBinaryPath: string,
+    options?: { hookProjectRoot?: string },
+  ): Promise<void> {
     // Install the event-hook plugin
     const pluginsDir = join(projectRoot, ".opencode", "plugins");
     mkdirSync(pluginsDir, { recursive: true });
 
     const pluginPath = join(pluginsDir, PLUGIN_FILENAME);
-    const content = generatePluginContent(aditBinaryPath, projectRoot);
+    const content = generatePluginContent(aditBinaryPath, options?.hookProjectRoot ?? projectRoot);
     writeFileSync(pluginPath, content);
 
     // Install slash command

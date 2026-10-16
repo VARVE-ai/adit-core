@@ -1,8 +1,15 @@
-import { describe, expect, it } from "vitest";
-import { formatCliAgentErrorForTerminal } from "./terminal-error.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  formatCliAgentErrorForTerminal,
+  writeCliAgentErrorToTerminal,
+} from "./terminal-error.js";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("formatCliAgentErrorForTerminal", () => {
-  it("formats title, status, session, and message on separate lines", () => {
+  it("formats title, status, and message on one line without the session id", () => {
     const output = formatCliAgentErrorForTerminal("adit cloud claude", {
       title: "Claude request failed",
       errorStatus: 502,
@@ -10,21 +17,17 @@ describe("formatCliAgentErrorForTerminal", () => {
       message: "upstream error",
     });
     expect(output).toBe(
-      "\n[adit cloud claude] Claude request failed (status 502)\n" +
-        "  session: abc-123\n" +
-        "  upstream error\n",
+      "\n[adit cloud claude] Claude request failed (status 502): upstream error\n",
     );
   });
 
-  it("indents each line of a multi-line message", () => {
+  it("collapses multi-line titles and messages", () => {
     const output = formatCliAgentErrorForTerminal("adit cloud codex", {
-      message: "line one\nline two\r\nline three",
+      title: "Codex operation\nfailed",
+      message: "line one\nline two\r\n  line three",
     });
     expect(output).toBe(
-      "\n[adit cloud codex] error\n" +
-        "  line one\n" +
-        "  line two\n" +
-        "  line three\n",
+      "\n[adit cloud codex] Codex operation failed: line one line two line three\n",
     );
   });
 
@@ -34,6 +37,30 @@ describe("formatCliAgentErrorForTerminal", () => {
       errorStatus: Number.NaN,
       sessionId: 42,
     });
-    expect(output).toBe("\n[adit cloud claude] error\n  unknown error\n");
+    expect(output).toBe("\n[adit cloud claude] error: unknown error\n");
+  });
+});
+
+describe("writeCliAgentErrorToTerminal", () => {
+  it("sends the full session id to debug output", () => {
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const debug = vi.fn();
+
+    writeCliAgentErrorToTerminal(
+      "adit codex",
+      {
+        title: "Codex operation failed",
+        sessionId: "01a0473d-f373-7c60-a57b-6e49413caab2",
+        message: "fetch failed",
+      },
+      debug,
+    );
+
+    expect(stderrWrite).toHaveBeenCalledWith(
+      "\n[adit codex] Codex operation failed: fetch failed\n",
+    );
+    expect(debug).toHaveBeenCalledWith(
+      "error session: 01a0473d-f373-7c60-a57b-6e49413caab2",
+    );
   });
 });

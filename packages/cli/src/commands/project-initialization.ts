@@ -14,6 +14,7 @@ import {
   loadConfig,
   type AditConfig,
 } from "@varveai/adit-core";
+import { commandLabel, printError, strong } from "./cli-style.js";
 
 export interface AditProjectInitializationPaths {
   dataDir: string;
@@ -27,12 +28,6 @@ export type AditProjectGuardState =
   | "uninitialized"
   | "corrupt";
 
-export interface AditProjectInitializationStatus extends AditProjectInitializationPaths {
-  dataDirExists: boolean;
-  dbExists: boolean;
-  initialized: boolean;
-}
-
 export function getAditProjectInitializationPaths(
   projectRoot: string,
   env: NodeJS.ProcessEnv = process.env,
@@ -41,21 +36,6 @@ export function getAditProjectInitializationPaths(
   return {
     dataDir,
     dbPath: env.ADIT_DB_PATH ?? join(dataDir, "adit.sqlite"),
-  };
-}
-
-export function getAditProjectInitializationStatus(
-  projectRoot: string,
-  env: NodeJS.ProcessEnv = process.env,
-): AditProjectInitializationStatus {
-  const paths = getAditProjectInitializationPaths(projectRoot, env);
-  const dataDirExists = existsSync(paths.dataDir);
-  const dbExists = existsSync(paths.dbPath);
-  return {
-    ...paths,
-    dataDirExists,
-    dbExists,
-    initialized: dataDirExists && dbExists,
   };
 }
 
@@ -71,40 +51,23 @@ export function formatAditProjectNotInitializedMessage(command: string): string 
   ].join("\n");
 }
 
-export function formatAditProjectLegacyMessage(command: string): string {
-  return [
-    "ADIT has been upgraded and this project needs a one-time migration.",
-    "Recording is paused until the migration runs.",
-    "",
-    "Run:",
-    "  adit init",
-    "",
-    "Your project identity, cloud project and history are preserved.",
-    "",
-    "Then retry:",
-    `  ${command}`,
-  ].join("\n");
-}
-
-export function formatAditProjectNeedsRepairMessage(command: string): string {
-  return [
-    "This project's local database is missing.",
-    "",
-    "Run:",
-    "  adit init",
-    "",
-    "to rebuild it (the project identity is kept). Then retry:",
-    `  ${command}`,
-  ].join("\n");
-}
-
-export function formatAditProjectCorruptMessage(reason: string): string {
-  return [
-    `ADIT project configuration is damaged: ${reason}`,
-    "",
-    "Restore .adit/project.json from a backup, or run 'adit init' to rebuild it —",
-    "the project identity is recovered from local data when possible.",
-  ].join("\n");
+/** The shared-format failure for a project that cannot run `command` yet. */
+export function describeProjectGuardFailure(
+  state: Exclude<AditProjectGuardState, "initialized">,
+  command: string,
+  detail?: string,
+): { reason: string; hint: string } {
+  const retry = `then retry ${strong(command)}`;
+  switch (state) {
+    case "needs-repair":
+      return { reason: "this project's local database is missing", hint: `run ${strong("adit init")} to rebuild it (the project identity is kept), ${retry}` };
+    case "legacy":
+      return { reason: "this project needs a one-time migration; recording is paused until it runs", hint: `run ${strong("adit init")} (identity, cloud project and history are kept), ${retry}` };
+    case "corrupt":
+      return { reason: `ADIT project configuration is damaged: ${detail ?? "unreadable"}`, hint: `restore .adit/project.json from a backup, or run ${strong("adit init")} to rebuild it` };
+    case "uninitialized":
+      return { reason: "ADIT is not initialized in this project", hint: `run ${strong("adit init")}, ${retry}` };
+  }
 }
 
 export function classifyProjectGuardState(config: AditConfig): AditProjectGuardState {
@@ -130,39 +93,18 @@ export function loadInitializedProjectConfig(
     config = loadConfig(cwd);
   } catch (err) {
     if (err instanceof ProjectManifestError) {
-      console.error(formatAditProjectCorruptMessage(err.message));
+      const failure = describeProjectGuardFailure("corrupt", command, err.message);
+      printError(commandLabel(command), failure.reason, failure.hint);
       process.exitCode = 1;
       return null;
     }
     throw err;
   }
 
-  switch (classifyProjectGuardState(config)) {
-    case "initialized":
-      return config;
-    case "needs-repair":
-      console.error(formatAditProjectNeedsRepairMessage(command));
-      break;
-    case "legacy":
-      console.error(formatAditProjectLegacyMessage(command));
-      break;
-    case "uninitialized":
-      console.error(formatAditProjectNotInitializedMessage(command));
-      break;
-    case "corrupt":
-      break; // unreachable — corruption throws from loadConfig
-  }
+  const state = classifyProjectGuardState(config);
+  if (state === "initialized") return config;
+  const failure = describeProjectGuardFailure(state, command);
+  printError(commandLabel(command), failure.reason, failure.hint);
   process.exitCode = 1;
   return null;
-}
-
-/**
- * Guard used by cloud agent commands. Same manifest-based rule as
- * loadInitializedProjectConfig — kept as a named entry point for its callers.
- */
-export function loadInitializedGitOrWorkspaceProjectConfig(
-  command: string,
-  cwd?: string,
-): AditConfig | null {
-  return loadInitializedProjectConfig(command, cwd);
 }

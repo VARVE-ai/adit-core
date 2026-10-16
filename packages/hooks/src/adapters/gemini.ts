@@ -21,13 +21,12 @@ import {
   classifyAditHookEntries,
   describeHookValidation,
   isAditHookCommand,
+  mergeAditHookEntries,
 } from "./command.js";
 
 const HOOK_MAPPINGS: HookMapping[] = [
-  { platformEvent: "SessionStart", aditHandler: "session-start" },
   { platformEvent: "BeforeAgent", aditHandler: "prompt-submit" },
   { platformEvent: "AfterAgent", aditHandler: "stop" },
-  { platformEvent: "SessionEnd", aditHandler: "session-end" },
 ];
 
 export const geminiAdapter: PlatformAdapter = {
@@ -60,12 +59,6 @@ export const geminiAdapter: PlatformAdapter = {
       notificationMessage: raw.message as string | undefined,
       notificationTitle: raw.title as string | undefined,
       notificationType: raw.notification_type as string | undefined,
-      // Session lifecycle
-      sessionSource: raw.source as string | undefined,
-      sessionEndReason: raw.reason as string | undefined,
-      // Common metadata
-      permissionMode: raw.permission_mode as string | undefined,
-      model: raw.model as string | undefined,
       rawPlatformData: raw,
     };
   },
@@ -85,10 +78,8 @@ export const geminiAdapter: PlatformAdapter = {
       configPath: ".gemini/settings.json",
       content: {
         hooks: {
-          SessionStart: makeHookEntry("session-start"),
           BeforeAgent: makeHookEntry("prompt-submit"),
           AfterAgent: makeHookEntry("stop"),
-          SessionEnd: makeHookEntry("session-end"),
         },
       },
     };
@@ -172,7 +163,11 @@ export const geminiAdapter: PlatformAdapter = {
     };
   },
 
-  async installHooks(projectRoot: string, aditBinaryPath: string): Promise<void> {
+  async installHooks(
+    projectRoot: string,
+    aditBinaryPath: string,
+    options?: { hookProjectRoot?: string },
+  ): Promise<void> {
     const geminiDir = join(projectRoot, ".gemini");
     if (!existsSync(geminiDir)) {
       mkdirSync(geminiDir, { recursive: true });
@@ -197,33 +192,14 @@ export const geminiAdapter: PlatformAdapter = {
       }
     }
 
-    const hookConfig = this.generateHookConfig(aditBinaryPath, projectRoot);
+    const hookConfig = this.generateHookConfig(aditBinaryPath, options?.hookProjectRoot ?? projectRoot);
     const existingHooks = (settings.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 
-    // Merge hook entries per event key: preserve other tools' hooks,
-    // remove stale ADIT entries, then append new ADIT entries.
-    const mergedHooks: Record<string, unknown[]> = { ...existingHooks };
-    for (const [eventKey, aditEntries] of Object.entries(newHooks)) {
-      const existing = Array.isArray(mergedHooks[eventKey]) ? mergedHooks[eventKey] : [];
-
-      // Remove stale ADIT entries (same logic as uninstallHooks)
-      const nonAditEntries = existing.filter(
-        (raw) => {
-          const entry = raw as { command?: string; hooks?: Array<{ command?: string }> };
-          if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return false;
-          if (Array.isArray(entry.hooks)) {
-            return !entry.hooks.some(
-              (h) => typeof h.command === "string" && isAditHookCommand(h.command),
-            );
-          }
-          return true;
-        },
-      );
-
-      // Append new ADIT entries after other tools' hooks
-      mergedHooks[eventKey] = [...nonAditEntries, ...aditEntries];
-    }
+    // Merge: strip ADIT entries from every event (including events ADIT no
+    // longer installs, so upgrades leave nothing behind), keep other tools'
+    // entries, then append this release's ADIT entries.
+    const mergedHooks = mergeAditHookEntries(existingHooks, newHooks);
 
     settings.hooks = mergedHooks;
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");

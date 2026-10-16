@@ -3,12 +3,21 @@
  *
  * Collects remote URL, branches, commit logs, and default branch
  * using the existing @varveai/adit-engine git runner. All functions are
- * fail-safe — they throw on critical errors (no git repo, no remote)
- * but return empty arrays for non-critical failures.
+ * fail-safe — they throw on critical errors (no git repo, no remote), while
+ * optional enrichments such as file stats may return empty results.
  */
 
+import { createHash } from "node:crypto";
 import { runGit, getRemoteUrl } from "@varveai/adit-engine";
-import type { GitBranch, GitCommit, GitCommitFileStat, GitIdentity } from "./types.js";
+import type {
+  GitBranch,
+  GitCommit,
+  GitCommitFileStat,
+  GitIdentity,
+  RemoteBranchSnapshot,
+} from "./types.js";
+
+const REMOTE_BRANCH_TIMEOUT_MS = 10_000;
 
 /** Collect the remote origin URL. Throws if no remote is configured. */
 export async function collectRemoteUrl(cwd: string): Promise<string> {
@@ -121,6 +130,103 @@ export async function collectBranches(cwd: string): Promise<GitBranch[]> {
   return Array.from(seen.values());
 }
 
+/**
+ * Read the branches that currently exist on origin without changing local
+ * refs. Unlike `git branch -a`, this does not trust stale remote-tracking
+ * refs, so a branch deleted on the remote is absent even when it remains
+ * locally under refs/heads or refs/remotes/origin.
+ */
+export async function collectRemoteBranchSnapshot(
+  cwd: string,
+): Promise<RemoteBranchSnapshot> {
+  const result = await runGit(["ls-remote", "--heads", "origin"], {
+    cwd,
+    timeout: REMOTE_BRANCH_TIMEOUT_MS,
+    env: { GIT_TERMINAL_PROMPT: "0" },
+  });
+  if (result.exitCode !== 0) {
+    const message = result.stderr.trim() || "git ls-remote failed";
+    throw new Error(`Unable to read remote branches: ${message}`);
+  }
+
+  const defaultBranch = await collectDefaultBranch(cwd);
+  const byName = new Map<string, GitBranch>();
+  for (const line of result.stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const [headSha, refName] = trimmed.split(/\s+/, 2);
+    if (!headSha || !refName?.startsWith("refs/heads/")) continue;
+    const name = refName.slice("refs/heads/".length);
+    if (!name) continue;
+    byName.set(name, {
+      name,
+      headSha,
+      isDefault: name === defaultBranch,
+    });
+  }
+
+  const branches = Array.from(byName.values()).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  );
+  const fingerprint = createHash("sha256")
+    .update(
+      JSON.stringify(
+        branches.map((branch) => ({
+          name: branch.name,
+          headSha: branch.headSha,
+        })),
+      ),
+    )
+    .digest("hex");
+
+  return { branches, fingerprint };
+}
+
+/** Build the branch-head snapshot used as the incremental git cursor. */
+export function branchHeadMap(branches: GitBranch[]): Record<string, string> {
+  return Object.fromEntries(branches.map((branch) => [branch.name, branch.headSha]));
+}
+
+/** Hash all known local and remote-tracking refs without walking commit history. */
+export interface GitRefsFingerprintResult {
+  fingerprint: string | null;
+  /** Git's own diagnostic when the refs could not be read. */
+  error: string | null;
+}
+
+/** Fingerprint local refs, keeping Git's diagnostic when they cannot be read. */
+export async function readGitRefsFingerprint(cwd: string): Promise<GitRefsFingerprintResult> {
+  const result = await runGit(
+    [
+      "for-each-ref",
+      "refs/heads",
+      "refs/remotes",
+      "--sort=refname",
+      "--format=%(refname)%00%(objectname)",
+    ],
+    { cwd, timeout: 5_000 },
+  );
+
+  if (result.exitCode !== 0) {
+    return { fingerprint: null, error: describeGitFailure(result) };
+  }
+  return { fingerprint: createHash("sha256").update(result.stdout).digest("hex"), error: null };
+}
+
+export async function collectGitRefsFingerprint(cwd: string): Promise<string | null> {
+  return (await readGitRefsFingerprint(cwd)).fingerprint;
+}
+
+/** One-line summary of a failed git run for user-facing messages. */
+function describeGitFailure(result: { stderr: string; exitCode: number }): string {
+  const detail = result.stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" | ");
+  return detail || `git exited with code ${result.exitCode}`;
+}
+
 function normalizeBranchRef(fullRef: string, shortRef: string): string | null {
   const trimmedFullRef = fullRef.trim();
   const trimmedShortRef = shortRef.trim();
@@ -220,11 +326,48 @@ export async function collectCommitLogs(
   const result = await runGit(args, { cwd, timeout: 30_000 });
   if (result.exitCode !== 0) return [];
 
+  return parseCommitLog(result.stdout, branch);
+}
+
+/**
+ * Collect commits newly reachable from the current branch heads.
+ *
+ * Every previous head is excluded, so branch creation, merge, force-push and
+ * deletion are handled from the complete ref snapshot rather than one global
+ * last SHA. Missing old objects are ignored and the remaining refs still sync.
+ */
+export async function collectCommitsBetweenRefSnapshots(
+  cwd: string,
+  currentHeads: Record<string, string>,
+  previousHeads: Record<string, string>,
+): Promise<GitCommit[]> {
+  const include = Array.from(new Set(Object.values(currentHeads).filter(Boolean)));
+  if (include.length === 0) return [];
+
+  const exclude: string[] = [];
+  for (const sha of new Set(Object.values(previousHeads).filter(Boolean))) {
+    const exists = await runGit(["cat-file", "-e", `${sha}^{commit}`], { cwd });
+    if (exists.exitCode === 0) exclude.push(`^${sha}`);
+  }
+
+  const args = [
+    "log",
+    "--format=%H%x01%P%x01%an%x01%ae%x01%aI%x01%B%x00",
+    ...include,
+    ...exclude,
+  ];
+  const result = await runGit(args, { cwd, timeout: 30_000 });
+  if (result.exitCode !== 0) {
+    throw new Error(`Unable to collect incremental git history: ${result.stderr.trim() || "git log failed"}`);
+  }
+
+  return parseCommitLog(result.stdout);
+}
+
+function parseCommitLog(stdout: string, branch?: string | null): GitCommit[] {
   const commits: GitCommit[] = [];
 
-  // Split on NUL to get individual commit records.
-  // %B includes a trailing newline; we trim each record to strip it.
-  for (const record of result.stdout.split("\0")) {
+  for (const record of stdout.split("\0")) {
     const trimmed = record.trim();
     if (!trimmed) continue;
 
@@ -232,15 +375,12 @@ export async function collectCommitLogs(
     if (fields.length < 6) continue;
 
     const parentSha = fields[1]?.trim().split(/\s+/).filter(Boolean)[0] ?? null;
-
     commits.push({
       sha: fields[0],
       parentSha,
       authorName: fields[2],
       authorEmail: fields[3],
       date: fields[4],
-      // %B may contain SOH-free multi-line text; everything after the 5th
-      // SOH is the message (rejoin in case of unexpected extra SOH chars).
       message: fields.slice(5).join("\x01").trim(),
       branch: branch ?? undefined,
     });

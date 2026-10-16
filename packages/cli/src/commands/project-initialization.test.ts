@@ -5,8 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { writeProjectManifest, type ProjectManifest } from "@varveai/adit-core";
 import {
   classifyProjectGuardState,
-  getAditProjectInitializationStatus,
-  loadInitializedGitOrWorkspaceProjectConfig,
   loadInitializedProjectConfig,
 } from "./project-initialization.js";
 
@@ -96,11 +94,31 @@ describe("project initialization guard", () => {
     expect(vi.mocked(console.error).mock.calls[0][0]).toContain("damaged");
   });
 
-  it("does not pass through to a parent project from a member repository", () => {
+  it("routes a registered member repository to its parent project", () => {
     // parent container with a manifest listing this repository
     const parent = mkdtempSync(join(tmpdir(), "adit-parent-"));
     try {
       const child = join(parent, "api");
+      mkdirSync(join(child, ".git"), { recursive: true });
+      writeProjectManifest(
+        parent,
+        manifestFor({ projectType: "workspace", repositories: [{ relativePath: "api" }] }),
+      );
+      writeFileSync(join(parent, ".adit", "adit.sqlite"), "", "utf-8");
+
+      const config = loadInitializedProjectConfig("adit status", child);
+      expect(config).not.toBeNull();
+      expect(config!.projectRoot).toBe(parent);
+      expect(process.exitCode).toBeUndefined();
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("does not pass through to a parent project from an unregistered repository", () => {
+    const parent = mkdtempSync(join(tmpdir(), "adit-parent-"));
+    try {
+      const child = join(parent, "web");
       mkdirSync(join(child, ".git"), { recursive: true });
       writeProjectManifest(
         parent,
@@ -116,19 +134,9 @@ describe("project initialization guard", () => {
     }
   });
 
-  it("cloud agent guard follows the same manifest rule", () => {
-    writeProjectManifest(projectRoot, manifestFor());
-    writeFileSync(join(projectRoot, ".adit", "adit.sqlite"), "", "utf-8");
-
-    const config = loadInitializedGitOrWorkspaceProjectConfig("adit cloud claude", projectRoot);
-    expect(config).not.toBeNull();
-  });
-
   it("classifies guard states from a loaded config", () => {
     writeProjectManifest(projectRoot, manifestFor());
     writeFileSync(join(projectRoot, ".adit", "adit.sqlite"), "", "utf-8");
-    const status = getAditProjectInitializationStatus(projectRoot);
-    expect(status.initialized).toBe(true);
 
     const config = loadInitializedProjectConfig("adit status", projectRoot);
     expect(classifyProjectGuardState(config!)).toBe("initialized");

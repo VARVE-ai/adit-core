@@ -11,8 +11,8 @@ the adit-cloud Coding panel.
 ## What ADIT Does
 
 1. **Trace every AI-assisted change** — ADIT stores normalized timeline events
-   for user prompts, assistant turns, tools, subagents, notifications, session
-   lifecycle events, diffs, and related metadata.
+   for user prompts, assistant turns, tools, subagents, notifications, diffs,
+   and related metadata.
 2. **Capture per-turn file diffs** — ADIT extracts file mutations from platform
    transcripts on each turn and stores bounded diff text for inspection.
 3. **Bridge local CLIs to adit-cloud** — `adit cloud claude|codex` connects a
@@ -33,10 +33,12 @@ the adit-cloud Coding panel.
   context, Docker signals, shell details, CPU/memory, and package managers.
 - **Environment drift detection** — Compares snapshots across sessions.
 - **Cloud sync** — Supports device-code login, static token auth, cursor-based
-  incremental push, per-project cursors, transcript upload, auto-sync, and a
-  rolling-window circuit breaker.
-- **Auto project link** — Syncs Git metadata and project documents to
-  adit-cloud on session start with staleness-based caching.
+  incremental push, per-project cursors, auto-sync, and a rolling-window
+  circuit breaker.
+- **Coordinated cloud sync** — Auto-sync uploads Events, Sessions, and Diffs
+  first, then refreshes Git metadata for linked projects. Manual sync also
+  checks Git when conversation data is current. Project documents remain an
+  explicit `adit cloud link` operation.
 - **Platform session tracking** — Correlates ADIT records with platform-native
   session IDs.
 - **Interactive TUI** — React/Ink terminal UI with timeline, detail, search,
@@ -46,21 +48,19 @@ the adit-cloud Coding panel.
 
 ## Architecture
 
-ADIT is a TypeScript pnpm monorepo with six packages:
+ADIT is a TypeScript pnpm monorepo with five packages:
 
 | Package | Description |
 | --- | --- |
-| `@varveai/adit-core` | Core types, SQLite database access, config, sync primitives, performance logs, and native install checks |
+| `@varveai/adit-core` | Core types, SQLite database access, config, sync primitives, and performance logs |
 | `@varveai/adit-engine` | Git runner, working tree detection, timeline management, and environment capture/diff |
 | `@varveai/adit-hooks` | Hook dispatcher, fail-open handlers, platform adapter registry, and hook install/validate/uninstall logic |
-| `@varveai/adit-cli` | Commander.js CLI, cloud coding entry points, debug commands, docs commands, and React/Ink TUI |
-| `@varveai/adit-cloud` | Cloud config, device/token auth, HTTP client, incremental sync, transcript upload, project-link sync, and intent commands |
-| `@varveai/adit-plans` | SpecFlow-inspired plan manager and project document template generator/validator |
+| `@varveai/adit-cli` | Commander.js CLI, cloud coding entry points, debug commands, and React/Ink TUI |
+| `@varveai/adit-cloud` | Cloud config, device/token auth, HTTP client, incremental sync, project-link sync, and intent commands |
 
 Package boundaries are intentionally small: `core` owns storage and shared
 types, `engine` owns Git/timeline mechanics, `hooks` normalizes platform events,
-`cli` owns user commands, `cloud` owns remote sync, and `plans` owns planning
-artifacts.
+`cli` owns user commands, and `cloud` owns remote sync.
 
 ## Platform Support
 
@@ -71,9 +71,9 @@ events to ADIT's normalized hook model.
 | --- | --- | --- |
 | Claude Code | Supported | Installs hook entries in `.claude/settings.local.json` and slash command files under `.claude/commands/` |
 | Claude Code VS Code | Supported | Uses the Claude Code hook mechanism with VS Code-aware platform detection |
-| OpenCode | Supported | Generates `.opencode/plugins/adit.ts`, slash commands, and LLM-callable tools `adit_link` and `adit_intent` |
-| Cursor | Supported | Installs hook entries in `.cursor/hooks.json` |
-| Codex | Supported | Installs hook entries in `.codex/hooks.json`, enables Codex hooks, and writes ADIT hook trust config |
+| OpenCode | Supported | Generates `.opencode/plugins/adit.ts`, slash commands, and the LLM-callable tool `adit_link` |
+| Cursor | Supported | Shares `.claude/settings.local.json`; platform is identified from Cursor payloads, not the model |
+| Codex | Supported | Installs hook entries in `.codex/hooks.json`; approve them once inside Codex via `/hooks` (ADIT never edits the user-level Codex config) |
 | Gemini CLI | Supported | Installs hook entries in `.gemini/settings.json` |
 | GitHub Copilot | Stub | Detected by the registry, but hook install/parse support is not implemented yet |
 | Other | Stub | Placeholder adapter for unknown platforms |
@@ -83,6 +83,37 @@ Registered adapters can be listed with:
 ```bash
 adit hook list
 ```
+
+### Shared Claude / Cursor hooks
+
+`adit init` offers one **Claude Code / Cursor** option, including the Claude VS Code
+extension. ADIT identifies `cursor_version` in each incoming payload and keeps
+Cursor sessions and transcript parsing separate from Claude. Running Claude from
+a Cursor terminal still records Claude.
+
+Re-running `adit init` migrates project-local ADIT entries in `.cursor/hooks.json`
+to the shared configuration, preserving other tools' hooks and settings. Legacy
+`adit init --platform cursor` and `adit hook install cursor` use the shared installer.
+Installing or removing any member affects the shared integration. Restart the AI
+tool or open a new conversation after upgrading; stored session labels are not
+rewritten. Cursor releases that do not load Claude-compatible hooks need upgrading.
+
+### Cursor hooks on Windows
+
+ADIT accepts UTF-8 BOM-prefixed hook input. Some Cursor versions also read their
+UTF-8 hook payload files through Windows PowerShell 5.1 without specifying the
+input encoding, corrupting non-ASCII text before ADIT receives it. For these
+invocations, ADIT reads Cursor's still-live UTF-8 payload file from the current
+user's temporary directory, matching the conversation, generation, hook event,
+Cursor version, and session ID. This also covers Cursor loading Claude hooks.
+No PowerShell upgrade, system locale change, or hook path change is required.
+
+Recovery is limited to recent `cursor-hook-payload-*.json` files with bounded
+file counts and sizes. ADIT never picks the newest conversation or guesses a
+reverse encoding. If no unique matching payload is available, it falls back to
+stdin; a future Cursor transport change may therefore require an adapter update.
+Payload files remain owned and cleaned up by Cursor. Existing stored events are
+not rewritten.
 
 ## Installation
 
@@ -139,30 +170,37 @@ adit cloud login --server <url>
 
 ## Projects & Initialization
 
-`adit init` is the only command that decides what a project is. It writes
-`.adit/project.json` — the project identity, the project type, and the explicit
-repository member list. Every other command (status, doctor, link, sync, hooks)
-only reads this manifest and never changes the project structure.
+Every project represents a workspace directory, even when it contains only a
+root Git repository. Project-level Git address and identity fields stay empty;
+the root (`.`) and child repositories keep their own addresses and identities.
+Cloud project names use the workspace directory name.
 
-- **Single-repo project** — a normal Git repository. `adit init` sets it up
-  without questions.
-- **Multi-repo project** — a directory containing several Git repositories one
-  level below (with or without a top-level `.git`). `adit init` lists the
-  repositories and asks how to manage them. Non-interactive environments use
-  `adit init --multi-repo` / `adit init --single-repo` explicitly.
-- **Recording boundary** — for a multi-repo project, start your coding tools
-  from the project root: work across all member repositories is recorded there.
-  Sessions started inside a member repository are not recorded. To record a
-  member repository on its own, run `adit init` inside it — it becomes an
-  independent project and the parent project is not affected.
-- **Adding / removing repositories** — nothing changes automatically. Re-run
-  `adit init` in the project root and confirm the updated list; `adit status`
-  and `adit doctor` point out unregistered or missing repositories.
-- **Upgrading from an older adit** — projects initialized before the manifest
-  existed show a one-time migration prompt. Run `adit init` once in each
-  project: the project identity is carried over, so the cloud project, local
-  history, team links and sync progress all stay attached. Recording is paused
-  until the migration runs.
+`adit init` writes `.adit/project.json`: a stable project identity and the
+repositories included in that project. The root Git repository (`.`) and
+immediate child repositories can be selected together, for example
+`adit init --repos .,test2,test3`. There is no stored project type.
+
+- **Parent and child projects coexist.** Running init in `test4/` creates or
+  reuses its own project, whether or not the parent also includes that repository.
+  Including a child never moves its data, changes its hooks, or hides its project.
+- **Adding and excluding repositories.** Re-run init at the parent and select
+  the current members. Exclusion stops repository uploads and removes this
+  source's team mounts on the next successful link/sync. Historical records and
+  the repository identity remain; re-inclusion reuses the identity but requires
+  manual team mounting. Other projects and members are unaffected.
+- **Sessions and documents.** A session stays with the project where it begins,
+  including after working-directory changes or hook refreshes. Historical data
+  stays in its original project. Documents synced from the same repository by
+  two projects have independent versions. Root document discovery excludes
+  nested Git repositories; each selected repository uploads its own documents.
+- **Recovery.** Init saves the complete selection atomically. Interrupted runs
+  can be retried without moving child data. Cloud applies saved revisions once
+  and ignores stale retries. `--absorb` is no longer supported; `--detach` is a
+  compatibility alias for ordinary independent initialization.
+- **Older projects.** Explicit init upgrades the local manifest to schema 3 and
+  restores a legacy merged child without changing its parent or moving history.
+  Ordinary uploads never hide or restore projects. Install the matching Cloud
+  version and apply its registration migration before using schema 3 clients.
 
 ## CLI Commands
 
@@ -214,15 +252,9 @@ Common timeline options include `--limit`, `--actor`, `--type`,
 | --- | --- |
 | `adit cloud login` | Authenticate with device-code flow or `--token` |
 | `adit cloud logout` | Clear stored cloud credentials |
-| `adit cloud sync` | Push unsynced local records to adit-cloud |
+| `adit cloud sync` | Push unsynced conversation records and always check linked Git metadata |
 | `adit cloud status` | Show cloud sync status and server reachability |
 | `adit cloud auth reset` | Clear credentials and sync state |
-| `adit cloud transcript enable` | Enable automatic transcript upload |
-| `adit cloud transcript disable` | Disable automatic transcript upload |
-| `adit cloud transcript status` | Show transcript upload status |
-| `adit cloud transcript upload` | Manually upload pending transcripts |
-| `adit cloud transcript reset <id>` | Reset a failed transcript upload |
-
 ### Cloud Coding
 
 | Command | Description |
@@ -235,13 +267,39 @@ Common timeline options include `--limit`, `--actor`, `--type`,
 | Command | Description |
 | --- | --- |
 | `adit cloud link` | Upload Git metadata and project documents to adit-cloud |
-| `adit cloud intent` | List or inspect connected project intents |
-| `adit cloud intent complete <id>` | Complete one phase or an entire intent |
+| `adit cloud tasks list --json` | Query your unfinished tasks using the current project's linked team, or its personal scope if no team is linked |
+| `adit cloud tasks scopes --json` | List only the current project's accessible linked teams; use `tasks list --team <id>` if more than one is linked |
+| `adit cloud tasks show <taskId> --json` | Read an assigned task, permissions and current update timestamp |
+| `adit cloud tasks context <taskId> --json` | Read the task, current PRD and attachment/sketch URLs without downloading files |
+| `adit cloud tasks update <taskId> --state done --json` | Update Cloud immediately and record task history |
+| `adit cloud projects list --json` | Your own projects; add `--scope visible` to include team projects your role allows |
+| `adit cloud teams list --json` | Your teams with your role (owner, lead or member) in each |
+| `adit cloud sessions current --json` | The session recorded in this directory, its unsynced events and whether Cloud has it |
+| `adit cloud sessions search <query> --from <date> --to <date> --json` | Find your sessions by words in their outline titles, keywords or descriptions |
+| `adit cloud sessions list --from <date> --to <date> --json` | Your sessions in a period, newest first |
+| `adit cloud sessions show <sessionId> --json` | A session's summary and outline (`current` stands for this session) |
+| `adit cloud sessions events <sessionId> --section <n> --json` | A session's events by outline section or page, truncated per field |
+| `adit cloud sessions link create <sessionId> --json` | One-hour read link for another assistant; also `status`, `renew`, `revoke` |
+| `adit cloud commits explain <sha> --json` | Your session prompts and responses recorded around a commit |
+| `adit cloud usage --by model --json` | Token usage and estimated cost, by model, day, session or team member |
+| `adit cloud reports daily --json` | Daily work reports as work cards with evidence |
+| `adit cloud team members --team <id> --json` | A team's members and roles |
+| `adit cloud team progress --team <id> --member <id> --query <text> --json` | A member's tasks, sessions, evidence and commits for a feature |
+
+`projects list`, `sessions list`, `sessions search` and `commits explain` accept
+`--scope me|visible` and default to `me`. `visible` includes only data your
+existing permissions allow; an empty result never expands the scope. Session
+ownership, not the Git author name, determines whose commit explanations are
+included. Team, project and member filters narrow the selected scope;
+`--scope me --member <someone-else>` is an error. Project `--kind personal|team`
+remains supported: `--kind team` without `--scope` keeps its old meaning, while
+explicit `--scope me --kind team` is an error. JSON responses echo `scope.kind`;
+update the Cloud server before the CLI, since an older server cannot confirm
+these scope guarantees and its query results are rejected by the new CLI.
 
 `adit cloud link` supports `--force`, `--skip-docs`, `--skip-commits`,
-`--skip-qualify`, `--dry-run`, and `--json`. The same project-link and intent
-flows are also exposed as `/adit link` and `/adit intent` in supported
-platform integrations.
+`--dry-run`, and `--json`. The same project-link flow is also exposed as
+`/adit link` in supported platform integrations.
 
 Link only connects an already initialized project: it reads the repository
 list from `.adit/project.json`, validates every repository and its `origin`
@@ -252,18 +310,16 @@ link. When a link would create a brand-new cloud project while the account
 already has projects pointing at the same git remotes (typical after a fresh
 clone or on a new machine), link prints a notice — nothing is merged.
 
-### Export, Docs, Debug, Maintenance
+### Export, Debug, Maintenance
 
 | Command | Description |
 | --- | --- |
 | `adit export event <id>` | Export one event as JSON |
 | `adit export session [id]` | Export a session as JSON, JSONL, or Markdown |
-| `adit docs scaffold [type]` | Generate project document templates |
-| `adit docs validate [path]` | Validate project documents against structural specs |
 | `adit debug db clear-events` | Clear local events, sessions, diffs, and environment snapshots |
 | `adit debug perf stats` | Show performance stats |
 | `adit debug perf clear` | Clear performance logs |
-| `adit upgrade` | Update ADIT or check for updates |
+| `adit update` | Update ADIT or check for updates (`--check`); `upgrade` and `self-update` still work as aliases |
 
 ## Interactive TUI
 
@@ -279,22 +335,42 @@ environment snapshot view.
 Common shortcuts: `j`/`k` navigate, `d` diff, `p` prompt, `e` environment, `/`
 search, `f` filter, `s` cycle sort, `Esc`/`b` back, and `q` quit.
 
+## Shell File Attribution
+
+Shell hooks identify write targets from the current command, inline Python/Node
+bodies, and inline patches, then compare only those paths before and after the
+command. Other agents' changes to different files and to the Git staging area
+are excluded; concurrent edits to the same target file are not separated.
+
+The parser recognizes common literal paths, local path variables and simple path
+construction. A script created and executed in the same command can be analyzed
+from that command's inline body. Standalone external script invocations are not
+opened or traced, and earlier transcript commands are not consulted. Unknown
+targets never fall back to a full-repository diff; directory targets are not
+expanded to all files underneath them. Background commands and
+commands that change HEAD are not attributed through these snapshots.
+
+Session commit evidence accepts Codex command-execution records, paired shell
+function calls/results, and legacy execution events. Successful explicit commits
+are recorded; merges are not. No database migration is required for this behavior.
+
 ## Cloud Sync
 
 Cloud sync is optional. After `adit cloud login`, ADIT automatically pushes
-local events, sessions, diffs, sync cursors, transcripts, Git metadata, and
-project documents to adit-cloud — being logged in is the opt-in. Environment
-snapshots remain local and are not included in Cloud sync payloads. The login
-command prints exactly what is uploaded and how to disable each channel;
-`adit status` surfaces sync health warnings.
+local events with their related sessions and diffs. Manual sync always checks
+Git metadata; auto-sync refreshes it after a conversation batch succeeds for
+repositories previously connected by `adit cloud link`. Project documents
+upload only when that command is run manually. Raw platform transcript files
+and environment snapshots remain local. The login command prints exactly what
+is uploaded and how to disable automatic sync; `adit status` surfaces sync
+health warnings.
 
 - Auto-sync runs after stable hook events when credentials are available.
 - `prompt-submit` is skipped so cloud does not receive a half-finished turn.
 - Each project tracks its own cursor with legacy global-cursor fallback.
 - Count-based auto-sync defaults to 10 unsynced events.
 - Time-based auto-sync defaults to 2 hours since the last successful sync.
-- Transcript upload supports polling, concurrency limits, retry limits, and
-  incremental byte thresholds.
+- Session start initializes local attribution state but does not upload anything.
 - Repeated failures trip a rolling-window circuit breaker and recover later.
 - Network and auth errors are fail-open and retried on later triggers.
 
@@ -304,8 +380,7 @@ By default, ADIT stores project-local data in `.adit/`:
 
 | Path | Purpose |
 | --- | --- |
-| `.adit/adit.sqlite` | Events, sessions, diffs, environment snapshots, plans, transcript uploads, and sync state |
-| `.adit/plans/` | Generated SpecFlow-style planning artifacts |
+| `.adit/adit.sqlite` | Events, sessions, diffs, environment snapshots, and sync state |
 
 Machine-level data is stored under `~/.adit/`:
 
@@ -362,18 +437,71 @@ Files larger than 500 KB are skipped with a warning.
 | `ADIT_CLOUD_SYNC_THRESHOLD` | Unsynced event count that triggers auto-sync | `10` |
 | `ADIT_CLOUD_SYNC_TIMEOUT_HOURS` | Hours after last sync that trigger auto-sync | `2` |
 | `ADIT_AUTH_TOKEN` | Static JWT token for CI/CD or non-interactive auth | unset |
-| `ADIT_TRANSCRIPT_UPLOAD` | Set to `false` to disable transcript upload | `true` |
-| `ADIT_TRANSCRIPT_POLL_INTERVAL` | Transcript upload poll interval in seconds | `30` |
-| `ADIT_TRANSCRIPT_MAX_CONCURRENT` | Max concurrent transcript uploads | `2` |
-| `ADIT_TRANSCRIPT_MAX_RETRIES` | Max consecutive transcript upload failures | `3` |
-| `ADIT_TRANSCRIPT_MIN_INCREMENT` | Minimum new transcript bytes before incremental upload | `1024` |
-| `ADIT_PROJECT_LINK_AUTO_SYNC` | Set to `false` to disable project-link auto-sync | `true` |
-| `ADIT_PROJECT_LINK_STALE_HOURS` | Project-link cache staleness threshold | `2` |
 | `ADIT_DEBUG` | Enable debug output and the hook debug log (`$TMPDIR/adit-hook-debug.jsonl`, size-capped) | unset |
 | `ADIT_CODEX_BIN` | Override Codex binary used by cloud coding commands | unset |
-| `ADIT_INSTALL_DIR` | Override the upgrade install directory | unset |
-| `ADIT_ALLOW_NATIVE_BUILD` | Allow native better-sqlite3 build when no prebuild is confirmed | unset |
-| `ADIT_SKIP_NATIVE_PREBUILD_CHECK` | Bypass the native prebuild preflight check | unset |
+| `ADIT_INSTALL_DIR` | Override the `adit update` install directory | unset |
+| `ADIT_PLAIN` | Set to `1` to print command output without the ┌ │ └ frame (it is already off when output is piped); `NO_COLOR` turns colors off | unset |
+
+## Reply Token Usage
+
+Token totals are stored as numeric columns on the final reply event. The normal
+sync request includes the reply's `tokenUsage` payload; late usage replays the
+same event and requires a matching usage acknowledgement before marking it synced.
+Per-request capture evidence stays private to the reply for deduplication and
+exact request-time accounting. It is not emitted as additional timeline events.
+
+The next database open adds the reply fields and drops `token_usage_records`,
+`token_usage_sync_state`, and `token_usage_cursors`. Historical local token usage
+is deliberately discarded, not migrated or reread from old transcripts. Existing
+conversations, file changes, and usage already synced to Cloud remain intact.
+Capture begins with subsequent prompts. Deploy a Cloud version that accepts
+reply usage before upgrading Core; older Cloud versions leave usage pending
+and report a missing acknowledgement rather than silently lose it.
+
+## Skills
+
+Three skills are installed automatically by `adit init`, `adit update`, and
+published npm installs with lifecycle scripts enabled: `adit-tasks` (the user's
+own tasks), `adit-history` (sessions, commits and read links) and
+`adit-reports` (daily and weekly reports, token usage, team progress). Each is
+placed in `~/.agents/skills/<name>/SKILL.md` and `~/.claude/skills/<name>/SKILL.md`.
+Already-running AI sessions may need restarting to discover them. Upgrades refresh
+unmodified ADIT-owned copies; custom or unrelated existing skills are not overwritten.
+If lifecycle scripts were disabled, run `adit init` to install the skills.
+
+The history and report commands work from any directory; only
+`adit cloud sessions current` reads the local project database, because the
+session recorded here and its unsynced events are only known locally. Dates are
+calendar days sent with this machine's time zone. Team queries about other
+members are allowed for owners and leads; members can only query themselves.
+
+Ask your AI assistant "What tasks do I still need to finish?" and then select a
+task to implement. The skill queries live data and keeps the real task ID,
+reads the related PRD and directs the AI to read relevant resource URLs itself.
+Independent tasks have no PRD and use their own requirements and attachments.
+Both task listing and scope discovery send the current local project ID. Team
+resolution reuses repository mounts, not all account memberships. One linked
+team is selected automatically; several require choosing one of that project's
+teams. Without a linked team, listing uses personal project tasks. Use
+`--personal` to explicitly select personal tasks, or `--team <id>` to select a
+linked team. Unrelated teams are rejected even if you belong to them. Responses
+identify the source project and effective scope. Lists are paginated and return
+`nextOffset`; changing pages must preserve the same project and scope.
+
+"Work on this task" does not mark it completed. An explicit request to mark it
+done runs an update, without requiring `adit cloud sync`. To postpone a task:
+
+```bash
+adit cloud tasks show <taskId> --json
+adit cloud tasks update <taskId> --due 2026-09-30 --expected-updated-at <updatedAt> --json
+```
+
+Assignees may update their own state and due date; other edits retain existing
+management permissions. A supplied stale `updatedAt` is rejected with HTTP 409;
+without one, the CLI reads the current version before attempting the update.
+Private resource URLs expire after 15 minutes and must not be published or
+committed. Re-query context to refresh them. No task snapshots or attachment
+files are cached by these commands. These commands require Cloud task API support.
 
 ## Development Commands
 

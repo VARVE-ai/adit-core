@@ -2,18 +2,13 @@
  * Project Link — public API for connecting a local codebase to adit-cloud.
  *
  * Exports command handlers, utility functions, and type definitions
- * for the `/adit link` and `/adit intent` plugin commands.
+ * for the `/adit link` plugin command.
  */
 
 // Command handlers
 export { linkCommand, WorkspaceLinkPartialFailureError } from "./link-command.js";
-export { intentCommand, formatIntentList, formatIntentDetail } from "./intent-command.js";
-
-// Auto-sync
-export { triggerProjectLinkSync } from "./auto-link.js";
 
 // Quality check
-export { checkQuality, formatQualityFeedback } from "./qualify.js";
 
 // Repository key normalization
 export { normalizeGitHubRepoKey } from "./repo-key.js";
@@ -23,11 +18,12 @@ export {
   collectRemoteUrl,
   collectDefaultBranch,
   collectCurrentBranch,
-  collectGitIdentity,
   collectBranches,
+  branchHeadMap,
+  collectGitRefsFingerprint,
   collectCommitLogs,
+  collectCommitsBetweenRefSnapshots,
   collectCommitCount,
-  resolveCommitBranches,
   projectNameFromRemoteUrl,
 } from "./git-collector.js";
 
@@ -39,32 +35,26 @@ export {
   getProjectLinkCache,
   upsertProjectLinkCache,
   clearProjectLinkCache,
-  updateCachedCommitSha,
-  updateCachedDocHashes,
-  updateCachedQualified,
+  updateCachedGitState,
 } from "./cache.js";
+
+export {
+  syncLinkedGitMetadata,
+  type GitSyncResult,
+  type GitSyncFailure,
+  type GitSyncSkip,
+  type GitSyncSkipReason,
+} from "./git-sync.js";
 
 // Types
 export type {
   GitBranch,
   GitCommit,
-  GitIdentity,
   DiscoveredDocument,
   ProjectLinkCache,
-  NegotiateResponse,
-  LinkInitResponse,
-  CommitUploadResponse,
-  DocumentUploadResponse,
-  QualifyResponse,
-  LinkStatusResponse,
-  IntentSummary,
-  IntentDetail,
-  TaskSlice,
   StepTiming,
   LinkOptions,
-  IntentOptions,
   LinkResult,
   WorkspaceRepositoryResult,
   WorkspaceRepositoryFailure,
-  IntentResult,
 } from "./types.js";

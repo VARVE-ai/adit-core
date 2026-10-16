@@ -1,10 +1,9 @@
 /**
  * Local project manifest and repository resolution.
  *
- * A local ADIT project is defined by `.adit/project.json`, written only by
- * `adit init`. It records the project identity, the project type (single
- * repo or multi-repo workspace) and the explicit repository member list.
- * Every other command reads this manifest; nothing else may write it.
+ * A local ADIT project is defined by `.adit/project.json`. `adit init` owns
+ * project identity, membership, and sync selection. `adit cloud link` may
+ * append Cloud deletion tombstones without changing those decisions.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -24,10 +23,21 @@ import {
 } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
 
+/**
+ * Derived project shape. Not stored in the manifest any more (schema 2): a
+ * project is "a root + one or more repositories"; the type only summarizes
+ * whether the root repository is the sole member. Kept for Cloud payloads and
+ * hook heuristics until the Cloud drops the field.
+ */
 export type ProjectType = "repo" | "workspace";
 
 export interface ProjectManifestRepository {
   relativePath: string;
+  /** Included in this project. False retains only identity/history; never routes or syncs. */
+  syncEnabled?: boolean;
+  /** Append-only Cloud deletion tombstone mirrored locally. */
+  cloudDeletedAt?: string;
+  cloudDeletionOperationId?: string;
   /**
    * Persisted member-repository identity (workspace projects). Minted once
    * when the repository is registered and carried across directory renames —
@@ -46,10 +56,26 @@ export interface ProjectManifestRepository {
 }
 
 export interface ProjectManifest {
-  schemaVersion: 1;
+  /** 1 = legacy type; 2 = legacy absorption; 3 = independent projects and explicit selection. */
+  schemaVersion: 1 | 2 | 3;
   projectId: string;
-  projectType: ProjectType;
+  /**
+   * Legacy field, present only on schema 1 manifests. Runtime code must use
+   * `deriveProjectType` instead; `adit init` rewrites such manifests to
+   * schema 3 on the next run.
+   */
+  projectType?: ProjectType;
+  /** Registered repositories: `.` for the root itself plus immediate child directories. */
   repositories: ProjectManifestRepository[];
+  /** Whole-project Cloud deletion tombstone. */
+  cloudDeletedAt?: string;
+  cloudDeletionOperationId?: string;
+  /**
+   * Set when this member repository's former project was merged into the
+   * parent project that registers it: commands and hooks run here route to
+   * the parent, and the local history stays attached to this ID.
+   */
+  mergedIntoProjectId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -91,8 +117,36 @@ export class ProjectInitLockError extends Error {
 export const projectManifestRelativePath = ".adit/project.json";
 export const workspaceManifestRelativePath = ".adit/workspace.json";
 
-const MANIFEST_SCHEMA_VERSION = 1;
+/** Schema written by this version. Schema 1 manifests are still read. */
+export const MANIFEST_SCHEMA_VERSION = 3;
+const SUPPORTED_MANIFEST_SCHEMA_VERSIONS = [1, 2, 3] as const;
 const INIT_LOCK_STALE_MS = 10 * 60 * 1000;
+
+/** True for the manifest entry that denotes the project root directory itself. */
+export function isRootRepositoryPath(relativePath: string): boolean {
+  return relativePath === ".";
+}
+
+/**
+ * Summarize a manifest as the legacy project type: a project whose only
+ * repository is the root directory is a "repo" project; anything else is a
+ * "workspace". Derived on the fly — never persisted.
+ */
+export function deriveProjectType(
+  manifest: Pick<ProjectManifest, "repositories">,
+): ProjectType {
+  const repositories = manifest.repositories;
+  return repositories.length === 1 && isRootRepositoryPath(repositories[0].relativePath)
+    ? "repo"
+    : "workspace";
+}
+
+/** Return a copy of the manifest in the current schema (drops legacy fields). */
+export function toCurrentManifestSchema(manifest: ProjectManifest): ProjectManifest {
+  const { projectType: _legacyType, ...rest } = manifest;
+  void _legacyType;
+  return { ...rest, schemaVersion: MANIFEST_SCHEMA_VERSION };
+}
 
 export function projectManifestPath(projectRoot: string): string {
   return join(projectRoot, projectManifestRelativePath);
@@ -100,6 +154,11 @@ export function projectManifestPath(projectRoot: string): string {
 
 /** Generate a fresh project ID for a brand-new project. */
 export function generateProjectId(): string {
+  return randomUUID();
+}
+
+/** Generate a fresh identity when a deleted repository is recreated. */
+export function generateRepositoryId(): string {
   return randomUUID();
 }
 
@@ -157,7 +216,7 @@ export function validateProjectManifest(manifest: ProjectManifest, projectRoot: 
   return validateManifest(manifest, projectManifestPath(projectRoot));
 }
 
-/** Atomically write the project manifest. Only `adit init` may call this. */
+/** Atomically write a fully validated project manifest. */
 export function writeProjectManifest(projectRoot: string, manifest: ProjectManifest): void {
   const manifestPath = projectManifestPath(projectRoot);
   validateManifest(manifest, manifestPath);
@@ -178,8 +237,8 @@ export function writeProjectManifest(projectRoot: string, manifest: ProjectManif
  * Run `fn` while holding the exclusive init lock for this project.
  *
  * A concurrent init fails fast with ProjectInitLockError instead of racing
- * on the manifest. A stale lock (older than 10 minutes, e.g. after a crash)
- * is removed and re-acquired.
+ * on the manifest. Dead-process locks are recovered immediately; malformed
+ * locks expire after 10 minutes. A live interactive init never loses its lock.
  */
 export async function withProjectInitLock<T>(projectRoot: string, fn: () => Promise<T>): Promise<T> {
   const lockPath = join(projectRoot, ".adit", "init.lock");
@@ -193,6 +252,41 @@ export async function withProjectInitLock<T>(projectRoot: string, fn: () => Prom
     } catch {
       // best effort — a leftover lock is recovered via the stale check
     }
+  }
+}
+
+export interface RegisteringParent {
+  root: string;
+  manifest: ProjectManifest;
+  /** This member's path as registered in the parent manifest. */
+  relativePath: string;
+}
+
+/**
+ * Find the parent project that registers `memberRoot` as one of its
+ * repositories. Only the nearest ancestor manifest is consulted: a nearer
+ * project that does not include the member ends the search.
+ */
+export function findRegisteringParent(memberRoot: string): RegisteringParent | null {
+  const member = resolve(memberRoot);
+  let dir = member;
+  while (true) {
+    const parent = resolve(dir, "..");
+    if (parent === dir) return null;
+    dir = parent;
+    if (!existsSync(projectManifestPath(dir))) continue;
+    let manifest: ProjectManifest | null;
+    try {
+      manifest = readProjectManifest(dir);
+    } catch {
+      return null; // a damaged parent manifest never claims a member
+    }
+    if (!manifest) continue;
+    const relativePath = relative(dir, member).replace(/\\/gu, "/");
+    if (manifest.repositories.some((entry) => entry.relativePath === relativePath && entry.syncEnabled !== false && !entry.cloudDeletedAt)) {
+      return { root: dir, manifest, relativePath };
+    }
+    return null;
   }
 }
 
@@ -224,13 +318,11 @@ export function resolveManifestRepositories(
     const path = relativePath === "." ? resolve(projectRoot) : resolve(projectRoot, relativePath);
     assertInsideProjectRoot(projectRoot, path, relativePath, manifestPath);
     return {
-      // Persistence first: a stored repositoryId survives directory renames.
-      // The derivation formula is only the fallback for entries written
-      // before the field existed (it yields the identical value).
-      localRepositoryId:
-        manifest.projectType === "repo"
-          ? manifest.projectId
-          : entry.repositoryId ?? computeLocalRepositoryId(manifest.projectId, relativePath),
+      // A persisted identity always wins, including recreated roots. Legacy
+      // roots use the project ID; member fallback uses the frozen path formula.
+      localRepositoryId: entry.repositoryId ?? (isRootRepositoryPath(relativePath)
+        ? manifest.projectId
+        : computeLocalRepositoryId(manifest.projectId, relativePath)),
       relativePath,
       displayName: relativePath === "." ? basename(resolve(projectRoot)) : basename(relativePath),
       repositoryUrl: null,
@@ -238,6 +330,22 @@ export function resolveManifestRepositories(
       path,
     };
   });
+}
+
+/** Resolve only repositories currently eligible for Cloud upload. */
+export function resolveActiveManifestRepositories(
+  projectRoot: string,
+  manifest: ProjectManifest,
+): LocalRepository[] {
+  if (manifest.cloudDeletedAt) return [];
+  const activePaths = new Set(
+    manifest.repositories
+      .filter((entry) => entry.syncEnabled !== false && !entry.cloudDeletedAt)
+      .map((entry) => entry.relativePath),
+  );
+  return resolveManifestRepositories(projectRoot, manifest).filter((repository) =>
+    activePaths.has(repository.relativePath),
+  );
 }
 
 /**
@@ -298,6 +406,30 @@ export function discoverWorkspaceRepositories(projectRoot: string): Array<{
   return repos.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
 }
 
+/**
+ * Compare the manifest's registered repositories with what is on disk: the
+ * root itself (when it is a Git repository) plus immediate child repositories.
+ * Excluded entries retain identity but do not count as current members or
+ * missing repositories. They are known exclusions, not newly discovered repos.
+ */
+export function computeRepositoryDrift(
+  projectRoot: string,
+  manifest: Pick<ProjectManifest, "repositories">,
+): { registered: string[]; discovered: string[]; unregistered: string[]; missing: string[] } {
+  const known = manifest.repositories.map((entry) => entry.relativePath);
+  const registered = manifest.repositories.filter((entry) => entry.syncEnabled !== false && !entry.cloudDeletedAt).map((entry) => entry.relativePath);
+  const discovered = [
+    ...(existsSync(join(projectRoot, ".git")) ? ["."] : []),
+    ...discoverWorkspaceRepositories(projectRoot).map((repo) => repo.relativePath),
+  ];
+  return {
+    registered,
+    discovered,
+    unregistered: discovered.filter((path) => !known.includes(path)),
+    missing: registered.filter((path) => !discovered.includes(path)),
+  };
+}
+
 export function toRepositoryPayload(repository: LocalRepository): {
   localRepositoryId: string;
   relativePath: string;
@@ -320,9 +452,10 @@ function validateManifest(parsed: unknown, manifestPath: string): ProjectManifes
   }
   const manifest = parsed as Record<string, unknown>;
 
-  if (manifest.schemaVersion !== MANIFEST_SCHEMA_VERSION) {
+  const schemaVersion = manifest.schemaVersion;
+  if (!(SUPPORTED_MANIFEST_SCHEMA_VERSIONS as readonly unknown[]).includes(schemaVersion)) {
     throw new ProjectManifestError(
-      `Unsupported project manifest schemaVersion: ${String(manifest.schemaVersion)}. This adit version supports version ${MANIFEST_SCHEMA_VERSION}.`,
+      `Unsupported project manifest schemaVersion: ${String(schemaVersion)}. This adit version supports versions ${SUPPORTED_MANIFEST_SCHEMA_VERSIONS.join(", ")}.`,
       manifestPath,
     );
   }
@@ -330,12 +463,18 @@ function validateManifest(parsed: unknown, manifestPath: string): ProjectManifes
   if (!projectId) {
     throw new ProjectManifestError("Project manifest is missing projectId.", manifestPath);
   }
-  const projectType = manifest.projectType;
-  if (projectType !== "repo" && projectType !== "workspace") {
-    throw new ProjectManifestError(
-      `Project manifest has invalid projectType: ${String(projectType)}.`,
-      manifestPath,
-    );
+  // Schema 1 carried the project type; it must still be well-formed so a
+  // damaged legacy manifest is surfaced instead of silently reinterpreted.
+  let legacyProjectType: ProjectType | undefined;
+  if (schemaVersion === 1) {
+    const projectType = manifest.projectType;
+    if (projectType !== "repo" && projectType !== "workspace") {
+      throw new ProjectManifestError(
+        `Project manifest has invalid projectType: ${String(projectType)}.`,
+        manifestPath,
+      );
+    }
+    legacyProjectType = projectType;
   }
   if (!Array.isArray(manifest.repositories) || manifest.repositories.length === 0) {
     throw new ProjectManifestError("Project manifest must list at least one repository.", manifestPath);
@@ -360,54 +499,89 @@ function validateManifest(parsed: unknown, manifestPath: string): ProjectManifes
       typeof record.repositoryId === "string" && record.repositoryId.trim()
         ? record.repositoryId.trim()
         : undefined;
-    if (repositoryId) {
-      if (seenRepositoryIds.has(repositoryId)) {
+    const effectiveId = schemaVersion === 3
+      ? repositoryId ?? (relativePath === "." ? projectId : computeLocalRepositoryId(projectId, relativePath))
+      : repositoryId;
+    if (effectiveId) {
+      if (seenRepositoryIds.has(effectiveId)) {
         throw new ProjectManifestError(
-          `Project manifest lists repositoryId '${repositoryId}' more than once.`,
+          `Project manifest lists repositoryId '${effectiveId}' more than once.`,
           manifestPath,
         );
       }
-      seenRepositoryIds.add(repositoryId);
+      seenRepositoryIds.add(effectiveId);
     }
     const repositoryUrl =
       typeof record.repositoryUrl === "string" && record.repositoryUrl.trim()
         ? record.repositoryUrl.trim()
         : null;
+    if (record.syncEnabled !== undefined && typeof record.syncEnabled !== "boolean") {
+      throw new ProjectManifestError(
+        `Repository '${relativePath}' has invalid syncEnabled.`,
+        manifestPath,
+      );
+    }
+    const cloudDeletedAt = optionalNonEmptyString(record.cloudDeletedAt, "cloudDeletedAt", manifestPath);
+    const cloudDeletionOperationId = optionalNonEmptyString(
+      record.cloudDeletionOperationId,
+      "cloudDeletionOperationId",
+      manifestPath,
+    );
 
     return {
       relativePath,
+      ...(typeof record.syncEnabled === "boolean" ? { syncEnabled: record.syncEnabled } : {}),
+      ...(cloudDeletedAt ? { cloudDeletedAt } : {}),
+      ...(cloudDeletionOperationId ? { cloudDeletionOperationId } : {}),
       ...(repositoryId ? { repositoryId } : {}),
       ...(repositoryUrl ? { repositoryUrl } : {}),
     };
   });
-
-  if (projectType === "repo" && (repositories.length !== 1 || repositories[0].relativePath !== ".")) {
-    throw new ProjectManifestError(
-      "A single-repo project manifest must contain exactly one repository with relativePath '.'.",
-      manifestPath,
-    );
-  }
-  if (projectType === "workspace" && repositories.some((repo) => repo.relativePath === ".")) {
-    throw new ProjectManifestError(
-      "A multi-repo project manifest must not contain '.' — only immediate child directories.",
-      manifestPath,
-    );
-  }
 
   const createdAt = typeof manifest.createdAt === "string" ? manifest.createdAt : "";
   const updatedAt = typeof manifest.updatedAt === "string" ? manifest.updatedAt : "";
   if (!createdAt || !updatedAt) {
     throw new ProjectManifestError("Project manifest is missing createdAt/updatedAt.", manifestPath);
   }
+  const cloudDeletedAt = optionalNonEmptyString(
+    manifest.cloudDeletedAt,
+    "cloudDeletedAt",
+    manifestPath,
+  );
+  const cloudDeletionOperationId = optionalNonEmptyString(
+    manifest.cloudDeletionOperationId,
+    "cloudDeletionOperationId",
+    manifestPath,
+  );
+  const mergedIntoProjectId = optionalNonEmptyString(
+    manifest.mergedIntoProjectId,
+    "mergedIntoProjectId",
+    manifestPath,
+  );
 
   return {
-    schemaVersion: MANIFEST_SCHEMA_VERSION,
+    schemaVersion: schemaVersion as 1 | 2 | 3,
     projectId,
-    projectType,
+    ...(legacyProjectType ? { projectType: legacyProjectType } : {}),
     repositories,
+    ...(cloudDeletedAt ? { cloudDeletedAt } : {}),
+    ...(cloudDeletionOperationId ? { cloudDeletionOperationId } : {}),
+    ...(mergedIntoProjectId ? { mergedIntoProjectId } : {}),
     createdAt,
     updatedAt,
   };
+}
+
+function optionalNonEmptyString(
+  value: unknown,
+  field: string,
+  manifestPath: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new ProjectManifestError(`Project manifest has invalid ${field}.`, manifestPath);
+  }
+  return value.trim();
 }
 
 function assertSafeRelativePath(relativePath: string, manifestPath: string): void {
@@ -478,7 +652,8 @@ function acquireInitLock(lockPath: string): void {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       const age = lockAgeMs(lockPath);
-      if (age !== null && age > INIT_LOCK_STALE_MS) {
+      const ownerAlive = initLockOwnerAlive(lockPath);
+      if (ownerAlive === false || (ownerAlive === null && age !== null && age > INIT_LOCK_STALE_MS)) {
         rmSync(lockPath, { force: true });
         continue;
       }
@@ -486,6 +661,16 @@ function acquireInitLock(lockPath: string): void {
     }
   }
   throw new ProjectInitLockError(lockPath);
+}
+
+function initLockOwnerAlive(lockPath: string): boolean | null {
+  try {
+    const pid = Number(readFileSync(lockPath, "utf8").trim());
+    if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+    try { process.kill(pid, 0); return true; } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ESRCH" ? false : true;
+    }
+  } catch { return null; }
 }
 
 function lockAgeMs(lockPath: string): number | null {

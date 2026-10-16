@@ -5,7 +5,6 @@
 import { describe, it, expect } from "vitest";
 import {
   padRight,
-  padLeft,
   timeAgo,
   formatDateTime,
   horizontalRule,
@@ -25,16 +24,6 @@ describe("padRight", () => {
 
   it("returns string as-is when exact length", () => {
     expect(padRight("abc", 3)).toBe("abc");
-  });
-});
-
-describe("padLeft", () => {
-  it("pads short strings with leading spaces", () => {
-    expect(padLeft("42", 5)).toBe("   42");
-  });
-
-  it("returns string as-is when longer than target", () => {
-    expect(padLeft("abcdef", 3)).toBe("abcdef");
   });
 });
 

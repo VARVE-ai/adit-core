@@ -3,10 +3,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { unlinkSync, existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import Database from "better-sqlite3";
 import { openDatabase, closeDatabase } from "./connection.js";
+import { migrations } from "./migrations.js";
 
 function tempDbPath(): string {
   return join(tmpdir(), `adit-test-${randomBytes(8).toString("hex")}.sqlite`);
+}
+
+function legacyTokenDatabase(path: string): Database.Database {
+  const db = new Database(path);
+  db.pragma("foreign_keys = ON");
+  db.exec("CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL)");
+  for (const migration of migrations.filter(migration => migration.id <= 24)) {
+    db.exec(migration.sql);
+    db.prepare("INSERT INTO _migrations(id, name) VALUES (?, ?)").run(migration.id, migration.name);
+  }
+  return db;
 }
 
 describe("Database", () => {
@@ -40,9 +53,43 @@ describe("Database", () => {
     expect(tables).toContain("sessions");
     expect(tables).toContain("events");
     expect(tables).toContain("env_snapshots");
-    expect(tables).toContain("plans");
+    expect(tables).not.toContain("plans");
+    expect(tables).not.toContain("transcript_uploads");
     expect(tables).toContain("diffs");
     expect(tables).toContain("_migrations");
+    expect(tables).not.toContain("token_usage_cursors");
+    expect(tables).not.toContain("token_usage_records");
+    expect(tables).not.toContain("token_usage_sync_state");
+
+    const eventColumns = db
+      .prepare("PRAGMA table_info(events)")
+      .all()
+      .map((r) => (r as { name: string }).name);
+    expect(eventColumns).not.toContain("plan_task_id");
+    expect(eventColumns).toContain("inferred_files_json");
+    expect(eventColumns).toContain("token_input");
+    expect(eventColumns).toContain("token_total");
+
+    const sessionColumns = db
+      .prepare("PRAGMA table_info(sessions)")
+      .all()
+      .map((r) => (r as { name: string }).name);
+    expect(sessionColumns).not.toContain("ended_at");
+    expect(sessionColumns).not.toContain("status");
+
+    const projectLinkColumns = db
+      .prepare("PRAGMA table_info(project_link_cache)")
+      .all()
+      .map((r) => (r as { name: string }).name);
+    expect(projectLinkColumns).toContain("git_ref_heads_json");
+    expect(projectLinkColumns).toContain("git_refs_fingerprint");
+
+    const eventIndexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events'")
+      .all()
+      .map((r) => (r as { name: string }).name);
+    expect(eventIndexes).toContain("idx_events_git_commit_identity");
+    expect(eventIndexes).not.toContain("idx_events_git_operation_identity");
 
     closeDatabase(db);
   });
@@ -61,6 +108,207 @@ describe("Database", () => {
       .get() as { count: number };
     expect(migrationCount.count).toBeGreaterThan(0);
     closeDatabase(db2);
+  });
+
+  it("adds reply fields and discards historical usage without migrating it", () => {
+    const path = tempDbPath();
+    paths.push(path);
+    const tokenDb = legacyTokenDatabase(path);
+    tokenDb.exec("DELETE FROM _migrations WHERE id = 22; ALTER TABLE events DROP COLUMN inferred_files_json;");
+    tokenDb.prepare(`INSERT INTO sessions (id, project_id, client_id, platform, started_at, vclock_json)
+      VALUES ('token-session', 'project', 'client', 'codex', '2026-09-16T00:00:00.000Z', '{}')`).run();
+    tokenDb.prepare("INSERT INTO token_usage_records VALUES ('usage', 'token-session', NULL, 1, '{}')").run();
+    tokenDb.prepare(`INSERT INTO events (id, session_id, sequence, event_type, actor, response_text, started_at, vclock_json)
+      VALUES ('retained-reply', 'token-session', 1, 'assistant_response', 'assistant', 'Done', '2026-09-16T00:00:00.000Z', '{}')`).run();
+    tokenDb.prepare(`INSERT INTO diffs (id, event_id, diff_text, created_at)
+      VALUES ('retained-diff', 'retained-reply', '+existing change', '2026-09-16T00:00:00.000Z')`).run();
+    closeDatabase(tokenDb);
+
+    for (const attempt of [1, 2]) {
+      const db = openDatabase(path);
+      try {
+        expect(db.prepare("PRAGMA table_info(events)").all(), `open ${attempt}`).toEqual(
+          expect.arrayContaining([expect.objectContaining({ name: "inferred_files_json" })]),
+        );
+        expect(db.prepare("SELECT name FROM sqlite_master WHERE name='token_usage_records'").all()).toEqual([]);
+        expect(db.prepare("SELECT token_capture_json FROM sessions WHERE id='token-session'").get()).toEqual({ token_capture_json: null });
+        expect(db.prepare("SELECT response_text, token_total FROM events WHERE id='retained-reply'").get()).toEqual({ response_text: "Done", token_total: null });
+        expect(db.prepare("SELECT diff_text FROM diffs WHERE id='retained-diff'").get()).toEqual({ diff_text: "+existing change" });
+        expect(db.prepare("SELECT id FROM _migrations WHERE id >= 22 ORDER BY id").all()).toEqual([
+          { id: 22 }, { id: 23 }, { id: 24 }, { id: 25 },
+        ]);
+        expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+      } finally { closeDatabase(db); }
+    }
+  });
+
+  it.each(["add_event_inferred_files", "token_usage_ledger"])("upgrades migration 22 from %s without losing data", (legacyName) => {
+    const path = tempDbPath();
+    paths.push(path);
+    const legacyDb = legacyTokenDatabase(path);
+    legacyDb.exec("DELETE FROM _migrations WHERE id >= 22");
+    legacyDb.prepare("INSERT INTO _migrations (id, name) VALUES (22, ?)").run(legacyName);
+    legacyDb.prepare(`INSERT INTO sessions (id, project_id, client_id, platform, started_at, vclock_json)
+      VALUES ('retained-session', 'project', 'client', 'codex', '2026-09-15T00:00:00.000Z', '{}')`).run();
+    if (legacyName === "add_event_inferred_files") {
+      legacyDb.exec(`DROP TABLE token_usage_sync_state; DROP TABLE token_usage_cursors;
+        DROP TABLE token_usage_records;`);
+    } else {
+      legacyDb.prepare(`INSERT INTO token_usage_records (id, session_id, turn_id, revision, record_json)
+        VALUES ('retained-usage', 'retained-session', NULL, 1, '{}')`).run();
+      legacyDb.prepare(`INSERT INTO token_usage_cursors (source_key, session_id, state_json)
+        VALUES ('retained-cursor', 'retained-session', '{"offset":123}')`).run();
+    }
+    closeDatabase(legacyDb);
+
+    for (const attempt of [1, 2]) {
+      const db = openDatabase(path);
+      try {
+        expect(db.prepare("SELECT name FROM _migrations WHERE id = 22").get()).toEqual({ name: legacyName });
+        expect(db.prepare("SELECT name FROM _migrations WHERE id = 23").get(), `open ${attempt}`).toEqual({ name: "token_usage_ledger" });
+        expect(db.prepare("SELECT id FROM sessions").all()).toEqual([{ id: "retained-session" }]);
+        expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+        expect(db.prepare("SELECT name FROM sqlite_master WHERE name IN ('token_usage_records','token_usage_cursors','token_usage_sync_state')").all()).toEqual([]);
+        expect(db.prepare("PRAGMA table_info(events)").all()).toEqual(expect.arrayContaining([expect.objectContaining({ name: "inferred_files_json" })]));
+      } finally {
+        closeDatabase(db);
+      }
+    }
+  });
+
+  it("removes only backed-up legacy usage events without losing ledger data or referenced events", () => {
+    const db = legacyTokenDatabase(":memory:");
+    try {
+      db.prepare(`INSERT INTO sessions (id, project_id, client_id, platform, started_at, vclock_json)
+        VALUES ('session', 'project', 'client', 'codex', '2026-09-16T00:00:00.000Z', '{}')`).run();
+      const record = { id: "usage", sessionId: "session", revision: 2, totalTokens: 15 };
+      db.prepare("INSERT INTO token_usage_records VALUES ('usage', 'session', NULL, 2, ?)").run(JSON.stringify(record));
+      const insert = db.prepare(`INSERT INTO events (id, session_id, sequence, event_type, actor, tool_name, tool_input_json, started_at, vclock_json)
+        VALUES (?, 'session', ?, ?, 'system', 'adit.token-usage.v1', ?, '2026-09-16T00:00:00.000Z', '{}')`);
+      insert.run("covered", 1, "token_usage", JSON.stringify({ ...record, revision: 1 }));
+      insert.run("latest", 2, "token_usage", JSON.stringify(record));
+      insert.run("unbacked", 3, "token_usage", JSON.stringify({ ...record, id: "missing" }));
+      insert.run("malformed", 4, "token_usage", "not-json");
+      insert.run("newer", 5, "token_usage", JSON.stringify({ ...record, revision: 3 }));
+      insert.run("referenced", 6, "token_usage", JSON.stringify(record));
+      insert.run("conversation", 7, "prompt_submit", null);
+      db.prepare("UPDATE events SET parent_event_id = 'referenced' WHERE id = 'conversation'").run();
+      db.exec(migrations.find((migration) => migration.id === 24)!.sql);
+      expect(db.prepare("SELECT id FROM events ORDER BY id").all()).toEqual(
+        ["conversation", "malformed", "newer", "referenced", "unbacked"].map((id) => ({ id })),
+      );
+      expect(JSON.parse((db.prepare("SELECT record_json FROM token_usage_records").get() as { record_json: string }).record_json)).toEqual(record);
+      expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    } finally { db.close(); }
+  });
+
+  it("normalizes and merges legacy cloud server URL keys", () => {
+    const path = tempDbPath();
+    paths.push(path);
+
+    const legacyDb = openDatabase(path);
+    legacyDb.prepare("DELETE FROM _migrations WHERE id = 18").run();
+    legacyDb.prepare(`
+      INSERT INTO sync_state (
+        server_url, client_id, last_synced_event_id, last_synced_at, sync_version
+      ) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)
+    `).run(
+      "http://localhost:3000/",
+      "client-1",
+      "event-20",
+      "2026-08-28T10:00:00.000Z",
+      20,
+      "http://localhost:3000",
+      "client-1",
+      "event-10",
+      "2026-08-27T10:00:00.000Z",
+      10,
+    );
+    legacyDb.prepare(`
+      INSERT INTO project_link_cache (
+        project_id, repository_id, server_url, confirmed_project_id,
+        last_branch_sync_at, last_doc_sync_at, doc_hashes_json, qualified,
+        initialized_at, updated_at, git_ref_heads_json, git_refs_fingerprint
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "project-1",
+      "repo-1",
+      "http://localhost:3000/",
+      "cloud-project-1",
+      "2026-08-26T10:00:00.000Z",
+      null,
+      "{}",
+      0,
+      "2026-08-26T10:00:00.000Z",
+      "2026-08-26T10:00:00.000Z",
+      '{"main":"sha-1"}',
+      "fingerprint-1",
+      "project-1",
+      "repo-1",
+      "http://localhost:3000",
+      null,
+      null,
+      "2026-08-28T10:00:00.000Z",
+      '{"README.md":"hash-1"}',
+      0,
+      "2026-08-28T10:00:00.000Z",
+      "2026-08-28T10:00:00.000Z",
+      "{}",
+      null,
+    );
+    closeDatabase(legacyDb);
+
+    const db = openDatabase(path);
+    const syncRows = db.prepare("SELECT * FROM sync_state").all() as Array<{
+      server_url: string;
+      last_synced_event_id: string;
+    }>;
+    expect(syncRows).toHaveLength(1);
+    expect(syncRows[0]).toMatchObject({
+      server_url: "http://localhost:3000",
+      last_synced_event_id: "event-20",
+    });
+
+    const linkRows = db.prepare("SELECT * FROM project_link_cache").all() as Array<{
+      server_url: string;
+      confirmed_project_id: string | null;
+      doc_hashes_json: string;
+      git_refs_fingerprint: string | null;
+    }>;
+    expect(linkRows).toHaveLength(1);
+    expect(linkRows[0]).toMatchObject({
+      server_url: "http://localhost:3000",
+      confirmed_project_id: "cloud-project-1",
+      doc_hashes_json: '{"README.md":"hash-1"}',
+      git_refs_fingerprint: "fingerprint-1",
+    });
+    closeDatabase(db);
+  });
+
+  it("drops the retired transcript upload table from existing databases", () => {
+    const path = tempDbPath();
+    paths.push(path);
+
+    const legacyDb = new Database(path);
+    legacyDb.exec(`
+      CREATE TABLE _migrations (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO _migrations (id, name)
+      VALUES (8, 'create_transcript_uploads');
+      CREATE TABLE transcript_uploads (id TEXT PRIMARY KEY);
+    `);
+    legacyDb.close();
+
+    const db = openDatabase(path);
+    const table = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get("transcript_uploads");
+
+    expect(table).toBeUndefined();
+    closeDatabase(db);
   });
 
   it("uses WAL mode", () => {

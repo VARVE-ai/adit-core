@@ -178,7 +178,6 @@ describe("insertEventAutoSeq", () => {
       endedAt: now,
       status: "success",
       errorJson: null,
-      planTaskId: null,
       clientId: "test-client",
       vclockJson: '{"test-client": 1}',
     });

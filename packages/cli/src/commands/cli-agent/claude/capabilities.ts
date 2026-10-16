@@ -48,15 +48,6 @@ export function claudeToolScope(
         ? "internal_plan"
         : "workspace_write";
   }
-  if (
-    mode === "plan" &&
-    (normalized === "write" ||
-      normalized === "edit" ||
-      normalized === "multiedit" ||
-      normalized === "notebookedit")
-  ) {
-    return "internal_plan";
-  }
   if (normalized === TODO_WRITE_TOOL.toLowerCase()) {
     return mode === "plan" ? "internal_plan" : "internal";
   }
@@ -70,14 +61,6 @@ export function claudeToolScope(
     normalized === "websearch"
   ) {
     return "workspace_read";
-  }
-  if (
-    normalized === "write" ||
-    normalized === "edit" ||
-    normalized === "multiedit" ||
-    normalized === "notebookedit"
-  ) {
-    return "workspace_write";
   }
   return "internal";
 }

@@ -1,13 +1,14 @@
 /**
  * Codex transcript JSONL -> AgentFileMutation[].
  *
- * Codex writes patch application results as `event_msg` entries whose payload
- * has `type: "patch_apply_end"`. The reliable per-file evidence is in
- * `payload.changes`, not in the surrounding assistant/tool messages.
+ * Every apply_patch Codex performs is recorded as an `item_completed` event
+ * whose item has `type: "FileChange"`: one entry per file with its unified
+ * diff (or the full content for added/deleted files) and the outcome. The
+ * record exists in the 0.151 and 0.153 transcript formats alike, so it is the
+ * only source read here. Shell-driven edits are not represented.
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
 import type { AgentFileMutation, MutationKind } from "./types.js";
 import { MAX_FILE_BYTES, MAX_FILE_DIFF_BYTES, utf8ByteLength } from "./constants.js";
 
@@ -18,17 +19,13 @@ interface CodexRawEntry {
 }
 
 interface CodexExtractResult {
-  sessionId: string | undefined;
-  startedAt: string | undefined;
-  endedAt: string | undefined;
   mutations: AgentFileMutation[];
 }
 
-interface PatchApplyPayload extends Record<string, unknown> {
-  type: "patch_apply_end";
-  call_id?: string;
+interface CodexFileChangeItem extends Record<string, unknown> {
+  type: "FileChange";
+  id?: string;
   status?: string;
-  success?: boolean;
   changes?: unknown;
 }
 
@@ -37,22 +34,6 @@ interface CodexPatchChange {
   unified_diff?: string;
   content?: string;
   move_path?: string | null;
-}
-
-interface ExecCommandEndPayload extends Record<string, unknown> {
-  type: "exec_command_end";
-  call_id?: string;
-  status?: string;
-  exit_code?: number;
-  cwd?: string;
-  command?: unknown;
-  parsed_cmd?: unknown;
-}
-
-interface ParsedCommand {
-  type?: string;
-  path?: unknown;
-  cmd?: unknown;
 }
 
 export function extractCodexMutationsFromTranscript(
@@ -66,18 +47,11 @@ export function extractCodexMutationsFromTranscript(
   const mutations: AgentFileMutation[] = [];
 
   for (let index = turnBounds.start; index < turnBounds.end; index++) {
-    const payload = asRecord(entries[index]?.payload);
-    if (isPatchApplyPayload(payload)) {
-      mutations.push(...mutationsFromPatchApply(payload));
-    } else if (isExecCommandEndPayload(payload)) {
-      mutations.push(...mutationsFromExecCommandEnd(payload));
-    }
+    const item = fileChangeItem(entries[index]?.payload);
+    if (item) mutations.push(...mutationsFromFileChange(item));
   }
 
   return {
-    sessionId: sessionIdFromPath(transcriptPath),
-    startedAt: entries[turnBounds.start]?.timestamp,
-    endedAt: entries[turnBounds.end - 1]?.timestamp,
     mutations,
   };
 }
@@ -129,14 +103,20 @@ function isUserPrompt(entry: CodexRawEntry | undefined): boolean {
   });
 }
 
-function mutationsFromPatchApply(payload: PatchApplyPayload): AgentFileMutation[] {
-  const changes = asRecord(payload.changes);
+function fileChangeItem(payload: unknown): CodexFileChangeItem | null {
+  const record = asRecord(payload);
+  if (record?.type !== "item_completed") return null;
+  const item = asRecord(record.item);
+  return item?.type === "FileChange" ? item as CodexFileChangeItem : null;
+}
+
+function mutationsFromFileChange(item: CodexFileChangeItem): AgentFileMutation[] {
+  const changes = asRecord(item.changes);
   if (!changes) return [];
 
   const mutations: AgentFileMutation[] = [];
-  const toolUseId = readString(payload.call_id) ?? "codex-patch";
-  const isSuccess = payload.success === true ||
-    (payload.success !== false && payload.status === "completed");
+  const toolUseId = readString(item.id) ?? "codex-file-change";
+  const isSuccess = item.status === "completed" || item.status === "success";
   const status = isSuccess ? "completed" : "failed";
 
   for (const [rawPath, rawChange] of Object.entries(changes)) {
@@ -150,7 +130,7 @@ function mutationsFromPatchApply(payload: PatchApplyPayload): AgentFileMutation[
       path,
       kind: kindFromCodexChange(change),
       status,
-      source: "codex-patch-apply-end",
+      source: "codex-file-change",
     };
 
     if (!isSuccess) {
@@ -159,10 +139,9 @@ function mutationsFromPatchApply(payload: PatchApplyPayload): AgentFileMutation[
       continue;
     }
 
-    // Source file size check: when add/delete carries the full file content,
-    // use it as a proxy for file size. Update-only entries only expose
-    // unified_diff (no original-file snapshot), so we skip this guard for them
-    // and let the diff-size check below catch any oversized payload.
+    // Added/deleted files carry their full content, which doubles as the file
+    // size guard. Updates only expose the unified diff, so the diff-size check
+    // below is the only cap that applies to them.
     const contentField = typeof change.content === "string" ? change.content : "";
     if (utf8ByteLength(contentField) > MAX_FILE_BYTES) {
       mutation.omitted = {
@@ -256,183 +235,6 @@ function assignStats(mutation: AgentFileMutation, diff: string): void {
   mutation.deletions = deletions;
 }
 
-function isPatchApplyPayload(value: Record<string, unknown> | null): value is PatchApplyPayload {
-  return value?.type === "patch_apply_end";
-}
-
-function isExecCommandEndPayload(
-  value: Record<string, unknown> | null,
-): value is ExecCommandEndPayload {
-  return value?.type === "exec_command_end";
-}
-
-interface ShellWriteTarget {
-  path: string;
-  kind: MutationKind;
-}
-
-function mutationsFromExecCommandEnd(payload: ExecCommandEndPayload): AgentFileMutation[] {
-  if (!isSuccessfulExecCommand(payload)) return [];
-
-  const toolUseId = readString(payload.call_id) ?? "codex-bash";
-  const targets = extractWrittenPathsFromExecCommand(payload);
-  return targets.map(({ path, kind }) => ({
-    provider: "codex",
-    toolUseId,
-    toolName: "Bash",
-    path,
-    kind,
-    status: "completed",
-    source: "codex-bash-output",
-    omitted: { reason: "unavailable" },
-  }));
-}
-
-function isSuccessfulExecCommand(payload: ExecCommandEndPayload): boolean {
-  if (payload.status === "completed") return true;
-  return typeof payload.exit_code === "number" && payload.exit_code === 0;
-}
-
-function extractWrittenPathsFromExecCommand(payload: ExecCommandEndPayload): ShellWriteTarget[] {
-  const targets = new Map<string, MutationKind>();
-  const cwd = readString(payload.cwd);
-
-  for (const command of readParsedCommands(payload.parsed_cmd)) {
-    if (isReadOnlyParsedCommand(command)) continue;
-    addTarget(targets, readString(command.path), cwd, "update");
-  }
-
-  const commandText = execCommandText(payload.command);
-  if (commandText) {
-    for (const target of extractShellWriteTargets(commandText)) {
-      addTarget(targets, target.path, cwd, target.kind);
-    }
-  }
-
-  return Array.from(targets, ([path, kind]) => ({ path, kind }));
-}
-
-function readParsedCommands(value: unknown): ParsedCommand[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => asRecord(item) as ParsedCommand | null)
-    .filter((item): item is ParsedCommand => !!item);
-}
-
-function isReadOnlyParsedCommand(command: ParsedCommand): boolean {
-  return command.type === "read" ||
-    command.type === "list_files" ||
-    command.type === "search";
-}
-
-function execCommandText(command: unknown): string | null {
-  if (typeof command === "string") return command;
-  if (!Array.isArray(command)) return null;
-  const parts = command.filter((part): part is string => typeof part === "string");
-  if (parts.length === 0) return null;
-  return parts.at(-1) ?? null;
-}
-
-function extractShellWriteTargets(command: string): ShellWriteTarget[] {
-  const targets = new Map<string, MutationKind>();
-  for (const line of command.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    extractRedirectionTargets(trimmed).forEach((path) => addTarget(targets, path, null, "update"));
-    extractOptionTargets(trimmed).forEach((path) => addTarget(targets, path, null, "update"));
-    extractKnownWriteCallTargets(trimmed).forEach((target) =>
-      addTarget(targets, target.path, null, target.kind),
-    );
-  }
-  return Array.from(targets, ([path, kind]) => ({ path, kind }));
-}
-
-function extractRedirectionTargets(command: string): string[] {
-  const paths: string[] = [];
-  const pattern = /(?:^|[\s;|&])(?:\d*)>{1,2}\s*(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu;
-  for (const match of command.matchAll(pattern)) {
-    const path = match[1] ?? match[2] ?? match[3];
-    if (path && isLikelyFilePath(path)) paths.push(path);
-  }
-  return paths;
-}
-
-function extractOptionTargets(command: string): string[] {
-  const paths: string[] = [];
-  const optionPattern = /(?:\s|^)(?:--out|--output)\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu;
-  for (const match of command.matchAll(optionPattern)) {
-    const path = match[1] ?? match[2] ?? match[3];
-    if (path && isPathLikeOptionTarget(path)) paths.push(path);
-  }
-
-  const shortOutputPattern =
-    /\b(?:sips|curl)\b[^\n;&|]*\s-o\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu;
-  for (const match of command.matchAll(shortOutputPattern)) {
-    const path = match[1] ?? match[2] ?? match[3];
-    if (path && isLikelyFilePath(path)) paths.push(path);
-  }
-  return paths;
-}
-
-function extractKnownWriteCallTargets(command: string): ShellWriteTarget[] {
-  const targets: ShellWriteTarget[] = [];
-  const updatePatterns = [
-    /\bwriteFile(?:Sync)?\(\s*["']([^"']+)["']/gu,
-    /\bPath\(\s*["']([^"']+)["']\s*\)\.write_(?:text|bytes)\(/gu,
-    /\bopen\(\s*["']([^"']+)["']\s*,\s*["'][^"']*[wa][^"']*["']/gu,
-    /\btouch\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu,
-    // cp/mv record the written destination; mv's removed source is not
-    // tracked by this heuristic.
-    /\b(?:cp|mv)\s+(?:"[^"]+"|'[^']+'|[^\s;&|]+)\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu,
-  ];
-  const deletePatterns = [
-    /\b(?:rm|unlink)\s+(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/gu,
-  ];
-
-  const collect = (patterns: RegExp[], kind: MutationKind) => {
-    for (const pattern of patterns) {
-      for (const match of command.matchAll(pattern)) {
-        const path = match.slice(1).find((value) => value);
-        if (path && isLikelyFilePath(path)) targets.push({ path, kind });
-      }
-    }
-  };
-  collect(updatePatterns, "update");
-  collect(deletePatterns, "delete");
-
-  return targets;
-}
-
-function addTarget(
-  targets: Map<string, MutationKind>,
-  path: string | null,
-  cwd: string | null,
-  kind: MutationKind,
-): void {
-  if (!path || !isLikelyFilePath(path)) return;
-  const absolutePath = cwd && !isAbsolute(path)
-    ? resolve(join(cwd, path))
-    : path;
-  const normalized = normalizePath(absolutePath);
-  // "delete" wins when one command both writes and removes a path — the
-  // removal is the terminal state this heuristic can see.
-  if (targets.get(normalized) === "delete") return;
-  targets.set(normalized, kind);
-}
-
-function isLikelyFilePath(path: string): boolean {
-  if (!path || path === "." || path === "..") return false;
-  if (path.startsWith("-")) return false;
-  if (path.includes("$(") || path.includes("`")) return false;
-  if (path === "/dev/null" || /^&?\d+$/u.test(path)) return false;
-  return true;
-}
-
-function isPathLikeOptionTarget(path: string): boolean {
-  return isLikelyFilePath(path) &&
-    (path.includes("/") || path.includes("\\") || path.includes("."));
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -445,8 +247,4 @@ function readString(value: unknown): string | null {
 
 function normalizePath(path: string): string {
   return path.replace(/\\/g, "/");
-}
-
-function sessionIdFromPath(transcriptPath: string): string | undefined {
-  return transcriptPath.match(/([0-9a-f-]{36})\.jsonl$/i)?.[1];
 }

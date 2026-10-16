@@ -26,13 +26,6 @@ export const MAX_FILE_DIFF_BYTES = 128 * 1024;
 export const MAX_EVENT_DIFF_BYTES = 512 * 1024;
 
 /**
- * Cloud sync payload byte cap. The sync serializer must keep the total
- * diff_text payload under this limit, dropping excess rather than pushing
- * huge payloads to the server.
- */
-export const MAX_SYNC_DIFF_BYTES = 2 * 1024 * 1024;
-
-/**
  * Real UTF-8 byte length for cap checks. String.length counts UTF-16 code
  * units and undercounts CJK/emoji by up to 3x, letting payloads blow past
  * the *_BYTES limits above — every cap comparison must go through this.

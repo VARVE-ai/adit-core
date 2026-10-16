@@ -93,8 +93,9 @@ describe("installClaudeHooks", () => {
       expect(installed.settingsPath).toBe(managedSettingsPath);
       const managedSettingsText = readFileSync(managedSettingsPath, "utf8");
       const managedSettings = JSON.parse(managedSettingsText);
-      const command = managedSettings.hooks.SessionStart[0].hooks[0].command as string;
+      const command = managedSettings.hooks.UserPromptSubmit[0].hooks[0].command as string;
       const statusLineCommand = managedSettings.statusLine.command as string;
+      expect(managedSettings.hooks.SessionStart).toBeUndefined();
       expect(managedSettings.hooks.Notification).toHaveLength(1);
       expect(managedSettings.hooks.StopFailure).toHaveLength(1);
       expect(managedSettings.statusLine.refreshInterval).toBe(1);
@@ -112,6 +113,47 @@ describe("installClaudeHooks", () => {
       installed.cleanup();
       expect(existsSync(managedSettingsPath)).toBe(false);
       expect(existsSync(baseSettingsPath)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("removes only ADIT cloud SessionStart hooks", () => {
+    const dir = tempDir();
+    try {
+      const claudeDir = join(dir, ".claude");
+      const baseSettingsPath = join(claudeDir, "settings.local.json");
+      const managedSettingsPath = join(claudeDir, "adit-cloud-test.settings.local.json");
+      mkdirSync(claudeDir, { recursive: true });
+      writeFileSync(baseSettingsPath, JSON.stringify({
+        hooks: {
+          SessionStart: [
+            {
+              hooks: [{
+                type: "command",
+                command: "node relay from=adit-cloud-cli-9999",
+                timeout: 10,
+              }],
+            },
+            {
+              hooks: [{ type: "command", command: "other-tool session-start", timeout: 10 }],
+            },
+          ],
+        },
+      }, null, 2));
+
+      installClaudeHooks({
+        cwd: dir,
+        endpoint: "http://127.0.0.1:1234/hook",
+        marker: "from=adit-cloud-cli-1234",
+        settingsPath: managedSettingsPath,
+      });
+
+      const managedSettings = JSON.parse(readFileSync(managedSettingsPath, "utf8"));
+      expect(managedSettings.hooks.SessionStart).toHaveLength(1);
+      expect(managedSettings.hooks.SessionStart[0].hooks[0].command).toBe(
+        "other-tool session-start",
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -268,21 +310,17 @@ describe("ensurePersistentClaudeHooksInstalled", () => {
       const settings = readFileSync(join(dir, ".claude", "settings.local.json"), "utf8");
       const fixedRootArg = `--project-root-b64 ${encodeProjectRoot(dir)}`;
 
-      for (const hookType of [
-        "prompt-submit",
-        "stop",
-        "session-start",
-        "session-end",
-        "subagent-start",
-        "subagent-stop",
-      ]) {
+      for (const hookType of ["prompt-submit", "stop"]) {
         expect(settings).toContain(
           `node /tmp/adit-hook --platform claude ${fixedRootArg} ${hookType}`,
         );
       }
-      // notification / task-completed collection was retired
+      expect(settings).not.toContain(` ${fixedRootArg} session-end`);
+      // notification / task-completed / subagent collection was retired
       expect(settings).not.toContain(` ${fixedRootArg} task-completed`);
       expect(settings).not.toContain(` ${fixedRootArg} notification`);
+      expect(settings).not.toContain(` ${fixedRootArg} subagent-start`);
+      expect(settings).not.toContain(` ${fixedRootArg} subagent-stop`);
       expect(existsSync(join(dir, ".claude", "commands", "adit.md"))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -303,9 +341,9 @@ describe("ensurePersistentClaudeHooksInstalled", () => {
 
       const settings = readFileSync(join(dir, ".claude", "settings.local.json"), "utf8");
       expect(installedAgain).toBe(false);
-      // 7 hook mappings: prompt-submit, stop (Stop + StopFailure),
-      // session-start, session-end, subagent-start, subagent-stop
-      expect((settings.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(7);
+      // 5 hook mappings: prompt-submit, stop (Stop + StopFailure),
+      // pre-tool-use + post-tool-use (Bash working-tree snapshots)
+      expect((settings.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(5);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

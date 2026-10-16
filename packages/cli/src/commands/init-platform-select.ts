@@ -13,22 +13,20 @@
  *   not drive the default here: a temporarily missing CLI on PATH would
  *   otherwise silently disconnect a connected platform on plain Enter.)
  * - A first-run project (no record) pre-checks the detected CLIs.
- * - Manual platforms (Cursor) are never pre-checked unless recorded.
  */
 
 import { createInterface } from "node:readline/promises";
 import pc from "picocolors";
+import { marks } from "./cli-style.js";
 import type { Platform } from "@varveai/adit-core";
 import { getAdapter, listAdapters } from "@varveai/adit-hooks/adapters";
 
 /** Companion platforms installed/removed together with their owner. */
 export const BUNDLED_PLATFORMS: Partial<Record<Platform, Platform[]>> = {
-  // The VS Code extension shares Claude Code's configuration; connecting
-  // Claude Code always connects both.
-  "claude-code": ["claude-vscode"],
+  "claude-code": ["claude-vscode", "cursor"],
 };
 
-const DISPLAY_ORDER: Platform[] = ["claude-code", "codex", "gemini", "opencode", "cursor"];
+const DISPLAY_ORDER: Platform[] = ["claude-code", "codex", "gemini", "opencode"];
 
 export interface PlatformChoice {
   platform: Platform;
@@ -102,7 +100,7 @@ export function buildPlatformChoices(opts: {
     const preChecked = opts.hasRecord ? connected : detected && !manual;
     return {
       platform,
-      displayName: adapter.displayName,
+      displayName: platform === "claude-code" ? "Claude Code / Cursor" : adapter.displayName,
       cliBinary: adapter.cliBinary,
       detected,
       connected,
@@ -202,7 +200,7 @@ export function parseSelectionAnswer(
 /** Print the numbered choice list used by the readline fallback. */
 export function printChoiceList(choices: PlatformChoice[]): void {
   choices.forEach((choice, index) => {
-    const box = choice.preChecked ? pc.green("[x]") : pc.dim("[ ]");
+    const box = choice.preChecked ? pc.green("[✓]") : pc.dim("[ ]");
     const binary = choice.cliBinary ? `(${choice.cliBinary})` : "";
     const name = `${choice.displayName} ${binary}`.trim();
     console.log(`    ${index + 1}. ${box} ${name.padEnd(24)} ${pc.dim(`— ${describeChoice(choice)}`)}`);
@@ -227,7 +225,7 @@ export async function promptPlatformSelectionFallback(
     const answer = await rl.question("  Select: ");
     let selection = parseSelectionAnswer(answer, choices);
     if (selection === null) {
-      console.log(pc.dim("  [ ] Unrecognized answer — keeping the current selection."));
+      console.log(`  ${marks.skip} ${pc.dim("Unrecognized answer; keeping the current selection.")}`);
       return new Set(
         choices.filter((choice) => choice.preChecked).map((choice) => choice.platform),
       );
@@ -243,7 +241,7 @@ export async function promptPlatformSelectionFallback(
       )).trim().toLowerCase();
       if (confirm !== "y" && confirm !== "yes") {
         selection = keepDisconnectedSelection(choices, selection);
-        console.log(pc.dim("  [=] Keeping them connected."));
+        console.log(`  ${marks.skip} ${pc.dim("Keeping them connected.")}`);
       }
     }
     return selection;

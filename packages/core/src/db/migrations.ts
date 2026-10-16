@@ -69,7 +69,6 @@ export const migrations: Migration[] = [
         status          TEXT NOT NULL DEFAULT 'running',
         error_json      TEXT,
         labels_json     TEXT,
-        plan_task_id    TEXT,
 
         vclock_json     TEXT NOT NULL,
         deleted_at      TEXT
@@ -110,30 +109,9 @@ export const migrations: Migration[] = [
         ON env_snapshots(session_id);
     `,
   },
-  {
-    id: 4,
-    name: "create_plans",
-    sql: `
-      CREATE TABLE IF NOT EXISTS plans (
-        id              TEXT PRIMARY KEY,
-        project_id      TEXT NOT NULL,
-        plan_type       TEXT NOT NULL,
-        parent_plan_id  TEXT REFERENCES plans(id),
-        title           TEXT NOT NULL,
-        content_md      TEXT NOT NULL,
-        status          TEXT NOT NULL DEFAULT 'draft',
-        created_at      TEXT NOT NULL,
-        updated_at      TEXT,
-        vclock_json     TEXT NOT NULL,
-        deleted_at      TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_plans_project
-        ON plans(project_id);
-      CREATE INDEX IF NOT EXISTS idx_plans_type
-        ON plans(plan_type) WHERE deleted_at IS NULL;
-    `,
-  },
+  // Migration 4 belonged to the retired local Plan model. Its ID remains
+  // reserved so databases created by older releases keep their migration
+  // history; their unused table is intentionally left intact for recovery.
   {
     id: 5,
     name: "create_diffs",
@@ -174,33 +152,8 @@ export const migrations: Migration[] = [
       );
     `,
   },
-  {
-    id: 8,
-    name: "create_transcript_uploads",
-    sql: `
-      CREATE TABLE IF NOT EXISTS transcript_uploads (
-        id                TEXT PRIMARY KEY,
-        session_id        TEXT NOT NULL,
-        transcript_path   TEXT NOT NULL,
-        server_url        TEXT NOT NULL,
-        uploaded_bytes    INTEGER NOT NULL DEFAULT 0,
-        file_size_bytes   INTEGER NOT NULL DEFAULT 0,
-        status            TEXT NOT NULL DEFAULT 'pending',
-        failure_count     INTEGER NOT NULL DEFAULT 0,
-        last_error        TEXT,
-        server_version    TEXT,
-        created_at        TEXT NOT NULL,
-        updated_at        TEXT NOT NULL
-      );
-
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_transcript_path_server
-        ON transcript_uploads(transcript_path, server_url);
-      CREATE INDEX IF NOT EXISTS idx_transcript_status
-        ON transcript_uploads(status) WHERE status IN ('pending', 'uploading');
-      CREATE INDEX IF NOT EXISTS idx_transcript_session
-        ON transcript_uploads(session_id);
-    `,
-  },
+  // Migration 8 belonged to the retired transcript upload feature. Its ID
+  // remains reserved so existing databases keep a stable migration history.
   {
     id: 9,
     name: "add_events_client_id_and_started_at_index",
@@ -286,6 +239,310 @@ export const migrations: Migration[] = [
         updated_at    TEXT NOT NULL,
         PRIMARY KEY (session_id, relative_path)
       );
+    `,
+  },
+  {
+    id: 14,
+    name: "drop_transcript_uploads",
+    sql: "DROP TABLE IF EXISTS transcript_uploads;",
+  },
+  {
+    id: 15,
+    name: "drop_session_lifecycle",
+    sql: `
+      DROP INDEX IF EXISTS idx_sessions_status;
+      ALTER TABLE sessions DROP COLUMN ended_at;
+      ALTER TABLE sessions DROP COLUMN status;
+    `,
+  },
+  {
+    id: 16,
+    name: "add_project_link_git_state",
+    sql: `
+      ALTER TABLE project_link_cache
+        ADD COLUMN git_ref_heads_json TEXT NOT NULL DEFAULT '{}';
+      ALTER TABLE project_link_cache
+        ADD COLUMN git_refs_fingerprint TEXT;
+    `,
+  },
+  {
+    id: 17,
+    name: "replace_commit_observation_with_recorded_commits",
+    sql: `
+      DROP TABLE IF EXISTS session_repo_heads;
+
+      DROP INDEX IF EXISTS idx_events_checkpoint;
+      ALTER TABLE events DROP COLUMN checkpoint_sha;
+      ALTER TABLE events DROP COLUMN checkpoint_ref;
+
+      ALTER TABLE project_link_cache DROP COLUMN last_commit_sha;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_events_git_commit_identity
+        ON events(
+          session_id,
+          event_type,
+          json_extract(tool_input_json, '$.provider'),
+          json_extract(tool_input_json, '$.toolCallId'),
+          json_extract(tool_input_json, '$.operationIndex')
+        )
+        WHERE event_type = 'git_commit'
+          AND tool_name = 'commit'
+          AND deleted_at IS NULL;
+    `,
+  },
+  {
+    id: 18,
+    name: "normalize_cloud_server_urls",
+    sql: `
+      ALTER TABLE sync_state RENAME TO sync_state_legacy_urls;
+
+      CREATE TABLE sync_state (
+        server_url            TEXT PRIMARY KEY,
+        client_id             TEXT NOT NULL,
+        last_synced_event_id  TEXT,
+        last_synced_at        TEXT,
+        sync_version          INTEGER NOT NULL DEFAULT 0
+      );
+
+      INSERT INTO sync_state (
+        server_url, client_id, last_synced_event_id, last_synced_at, sync_version
+      )
+      WITH normalized AS (
+        SELECT
+          RTRIM(TRIM(server_url), '/') AS server_url,
+          client_id,
+          last_synced_event_id,
+          last_synced_at,
+          sync_version
+        FROM sync_state_legacy_urls
+      ), ranked AS (
+        SELECT
+          server_url,
+          client_id,
+          MAX(last_synced_event_id) OVER (PARTITION BY server_url) AS last_synced_event_id,
+          MAX(last_synced_at) OVER (PARTITION BY server_url) AS last_synced_at,
+          MAX(sync_version) OVER (PARTITION BY server_url) AS sync_version,
+          ROW_NUMBER() OVER (
+            PARTITION BY server_url
+            ORDER BY COALESCE(last_synced_at, '') DESC, sync_version DESC
+          ) AS row_number
+        FROM normalized
+      )
+      SELECT server_url, client_id, last_synced_event_id, last_synced_at, sync_version
+      FROM ranked
+      WHERE row_number = 1;
+
+      DROP TABLE sync_state_legacy_urls;
+
+      ALTER TABLE project_link_cache RENAME TO project_link_cache_legacy_urls;
+
+      CREATE TABLE project_link_cache (
+        project_id TEXT NOT NULL,
+        repository_id TEXT NOT NULL,
+        server_url TEXT NOT NULL,
+        confirmed_project_id TEXT,
+        last_branch_sync_at TEXT,
+        last_doc_sync_at TEXT,
+        doc_hashes_json TEXT DEFAULT '{}',
+        qualified INTEGER DEFAULT 0,
+        initialized_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        git_ref_heads_json TEXT NOT NULL DEFAULT '{}',
+        git_refs_fingerprint TEXT,
+        PRIMARY KEY (project_id, repository_id, server_url)
+      );
+
+      INSERT INTO project_link_cache (
+        project_id, repository_id, server_url, confirmed_project_id,
+        last_branch_sync_at, last_doc_sync_at, doc_hashes_json, qualified,
+        initialized_at, updated_at, git_ref_heads_json, git_refs_fingerprint
+      )
+      WITH normalized AS (
+        SELECT
+          project_id,
+          repository_id,
+          RTRIM(TRIM(server_url), '/') AS server_url,
+          confirmed_project_id,
+          last_branch_sync_at,
+          last_doc_sync_at,
+          doc_hashes_json,
+          qualified,
+          initialized_at,
+          updated_at,
+          git_ref_heads_json,
+          git_refs_fingerprint
+        FROM project_link_cache_legacy_urls
+      ), merged AS (
+        SELECT DISTINCT
+          project_id,
+          repository_id,
+          server_url,
+          FIRST_VALUE(confirmed_project_id) OVER confirmed_state AS confirmed_project_id,
+          FIRST_VALUE(last_branch_sync_at) OVER branch_state AS last_branch_sync_at,
+          FIRST_VALUE(last_doc_sync_at) OVER document_state AS last_doc_sync_at,
+          FIRST_VALUE(doc_hashes_json) OVER document_state AS doc_hashes_json,
+          MAX(qualified) OVER cache_key AS qualified,
+          MIN(initialized_at) OVER cache_key AS initialized_at,
+          MAX(updated_at) OVER cache_key AS updated_at,
+          FIRST_VALUE(git_ref_heads_json) OVER branch_state AS git_ref_heads_json,
+          FIRST_VALUE(git_refs_fingerprint) OVER branch_state AS git_refs_fingerprint
+        FROM normalized
+        WINDOW
+          cache_key AS (
+            PARTITION BY project_id, repository_id, server_url
+          ),
+          confirmed_state AS (
+            PARTITION BY project_id, repository_id, server_url
+            ORDER BY (confirmed_project_id IS NULL), updated_at DESC
+          ),
+          branch_state AS (
+            PARTITION BY project_id, repository_id, server_url
+            ORDER BY
+              (git_refs_fingerprint IS NULL AND git_ref_heads_json = '{}'),
+              COALESCE(last_branch_sync_at, '') DESC,
+              updated_at DESC
+          ),
+          document_state AS (
+            PARTITION BY project_id, repository_id, server_url
+            ORDER BY
+              (last_doc_sync_at IS NULL AND doc_hashes_json = '{}'),
+              COALESCE(last_doc_sync_at, '') DESC,
+              updated_at DESC
+          )
+      )
+      SELECT
+        project_id, repository_id, server_url, confirmed_project_id,
+        last_branch_sync_at, last_doc_sync_at, doc_hashes_json, qualified,
+        initialized_at, updated_at, git_ref_heads_json, git_refs_fingerprint
+      FROM merged;
+
+      DROP TABLE project_link_cache_legacy_urls;
+    `,
+  },
+  {
+    id: 19,
+    name: "replace_git_operation_identity_with_commit_identity",
+    sql: `
+      DROP INDEX IF EXISTS idx_events_git_operation_identity;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_events_git_commit_identity
+        ON events(
+          session_id,
+          event_type,
+          json_extract(tool_input_json, '$.provider'),
+          json_extract(tool_input_json, '$.toolCallId'),
+          json_extract(tool_input_json, '$.operationIndex')
+        )
+        WHERE event_type = 'git_commit'
+          AND tool_name = 'commit'
+          AND deleted_at IS NULL;
+    `,
+  },
+  {
+    id: 20,
+    name: "add_project_link_remote_branch_state",
+    sql: `
+      ALTER TABLE project_link_cache
+        ADD COLUMN remote_refs_fingerprint TEXT;
+      ALTER TABLE project_link_cache
+        ADD COLUMN last_remote_branch_check_at TEXT;
+    `,
+  },
+  {
+    id: 21,
+    name: "create_session_platform_aliases",
+    sql: `
+      -- Extra platform session ids that belong to an existing local session.
+      -- Claude Code forks a conversation into a new session id when a
+      -- message is edited and resent; the fork keeps recording here.
+      CREATE TABLE IF NOT EXISTS session_platform_aliases (
+        platform_session_id TEXT PRIMARY KEY,
+        session_id          TEXT NOT NULL REFERENCES sessions(id),
+        created_at          TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_platform_aliases_session
+        ON session_platform_aliases(session_id);
+    `,
+  },
+  {
+    id: 22,
+    name: "add_event_inferred_files",
+    sql: `
+      -- Files a turn changed without a file-editing tool (e.g. Claude's Bash
+      -- writes), inferred from working-tree snapshots taken around each tool
+      -- call. Path-only evidence for commit matching; never a diff.
+      ALTER TABLE events ADD COLUMN inferred_files_json TEXT;
+    `,
+  },
+  {
+    id: 23,
+    name: "token_usage_ledger",
+    sql: `
+      CREATE TABLE IF NOT EXISTS token_usage_cursors (
+        source_key TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        state_json TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS token_usage_records (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        turn_id TEXT,
+        revision INTEGER NOT NULL,
+        record_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_token_usage_session ON token_usage_records(session_id, turn_id);
+    `,
+  },
+  {
+    id: 24,
+    name: "independent_token_usage_sync",
+    sql: `
+      CREATE TABLE IF NOT EXISTS token_usage_sync_state (
+        server_url TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        record_id TEXT NOT NULL REFERENCES token_usage_records(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL,
+        PRIMARY KEY (server_url, client_id, record_id)
+      );
+      DELETE FROM events
+      WHERE event_type = 'token_usage' AND tool_name = 'adit.token-usage.v1'
+        AND CASE WHEN json_valid(tool_input_json) THEN EXISTS (
+          SELECT 1 FROM token_usage_records AS usage
+          WHERE usage.id = json_extract(events.tool_input_json, '$.id')
+            AND usage.session_id = events.session_id
+            AND usage.revision >= json_extract(events.tool_input_json, '$.revision')
+            AND json_valid(usage.record_json)
+            AND json_extract(CASE WHEN json_valid(usage.record_json) THEN usage.record_json ELSE '{}' END, '$.id') = usage.id
+            AND json_extract(CASE WHEN json_valid(usage.record_json) THEN usage.record_json ELSE '{}' END, '$.revision') = usage.revision
+            AND json_extract(CASE WHEN json_valid(usage.record_json) THEN usage.record_json ELSE '{}' END, '$.sessionId') = usage.session_id
+        ) ELSE 0 END
+        AND NOT EXISTS (SELECT 1 FROM events AS child WHERE child.parent_event_id = events.id)
+        AND NOT EXISTS (SELECT 1 FROM diffs WHERE diffs.event_id = events.id);
+    `,
+  },
+  {
+    id: 25,
+    name: "store_token_usage_on_replies",
+    sql: `
+      ALTER TABLE sessions ADD COLUMN token_capture_json TEXT;
+      ALTER TABLE events ADD COLUMN token_usage_turn_id TEXT;
+      ALTER TABLE events ADD COLUMN token_usage_revision INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE events ADD COLUMN token_usage_json TEXT;
+      ALTER TABLE events ADD COLUMN token_usage_ack_json TEXT;
+      ALTER TABLE events ADD COLUMN token_requests INTEGER;
+      ALTER TABLE events ADD COLUMN token_observations INTEGER;
+      ALTER TABLE events ADD COLUMN token_incomplete INTEGER;
+      ALTER TABLE events ADD COLUMN token_input REAL;
+      ALTER TABLE events ADD COLUMN token_uncached_input REAL;
+      ALTER TABLE events ADD COLUMN token_output REAL;
+      ALTER TABLE events ADD COLUMN token_cache_read REAL;
+      ALTER TABLE events ADD COLUMN token_cache_write REAL;
+      ALTER TABLE events ADD COLUMN token_reasoning REAL;
+      ALTER TABLE events ADD COLUMN token_total REAL;
+      CREATE INDEX idx_events_token_turn ON events(session_id, token_usage_turn_id);
+      DROP TABLE IF EXISTS token_usage_sync_state;
+      DROP TABLE IF EXISTS token_usage_records;
+      DROP TABLE IF EXISTS token_usage_cursors;
     `,
   },
 ];

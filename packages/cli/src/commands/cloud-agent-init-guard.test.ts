@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -95,6 +96,7 @@ vi.mock("./cli-agent/relay-client.js", () => ({
 
 import { cloudClaudeCommand } from "./cloud-claude.js";
 import { cloudCodexCommand } from "./cloud-codex.js";
+import { marks } from "./cli-style.js";
 
 describe("cloud agent initialization guard", () => {
   let projectRoot: string;
@@ -118,7 +120,6 @@ describe("cloud agent initialization guard", () => {
       projectType: "repo",
       repositories: [],
       initialization: "uninitialized",
-      refPrefix: "refs/adit/checkpoints",
       captureEnv: true,
     }));
     mocks.resolveExecutable.mockReturnValue("/usr/local/bin/claude");
@@ -157,15 +158,10 @@ describe("cloud agent initialization guard", () => {
     expect(process.exitCode).toBe(1);
     expect(mocks.loadCredentials).not.toHaveBeenCalled();
     expect(mocks.ensurePersistentClaudeHooksInstalled).not.toHaveBeenCalled();
-    expect(errorSpy).toHaveBeenCalledWith([
-      "ADIT is not initialized in this project.",
-      "",
-      "Run:",
-      "  adit init",
-      "",
-      "Then retry:",
-      "  adit cloud claude",
-    ].join("\n"));
+    expect(errorSpy.mock.calls.map((call) => stripVTControlCharacters(String(call[0])))).toEqual([
+      `${stripVTControlCharacters(marks.fail)} claude: ADIT is not initialized in this project`,
+      "  run adit init, then retry adit cloud claude",
+    ]);
   });
 
   it("refuses cloud codex before project initialization side effects", async () => {
@@ -174,15 +170,10 @@ describe("cloud agent initialization guard", () => {
     expect(process.exitCode).toBe(1);
     expect(mocks.loadCredentials).not.toHaveBeenCalled();
     expect(mocks.ensurePersistentCodexHooksInstalled).not.toHaveBeenCalled();
-    expect(errorSpy).toHaveBeenCalledWith([
-      "ADIT is not initialized in this project.",
-      "",
-      "Run:",
-      "  adit init",
-      "",
-      "Then retry:",
-      "  adit cloud codex",
-    ].join("\n"));
+    expect(errorSpy.mock.calls.map((call) => stripVTControlCharacters(String(call[0])))).toEqual([
+      `${stripVTControlCharacters(marks.fail)} codex: ADIT is not initialized in this project`,
+      "  run adit init, then retry adit cloud codex",
+    ]);
   });
 
   it("allows cloud codex from an initialized workspace root without a git repository", async () => {
@@ -202,7 +193,6 @@ describe("cloud agent initialization guard", () => {
       projectType: "workspace",
       repositories: [],
       initialization: "initialized",
-      refPrefix: "refs/adit/checkpoints",
       captureEnv: true,
     });
     mocks.loadCredentials.mockReturnValue(null);

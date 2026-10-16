@@ -39,8 +39,6 @@ interface ToolUseBlock {
 }
 
 export interface ExtractResult {
-  startedAt: string | undefined;
-  endedAt: string | undefined;
   mutations: AgentFileMutation[];
 }
 
@@ -82,8 +80,6 @@ export function extractCursorMutationsFromTranscript(
   }
 
   return {
-    startedAt: undefined,
-    endedAt: undefined,
     mutations,
   };
 }

@@ -19,6 +19,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./diagnostics": {
+      "types": "./dist/diagnostics.d.ts",
+      "import": "./dist/diagnostics.js"
+    },
     "./adapters": {
       "types": "./dist/adapters/index.d.ts",
       "import": "./dist/adapters/index.js"
@@ -29,8 +33,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@varveai/adit-core": "workspace:*",
     "@varveai/adit-cloud": "workspace:*",
+    "@varveai/adit-core": "workspace:*",
     "@varveai/adit-engine": "workspace:*"
   },
   "devDependencies": {

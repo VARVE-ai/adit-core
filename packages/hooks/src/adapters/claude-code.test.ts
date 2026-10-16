@@ -57,19 +57,138 @@ describe("Claude Code Hook Chaining", () => {
     expect(hooks.Stop).toBeDefined();
     // StopFailure routes API-error turn ends through the stop handler
     expect(hooks.StopFailure).toBeDefined();
-    expect(hooks.SessionStart).toBeDefined();
-    expect(hooks.SessionEnd).toBeDefined();
-    // notification / task-completed collection was retired
+    expect(hooks.SessionStart).toBeUndefined();
+    expect(hooks.SessionEnd).toBeUndefined();
+    // notification / task-completed / subagent collection was retired
     expect(hooks.TaskCompleted).toBeUndefined();
     expect(hooks.Notification).toBeUndefined();
-    expect(hooks.SubagentStart).toBeDefined();
-    expect(hooks.SubagentStop).toBeDefined();
+    expect(hooks.SubagentStart).toBeUndefined();
+    expect(hooks.SubagentStop).toBeUndefined();
 
     // Each event should have exactly one matcher group with one ADIT hook
     const stopEntries = hooks.Stop as Array<{ hooks: Array<{ command: string }> }>;
     expect(stopEntries).toHaveLength(1);
     expect(stopEntries[0].hooks[0].command).toContain("adit-hook");
     expect(stopEntries[0].hooks[0].command).toContain("--project-root-b64");
+  });
+
+  it("removes legacy ADIT SessionEnd hooks while preserving other tools", async () => {
+    writeSettings(projectRoot, {
+      hooks: {
+        SessionEnd: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook session-end" }] },
+          { hooks: [{ type: "command", command: "other-tool session-end" }] },
+        ],
+      },
+    });
+
+    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    const hooks = readSettings(projectRoot).hooks as Record<string, unknown[]>;
+    expect(JSON.stringify(hooks.SessionEnd)).not.toContain("adit-hook session-end");
+    expect(JSON.stringify(hooks.SessionEnd)).toContain("other-tool session-end");
+  });
+
+  it("removes retired ADIT subagent hooks while preserving other tools", async () => {
+    writeSettings(projectRoot, {
+      hooks: {
+        SubagentStart: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook subagent-start" }] },
+        ],
+        SubagentStop: [
+          { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook subagent-stop" }] },
+          { hooks: [{ type: "command", command: "other-tool subagent-stop" }] },
+        ],
+      },
+    });
+
+    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    const hooks = readSettings(projectRoot).hooks as Record<string, unknown[]>;
+    expect(hooks.SubagentStart).toBeUndefined();
+    expect(JSON.stringify(hooks.SubagentStop)).not.toContain("adit-hook subagent-stop");
+    expect(JSON.stringify(hooks.SubagentStop)).toContain("other-tool subagent-stop");
+  });
+
+  it("removes ADIT hooks for every retired event on upgrade while preserving other tools", async () => {
+    // Every event ADIT ever installed for this platform, as an old install
+    // left it, plus another tool's hook under one of the retired events.
+    const configPath = join(projectRoot, ".claude", "settings.local.json");
+    mkdirSync(join(configPath, ".."), { recursive: true });
+    writeFileSync(configPath, JSON.stringify({
+      hooks: {
+        UserPromptSubmit: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude prompt-submit", timeout: 30 }] }
+        ],
+        Stop: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude stop", timeout: 30 }] }
+        ],
+        SessionStart: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude session-start", timeout: 30 }] }
+        ],
+        SessionEnd: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude session-end", timeout: 30 }] }
+        ],
+        TaskCompleted: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude task-completed", timeout: 30 }] }
+        ],
+        Notification: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude notification", timeout: 30 }] },
+          { hooks: [{ type: "command", command: "other-tool notify", timeout: 30 }] }
+        ],
+        SubagentStart: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude subagent-start", timeout: 30 }] }
+        ],
+        SubagentStop: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude subagent-stop", timeout: 30 }] }
+        ],
+      },
+    }, null, 2) + "\n");
+
+    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    const hooks = (JSON.parse(readFileSync(configPath, "utf-8")) as { hooks: Record<string, unknown[]> }).hooks;
+    const eventsWithAdit = Object.keys(hooks)
+      .filter((event) => JSON.stringify(hooks[event]).includes("adit-hook"))
+      .sort();
+    // Only this release's events carry ADIT entries — nothing retired lingers.
+    expect(eventsWithAdit).toEqual(["PostToolUse", "PreToolUse", "Stop", "StopFailure", "UserPromptSubmit"]);
+    for (const event of eventsWithAdit) {
+      expect(hooks[event].filter((e) => JSON.stringify(e).includes("adit-hook"))).toHaveLength(1);
+    }
+    // The other tool's hook under a retired event is untouched.
+    expect(hooks.Notification).toHaveLength(1);
+    expect(JSON.stringify(hooks.Notification)).toContain("other-tool notify");
+  });
+
+  it("prunes retired ADIT events from the shared settings.json but keeps current ones", async () => {
+    const claudeDir = join(projectRoot, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    const sharedPath = join(claudeDir, "settings.json");
+    writeFileSync(sharedPath, JSON.stringify({
+      permissions: { allow: ["Bash(ls)"] },
+      hooks: {
+        Stop: [{ hooks: [{ type: "command", command: "npx adit-hook --platform claude stop" }] }],
+        Notification: [
+          { hooks: [{ type: "command", command: "npx adit-hook --platform claude notification" }] },
+          { hooks: [{ type: "command", command: "other-tool notify" }] },
+        ],
+        SessionStart: [{ hooks: [{ type: "command", command: "npx adit-hook --platform claude session-start" }] }],
+      },
+    }, null, 2) + "\n");
+
+    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+
+    const shared = JSON.parse(readFileSync(sharedPath, "utf-8")) as {
+      permissions?: unknown;
+      hooks?: Record<string, unknown[]>;
+    };
+    expect(shared.permissions).toEqual({ allow: ["Bash(ls)"] });
+    // A current-event ADIT entry in the shared file is the user's choice — kept.
+    expect(JSON.stringify(shared.hooks?.Stop)).toContain("adit-hook");
+    expect(shared.hooks?.SessionStart).toBeUndefined();
+    expect(shared.hooks?.Notification).toHaveLength(1);
+    expect(JSON.stringify(shared.hooks?.Notification)).toContain("other-tool notify");
   });
 
   it("preserves other tools' hooks when installing ADIT hooks", async () => {
@@ -93,11 +212,10 @@ describe("Claude Code Hook Chaining", () => {
     const settings = readSettings(projectRoot);
     const hooks = settings.hooks as Record<string, unknown[]>;
 
-    // SessionStart should have both: Entire's hook + ADIT's hook
+    // ADIT no longer installs SessionStart; the other tool's hook is preserved.
     const sessionStartEntries = hooks.SessionStart as Array<{ hooks: Array<{ command: string }> }>;
-    expect(sessionStartEntries).toHaveLength(2);
+    expect(sessionStartEntries).toHaveLength(1);
     expect(sessionStartEntries[0].hooks[0].command).toContain("entire");
-    expect(sessionStartEntries[1].hooks[0].command).toContain("adit-hook");
 
     // Stop should also have both
     const stopEntries = hooks.Stop as Array<{ hooks: Array<{ command: string }> }>;
@@ -172,14 +290,17 @@ describe("Claude Code Hook Chaining", () => {
     const settings = readSettings(projectRoot);
     const hooks = settings.hooks as Record<string, unknown[]>;
 
-    // PostToolUse should be preserved exactly as-is
+    // The other tool's PostToolUse entry stays first and untouched; ADIT's
+    // own Bash-matcher entry is appended after it.
     const postToolEntries = hooks.PostToolUse as Array<{ matcher: string; hooks: Array<{ command: string }> }>;
-    expect(postToolEntries).toHaveLength(1);
+    expect(postToolEntries).toHaveLength(2);
     expect(postToolEntries[0].matcher).toBe("Write|Edit");
     expect(postToolEntries[0].hooks[0].command).toBe("my-formatter run");
+    expect(postToolEntries[1].matcher).toBe("Bash");
+    expect(postToolEntries[1].hooks[0].command).toContain("adit-hook");
 
     // ADIT hooks should also be present
-    expect(hooks.SessionStart).toBeDefined();
+    expect(hooks.SessionStart).toBeUndefined();
     expect(hooks.Stop).toBeDefined();
   });
 
@@ -364,6 +485,12 @@ describe("Claude Code Hook Chaining", () => {
         StopFailure: [
           { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook stop" }] },
         ],
+        PreToolUse: [
+          { matcher: "Bash", hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook pre-tool-use" }] },
+        ],
+        PostToolUse: [
+          { matcher: "Bash", hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook post-tool-use" }] },
+        ],
         SessionStart: [
           { hooks: [{ type: "command", command: "CLAUDE_CODE=1 npx adit-hook session-start" }] },
         ],
@@ -395,6 +522,21 @@ describe("Claude Code Hook Chaining", () => {
     expect(hookCheck?.detail).toContain("Stale ADIT hooks");
     expect(hookCheck?.detail).toContain("re-run `adit init`");
     expect(hookCheck?.detail).not.toContain("Missing hooks");
+  });
+
+  it("validateInstallation reports an install that predates Bash snapshots as missing hooks", async () => {
+    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+    const settings = readSettings(projectRoot);
+    const hooks = settings.hooks as Record<string, unknown[]>;
+    delete hooks.PreToolUse;
+    delete hooks.PostToolUse;
+    writeSettings(projectRoot, settings);
+
+    const result = await claudeCodeAdapter.validateInstallation(projectRoot);
+
+    const hookCheck = result.checks.find((c) => c.name === "Hook configuration");
+    expect(hookCheck?.ok).toBe(false);
+    expect(hookCheck?.detail).toContain("Missing hooks: PreToolUse, PostToolUse");
   });
 
   it("validateInstallation hints at a moved project when the pinned root differs", async () => {

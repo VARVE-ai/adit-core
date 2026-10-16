@@ -15,7 +15,7 @@ import {
   closeDatabase,
   getEnvSnapshotById,
   getEventsBySession,
-  getActiveSession,
+  getLatestSession,
   getSessionById,
   parseLabels,
   parseDiffStats,
@@ -23,15 +23,14 @@ import {
 } from "@varveai/adit-core";
 import { loadInitializedProjectConfig } from "./project-initialization.js";
 import { createTimelineManager } from "@varveai/adit-engine";
+import { strong } from "./cli-style.js";
+import { resolveLocalIdOrReport } from "./local-ids.js";
 
 /** `adit export <id>` — export a single event bundle */
 export async function exportCommand(
   eventId: string,
   opts: {
-    format?: string;
     output?: string;
-    includeDiffs?: boolean;
-    includeEnv?: boolean;
   },
 ): Promise<void> {
   const config = loadInitializedProjectConfig("adit export");
@@ -40,13 +39,16 @@ export async function exportCommand(
   const timeline = createTimelineManager(db, config);
 
   try {
-    const event = await timeline.get(eventId);
+    // Accepts the 10-character prefix other commands print.
+    const id = resolveLocalIdOrReport(db, "events", eventId, "export event", `find IDs with ${strong("adit timeline")}`);
+    if (!id) return;
+    const event = await timeline.get(id);
     if (!event) {
       console.error(`Event not found: ${eventId}`);
       process.exit(1);
     }
 
-    const diff = await timeline.getDiff(eventId);
+    const diff = await timeline.getDiff(event.id);
     const envSnapshot = event.envSnapshotId
       ? getEnvSnapshotById(db, event.envSnapshotId)
       : null;
@@ -85,10 +87,16 @@ export async function exportSessionCommand(
 
   try {
     let sid = sessionId;
+    if (sid) {
+      // Accepts the 10-character prefix other commands print.
+      const resolved = resolveLocalIdOrReport(db, "sessions", sid, "export session", `find the session ID with ${strong("adit status")} or ${strong("adit show <event-id>")}`);
+      if (!resolved) return;
+      sid = resolved;
+    }
     if (!sid) {
-      const session = getActiveSession(db, config.projectId, config.clientId);
+      const session = getLatestSession(db, config.projectId, config.clientId);
       if (!session) {
-        console.error("No active session. Provide a session ID.");
+        console.error("No sessions found. Provide a session ID.");
         process.exit(1);
       }
       sid = session.id;
@@ -115,7 +123,7 @@ export async function exportSessionCommand(
     const format = opts?.format ?? "json";
 
     if (format === "markdown") {
-      const md = generateMarkdownReport(session, events, timeline, db, opts);
+      const md = generateMarkdownReport(session, events);
       await outputResult(md, opts?.output, opts?.gzip);
     } else if (format === "jsonl") {
       const lines: string[] = [];
@@ -125,8 +133,7 @@ export async function exportSessionCommand(
         id: session.id,
         platform: session.platform,
         startedAt: session.startedAt,
-        endedAt: session.endedAt,
-        status: session.status,
+        lastActivityAt: events.at(-1)?.startedAt ?? session.startedAt,
       }));
 
       for (const event of events) {
@@ -150,8 +157,7 @@ export async function exportSessionCommand(
           id: session.id,
           platform: session.platform,
           startedAt: session.startedAt,
-          endedAt: session.endedAt,
-          status: session.status,
+          lastActivityAt: events.at(-1)?.startedAt ?? session.startedAt,
         },
         events: events.map((e) => buildEventBundle(e, undefined, null)),
         eventCount: events.length,
@@ -187,7 +193,6 @@ function buildEventBundle(
       status: event.status,
       gitBranch: event.gitBranch,
       gitHeadSha: event.gitHeadSha,
-      checkpointSha: event.checkpointSha,
       labels: parseLabels(event.labelsJson),
       fileStats: parseDiffStats(event.diffStatJson),
     },
@@ -217,11 +222,8 @@ function buildEventBundle(
 }
 
 function generateMarkdownReport(
-  session: { id: string; platform: string; startedAt: string; endedAt: string | null; status: string },
+  session: { id: string; platform: string; startedAt: string },
   events: AditEvent[],
-  _timeline: unknown,
-  _db: unknown,
-  _opts?: { includeDiffs?: boolean; includeEnv?: boolean },
 ): string {
   const lines: string[] = [];
   lines.push(`# ADIT Session Export`);
@@ -229,8 +231,7 @@ function generateMarkdownReport(
   lines.push(`- **Session**: ${session.id}`);
   lines.push(`- **Platform**: ${session.platform}`);
   lines.push(`- **Started**: ${session.startedAt}`);
-  lines.push(`- **Ended**: ${session.endedAt ?? "(active)"}`);
-  lines.push(`- **Status**: ${session.status}`);
+  lines.push(`- **Last activity**: ${events.at(-1)?.startedAt ?? session.startedAt}`);
   lines.push(`- **Events**: ${events.length}`);
   lines.push("");
   lines.push("## Timeline");
@@ -239,8 +240,7 @@ function generateMarkdownReport(
   for (const event of events) {
     const time = event.startedAt.substring(5, 19).replace("T", " ");
     const actor = event.actor[0].toUpperCase();
-    const checkpoint = event.checkpointSha ? " [checkpoint]" : "";
-    lines.push(`### ${time} [${actor}] ${event.eventType}${checkpoint}`);
+    lines.push(`### ${time} [${actor}] ${event.eventType}`);
     lines.push("");
 
     if (event.promptText) {

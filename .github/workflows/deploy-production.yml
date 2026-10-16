@@ -109,7 +109,6 @@ jobs:
             "packages/hooks/package.json",
             "packages/cli/package.json",
             "packages/cloud/package.json",
-            "packages/plans/package.json",
           ];
           for (const path of packageJsonPaths) {
             console.log(JSON.parse(readFileSync(path, "utf8")).name);
@@ -143,7 +142,6 @@ jobs:
             "@varveai/adit-hooks",
             "@varveai/adit-cli",
             "@varveai/adit-cloud",
-            "@varveai/adit-plans",
           ]);
           const packageJsonPaths = [
             "packages/core/package.json",
@@ -151,7 +149,6 @@ jobs:
             "packages/hooks/package.json",
             "packages/cli/package.json",
             "packages/cloud/package.json",
-            "packages/plans/package.json",
           ];
 
           for (const path of packageJsonPaths) {

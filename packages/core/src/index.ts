@@ -16,40 +16,42 @@ export type {
 } from "./types/index.js";
 export { parseLabels, parseDiffStats, parseError } from "./types/index.js";
 
+// Cloud server identity
+export { normalizeServerUrl } from "./server-url.js";
+
 export type {
-  SessionStatus,
   Platform,
   SessionType,
   SessionMetadata,
   AditSession,
 } from "./types/index.js";
 
-export type {
-  PlanType,
-  PlanStatus,
-  AditPlan,
-} from "./types/index.js";
-
 export type { EnvSnapshot, EnvDiff, EnvChange } from "./types/index.js";
 
 // Database
+export { normalizeUsage, sanitizeUsage } from "./usage.js";
+export type { TokenUsageRecord } from "./usage.js";
+export { readTokenCaptureState, readSessionUsageRecords, storeSessionUsage, attachPendingTokenUsage, eventUsageFromRow, summarizeEventUsage } from "./db/event-token-usage.js";
+export type { EventTokenUsage } from "./db/event-token-usage.js";
+
 export {
   openDatabase,
   closeDatabase,
   insertSession,
   getSessionById,
-  getActiveSession,
+  getLatestSession,
   getSessionByPlatformSessionId,
-  reviveSession,
-  mergeSessionMetadata,
-  endSession,
-  endStaleSessions,
+  insertSessionPlatformAlias,
+  listSessionPlatformAliases,
+  listRecentSessions,
+  mergeSessionInto,
   listSessions,
   insertEvent,
   insertEventAutoSeq,
   getEventById,
   queryEvents,
   getEventsBySession,
+  getLastEventOfSession,
   updateEventStatus,
   updateEventLabels,
   searchEvents,
@@ -59,12 +61,6 @@ export {
   insertDiff,
   getDiffByEventId,
   getDiffText,
-  insertPlan,
-  getPlanById,
-  listPlans,
-  getChildPlans,
-  updatePlanStatus,
-  updatePlanContent,
   insertEnvSnapshot,
   getEnvSnapshotById,
   getLatestEnvSnapshot,
@@ -73,16 +69,6 @@ export {
   upsertSyncState,
   applyAuthoritativeSyncState,
   clearSyncState,
-  upsertTranscriptUpload,
-  getTranscriptUpload,
-  getTranscriptUploadById,
-  listPendingTranscriptUploads,
-  markTranscriptUploaded,
-  markTranscriptUploadFailed,
-  resetTranscriptUpload,
-  countActiveTranscriptUploads,
-  getSessionRepoHeads,
-  upsertSessionRepoHead,
 } from "./db/index.js";
 
 export type {
@@ -90,13 +76,8 @@ export type {
   InsertEventInput,
   EventQueryOptions,
   DiffRecord,
-  CreatePlanInput,
   CreateEnvSnapshotInput,
   SyncState,
-  TranscriptUpload,
-  TranscriptUploadStatus,
-  UpsertTranscriptUploadInput,
-  SessionRepoHead,
 } from "./db/index.js";
 
 // Config
@@ -114,6 +95,7 @@ export {
   projectManifestPath,
   workspaceManifestRelativePath,
   generateProjectId,
+  generateRepositoryId,
   computeRepoProjectId,
   computeLocalRepositoryId,
   readProjectManifest,
@@ -121,11 +103,18 @@ export {
   writeProjectManifest,
   withProjectInitLock,
   findProjectManifestRoot,
+  findRegisteringParent,
   resolveManifestRepositories,
+  resolveActiveManifestRepositories,
   hasLegacyProjectTraces,
   readWorkspaceManifest,
   discoverWorkspaceRepositories,
+  computeRepositoryDrift,
   toRepositoryPayload,
+  deriveProjectType,
+  isRootRepositoryPath,
+  toCurrentManifestSchema,
+  MANIFEST_SCHEMA_VERSION,
   ProjectManifestError,
   ProjectInitLockError,
   type ProjectManifest,
@@ -148,6 +137,8 @@ export {
   type PerfOperationStats,
   type PerfStatsReport,
 } from "./perf/perf-log.js";
+
+export { recordAgentRuntime, readAgentRuntimeVersions } from "./config/runtime-agents.js";
 
 // Sync primitives
 export {

@@ -19,6 +19,7 @@ import type {
 } from "../types.js";
 import {
   CodexAppServerClient,
+  CodexAppServerExitError,
   type CodexJsonRpcMessage,
 } from "./codex-app-server-client.js";
 import {
@@ -56,6 +57,8 @@ import {
   buildQuestionResponse,
 } from "./requests.js";
 import { stopLocalCodexProcess } from "./terminal.js";
+import { hasCodexRolloutHistory } from "./local-rollout.js";
+import { codexRestartArgs } from "./local-cli-args.js";
 import { applyReclaimInput } from "../reclaim-input.js";
 import {
   RECLAIM_COMMAND,
@@ -75,7 +78,6 @@ import {
 } from "./usage.js";
 import { emitCodexThreadItem } from "./thread-items.js";
 export { promptInputForCodexMode, codexThreadModeOverrides, codexTurnModeOverrides } from "./input-mode.js";
-export type { CodexPromptMode } from "./input-mode.js";
 export { normalizeReclaimInput as normalizeCodexReclaimInput } from "../reclaim-input.js";
 import { killCliProcessTree, spawnCliProcess } from "../cli-process.js";
 import {
@@ -145,6 +147,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private reasoningEffortBySession = new Map<string, string>();
   private promptQueue: PendingPrompt[] = [];
   private promptActive = false;
+  private readonly reportedAppServerErrors = new WeakSet<Error>();
   private activeTurnId: string | null = null;
   private activeTurnErrorNotice: { turnId: string; message: string | null } | null = null;
   private activePromptMode: CodexPromptMode | null = null;
@@ -166,6 +169,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   private codexSkills: Array<Record<string, unknown>> = [];
   private codexMcpServers: Array<Record<string, unknown>> = [];
   private localResumeLogWatcher: CodexResumeLogWatcher | null = null;
+  private localRelease: Promise<void> | null = null;
   private localModelConfigWatcher: CodexModelConfigWatcher | null = null;
   private readonly notices: RelayNotices;
 
@@ -270,6 +274,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   }
 
   async takeover(): Promise<void> {
+    this.assertNoLocalHandoff();
     if (this.ownerValue === "web") {
       await this.hydrateAppServerCapabilities();
       return;
@@ -357,36 +362,56 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.attachReclaimInput();
   }
 
-  async releaseToLocal(): Promise<void> {
-    if (this.ownerValue !== "web") return;
+  releaseToLocal(): Promise<void> {
+    if (this.localRelease) return this.localRelease;
+    if (this.ownerValue !== "web") return Promise.resolve();
+    this.localRelease = this.releaseWebControlToLocal().finally(() => {
+      this.localRelease = null;
+    });
+    return this.localRelease;
+  }
+
+  private async releaseWebControlToLocal(): Promise<void> {
     this.detachReclaimInput();
     this.notices.releasingToLocal();
-    await this.finishActiveRunAsAborted({
-      errorMessage: "Web control released to local CLI",
-      eventMessage: "Web control released to local CLI.",
-      collaborationErrorCode: "LOCAL_TAKEOVER_DURING_RUN",
-      interruptTurn: true,
-    });
-    this.appServer?.stop();
-    this.appServer = null;
-    this.loadedThreadIds = new Set<string>();
-    this.emptyThreadIds = new Set<string>();
-    const resumeId = this.pickLocalResumeSessionId();
-    if (resumeId) {
+    const currentSessionId = this.activeSessionId ?? this.resumeSessionId ?? this.sdkSessionId;
+    try {
+      await this.finishActiveRunAsAborted({
+        errorMessage: "Web control released to local CLI",
+        eventMessage: "Web control released to local CLI.",
+        collaborationErrorCode: "LOCAL_TAKEOVER_DURING_RUN",
+        interruptTurn: true,
+      });
+      const resumeId = await this.pickLocalResumeSessionId(currentSessionId);
+      if (this.ownerValue !== "web") return;
+      this.notices.debug(`Local handoff: session=${currentSessionId ?? "none"}, resume=${resumeId ?? "empty"}`);
+      await this.appServer?.stopAndWait();
+      if (this.ownerValue !== "web") return;
+      this.appServer = null;
+      this.loadedThreadIds = new Set<string>();
+      this.emptyThreadIds = new Set<string>();
       this.activeSessionId = resumeId;
       this.resumeSessionId = resumeId;
       this.sdkSessionId = resumeId;
       this.applyStoredUsageForSession(resumeId);
-    } else {
-      this.activeSessionId = null;
-      this.resumeSessionId = null;
-      this.sdkSessionId = null;
-      this.applyStoredUsageForSession(null);
+      this.notices.debug(`Local handoff: app-server exited; launching ${resumeId ? `resume ${resumeId}` : "empty session"}`);
+      this.startLocal(resumeId ? ["resume", resumeId] : []);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.notices.debug(`Local handoff failed: session=${currentSessionId ?? "none"}: ${message}`);
+      this.pushEvent("error", {
+        title: "Could not return Codex to local control",
+        message,
+        sessionId: currentSessionId ?? undefined,
+        createdAt: Date.now(),
+      });
+      if (this.ownerValue === "web") this.attachReclaimInput();
+      throw error;
     }
-    this.startLocal(resumeId ? ["resume", resumeId] : []);
   }
 
   async startNewSession(pendingSessionId?: string | null): Promise<void> {
+    this.assertNoLocalHandoff();
     if (this.ownerValue !== "web") {
       throw Object.assign(new Error("Web has not taken over this Codex session"), {
         statusCode: 409,
@@ -410,6 +435,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   }
 
   async switchSession(sessionId: string): Promise<void> {
+    this.assertNoLocalHandoff();
     if (!sessionId.trim()) {
       throw Object.assign(new Error("Codex session not found for this project"), {
         statusCode: 404,
@@ -443,7 +469,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       });
       await this.ensureAppServer();
       if (this.loadedThreadIds.has(sessionId)) {
-        this.noteThread({ id: sessionId }, null);
+        this.noteThread({ id: sessionId }, null, { markLocalResumable: true });
       } else {
         await this.resumeThread(sessionId);
       }
@@ -469,6 +495,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       sessionId?: string | null;
     } = {},
   ): Promise<void> {
+    this.assertNoLocalHandoff();
     if (this.ownerValue !== "web") {
       throw Object.assign(new Error("Web has not taken over this Codex session"), {
         statusCode: 409,
@@ -593,6 +620,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
   }
 
   async handleSlashCommand(command: CliSlashCommand): Promise<void> {
+    this.assertNoLocalHandoff();
     const name = command.name.trim().replace(/^\//, "").toLowerCase();
     if (!name) return;
     const pendingSessionId =
@@ -871,7 +899,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.emitState();
   }
 
-  private startLocal(extraArgs: string[] = []): void {
+  private startLocal(extraArgs?: string[]): void {
     this.stopLocalResumeLogWatcher();
     this.stopLocalModelConfigWatcher();
     this.detachReclaimInput();
@@ -883,7 +911,10 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     this.appServer?.stop();
     this.appServer = null;
     const resumeLogWatermark = readMaxCodexLogId();
-    const child = spawnCliProcess(this.opts.bin, [...extraArgs, ...this.opts.args], {
+    const args = extraArgs === undefined
+      ? this.opts.args
+      : [...extraArgs, ...codexRestartArgs(this.opts.args)];
+    const child = spawnCliProcess(this.opts.bin, args, {
       cwd: this.opts.cwd,
       env: this.buildEnv(),
       stdio: "inherit",
@@ -899,6 +930,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
 
     child.on("error", (error) => {
       this.pushEvent("error", {
+        title: "Codex failed to start",
         message: error.message,
         sessionId: this.activeSessionId ?? this.resumeSessionId ?? undefined,
         createdAt: Date.now(),
@@ -936,6 +968,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     afterLogId = readMaxCodexLogId(),
   ): void {
     this.localResumeLogWatcher = startCodexResumeLogWatcher({
+      processId: child.pid,
       cwd: this.opts.cwd,
       afterLogId,
       onResume: (threadId) => {
@@ -983,6 +1016,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       );
       item.reject(error);
       this.pushEvent("error", {
+        title: "Codex prompt cancelled",
         message: error.message,
         sessionId: item.targetSessionId,
         createdAt: Date.now(),
@@ -1053,16 +1087,20 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
         await this.collaboration.releaseContext(contextClaim);
       }
       this.activePromptMode = null;
-      item.reject(error instanceof Error ? error : new Error(String(error)));
-      this.pushEvent("error", {
-        message: error instanceof Error ? error.message : String(error),
-        sessionId: item.targetSessionId ??
-          item.pendingSessionId ??
-          this.activeSessionId ??
-          this.resumeSessionId ??
-          undefined,
-        createdAt: Date.now(),
-      });
+      const promptError = error instanceof Error ? error : new Error(String(error));
+      item.reject(promptError);
+      if (!this.reportedAppServerErrors.has(promptError)) {
+        this.pushEvent("error", {
+          title: "Codex operation failed",
+          message: promptError.message,
+          sessionId: item.targetSessionId ??
+            item.pendingSessionId ??
+            this.activeSessionId ??
+            this.resumeSessionId ??
+            undefined,
+          createdAt: Date.now(),
+        });
+      }
     } finally {
       this.promptActive = false;
     }
@@ -1098,8 +1136,23 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
       onNotification: (message) => this.handleAppNotification(message),
       onServerRequest: (message) => this.handleAppServerRequest(message),
       onError: (error) => {
+        this.reportedAppServerErrors.add(error);
+        if (error instanceof CodexAppServerExitError) {
+          for (const line of error.diagnostics) {
+            this.notices.debug(`[codex app-server] ${line}`);
+          }
+        } else {
+          this.notices.debug(`Codex app-server failure: ${error.message}`);
+        }
         this.pushEvent("error", {
-          message: error.message,
+          title: error instanceof CodexAppServerExitError
+            ? "Codex connection interrupted"
+            : "Codex background service failed",
+          message: error instanceof CodexAppServerExitError
+            ? `Codex background service exited unexpectedly. Retry the Web action, or type ${RECLAIM_COMMAND} here to return control to the local Codex.`
+            : this.ownerValue === "web"
+              ? `Codex background service encountered an error: ${error.message}. Retry the Web action, or type ${RECLAIM_COMMAND} here to return control to the local Codex.`
+              : `Codex background service could not start: ${error.message}. Local Codex keeps control.`,
           sessionId: this.activeSessionId ?? this.resumeSessionId ?? undefined,
           createdAt: Date.now(),
         });
@@ -1213,6 +1266,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
         if (!message) return;
       }
       this.pushEvent("error", {
+        title: "Codex operation failed",
         message: message ?? "Codex app-server error",
         sessionId: threadId ??
           this.activeSessionId ??
@@ -1284,6 +1338,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
         const alreadyReported = noticeMatchesTurn && notice?.message === message;
         if (!alreadyReported) {
           this.pushEvent("error", {
+            title: "Codex operation failed",
             message,
             sessionId: threadId ?? this.activeSessionId ?? this.resumeSessionId ?? undefined,
             createdAt: Date.now(),
@@ -1784,17 +1839,27 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     return this.activeSessionId ?? this.resumeSessionId ?? this.sdkSessionId;
   }
 
-  private pickLocalResumeSessionId(): string | null {
-    const seen = new Set<string>();
-    for (const id of [this.resumeSessionId, this.activeSessionId, this.sdkSessionId]) {
-      const sessionId = readString(id);
-      if (!sessionId || seen.has(sessionId)) continue;
-      seen.add(sessionId);
-      if (isCodexThreadSavedForCwd({ cwd: this.opts.cwd, threadId: sessionId })) {
-        return sessionId;
-      }
+  private async pickLocalResumeSessionId(sessionId: string | null): Promise<string | null> {
+    if (!sessionId) return null;
+    // The live Web thread is authoritative; an auxiliary index cannot replace it.
+    if (this.loadedThreadIds.has(sessionId) && !this.emptyThreadIds.has(sessionId)) {
+      return sessionId;
     }
-    return null;
+    if (isCodexThreadSavedForCwd({
+      cwd: this.opts.cwd,
+      threadId: sessionId,
+      onDiagnostic: (message) => this.notices.debug(`Local handoff ${sessionId}: ${message}`),
+    }) || await hasCodexRolloutHistory(this.opts.cwd, sessionId)) return sessionId;
+    if (this.emptyThreadIds.has(sessionId)) return null;
+    throw new Error(`Cannot verify history for Codex session ${sessionId}. The session ID was preserved; retry /local after restoring its rollout.`);
+  }
+
+  private assertNoLocalHandoff(): void {
+    if (this.localRelease) {
+      throw Object.assign(new Error("Codex is returning to local control. Retry after the handoff completes."), {
+        statusCode: 409,
+      });
+    }
   }
 
   private applyStoredUsageForSession(sessionId: string | null): void {
@@ -1811,7 +1876,11 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
 
   private pushEvent(type: string, payload: Record<string, unknown>): void {
     if (type === "error" && this.ownerValue === "web") {
-      writeCliAgentErrorToTerminal("adit codex", payload);
+      writeCliAgentErrorToTerminal(
+        "adit codex",
+        payload,
+        (message) => this.notices.debug(message),
+      );
     }
     this.opts.onEvent?.({ type, payload });
   }
@@ -2093,7 +2162,7 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     }
     if (update.submittedLines.some((line) => line.trim() === RECLAIM_COMMAND)) {
       this.reclaimBuffer = "";
-      void this.releaseToLocal();
+      void this.releaseToLocal().catch(() => {});
       return;
     }
     if (update.submittedLines.length > 0) {

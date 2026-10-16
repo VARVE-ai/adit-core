@@ -13,6 +13,13 @@ export interface GitBranch {
   isDefault: boolean;
 }
 
+/** Authoritative branch snapshot read directly from the configured Git remote. */
+export interface RemoteBranchSnapshot {
+  branches: GitBranch[];
+  /** Stable hash of sorted branch names and heads, used to avoid redundant uploads. */
+  fingerprint: string;
+}
+
 export interface GitCommit {
   sha: string;
   parentSha: string | null;
@@ -63,11 +70,17 @@ export interface ProjectLinkCache {
   serverUrl: string;
   /** Effective cloud project ID returned by the server, for display/debug only. */
   confirmedProjectId: string | null;
-  lastCommitSha: string | null;
+  /** Last successfully uploaded branch heads, keyed by normalized branch name. */
+  gitRefHeads: Record<string, string>;
+  /** Fingerprint of all local and remote-tracking refs at the last successful git sync. */
+  gitRefsFingerprint: string | null;
+  /** Fingerprint of the last authoritative origin branch snapshot uploaded to Cloud. */
+  remoteRefsFingerprint: string | null;
+  /** Last successful read of origin branches, whether or not an upload was needed. */
+  lastRemoteBranchCheckAt: string | null;
   lastBranchSyncAt: string | null;
   lastDocSyncAt: string | null;
   docHashes: Record<string, string>; // sourcePath → contentHash
-  qualified: boolean;
   initializedAt: string;
   updatedAt: string;
 }
@@ -102,9 +115,9 @@ export interface LinkInitResponse {
     gitAuthorName: string | null;
     gitAuthorEmail: string | null;
     branchCount: number;
-    qualified: boolean;
     lastGitSyncAt: string | null;
     lastDocSyncAt: string | null;
+    remoteBranchesCheckedAt?: string | null;
     createdAt: string;
   };
   status: "created" | "updated";
@@ -138,133 +151,12 @@ export interface DocumentUploadResponse {
   };
 }
 
-export interface QualifyDocumentDetail {
-  fileName: string;
-  detectedType: string;
-  structuralScore: number;
-  missingSections: string[];
-  hasStubContent: boolean;
-}
-
-export interface QualifyResponse {
-  qualified: boolean;
-  score: number;
-  documentCount: number;
-  documentDetails?: QualifyDocumentDetail[];
-  feedback: {
-    missing: string[];
-    suggestions: string[];
-    summaryPrompt: string;
-  } | null;
-}
-
-export interface LinkStatusResponse {
-  projectLink: {
-    id: string;
-    projectId: string;
-    remoteUrl: string;
-    canonicalRepoKey?: string | null;
-    defaultBranch: string | null;
-    qualified: boolean;
-    lastGitSyncAt: string | null;
-    lastDocSyncAt: string | null;
-    createdAt: string;
-  };
-  branchCount: number;
-  commitCount: number;
-  latestCommitSha: string | null;
-  latestCommitDate: string | null;
-  documentCount: number;
-  documents: Array<{
-    fileName: string;
-    contentHash: string;
-    updatedAt: string;
-  }>;
-}
-
-// ─── Intent Types ──────────────────────────────────────────
-
-export interface IntentSummary {
-  id: string;
-  title: string;
-  businessGoal: string;
-  state: string;
-  ambiguityScore: number | null;
-  linkedBranches: string[];
-  taskCount: number;
-  completedTaskCount: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface IntentDetail extends IntentSummary {
-  acceptanceMd: string | null;
-  antiGoals: string | null;
-  clarityScores: {
-    goal: number;
-    constraints: number;
-    criteria: number;
-    context: number;
-  } | null;
-  tasks: TaskSlice[];
-  plans: PromptVersion[];
-  recentShipNotes: Array<{
-    id: string;
-    noteBody: string;
-    createdBy: string;
-    architecturalDecision: boolean;
-    createdAt: string;
-  }>;
-}
-
-export interface TaskSlice {
-  id: string;
-  title: string;
-  description: string | null;
-  phase: number;
-  phaseTitle: string | null;
-  phaseChecklist: Array<{ item: string; checked: boolean }>;
-  sortOrder: number;
-  wave: number | null;
-  complexityScore: number | null;
-  approvalStatus: string;
-  featureTag: string | null;
-  acceptanceCriteria: {
-    criteria: string[];
-    assertions: Array<{
-      type: string;
-      description: string;
-      path?: string;
-    }>;
-  };
-  linkedEventIds: string[];
-  dependsOn: number[];
-  codingPrompt: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface PromptVersion {
-  version: number;
-  versionType: string;
-  promptText: string | null;
-  responsePayload: string;
-  llmModel: string | null;
-  llmParamsJson: string | null;
-  sourceEventId: string | null;
-  gatekeeperVerdict: string | null;
-  gatekeeperReport: string | null;
-  parentVersionId: string | null;
-  createdAt: string;
-}
-
 // ─── Command Options ───────────────────────────────────────
 
 export interface LinkOptions {
   force?: boolean;
   skipDocs?: boolean;
   skipCommits?: boolean;
-  skipQualify?: boolean;
   dryRun?: boolean;
   json?: boolean;
   /**
@@ -273,14 +165,19 @@ export interface LinkOptions {
    * failures are wrapped in LinkStepError so the failing step is named.
    */
   silent?: boolean;
+  /** Internal: the CLI already refreshed deletion policy before local prechecks. */
+  deletionPolicyRefreshed?: boolean;
   /** Invoked as each link step completes (per repository in workspaces). */
   onStepComplete?: (step: StepTiming) => void;
-}
-
-export interface IntentOptions {
-  id?: string;
-  state?: string;
-  json?: boolean;
+  /** Invoked when a repository starts linking, so callers can show progress. */
+  onRepositoryStart?: (progress: { index: number; total: number; relativePath: string }) => void;
+  /** Invoked when a repository finished linking, with its counts or its failure. */
+  onRepositoryDone?: (progress: {
+    index: number;
+    total: number;
+    result?: WorkspaceRepositoryResult;
+    failure?: WorkspaceRepositoryFailure;
+  }) => void;
 }
 
 // ─── Step Timing ───────────────────────────────────────────
@@ -311,19 +208,6 @@ export interface LinkResult {
   branchCount: number;
   commitCount: number;
   documentCount: number;
-  qualified: boolean;
-  score: number | null;
-  lowScoreDocumentCount?: number;
-  stubDocumentCount?: number;
-  lowestScoringDocuments?: Array<{
-    fileName: string;
-    score: number;
-    detectedType: string;
-  }>;
-  missingItems?: string[];
-  suggestions?: string[];
-  qualityFeedback?: string | null;
-  summaryPrompt?: string | null;
   /** Per-step timing breakdown */
   stepTimings: StepTiming[];
   /** Total wall-clock duration in milliseconds */
@@ -342,19 +226,6 @@ export interface WorkspaceRepositoryResult {
   branchCount: number;
   commitCount: number;
   documentCount: number;
-  qualified: boolean;
-  score: number | null;
-  lowScoreDocumentCount?: number;
-  stubDocumentCount?: number;
-  lowestScoringDocuments?: Array<{
-    fileName: string;
-    score: number;
-    detectedType: string;
-  }>;
-  missingItems?: string[];
-  suggestions?: string[];
-  qualityFeedback?: string | null;
-  summaryPrompt?: string | null;
   totalDurationMs: number;
 }
 
@@ -365,60 +236,4 @@ export interface WorkspaceRepositoryFailure {
   message: string;
   status?: number;
   response?: unknown;
-}
-
-export interface IntentResult {
-  intents?: IntentSummary[];
-  intent?: IntentDetail;
-}
-
-// ─── Bulk Task Update Types ─────────────────────────────────
-
-export interface BulkTaskFilter {
-  /** Filter by phase number (1-99) */
-  phase?: number;
-  /** Filter by task status */
-  status?: "pending" | "approved" | "in_progress" | "completed" | "rejected";
-  /** Filter by feature tag */
-  featureTag?: string;
-  /** Filter by wave number */
-  wave?: number;
-}
-
-export interface BulkTaskUpdate {
-  /** Task ID to update — must be "*" for phase/intent level operations */
-  taskId: string;
-  /** New status for the task */
-  status: "pending" | "approved" | "in_progress" | "completed" | "rejected";
-  /** Optional phase number */
-  phase?: number;
-  /** Optional title update */
-  title?: string;
-  /** Optional description update */
-  description?: string;
-}
-
-export interface BulkTaskUpdateOptions {
-  /** Intent ID containing the tasks to update */
-  intentId: string;
-  /** Target status (default: "completed") */
-  status?: "pending" | "approved" | "in_progress" | "completed" | "rejected";
-  /** Filters to apply before updating */
-  filters?: BulkTaskFilter;
-  /** Output as JSON */
-  json?: boolean;
-}
-
-export interface BulkTaskUpdateResult {
-  /** Number of tasks successfully updated */
-  updated: number;
-  /** Array of failed updates with error details */
-  failed: Array<{
-    taskId: string;
-    error: string;
-  }>;
-  /** Summary message */
-  message: string;
-  /** Intent state transition if triggered */
-  intentTransitioned?: "shipped" | null;
 }

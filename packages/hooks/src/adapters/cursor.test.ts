@@ -1,7 +1,7 @@
 /**
  * Tests for Cursor adapter.
  *
- * Validates hook generation in Cursor's native flat format,
+ * Validates shared hook generation and legacy Cursor migration,
  * install/uninstall chaining, and stdin field mapping.
  */
 
@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { cursorAdapter, extractLastAssistantMessage } from "./cursor.js";
+import { claudeCodeAdapter } from "./claude-code.js";
 
 /** Create a unique temp directory for each test */
 function tempProjectRoot(): string {
@@ -19,15 +20,11 @@ function tempProjectRoot(): string {
   return dir;
 }
 
-function readHooks(projectRoot: string): Record<string, unknown> {
-  const hooksPath = join(projectRoot, ".cursor", "hooks.json");
-  const config = JSON.parse(readFileSync(hooksPath, "utf-8"));
-  return config.hooks ?? config;
-}
-
-function readFullConfig(projectRoot: string): Record<string, unknown> {
-  const hooksPath = join(projectRoot, ".cursor", "hooks.json");
-  return JSON.parse(readFileSync(hooksPath, "utf-8"));
+function readSharedConfig(projectRoot: string): {
+  hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+  permissions?: { allow: string[] };
+} {
+  return JSON.parse(readFileSync(join(projectRoot, ".claude", "settings.local.json"), "utf8"));
 }
 
 function writeHooks(projectRoot: string, hooks: Record<string, unknown>): void {
@@ -39,46 +36,37 @@ function writeHooks(projectRoot: string, hooks: Record<string, unknown>): void {
 }
 
 describe("Cursor Adapter - Hook Generation", () => {
-  it("generates hooks in Cursor's native flat format", () => {
-    const config = cursorAdapter.generateHookConfig("npx adit-hook");
-    const hooks = config.content.hooks as Record<string, unknown[]>;
-
-    // Verify event names match Cursor's native names
-    expect(hooks.beforeSubmitPrompt).toBeDefined();
-    expect(hooks.stop).toBeDefined();
-    expect(hooks.sessionStart).toBeDefined();
-    expect(hooks.sessionEnd).toBeDefined();
-    // afterAgentResponse duplicates stop-side transcript extraction
-    expect(hooks.afterAgentResponse).toBeUndefined();
-
-    // Verify flat format (no nested "hooks" array)
-    const stopEntry = hooks.stop[0] as { command: string; type: string; timeout: number };
-    expect(stopEntry.command).toBeDefined();
-    expect(stopEntry.type).toBe("command");
-    expect(stopEntry.timeout).toBe(10); // seconds, not milliseconds
-    expect(typeof stopEntry).toBe("object");
-    expect(Array.isArray((stopEntry as Record<string, unknown>).hooks)).toBe(false);
-  });
-
-  it("includes explicit platform argument in commands", () => {
-    const config = cursorAdapter.generateHookConfig("npx adit-hook", "/project");
-    const hooks = config.content.hooks as Record<string, unknown[]>;
-
-    for (const [, entries] of Object.entries(hooks)) {
-      const entry = (entries as Array<{ command: string }>)[0];
-      expect(entry.command).toContain("--platform cursor");
-      expect(entry.command).toContain("--project-root-b64");
-      expect(entry.command).not.toMatch(/^CURSOR=1 /);
-    }
-  });
-
-  it("uses correct config path", () => {
-    const config = cursorAdapter.generateHookConfig("npx adit-hook");
-    expect(config.configPath).toBe(".cursor/hooks.json");
+  it("uses the exact same configuration as Claude", () => {
+    expect(cursorAdapter.generateHookConfig("npx adit-hook", "/project"))
+      .toEqual(claudeCodeAdapter.generateHookConfig("npx adit-hook", "/project"));
+    expect(cursorAdapter.hookMappings).toBe(claudeCodeAdapter.hookMappings);
+    expect(cursorAdapter.generateHookConfig("npx adit-hook").configPath).toBe(".claude/settings.local.json");
   });
 });
 
 describe("Cursor Adapter - parseInput", () => {
+  it("normalizes Windows workspace paths returned by Cursor URI objects", () => {
+    expect(cursorAdapter.parseInput({ workspace_roots: ["/D:/workspace"] }, "prompt-submit").cwd).toBe("D:/workspace");
+    expect(cursorAdapter.parseInput({ workspace_roots: ["/workspace"] }, "prompt-submit").cwd).toBe("/workspace");
+  });
+
+  it.each(["pre-tool-use", "post-tool-use"])("normalizes Cursor Shell data for %s snapshots", (hookType) => {
+    const input = cursorAdapter.parseInput({
+      conversation_id: "conversation", generation_id: "generation",
+      tool_name: "Shell", tool_use_id: "call-1", tool_input: { command: "echo hi > file.md" },
+      tool_output: { exit_code: 0 },
+    }, hookType);
+    expect(input).toMatchObject({
+      platformCli: "cursor", platformSessionId: "conversation", turnId: "generation",
+      toolName: "Bash", toolUseId: "call-1", toolInput: { command: "echo hi > file.md" },
+      toolOutput: { exit_code: 0 },
+    });
+  });
+
+  it("does not fabricate tool IDs from the generation ID", () => {
+    const input = cursorAdapter.parseInput({ generation_id: "generation", tool_name: "Shell" }, "pre-tool-use");
+    expect(input.toolUseId).toBeUndefined();
+  });
   it("maps Cursor stdin fields to NormalizedHookInput", () => {
     const raw = {
       conversation_id: "conv-123",
@@ -96,37 +84,9 @@ describe("Cursor Adapter - parseInput", () => {
     expect(input.cwd).toBe("/path/to/project");
     expect(input.platformSessionId).toBe("conv-123");
     expect(input.transcriptPath).toBe("/path/to/transcript.jsonl");
-    expect(input.model).toBe("claude-sonnet-4-6");
     expect(input.platformCli).toBe("cursor");
     expect(input.hookType).toBe("prompt-submit");
     expect(input.rawPlatformData).toBe(raw);
-  });
-
-  it("uses session_id when conversation_id is absent (sessionStart/sessionEnd)", () => {
-    const raw = {
-      session_id: "sess-789",
-      is_background_agent: false,
-      composer_mode: "agent",
-      model: "claude-sonnet-4-6",
-    };
-
-    const input = cursorAdapter.parseInput(raw, "session-start");
-
-    expect(input.platformSessionId).toBe("sess-789");
-    expect(input.sessionSource).toBe("agent");
-  });
-
-  it("maps sessionEnd reason field", () => {
-    const raw = {
-      session_id: "sess-789",
-      reason: "completed",
-      duration_ms: 5000,
-      final_status: "success",
-    };
-
-    const input = cursorAdapter.parseInput(raw, "session-end");
-
-    expect(input.sessionEndReason).toBe("completed");
   });
 
   it("falls back to CURSOR_PROJECT_DIR env when workspace_roots is absent", () => {
@@ -162,309 +122,114 @@ describe("Cursor Adapter - parseInput", () => {
   });
 });
 
-describe("Cursor Hook Chaining (install/uninstall)", () => {
+describe("Cursor shared hooks and legacy migration", () => {
   let projectRoot: string;
 
-  beforeEach(() => {
-    projectRoot = tempProjectRoot();
-  });
+  beforeEach(() => { projectRoot = tempProjectRoot(); });
+  afterEach(() => { rmSync(projectRoot, { recursive: true, force: true }); });
 
-  afterEach(() => {
-    try {
-      rmSync(projectRoot, { recursive: true, force: true });
-    } catch { /* best-effort */ }
-  });
-
-  it("installs hooks into an empty project (no existing hooks)", async () => {
+  it("installs the shared hooks without creating a Cursor hooks file", async () => {
     await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
-
-    const hooks = readHooks(projectRoot);
-
-    expect(hooks.beforeSubmitPrompt).toBeDefined();
-    expect(hooks.stop).toBeDefined();
-    expect(hooks.sessionStart).toBeDefined();
-    expect(hooks.sessionEnd).toBeDefined();
-    expect(hooks.afterAgentResponse).toBeUndefined();
-
-    // Each event should have exactly one flat entry
-    const stopEntries = hooks.stop as Array<{ command: string; type: string; timeout: number }>;
-    expect(stopEntries).toHaveLength(1);
-    expect(stopEntries[0].command).toContain("adit-hook");
-    expect(stopEntries[0].type).toBe("command");
-    expect(stopEntries[0].timeout).toBe(10);
+    expect(existsSync(join(projectRoot, ".cursor", "hooks.json"))).toBe(false);
+    const hooks = readSharedConfig(projectRoot).hooks;
+    expect(Object.keys(hooks)).toEqual(["UserPromptSubmit", "Stop", "StopFailure", "PreToolUse", "PostToolUse"]);
+    expect(hooks.Stop[0].hooks[0].command).toContain("--platform claude");
+    expect((await cursorAdapter.validateInstallation(projectRoot)).valid).toBe(true);
   });
 
-  it("preserves other tools' hooks when installing ADIT hooks", async () => {
-    // Pre-install another tool's hooks in Cursor's flat format
+  it.each(["cursor", "claude"])("migrates native hooks through the %s installer and preserves other tools", async (platform) => {
+    const other = { command: "other-tool before", timeout: 5 };
+    const nested = { type: "command", command: "other-tool stop" };
     writeHooks(projectRoot, {
+      version: 1, custom: { enabled: true },
       hooks: {
-        sessionStart: [
-          { command: "entire hook session-start", type: "command", timeout: 5 },
-        ],
-        stop: [
-          { command: "entire hook stop", type: "command", timeout: 5 },
-        ],
+        beforeSubmitPrompt: [{ command: "npx adit-hook --platform cursor prompt-submit" }, other],
+        stop: [{ matcher: "*", hooks: [{ command: "adit-hook stop" }, nested] }],
+        sessionEnd: [{ command: "adit-hook session-end" }],
+        afterFileEdit: [{ command: "other-tool edited" }],
       },
     });
-
-    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
-
-    const hooks = readHooks(projectRoot);
-
-    // sessionStart should have both: Entire's hook + ADIT's hook
-    const sessionStartEntries = hooks.sessionStart as Array<{ command: string }>;
-    expect(sessionStartEntries).toHaveLength(2);
-    expect(sessionStartEntries[0].command).toContain("entire");
-    expect(sessionStartEntries[1].command).toContain("adit-hook");
-
-    // stop should also have both
-    const stopEntries = hooks.stop as Array<{ command: string }>;
-    expect(stopEntries).toHaveLength(2);
-    expect(stopEntries[0].command).toContain("entire");
-    expect(stopEntries[1].command).toContain("adit-hook");
-  });
-
-  it("replaces stale ADIT hooks on reinstall (no duplicates)", async () => {
-    // Simulate a previous ADIT install
-    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
-
-    // Reinstall with a different binary path (e.g., after update)
-    await cursorAdapter.installHooks(projectRoot, 'node "/new/path/hooks/dist/index.js"');
-
-    const hooks = readHooks(projectRoot);
-
-    // Should have exactly one entry per event, with the new path
-    const stopEntries = hooks.stop as Array<{ command: string }>;
-    expect(stopEntries).toHaveLength(1);
-    expect(stopEntries[0].command).toContain("/new/path/hooks/dist/index.js");
-    expect(stopEntries[0].command).not.toContain("npx adit-hook");
-  });
-
-  it("preserves other tools' hooks on reinstall while replacing ADIT's", async () => {
-    // Setup: another tool + ADIT
-    writeHooks(projectRoot, {
+    const adapter = platform === "cursor" ? cursorAdapter : claudeCodeAdapter;
+    await adapter.installHooks(projectRoot, "npx adit-hook");
+    const native = JSON.parse(readFileSync(join(projectRoot, ".cursor", "hooks.json"), "utf8"));
+    expect(native).toEqual({
+      version: 1, custom: { enabled: true },
       hooks: {
-        beforeSubmitPrompt: [
-          { command: "my-linter check", type: "command", timeout: 3 },
-        ],
+        beforeSubmitPrompt: [other], stop: [{ matcher: "*", hooks: [nested] }],
+        afterFileEdit: [{ command: "other-tool edited" }],
       },
     });
-
-    // First ADIT install
-    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
-
-    // Verify both present
-    let hooks = readHooks(projectRoot);
-    let entries = hooks.beforeSubmitPrompt as unknown[];
-    expect(entries).toHaveLength(2);
-
-    // Reinstall ADIT (should replace old ADIT, keep linter)
-    await cursorAdapter.installHooks(projectRoot, 'node "/updated/hooks/dist/index.js"');
-
-    hooks = readHooks(projectRoot);
-    entries = hooks.beforeSubmitPrompt as Array<{ command: string }>;
-    expect(entries).toHaveLength(2);
-
-    const commands = (entries as Array<{ command: string }>).map((e) => e.command);
-    expect(commands).toContain("my-linter check");
-    expect(commands.some((c) => c.includes("/updated/hooks/dist/index.js"))).toBe(true);
-    expect(commands.some((c) => c.includes("npx adit-hook"))).toBe(false);
+    expect((await cursorAdapter.validateInstallation(projectRoot)).valid).toBe(true);
   });
 
-  it("preserves hook events that ADIT does not use", async () => {
-    // Another tool registers a custom hook event ADIT doesn't know about
-    writeHooks(projectRoot, {
-      hooks: {
-        preToolUse: [
-          { command: "my-formatter run", matcher: "Write|Edit" },
-        ],
-      },
-    });
-
+  it("preserves unrelated native configuration byte-for-byte", async () => {
+    writeHooks(projectRoot, { version: 1, hooks: { stop: [{ command: "other-tool stop" }] } });
+    const path = join(projectRoot, ".cursor", "hooks.json");
+    const before = readFileSync(path, "utf8");
     await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
-
-    const hooks = readHooks(projectRoot);
-
-    // preToolUse should be preserved exactly as-is
-    const preToolEntries = hooks.preToolUse as Array<{ command: string; matcher: string }>;
-    expect(preToolEntries).toHaveLength(1);
-    expect(preToolEntries[0].command).toBe("my-formatter run");
-    expect(preToolEntries[0].matcher).toBe("Write|Edit");
-
-    // ADIT hooks should also be present
-    expect(hooks.sessionStart).toBeDefined();
-    expect(hooks.stop).toBeDefined();
+    expect(readFileSync(path, "utf8")).toBe(before);
   });
 
-  it("preserves non-hooks settings keys", async () => {
-    writeHooks(projectRoot, {
-      version: 1,
-      settings: { theme: "dark" },
-      hooks: {
-        stop: [{ command: "other-tool stop", type: "command" }],
-      },
-    });
-
+  it("preserves shared permissions and non-ADIT hooks", async () => {
+    mkdirSync(join(projectRoot, ".claude"));
+    const other = { hooks: [{ command: "other-tool stop" }] };
+    writeFileSync(join(projectRoot, ".claude", "settings.local.json"), JSON.stringify({
+      permissions: { allow: ["Bash(git status)"] }, hooks: { Stop: [other] },
+    }));
     await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
-
-    // Read full config to verify non-hooks keys preserved
-    const fullConfig = readFullConfig(projectRoot);
-    expect(fullConfig.version).toBe(1);
-    expect(fullConfig.settings).toEqual({ theme: "dark" });
+    const config = readSharedConfig(projectRoot);
+    expect(config.permissions).toEqual({ allow: ["Bash(git status)"] });
+    expect(config.hooks.Stop).toHaveLength(2);
+    expect(config.hooks.Stop[0]).toEqual(other);
   });
 
-  it("refuses to overwrite a corrupted hooks file", async () => {
-    const cursorDir = join(projectRoot, ".cursor");
-    mkdirSync(cursorDir, { recursive: true });
-    const hooksPath = join(cursorDir, "hooks.json");
-    writeFileSync(hooksPath, "{ invalid json }}}");
-
-    // Must throw instead of silently rebuilding the file — the corrupt
-    // file may hold other tools' hook config.
-    await expect(
-      cursorAdapter.installHooks(projectRoot, "npx adit-hook"),
-    ).rejects.toThrow("invalid JSON");
-
-    // The corrupted file is left untouched for the user to fix.
-    expect(readFileSync(hooksPath, "utf-8")).toBe("{ invalid json }}}");
+  it("refuses migration of corrupted native settings without modifying either config", async () => {
+    mkdirSync(join(projectRoot, ".cursor"));
+    const path = join(projectRoot, ".cursor", "hooks.json");
+    writeFileSync(path, "{broken");
+    await expect(cursorAdapter.installHooks(projectRoot, "npx adit-hook")).rejects.toThrow("invalid hook configuration");
+    expect(readFileSync(path, "utf8")).toBe("{broken");
+    expect(existsSync(join(projectRoot, ".claude", "settings.local.json"))).toBe(false);
   });
 
-  it("uninstallHooks removes only ADIT entries, preserves others", async () => {
-    // Setup: other tool + ADIT
-    writeHooks(projectRoot, {
-      hooks: {
-        stop: [
-          { command: "entire hook stop", type: "command", timeout: 5 },
-        ],
-        sessionStart: [
-          { command: "entire hook session-start", type: "command" },
-        ],
-      },
-    });
+  it("keeps native recording intact if shared configuration cannot be installed", async () => {
+    writeHooks(projectRoot, { version: 1, hooks: { stop: [{ command: "adit-hook --platform cursor stop" }] } });
+    mkdirSync(join(projectRoot, ".claude"));
+    writeFileSync(join(projectRoot, ".claude", "settings.local.json"), "{broken");
+    const path = join(projectRoot, ".cursor", "hooks.json");
+    const before = readFileSync(path, "utf8");
+    await expect(cursorAdapter.installHooks(projectRoot, "npx adit-hook")).rejects.toThrow();
+    expect(readFileSync(path, "utf8")).toBe(before);
+  });
 
-    // Install ADIT alongside
+  it("detects native-only installations so init can migrate them", async () => {
+    writeHooks(projectRoot, { version: 1, hooks: { stop: [{ command: "adit-hook --platform cursor stop" }] } });
+    expect(await cursorAdapter.hasHooks!(projectRoot)).toBe(true);
+    expect((await cursorAdapter.validateInstallation(projectRoot)).valid).toBe(false);
+  });
+
+  it("is idempotent across both installers", async () => {
     await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
+    const before = readSharedConfig(projectRoot);
+    await claudeCodeAdapter.installHooks(projectRoot, "npx adit-hook");
+    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
+    expect(readSharedConfig(projectRoot)).toEqual(before);
+  });
 
-    // Verify both present
-    let hooks = readHooks(projectRoot);
-    expect(hooks.stop).toHaveLength(2);
-
-    // Uninstall ADIT
+  it("uninstalls both shared and legacy ADIT entries without removing other hooks", async () => {
+    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
+    writeHooks(projectRoot, { version: 1, hooks: { stop: [{ command: "adit-hook stop" }, { command: "other stop" }] } });
     await cursorAdapter.uninstallHooks(projectRoot);
-
-    hooks = readHooks(projectRoot);
-
-    // Entire's hooks should remain
-    const stopEntries = hooks.stop as Array<{ command: string }>;
-    expect(stopEntries).toHaveLength(1);
-    expect(stopEntries[0].command).toContain("entire");
-
-    const sessionEntries = hooks.sessionStart as Array<{ command: string }>;
-    expect(sessionEntries).toHaveLength(1);
-    expect(sessionEntries[0].command).toContain("entire");
+    expect(readSharedConfig(projectRoot).hooks).toBeUndefined();
+    expect(JSON.parse(readFileSync(join(projectRoot, ".cursor", "hooks.json"), "utf8")))
+      .toEqual({ version: 1, hooks: { stop: [{ command: "other stop" }] } });
+    expect(await cursorAdapter.hasHooks!(projectRoot)).toBe(false);
   });
 
-  it("uninstallHooks cleans up empty event arrays and hooks object", async () => {
-    // Only ADIT hooks installed
-    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
-
-    await cursorAdapter.uninstallHooks(projectRoot);
-
-    const hooks = readHooks(projectRoot);
-    // hooks object should still exist but be empty
-    expect(hooks).toEqual({});
-  });
-
-  it("install is idempotent — multiple installs with same path produce same result", async () => {
-    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
-    const first = readHooks(projectRoot);
-
-    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
-    const second = readHooks(projectRoot);
-
-    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
-    const third = readHooks(projectRoot);
-
-    expect(first).toEqual(second);
-    expect(second).toEqual(third);
-  });
-
-  it("validateInstallation detects ADIT hooks in chained configuration", async () => {
-    // Other tool installed first
-    writeHooks(projectRoot, {
-      hooks: {
-        sessionStart: [
-          { command: "entire hook session-start", type: "command" },
-        ],
-      },
-    });
-
-    // Install ADIT alongside
-    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
-
-    const result = await cursorAdapter.validateInstallation(projectRoot);
-    expect(result.valid).toBe(true);
-    expect(result.checks.every((c) => c.ok)).toBe(true);
-  });
-
-  it("validateInstallation marks old ADIT hook commands as needing upgrade", async () => {
-    writeHooks(projectRoot, {
-      hooks: {
-        beforeSubmitPrompt: [
-          { command: "CURSOR=1 npx adit-hook prompt-submit", type: "command" },
-        ],
-        stop: [
-          { command: "CURSOR=1 npx adit-hook stop", type: "command" },
-        ],
-        sessionStart: [
-          { command: "CURSOR=1 npx adit-hook session-start", type: "command" },
-        ],
-        sessionEnd: [
-          { command: "CURSOR=1 npx adit-hook session-end", type: "command" },
-        ],
-      },
-    });
-
-    const result = await cursorAdapter.validateInstallation(projectRoot);
-
-    expect(result.valid).toBe(false);
-    expect(result.checks.find((c) => c.name === "Hook configuration")?.ok).toBe(false);
-  });
-
-  it("uninstallHooks removes ADIT entries under any event key, including nested format", async () => {
-    writeHooks(projectRoot, {
-      hooks: {
-        UserPromptSubmit: [
-          { hooks: [{ type: "command", command: "CURSOR=1 npx adit-hook prompt-submit" }] },
-        ],
-        Stop: [
-          { hooks: [{ type: "command", command: "CURSOR=1 npx adit-hook stop" }] },
-        ],
-      },
-    });
-
-    await cursorAdapter.uninstallHooks(projectRoot);
-
-    const hooks = readHooks(projectRoot);
-    expect(hooks.UserPromptSubmit).toBeUndefined();
-    expect(hooks.Stop).toBeUndefined();
-  });
-
-  it("handles other tools' hooks in nested format alongside flat ADIT entries", async () => {
-    // Some tool might use the Claude Code nested format
-    writeHooks(projectRoot, {
-      hooks: {
-        stop: [
-          { hooks: [{ type: "command", command: "other-tool stop", timeout: 5000 }] },
-        ],
-      },
-    });
-
-    await cursorAdapter.installHooks(projectRoot, "npx adit-hook");
-
-    const hooks = readHooks(projectRoot);
-    const stopEntries = hooks.stop as unknown[];
-    expect(stopEntries).toHaveLength(2);
+  it("preserves a pinned parent root in shared commands", async () => {
+    await cursorAdapter.installHooks(projectRoot, "npx adit-hook", { hookProjectRoot: "/parent" });
+    expect(readSharedConfig(projectRoot).hooks.Stop[0].hooks[0].command)
+      .toContain(Buffer.from("/parent").toString("base64url"));
   });
 });
 

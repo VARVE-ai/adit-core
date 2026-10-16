@@ -1,8 +1,8 @@
 /**
  * Conflict handler for sync responses.
  *
- * When the server detects concurrent modifications on mutable records
- * (sessions, plans), it returns conflict details with its resolution.
+ * When the server detects a concurrent modification to a mutable session,
+ * it returns conflict details with its resolution.
  * This module processes those responses.
  *
  * Design: Local-first. We log conflicts but don't overwrite local data.
@@ -11,7 +11,7 @@
  */
 
 export interface SyncConflict {
-  type: "session" | "plan";
+  type: "session";
   id: string;
   resolution: string;
   reason: string;

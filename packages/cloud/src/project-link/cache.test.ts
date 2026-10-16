@@ -13,9 +13,9 @@ import {
   getProjectLinkCache,
   upsertProjectLinkCache,
   clearProjectLinkCache,
-  updateCachedCommitSha,
+  updateCachedGitState,
+  updateCachedRemoteBranchState,
   updateCachedDocHashes,
-  updateCachedQualified,
 } from "./cache.js";
 import type { ProjectLinkCache } from "./types.js";
 
@@ -29,17 +29,18 @@ function makeCache(overrides: Partial<ProjectLinkCache> = {}): ProjectLinkCache 
     repositoryId: "proj-abc123",
     serverUrl: "https://cloud.example.com",
     confirmedProjectId: null,
-    lastCommitSha: null,
+    gitRefHeads: {},
+    gitRefsFingerprint: null,
+    remoteRefsFingerprint: null,
+    lastRemoteBranchCheckAt: null,
     lastBranchSyncAt: null,
     lastDocSyncAt: null,
     docHashes: {},
-    qualified: false,
     initializedAt: "2026-03-10T12:00:00.000Z",
     updatedAt: "2026-03-10T12:00:00.000Z",
     ...overrides,
   };
 }
-
 describe("Project Link Cache", () => {
   let db: Database.Database;
   let dbPath: string;
@@ -73,7 +74,17 @@ describe("Project Link Cache", () => {
     expect(result!.repositoryId).toBe("proj-abc123");
     expect(result!.confirmedProjectId).toBe("confirmed-123");
     expect(result!.docHashes).toEqual({ "README.md": "abc123" });
-    expect(result!.qualified).toBe(false);
+  });
+
+  it("uses one cache key with or without trailing slashes", () => {
+    upsertProjectLinkCache(db, makeCache({
+      serverUrl: "https://cloud.example.com/",
+      confirmedProjectId: "confirmed-123",
+    }));
+
+    const result = getProjectLinkCache(db, "proj-abc123", "https://cloud.example.com");
+    expect(result?.confirmedProjectId).toBe("confirmed-123");
+    expect(result?.serverUrl).toBe("https://cloud.example.com");
   });
 
   it("upserts an existing cache entry", () => {
@@ -82,14 +93,12 @@ describe("Project Link Cache", () => {
 
     const updated = makeCache({
       confirmedProjectId: "confirmed-456",
-      lastCommitSha: "deadbeef",
       updatedAt: "2026-03-10T13:00:00.000Z",
     });
     upsertProjectLinkCache(db, updated);
 
     const result = getProjectLinkCache(db, cache.projectId, cache.serverUrl);
     expect(result!.confirmedProjectId).toBe("confirmed-456");
-    expect(result!.lastCommitSha).toBe("deadbeef");
     // initializedAt should NOT change on upsert
     expect(result!.initializedAt).toBe("2026-03-10T12:00:00.000Z");
   });
@@ -104,17 +113,6 @@ describe("Project Link Cache", () => {
     expect(result).toBeNull();
   });
 
-  it("updates commit SHA", () => {
-    const cache = makeCache();
-    upsertProjectLinkCache(db, cache);
-
-    updateCachedCommitSha(db, cache.projectId, cache.serverUrl, "newsha123");
-
-    const result = getProjectLinkCache(db, cache.projectId, cache.serverUrl);
-    expect(result!.lastCommitSha).toBe("newsha123");
-    expect(result!.updatedAt).not.toBe(cache.updatedAt);
-  });
-
   it("updates doc hashes", () => {
     const cache = makeCache({ docHashes: { "README.md": "old-hash" } });
     upsertProjectLinkCache(db, cache);
@@ -127,15 +125,34 @@ describe("Project Link Cache", () => {
     expect(result!.lastDocSyncAt).not.toBeNull();
   });
 
-  it("updates qualified status", () => {
+  it("updates the git cursor atomically", () => {
     const cache = makeCache();
     upsertProjectLinkCache(db, cache);
-    expect(getProjectLinkCache(db, cache.projectId, cache.serverUrl)!.qualified).toBe(false);
 
-    updateCachedQualified(db, cache.projectId, cache.serverUrl, true);
+    updateCachedGitState(db, cache.projectId, cache.serverUrl, {
+      refHeads: { main: "sha-main", feature: "sha-feature" },
+      refsFingerprint: "fingerprint-1",
+    });
 
     const result = getProjectLinkCache(db, cache.projectId, cache.serverUrl);
-    expect(result!.qualified).toBe(true);
+    expect(result!.gitRefHeads).toEqual({ main: "sha-main", feature: "sha-feature" });
+    expect(result!.gitRefsFingerprint).toBe("fingerprint-1");
+    expect(result!.lastBranchSyncAt).not.toBeNull();
+  });
+
+  it("updates the authoritative remote branch state independently", () => {
+    const cache = makeCache();
+    upsertProjectLinkCache(db, cache);
+
+    updateCachedRemoteBranchState(db, cache.projectId, cache.serverUrl, {
+      refsFingerprint: "remote-fingerprint-1",
+      checkedAt: "2026-03-10T14:00:00.000Z",
+    });
+
+    const result = getProjectLinkCache(db, cache.projectId, cache.serverUrl);
+    expect(result!.remoteRefsFingerprint).toBe("remote-fingerprint-1");
+    expect(result!.lastRemoteBranchCheckAt).toBe("2026-03-10T14:00:00.000Z");
+    expect(result!.gitRefsFingerprint).toBeNull();
   });
 
   it("supports multiple projects on different servers", () => {
@@ -152,8 +169,8 @@ describe("Project Link Cache", () => {
   });
 
   it("keeps repositories isolated for the same project and server", () => {
-    const repoA = makeCache({ repositoryId: "repo-a", lastCommitSha: "sha-a" });
-    const repoB = makeCache({ repositoryId: "repo-b", lastCommitSha: "sha-b" });
+    const repoA = makeCache({ repositoryId: "repo-a", gitRefsFingerprint: "fingerprint-a" });
+    const repoB = makeCache({ repositoryId: "repo-b", gitRefsFingerprint: "fingerprint-b" });
 
     upsertProjectLinkCache(db, repoA);
     upsertProjectLinkCache(db, repoB);
@@ -161,7 +178,7 @@ describe("Project Link Cache", () => {
     const a = getProjectLinkCache(db, repoA.projectId, repoA.serverUrl, repoA.repositoryId);
     const b = getProjectLinkCache(db, repoB.projectId, repoB.serverUrl, repoB.repositoryId);
 
-    expect(a!.lastCommitSha).toBe("sha-a");
-    expect(b!.lastCommitSha).toBe("sha-b");
+    expect(a!.gitRefsFingerprint).toBe("fingerprint-a");
+    expect(b!.gitRefsFingerprint).toBe("fingerprint-b");
   });
 });

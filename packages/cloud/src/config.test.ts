@@ -53,7 +53,7 @@ describe("loadCloudConfig", () => {
   });
 
   it("enables cloud when server URL is set", () => {
-    process.env.ADIT_CLOUD_URL = "https://cloud.example.com";
+    process.env.ADIT_CLOUD_URL = " https://cloud.example.com/// ";
     const config = loadCloudConfig();
     expect(config.serverUrl).toBe("https://cloud.example.com");
     expect(config.enabled).toBe(true);
@@ -89,36 +89,4 @@ describe("loadCloudConfig", () => {
     expect(config.syncTimeoutHours).toBe(2);
   });
 
-  it("returns project-link defaults when no env vars are set", () => {
-    delete process.env.ADIT_PROJECT_LINK_AUTO_SYNC;
-    delete process.env.ADIT_PROJECT_LINK_STALE_HOURS;
-
-    const config = loadCloudConfig();
-    expect(config.projectLink.autoSync).toBe(true);
-    expect(config.projectLink.staleHours).toBe(2);
-  });
-
-  it("disables project-link auto-sync via env var", () => {
-    process.env.ADIT_PROJECT_LINK_AUTO_SYNC = "false";
-    const config = loadCloudConfig();
-    expect(config.projectLink.autoSync).toBe(false);
-  });
-
-  it("reads project-link stale hours from env var", () => {
-    process.env.ADIT_PROJECT_LINK_STALE_HOURS = "6";
-    const config = loadCloudConfig();
-    expect(config.projectLink.staleHours).toBe(6);
-  });
-
-  it("supports fractional project-link stale hours", () => {
-    process.env.ADIT_PROJECT_LINK_STALE_HOURS = "0.5";
-    const config = loadCloudConfig();
-    expect(config.projectLink.staleHours).toBe(0.5);
-  });
-
-  it("falls back to 2 for invalid project-link stale hours", () => {
-    process.env.ADIT_PROJECT_LINK_STALE_HOURS = "not-a-number";
-    const config = loadCloudConfig();
-    expect(config.projectLink.staleHours).toBe(2);
-  });
 });

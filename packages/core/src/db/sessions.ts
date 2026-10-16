@@ -3,7 +3,8 @@
  */
 
 import type Database from "better-sqlite3";
-import type { AditSession, SessionStatus, Platform, SessionType } from "../types/index.js";
+import type { AditSession, Platform, SessionType } from "../types/index.js";
+import { deserialize, serialize, tick } from "../sync/vclock.js";
 
 export interface CreateSessionInput {
   id: string;
@@ -47,17 +48,22 @@ export function getSessionById(
   return row ? rowToSession(row) : null;
 }
 
-export function getActiveSession(
+/** Return the session with the most recent recorded activity. */
+export function getLatestSession(
   db: Database.Database,
   projectId: string,
   clientId: string,
   platform?: Platform,
 ): AditSession | null {
-  // Optional platform filter keeps sessionless hook events (no platform
-  // session id in the payload) from attaching to another CLI's session.
   const row = db
     .prepare(
-      `SELECT * FROM sessions WHERE project_id = ? AND client_id = ? AND status = 'active' AND deleted_at IS NULL${platform ? " AND platform = ?" : ""} ORDER BY started_at DESC LIMIT 1`,
+      `SELECT * FROM sessions
+       WHERE project_id = ? AND client_id = ? AND deleted_at IS NULL${platform ? " AND platform = ?" : ""}
+       ORDER BY COALESCE(
+         (SELECT MAX(e.started_at) FROM events e WHERE e.session_id = sessions.id AND e.deleted_at IS NULL),
+         sessions.started_at
+       ) DESC, sessions.started_at DESC
+       LIMIT 1`,
     )
     .get(...(platform ? [projectId, clientId, platform] : [projectId, clientId])) as
     | Record<string, unknown>
@@ -65,128 +71,136 @@ export function getActiveSession(
   return row ? rowToSession(row) : null;
 }
 
-/**
- * Close active sessions whose last activity is older than the cutoff.
- *
- * "Last activity" is the newest event's started_at, falling back to the
- * session's own started_at for sessions with no events. Scoped to one
- * project+platform because this backstops platforms without a SessionEnd
- * hook event (Codex has none), where sessions would otherwise stay active
- * forever. Returns the number of sessions closed.
- */
-export function endStaleSessions(
-  db: Database.Database,
-  input: {
-    projectId: string;
-    platform: Platform;
-    cutoffIso: string;
-    excludeSessionId?: string;
-  },
-): number {
-  const result = db
-    .prepare(
-      `UPDATE sessions SET ended_at = ?, status = 'completed'
-       WHERE project_id = ? AND platform = ? AND status = 'active' AND deleted_at IS NULL
-         AND id != ?
-         AND COALESCE(
-           (SELECT MAX(e.started_at) FROM events e WHERE e.session_id = sessions.id AND e.deleted_at IS NULL),
-           sessions.started_at
-         ) < ?`,
-    )
-    .run(
-      new Date().toISOString(),
-      input.projectId,
-      input.platform,
-      input.excludeSessionId ?? "",
-      input.cutoffIso,
-    );
-  return result.changes;
-}
-
 export function getSessionByPlatformSessionId(
   db: Database.Database,
   platformSessionId: string,
 ): AditSession | null {
-  // Deliberately NOT filtered to status='active': a platform session id is a
-  // stable identity, and resuming a closed CLI session must reattach to the
-  // same row instead of minting a duplicate. (Measured before this change:
-  // 17.7% of platform session ids had duplicate rows, all from resumes.)
-  // Prefer a still-active row if one exists, then the most recent.
+  // A platform session id is the only reliable identity. Historical databases
+  // may contain duplicate rows from the retired lifecycle/revival logic, so
+  // prefer the newest row without trying to infer an active state.
   const row = db
     .prepare(
       `SELECT * FROM sessions WHERE platform_session_id = ? AND deleted_at IS NULL
-       ORDER BY (status = 'active') DESC, started_at DESC LIMIT 1`,
+       ORDER BY started_at DESC LIMIT 1`,
     )
     .get(platformSessionId) as Record<string, unknown> | undefined;
-  return row ? rowToSession(row) : null;
+  if (row) return rowToSession(row);
+
+  // A platform session id attached later as an alias (client-side fork of an
+  // existing conversation) resolves to the session it was attached to.
+  const aliased = db
+    .prepare(
+      `SELECT s.* FROM session_platform_aliases a
+       JOIN sessions s ON s.id = a.session_id
+       WHERE a.platform_session_id = ? AND s.deleted_at IS NULL
+       LIMIT 1`,
+    )
+    .get(platformSessionId) as Record<string, unknown> | undefined;
+  return aliased ? rowToSession(aliased) : null;
 }
 
 /**
- * Reopen a closed session that received new activity (CLI resume).
- *
- * Clears ended_at and flips status back to active. Note the sync tradeoff:
- * the cloud detects session modifications via ended_at advancing, so the
- * revival itself is not pushed — the cloud shows the session as ended until
- * it ends again (eventual consistency). Its new events sync normally.
+ * Attach an additional platform session id to an existing local session, so
+ * hooks arriving under that id keep recording into the same conversation.
  */
-export function reviveSession(db: Database.Database, id: string): void {
+export function insertSessionPlatformAlias(
+  db: Database.Database,
+  input: { platformSessionId: string; sessionId: string; createdAt?: string },
+): void {
   db.prepare(
-    "UPDATE sessions SET status = 'active', ended_at = NULL WHERE id = ? AND status != 'active'",
-  ).run(id);
+    `INSERT OR IGNORE INTO session_platform_aliases (platform_session_id, session_id, created_at)
+     VALUES (?, ?, ?)`,
+  ).run(input.platformSessionId, input.sessionId, input.createdAt ?? new Date().toISOString());
+}
+
+/** Platform session ids attached to a session as aliases (oldest first). */
+export function listSessionPlatformAliases(
+  db: Database.Database,
+  sessionId: string,
+): string[] {
+  const rows = db
+    .prepare(
+      "SELECT platform_session_id FROM session_platform_aliases WHERE session_id = ? ORDER BY created_at ASC",
+    )
+    .all(sessionId) as Array<{ platform_session_id: string }>;
+  return rows.map((row) => row.platform_session_id);
+}
+
+/** Latest event time of a session, else its start time. */
+const LAST_ACTIVITY_SQL = `COALESCE(
+  (SELECT MAX(e.started_at) FROM events e WHERE e.session_id = sessions.id AND e.deleted_at IS NULL),
+  sessions.started_at
+)`;
+
+/**
+ * Sessions of a project active at or after `since`, most recently active
+ * first. Activity is the latest event (else the start time), so a long-lived
+ * conversation keeps qualifying for as long as it is still in use.
+ */
+export function listRecentSessions(
+  db: Database.Database,
+  input: { projectId: string; platform?: Platform; since: string; limit?: number },
+): AditSession[] {
+  const rows = db
+    .prepare(
+      `SELECT * FROM sessions
+       WHERE project_id = ? AND deleted_at IS NULL${input.platform ? " AND platform = ?" : ""}
+         AND ${LAST_ACTIVITY_SQL} >= ?
+       ORDER BY ${LAST_ACTIVITY_SQL} DESC, started_at DESC LIMIT ?`,
+    )
+    .all(
+      ...(input.platform
+        ? [input.projectId, input.platform, input.since, input.limit ?? 50]
+        : [input.projectId, input.since, input.limit ?? 50]),
+    ) as Record<string, unknown>[];
+  return rows.map(rowToSession);
 }
 
 /**
- * Shallow-merge keys into a session's metadata JSON.
- *
- * Used at session-start to persist launch context (model, source,
- * permission mode) on the session itself. Note the sync tradeoff:
- * metadata-only changes are not detected by the modified-session check
- * (ended_at), so revived sessions push the update when they next end.
+ * Fold `sourceSessionId` into `targetSessionId`: its events continue the
+ * target's sequence in their original order, its environment snapshots move
+ * with them, and the source row is soft-deleted. Every moved or deleted row
+ * gets a clock tick so a peer that already saw it picks up the change. One
+ * transaction; used when a session created for a platform session id turns
+ * out to be a client-side fork of `targetSessionId`.
  */
-export function mergeSessionMetadata(
+export function mergeSessionInto(
   db: Database.Database,
-  id: string,
-  patch: Record<string, unknown>,
-): void {
-  const row = db
-    .prepare("SELECT metadata_json FROM sessions WHERE id = ?")
-    .get(id) as { metadata_json: string | null } | undefined;
-  if (!row) return;
-
-  let current: Record<string, unknown> = {};
-  if (row.metadata_json) {
-    try {
-      const parsed = JSON.parse(row.metadata_json) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        current = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Corrupt metadata: rebuild from the patch rather than fail the hook
+  input: { sourceSessionId: string; targetSessionId: string; clientId: string; now?: string },
+): { movedEvents: number } {
+  return db.transaction(() => {
+    const { max } = db
+      .prepare("SELECT COALESCE(MAX(sequence), 0) AS max FROM events WHERE session_id = ?")
+      .get(input.targetSessionId) as { max: number };
+    const rows = db
+      .prepare("SELECT id, vclock_json FROM events WHERE session_id = ? ORDER BY sequence ASC")
+      .all(input.sourceSessionId) as Array<{ id: string; vclock_json: string }>;
+    const move = db.prepare(
+      "UPDATE events SET session_id = ?, sequence = ?, vclock_json = ? WHERE id = ?",
+    );
+    rows.forEach((row, index) => {
+      move.run(input.targetSessionId, max + index + 1, tickClock(row.vclock_json, input.clientId), row.id);
+    });
+    db.prepare("UPDATE env_snapshots SET session_id = ? WHERE session_id = ?").run(
+      input.targetSessionId,
+      input.sourceSessionId,
+    );
+    const source = db
+      .prepare("SELECT vclock_json FROM sessions WHERE id = ?")
+      .get(input.sourceSessionId) as { vclock_json: string } | undefined;
+    if (source) {
+      db.prepare("UPDATE sessions SET deleted_at = ?, vclock_json = ? WHERE id = ?").run(
+        input.now ?? new Date().toISOString(),
+        tickClock(source.vclock_json, input.clientId),
+        input.sourceSessionId,
+      );
     }
-  }
-
-  db.prepare("UPDATE sessions SET metadata_json = ? WHERE id = ?").run(
-    JSON.stringify({ ...current, ...patch }),
-    id,
-  );
+    return { movedEvents: rows.length };
+  })();
 }
 
-export function endSession(
-  db: Database.Database,
-  id: string,
-  status: SessionStatus = "completed",
-  vclockJson?: string,
-): void {
-  const now = new Date().toISOString();
-  if (vclockJson) {
-    db.prepare(
-      "UPDATE sessions SET ended_at = ?, status = ?, vclock_json = ? WHERE id = ?",
-    ).run(now, status, vclockJson, id);
-  } else {
-    db.prepare(
-      "UPDATE sessions SET ended_at = ?, status = ? WHERE id = ?",
-    ).run(now, status, id);
-  }
+function tickClock(vclockJson: string, clientId: string): string {
+  return serialize(tick(deserialize(vclockJson), clientId));
 }
 
 export function listSessions(
@@ -210,8 +224,6 @@ function rowToSession(row: Record<string, unknown>): AditSession {
     sessionType: row.session_type as SessionType,
     platform: row.platform as Platform,
     startedAt: row.started_at as string,
-    endedAt: (row.ended_at as string) ?? null,
-    status: row.status as SessionStatus,
     metadataJson: (row.metadata_json as string) ?? null,
     vclockJson: row.vclock_json as string,
     platformSessionId: (row.platform_session_id as string) ?? null,

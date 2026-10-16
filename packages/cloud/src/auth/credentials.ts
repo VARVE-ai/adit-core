@@ -19,6 +19,7 @@ import {
   writeSync,
   statSync,
 } from "node:fs";
+import { normalizeServerUrl } from "@varveai/adit-core";
 
 export type CloudAuthFailureStage = "refresh" | "request" | "auto-sync" | "status";
 
@@ -79,7 +80,10 @@ export function loadCredentials(): CloudCredentials | null {
     if (parsed.authType !== "token" && (!parsed.refreshToken || !parsed.clientId)) {
       return null;
     }
-    return parsed;
+    return {
+      ...parsed,
+      serverUrl: normalizeServerUrl(parsed.serverUrl),
+    };
   } catch {
     return null;
   }
@@ -89,7 +93,15 @@ export function loadCredentials(): CloudCredentials | null {
 export function saveCredentials(creds: CloudCredentials): void {
   const path = credentialsPath();
   mkdirSync(join(homedir(), ".adit"), { recursive: true });
-  writeFileSync(path, JSON.stringify(creds, null, 2), "utf-8");
+  writeFileSync(
+    path,
+    JSON.stringify(
+      { ...creds, serverUrl: normalizeServerUrl(creds.serverUrl) },
+      null,
+      2,
+    ),
+    "utf-8",
+  );
   try {
     chmodSync(path, 0o600);
   } catch {
@@ -285,7 +297,7 @@ export function credentialsFromEnvToken(
     refreshToken: "",
     clientId,
     expiresAt: "",
-    serverUrl,
+    serverUrl: normalizeServerUrl(serverUrl),
   };
 }
 

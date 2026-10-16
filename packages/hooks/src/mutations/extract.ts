@@ -45,9 +45,6 @@ interface ToolResultBlock {
 }
 
 export interface ExtractResult {
-  sessionId: string | undefined;
-  startedAt: string | undefined;
-  endedAt: string | undefined;
   mutations: AgentFileMutation[];
 }
 
@@ -89,9 +86,6 @@ export function extractClaudeMutationsFromTranscript(
   }
 
   return {
-    sessionId: entries[0]?.sessionId,
-    startedAt: entries[turnBounds.start]?.timestamp,
-    endedAt: entries[turnBounds.end - 1]?.timestamp,
     mutations,
   };
 }

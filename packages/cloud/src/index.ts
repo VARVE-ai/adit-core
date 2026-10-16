@@ -6,13 +6,21 @@
  */
 
 // Config
-export { loadCloudConfig, DEFAULT_SERVER_URL, type CloudConfig, type ProjectLinkConfig } from "./config.js";
+export { loadCloudConfig, DEFAULT_SERVER_URL, type CloudConfig } from "./config.js";
+export { normalizeServerUrl } from "@varveai/adit-core";
 export {
   resolveCloudProjectContext,
   repositoryPayloads,
   type CloudProjectContext,
   type CloudRepository,
 } from "./project-context.js";
+export {
+  applyProjectDeletionPolicy,
+  refreshProjectDeletionPolicy,
+  CloudProjectDeletedError,
+  type DeletedRepositoryPolicy,
+  type ProjectDeletionPolicy,
+} from "./project-deletion-policy.js";
 
 // Auth
 export {
@@ -52,46 +60,27 @@ export {
   type SyncResult,
   type SyncConflict,
 } from "./sync/engine.js";
+export { runSyncCycle, type SyncCycleResult } from "./sync/sync-cycle.js";
 export {
   buildSyncBatch,
-  countUnsyncedRecords,
+  countUnsyncedEvents,
   batchRecordCount,
   type SyncBatch,
 } from "./sync/serializer.js";
 export { triggerAutoSync } from "./sync/auto-sync.js";
-
-// Transcript / file upload
-export {
-  triggerTranscriptUpload,
-  registerTranscript,
-  processTranscriptUploads,
-  uploadChunk,
-  uploadFull,
-  checkUploadStatus,
-  lookupUploadByPath,
-  type TranscriptManagerOptions,
-  type TranscriptProcessResult,
-  type SyncUploadType,
-  type SyncUploadResponse,
-  type SyncUploadStatus,
-  type UploadChunkParams,
-} from "./transcript/index.js";
-
-export { type TranscriptUploadConfig } from "./config.js";
+export { formatUpgradeNotice } from "./sync/runtime-report.js";
+export type { RuntimeReport, UpgradeNotice } from "./sync/runtime-report.js";
 
 // Project Link
 export {
   linkCommand,
   WorkspaceLinkPartialFailureError,
-  intentCommand,
-  formatIntentList,
-  formatIntentDetail,
-  triggerProjectLinkSync,
-  checkQuality,
-  formatQualityFeedback,
   collectRemoteUrl,
   collectBranches,
+  branchHeadMap,
+  collectGitRefsFingerprint,
   collectCommitLogs,
+  collectCommitsBetweenRefSnapshots,
   collectCommitCount,
   collectDefaultBranch,
   collectCurrentBranch,
@@ -102,28 +91,24 @@ export {
   getProjectLinkCache,
   upsertProjectLinkCache,
   clearProjectLinkCache,
+  updateCachedGitState,
+  syncLinkedGitMetadata,
   type LinkResult,
   type WorkspaceRepositoryResult,
   type WorkspaceRepositoryFailure,
-  type IntentResult,
   type LinkOptions,
-  type IntentOptions,
-  type IntentSummary,
-  type IntentDetail,
-  type TaskSlice,
   type StepTiming,
   type GitBranch,
   type GitCommit,
   type DiscoveredDocument,
   type ProjectLinkCache,
-  type QualifyResponse,
+  type GitSyncResult,
+  type GitSyncFailure,
+  type GitSyncSkip,
+  type GitSyncSkipReason,
 } from "./project-link/index.js";
 
-// Bulk Task Update
-export { bulkTaskUpdateCommand } from "./project-link/bulk-task.js";
-export type {
-  BulkTaskFilter,
-  BulkTaskUpdate,
-  BulkTaskUpdateOptions,
-  BulkTaskUpdateResult,
-} from "./project-link/types.js";
+export { createCloudTask, listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask, uploadCloudTaskImage } from "./tasks.js";
+export * from "./cli-reads.js";
+export * from "./memories.js";
+export type { CloudTask, CloudTaskList, CloudTaskDetail, CloudTaskContext, CloudTaskPatch, CloudTaskState, CloudTaskCreate, CloudTaskCreated, CloudTaskAttachment } from "./tasks.js";

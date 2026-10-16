@@ -53,8 +53,17 @@ export interface PlatformAdapter {
    */
   hasProjectHooks?(projectRoot: string): Promise<boolean>;
 
-  /** Install/register hooks for this platform */
-  installHooks(projectRoot: string, aditBinaryPath: string): Promise<void>;
+  /**
+   * Install/register hooks for this platform into `projectRoot`.
+   * `options.hookProjectRoot` bakes a different ADIT project root into the
+   * hook command — used when a member repository records into its parent
+   * project. Defaults to `projectRoot`.
+   */
+  installHooks(
+    projectRoot: string,
+    aditBinaryPath: string,
+    options?: { hookProjectRoot?: string },
+  ): Promise<void>;
 
   /** Uninstall/deregister hooks */
   uninstallHooks(projectRoot: string): Promise<void>;
@@ -80,8 +89,14 @@ export interface NormalizedHookInput {
   platformSessionId?: string;
   /** Path to the session transcript file (JSONL) */
   transcriptPath?: string;
+  /** Platform id of the user prompt this hook belongs to (Claude Code >= 2.1.196) */
+  promptId?: string;
+  /** Platform id of the running turn (Codex); binds tool calls to their turn like promptId */
+  turnId?: string;
   prompt?: string;
   toolName?: string;
+  /** Platform id of the tool call (PreToolUse / PostToolUse) */
+  toolUseId?: string;
   toolInput?: Record<string, unknown>;
   toolOutput?: Record<string, unknown>;
   stopReason?: string;
@@ -100,14 +115,6 @@ export interface NormalizedHookInput {
   agentId?: string;
   agentType?: string;
   agentTranscriptPath?: string;
-  /** Permission mode the AI agent is running in */
-  permissionMode?: string;
-  /** Which AI model is being used (from SessionStart) */
-  model?: string;
-  /** Session source: startup, resume, clear, compact (from SessionStart) */
-  sessionSource?: string;
-  /** Why the session ended: clear, logout, exit, etc. (from SessionEnd) */
-  sessionEndReason?: string;
   rawPlatformData?: Record<string, unknown>;
 }
 
@@ -138,12 +145,13 @@ export interface ValidationCheck {
   advisory?: boolean;
 }
 
-/** All ADIT hook types */
+/** All ADIT hook types (task-completed/notification/subagent-* are retired
+ * but stay typed so stale installs' hook calls can be parsed and ignored) */
 export type AditHookType =
   | "prompt-submit"
   | "stop"
-  | "session-start"
-  | "session-end"
+  | "pre-tool-use"
+  | "post-tool-use"
   | "task-completed"
   | "notification"
   | "subagent-start"

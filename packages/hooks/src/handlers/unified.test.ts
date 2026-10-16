@@ -3,13 +3,10 @@
  *
  * Mocks all external dependencies (DB, engine, cloud) to verify
  * that dispatchHook correctly routes each hook type, handles
- * cloud auto-sync with threshold-based and force flags, and maintains fail-open behavior.
+ * cloud auto-sync thresholds, and maintains fail-open behavior.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 // ---- Mocks ----
 
@@ -22,11 +19,14 @@ const mockRecordEvent = vi.fn().mockResolvedValue({
 });
 const mockList = vi.fn().mockResolvedValue([]);
 
+const mockInsertDiff = vi.fn();
+
 vi.mock("@varveai/adit-core", () => ({
+  attachPendingTokenUsage: vi.fn(),
   getLatestEnvSnapshot: vi.fn(() => null),
-  endSession: vi.fn(),
-  mergeSessionMetadata: vi.fn(),
   withPerf: vi.fn((_dir: string, _cat: string, _op: string, fn: () => unknown) => fn()),
+  insertDiff: (...args: unknown[]) => mockInsertDiff(...args),
+  generateId: vi.fn(() => "diff-001"),
 }));
 
 vi.mock("@varveai/adit-engine", () => ({
@@ -36,14 +36,32 @@ vi.mock("@varveai/adit-engine", () => ({
   })),
   captureEnvironment: vi.fn().mockResolvedValue("env-001"),
   diffEnvironments: vi.fn().mockReturnValue({ changes: [], severity: "none" }),
-  getCurrentBranch: vi.fn().mockResolvedValue("main"),
-  getHeadSha: vi.fn().mockResolvedValue("head-sha-123"),
+}));
+
+vi.mock("../git-operations/index.js", () => ({
+  recordGitCommits: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@varveai/adit-cloud", () => ({
-  triggerTranscriptUpload: vi.fn().mockResolvedValue(undefined),
   triggerAutoSync: vi.fn().mockResolvedValue(undefined),
 }));
+
+// Bash working-tree snapshots: git and the on-disk store are mocked; the
+// pure merge/re-key helpers stay real.
+const snapshotMocks = vi.hoisted(() => ({
+  captureWorkingTree: vi.fn(),
+  diffWorkingTreesWithPatch: vi.fn(),
+  writeToolSnapshot: vi.fn(),
+  takeToolSnapshot: vi.fn(),
+  appendPendingInferred: vi.fn(),
+  takePendingInferred: vi.fn(() => []),
+  clearSessionSnapshots: vi.fn(),
+}));
+
+vi.mock("../bash-snapshot/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../bash-snapshot/index.js")>();
+  return { ...actual, ...snapshotMocks };
+});
 
 vi.mock("../common/context.js", () => ({
   initHookContext: vi.fn().mockResolvedValue({
@@ -61,17 +79,10 @@ vi.mock("../common/context.js", () => ({
 }));
 
 import { dispatchHook } from "./unified.js";
-import { endSession, mergeSessionMetadata } from "@varveai/adit-core";
-import { getCurrentBranch, getHeadSha } from "@varveai/adit-engine";
-import { triggerAutoSync, triggerTranscriptUpload } from "@varveai/adit-cloud";
+import { triggerAutoSync } from "@varveai/adit-cloud";
 import type { NormalizedHookInput } from "../adapters/types.js";
 
-const mockEndSession = vi.mocked(endSession);
-const mockMergeSessionMetadata = vi.mocked(mergeSessionMetadata);
-const mockGetCurrentBranch = vi.mocked(getCurrentBranch);
-const mockGetHeadSha = vi.mocked(getHeadSha);
 const mockTriggerAutoSync = vi.mocked(triggerAutoSync);
-const mockTriggerTranscriptUpload = vi.mocked(triggerTranscriptUpload);
 
 describe("dispatchHook", () => {
   beforeEach(() => {
@@ -117,7 +128,7 @@ describe("dispatchHook", () => {
       "/workspace/packages/api",
       "codex",
       "codex-session",
-      { projectRoot: "/workspace" },
+      { projectRoot: "/workspace", transcriptPath: null },
     );
   });
 
@@ -197,7 +208,6 @@ describe("dispatchHook", () => {
     expect(updateRun).toHaveBeenCalled();
     expect(mockRecordEvent).not.toHaveBeenCalled();
     expect(mockTriggerAutoSync).not.toHaveBeenCalled();
-    expect(mockTriggerTranscriptUpload).not.toHaveBeenCalled();
   });
 
   it("skips prompt-submit events from official subagents", async () => {
@@ -291,11 +301,11 @@ describe("dispatchHook", () => {
     expect(mockTriggerAutoSync).toHaveBeenCalledWith(
       expect.anything(),
       "proj-001",
-      { projectRoot: "/test" },
+      { projectRoot: "/test", collectRuntimeReport: expect.any(Function) },
     );
   });
 
-  it("records null workspace git state when stop has no turn mutations", async () => {
+  it("does not attach ambient Git state to an ordinary response event", async () => {
     const { initHookContext } = await import("../common/context.js");
     vi.mocked(initHookContext).mockResolvedValueOnce({
       db: { close: vi.fn() } as never,
@@ -325,304 +335,33 @@ describe("dispatchHook", () => {
       stopReason: "completed",
     });
 
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        eventType: "assistant_response",
-        gitBranch: null,
-        gitHeadSha: null,
-      }),
-    );
-    expect(mockGetCurrentBranch).not.toHaveBeenCalled();
-    expect(mockGetHeadSha).not.toHaveBeenCalled();
+    const ordinaryResponse = mockRecordEvent.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(ordinaryResponse.eventType).toBe("assistant_response");
+    expect(ordinaryResponse).not.toHaveProperty("gitBranch");
+    expect(ordinaryResponse).not.toHaveProperty("gitHeadSha");
   });
 
-  it("records workspace repository git state from turn mutations", async () => {
-    const transcriptDir = mkdtempSync(join(tmpdir(), "adit-hook-transcript-"));
-    const transcriptPath = join(transcriptDir, "019efde3-72c7-7f82-9f7c-5f3d63cee24f.jsonl");
+  it("silently ignores a stale session-start command without creating a session", async () => {
     const { initHookContext } = await import("../common/context.js");
+    await dispatchHook({ cwd: "/test", hookType: "session-start" } as unknown as NormalizedHookInput);
 
-    try {
-      writeFileSync(
-        transcriptPath,
-        [
-          JSON.stringify({
-            type: "response_item",
-            payload: {
-              type: "message",
-              role: "user",
-              content: [{ type: "input_text", text: "edit workspace repos" }],
-            },
-          }),
-          JSON.stringify({
-            type: "event_msg",
-            payload: {
-              type: "patch_apply_end",
-              call_id: "call_patch",
-              success: true,
-              status: "completed",
-              changes: {
-                "/workspace/adit-cloud/src/a.ts": {
-                  type: "update",
-                  unified_diff: "@@ -1,1 +1,1 @@\n-old\n+new\n",
-                },
-                "/workspace/adit-cloud/src/b.ts": {
-                  type: "update",
-                  unified_diff: "@@ -1,1 +1,1 @@\n-old\n+new\n",
-                },
-                "/workspace/adit-core/src/c.ts": {
-                  type: "update",
-                  unified_diff: "@@ -1,1 +1,1 @@\n-old\n+new\n",
-                },
-              },
-            },
-          }),
-        ].join("\n"),
-      );
-
-      vi.mocked(initHookContext).mockResolvedValueOnce({
-        db: { close: vi.fn() } as never,
-        config: {
-          projectId: "workspace-001",
-          projectRoot: "/workspace",
-          dataDir: "/tmp/adit-test",
-          clientId: "client-001",
-          dbPath: "/tmp/test.db",
-          captureEnv: false,
-          projectType: "workspace",
-          repositories: [
-            {
-              localRepositoryId: "repo-cloud",
-              relativePath: "adit-cloud",
-              displayName: "adit-cloud",
-              repositoryUrl: null,
-              canonicalRepoKey: null,
-              path: "/workspace/adit-cloud",
-            },
-            {
-              localRepositoryId: "repo-core",
-              relativePath: "adit-core",
-              displayName: "adit-core",
-              repositoryUrl: null,
-              canonicalRepoKey: null,
-              path: "/workspace/adit-core",
-            },
-          ],
-        },
-        session: { id: "sess-001" } as never,
-      });
-      mockGetCurrentBranch.mockImplementation(async (cwd) =>
-        cwd.endsWith("adit-cloud") ? "cloud-branch" : "core-branch",
-      );
-      mockGetHeadSha.mockImplementation(async (cwd) =>
-        cwd.endsWith("adit-cloud") ? "cloud-sha" : "core-sha",
-      );
-
-      await dispatchHook({
-        cwd: "/workspace",
-        hookType: "stop",
-        stopReason: "completed",
-        platformCli: "codex",
-        transcriptPath,
-      });
-    } finally {
-      rmSync(transcriptDir, { recursive: true, force: true });
-    }
-
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        eventType: "assistant_response",
-        gitBranch: "cloud-branch,core-branch",
-        gitHeadSha: "cloud-sha,core-sha",
-      }),
-    );
-  });
-
-  it("records workspace git state from Codex Bash writes in a child repo cwd", async () => {
-    const transcriptDir = mkdtempSync(join(tmpdir(), "adit-hook-transcript-"));
-    const transcriptPath = join(transcriptDir, "019efde3-72c7-7f82-9f7c-5f3d63cee24f.jsonl");
-    const { initHookContext } = await import("../common/context.js");
-
-    try {
-      writeFileSync(
-        transcriptPath,
-        [
-          JSON.stringify({
-            type: "response_item",
-            payload: {
-              type: "message",
-              role: "user",
-              content: [{ type: "input_text", text: "generate file with bash" }],
-            },
-          }),
-          JSON.stringify({
-            type: "event_msg",
-            payload: {
-              type: "exec_command_end",
-              call_id: "call_bash",
-              command: ["/bin/zsh", "-lc", "printf hi > src/generated.ts"],
-              cwd: "/workspace/adit-core",
-              parsed_cmd: [{ type: "unknown", cmd: "printf hi > src/generated.ts" }],
-              exit_code: 0,
-              status: "completed",
-            },
-          }),
-        ].join("\n"),
-      );
-
-      vi.mocked(initHookContext).mockResolvedValueOnce({
-        db: { close: vi.fn() } as never,
-        config: {
-          projectId: "workspace-001",
-          projectRoot: "/workspace",
-          dataDir: "/tmp/adit-test",
-          clientId: "client-001",
-          dbPath: "/tmp/test.db",
-          captureEnv: false,
-          projectType: "workspace",
-          repositories: [{
-            localRepositoryId: "repo-core",
-            relativePath: "adit-core",
-            displayName: "adit-core",
-            repositoryUrl: null,
-            canonicalRepoKey: null,
-            path: "/workspace/adit-core",
-          }],
-        },
-        session: { id: "sess-001" } as never,
-      });
-      mockGetCurrentBranch.mockResolvedValueOnce("core-branch");
-      mockGetHeadSha.mockResolvedValueOnce("core-sha");
-
-      await dispatchHook({
-        cwd: "/workspace",
-        hookType: "stop",
-        stopReason: "completed",
-        platformCli: "codex",
-        transcriptPath,
-      });
-    } finally {
-      rmSync(transcriptDir, { recursive: true, force: true });
-    }
-
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        eventType: "assistant_response",
-        gitBranch: "core-branch",
-        gitHeadSha: "core-sha",
-      }),
-    );
-  });
-
-  it("routes session-end and calls endSession", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "session-end",
-      sessionEndReason: "exit",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockEndSession).toHaveBeenCalledWith(
-      expect.anything(),
-      "sess-001",
-      "completed",
-    );
-  });
-
-  it("persists session-start launch metadata on the session instead of a checkpoint event", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "session-start",
-      sessionSource: "startup",
-      model: "claude-fable-5",
-      permissionMode: "default",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockMergeSessionMetadata).toHaveBeenCalledWith(
-      expect.anything(),
-      "sess-001",
-      { model: "claude-fable-5", source: "startup", permissionMode: "default" },
-    );
+    expect(initHookContext).not.toHaveBeenCalled();
     expect(mockRecordEvent).not.toHaveBeenCalled();
+    expect(mockTriggerAutoSync).not.toHaveBeenCalled();
   });
 
-  it("skips the metadata merge when the platform reports nothing", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "session-start",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockMergeSessionMetadata).not.toHaveBeenCalled();
-  });
-
-  it("triggers cloud auto-sync once on session-start", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "session-start",
-      sessionSource: "startup",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockTriggerAutoSync).toHaveBeenCalledTimes(1);
-    expect(mockTriggerAutoSync).toHaveBeenCalledWith(
-      expect.anything(),
-      "proj-001",
-      { projectRoot: "/test" },
-    );
-  });
-
-  it("applies normal auto-sync thresholds on session-end", async () => {
-    const input: NormalizedHookInput = {
+  it("silently ignores a stale session-end command without syncing", async () => {
+    const { initHookContext } = await import("../common/context.js");
+    const input = {
       cwd: "/test",
       hookType: "session-end",
-      sessionEndReason: "exit",
-    };
+    } as unknown as NormalizedHookInput;
 
     await dispatchHook(input);
 
-    expect(mockTriggerAutoSync).toHaveBeenCalledWith(
-      expect.anything(),
-      "proj-001",
-      { projectRoot: "/test" },
-    );
-  });
-
-  it("triggers transcript upload through the cloud package when a transcript path exists", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "prompt-submit",
-      prompt: "Fix the bug in auth.ts",
-      transcriptPath: "/tmp/transcript.jsonl",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockTriggerTranscriptUpload).toHaveBeenCalledWith(
-      expect.anything(),
-      "sess-001",
-      "/tmp/transcript.jsonl",
-    );
-  });
-
-  it("routes session-end with error reason", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "session-end",
-      sessionEndReason: "error",
-    };
-
-    await dispatchHook(input);
-
-    expect(mockEndSession).toHaveBeenCalledWith(
-      expect.anything(),
-      "sess-001",
-      "error",
-    );
+    expect(initHookContext).not.toHaveBeenCalled();
+    expect(mockRecordEvent).not.toHaveBeenCalled();
+    expect(mockTriggerAutoSync).not.toHaveBeenCalled();
   });
 
   // notification and task-completed hooks were retired: stale hook entries
@@ -658,45 +397,307 @@ describe("dispatchHook", () => {
     expect(mockRecordEvent).not.toHaveBeenCalled();
   });
 
-  it("routes subagent-start and records event", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "subagent-start",
-      agentId: "agent-001",
-      agentType: "code-reviewer",
-    };
+  it("silently ignores retired subagent hookTypes from stale installs", async () => {
+    for (const hookType of ["subagent-start", "subagent-stop"] as const) {
+      const input: NormalizedHookInput = {
+        cwd: "/test",
+        hookType,
+        agentId: "agent-001",
+        agentType: "code-reviewer",
+      };
 
-    await dispatchHook(input);
+      await dispatchHook(input);
+    }
 
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: "sess-001",
-        eventType: "subagent_start",
-        actor: "assistant",
-        toolName: "code-reviewer",
-      }),
-    );
+    expect(mockRecordEvent).not.toHaveBeenCalled();
   });
 
-  it("routes subagent-stop and records event", async () => {
-    const input: NormalizedHookInput = {
-      cwd: "/test",
-      hookType: "subagent-stop",
-      agentId: "agent-001",
-      agentType: "code-reviewer",
-      lastAssistantMessage: "Review complete, 3 issues found.",
-    };
+  describe("Bash working-tree snapshots", () => {
+    const repositories = [{
+      localRepositoryId: "repo-root",
+      relativePath: ".",
+      displayName: "test",
+      repositoryUrl: null,
+      canonicalRepoKey: null,
+      path: "/test",
+    }];
 
-    await dispatchHook(input);
+    async function withRepositories(): Promise<void> {
+      const { initHookContext } = await import("../common/context.js");
+      vi.mocked(initHookContext).mockResolvedValueOnce({
+        db: { close: vi.fn() } as never,
+        config: {
+          projectId: "proj-001",
+          projectRoot: "/test",
+          dataDir: "/tmp/adit-test",
+          clientId: "client-001",
+          dbPath: "/tmp/test.db",
+          captureEnv: false,
+          projectType: "repo",
+          repositories,
+        } as never,
+        session: { id: "sess-001" } as never,
+      });
+    }
 
-    expect(mockRecordEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: "sess-001",
-        eventType: "subagent_stop",
-        actor: "assistant",
-        toolName: "code-reviewer",
-      }),
-    );
+    it("pre-tool-use snapshots only the current command's write targets", async () => {
+      await withRepositories();
+      snapshotMocks.captureWorkingTree.mockResolvedValueOnce({ tree: "tree-a", head: "head-1" });
+
+      await dispatchHook({
+        cwd: "/test",
+        hookType: "pre-tool-use",
+        platformCli: "claude-code",
+        promptId: "prompt-1",
+        toolName: "Bash",
+        toolUseId: "toolu_01",
+        toolInput: { command: "python3 - <<'EOF'\nfrom pathlib import Path\nPath('src/a.ts').write_text('new')\nEOF" },
+      });
+
+      expect(snapshotMocks.captureWorkingTree).toHaveBeenCalledWith("/test", ["src/a.ts"]);
+      expect(snapshotMocks.writeToolSnapshot).toHaveBeenCalledWith(
+        "/tmp/adit-test",
+        "sess-001",
+        expect.objectContaining({
+          toolUseId: "toolu_01",
+          promptId: "prompt-1",
+          repositories: [expect.objectContaining({ path: "/test", tree: "tree-a", head: "head-1", targets: ["src/a.ts"] })],
+        }),
+      );
+      expect(mockRecordEvent).not.toHaveBeenCalled();
+      expect(mockTriggerAutoSync).not.toHaveBeenCalled();
+    });
+
+    it("pre-tool-use skips background commands, other tools and other platforms", async () => {
+      const base = {
+        cwd: "/test",
+        hookType: "pre-tool-use" as const,
+        platformCli: "claude-code" as const,
+        toolName: "Bash",
+        toolUseId: "toolu_02",
+      };
+      await withRepositories();
+      await dispatchHook({ ...base, toolInput: { command: "npm test", run_in_background: true } });
+      await withRepositories();
+      await dispatchHook({ ...base, toolName: "Read", toolInput: { file_path: "/test/a.ts" } });
+      await withRepositories();
+      await dispatchHook({ ...base, platformCli: "gemini", toolInput: { command: "ls" } });
+
+      expect(snapshotMocks.captureWorkingTree).not.toHaveBeenCalled();
+      expect(snapshotMocks.writeToolSnapshot).not.toHaveBeenCalled();
+    });
+
+    it.each(["codex", "cursor"] as const)("snapshots %s shell commands, binding them to the turn id", async (platform) => {
+      await withRepositories();
+      snapshotMocks.captureWorkingTree.mockResolvedValueOnce({ tree: "tree-a", head: "head-1" });
+
+      await dispatchHook({
+        cwd: "/test",
+        hookType: "pre-tool-use",
+        platformCli: platform,
+        turnId: "turn-1",
+        toolName: "Bash",
+        toolUseId: "exec-0c80cc67",
+        toolInput: { command: "printf hi > probe/two.txt" },
+      });
+
+      expect(snapshotMocks.writeToolSnapshot).toHaveBeenCalledWith(
+        "/tmp/adit-test",
+        "sess-001",
+        expect.objectContaining({ toolUseId: "exec-0c80cc67", promptId: "turn-1" }),
+      );
+    });
+
+    it.each(["codex", "cursor"] as const)("stop tags %s shell changes with its own source marker", async (platform) => {
+      snapshotMocks.takePendingInferred.mockReturnValueOnce([
+        {
+          toolUseId: "exec-0c80cc67",
+          promptId: "turn-1",
+          recordedAt: "2026-09-15T00:00:01.000Z",
+          files: [
+            { path: "probe/two.txt", status: "A", additions: 1, deletions: 0, diff: "@@ -0,0 +1 @@\n+hi" },
+          ],
+        },
+      ]);
+
+      await dispatchHook({
+        cwd: "/test",
+        hookType: "stop",
+        platformCli: platform,
+        stopReason: "completed",
+        lastAssistantMessage: "done",
+      });
+
+      const response = mockRecordEvent.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(JSON.parse(response.inferredFilesJson as string)).toEqual([
+        { path: "probe/two.txt", status: "A", source: `${platform}-bash-snapshot`, toolUseId: "exec-0c80cc67" },
+      ]);
+      expect(JSON.parse(response.diffStatJson as string)).toEqual([
+        { path: "probe/two.txt", status: "A", additions: 1, deletions: 0, toolName: "Bash", source: `${platform}-bash-snapshot` },
+      ]);
+    });
+
+    it("post-tool-use queues the files that changed while the command ran", async () => {
+      snapshotMocks.takeToolSnapshot.mockReturnValueOnce({
+        toolUseId: "toolu_03",
+        promptId: "prompt-1",
+        startedAt: "2026-09-15T00:00:00.000Z",
+        repositories: [{ localRepositoryId: "repo-root", relativePath: ".", path: "/test", tree: "tree-a", head: "head-1", targets: ["src/a.ts", "src/new.ts"] }],
+      });
+      snapshotMocks.captureWorkingTree.mockResolvedValueOnce({ tree: "tree-b", head: "head-1" });
+      snapshotMocks.diffWorkingTreesWithPatch.mockResolvedValueOnce([
+        { path: "src/a.ts", status: "M", additions: 1, deletions: 1, diff: "@@ -1 +1 @@\n-a\n+b" },
+        { path: "src/new.ts", status: "A", additions: 1, deletions: 0, diff: "@@ -0,0 +1 @@\n+n" },
+      ]);
+
+      await dispatchHook({
+        cwd: "/test",
+        hookType: "post-tool-use",
+        platformCli: "claude-code",
+        toolName: "Bash",
+        toolUseId: "toolu_03",
+        toolInput: { command: "sed -i '' 's/a/b/' src/a.ts" },
+      });
+
+      expect(snapshotMocks.takeToolSnapshot).toHaveBeenCalledWith("/tmp/adit-test", "sess-001", "toolu_03");
+      expect(snapshotMocks.diffWorkingTreesWithPatch).toHaveBeenCalledWith("/test", "tree-a", "tree-b");
+      expect(snapshotMocks.appendPendingInferred).toHaveBeenCalledWith(
+        "/tmp/adit-test",
+        "sess-001",
+        expect.objectContaining({
+          toolUseId: "toolu_03",
+          promptId: "prompt-1",
+          files: [
+            { path: "src/a.ts", status: "M", additions: 1, deletions: 1, diff: "@@ -1 +1 @@\n-a\n+b" },
+            { path: "src/new.ts", status: "A", additions: 1, deletions: 0, diff: "@@ -0,0 +1 @@\n+n" },
+          ],
+        }),
+      );
+    });
+
+    it("post-tool-use ignores commands that moved HEAD (checkout, pull, reset)", async () => {
+      snapshotMocks.takeToolSnapshot.mockReturnValueOnce({
+        toolUseId: "toolu_04",
+        promptId: null,
+        startedAt: "2026-09-15T00:00:00.000Z",
+        repositories: [{ localRepositoryId: "repo-root", relativePath: ".", path: "/test", tree: "tree-a", head: "head-1", targets: ["src/a.ts"] }],
+      });
+      snapshotMocks.captureWorkingTree.mockResolvedValueOnce({ tree: "tree-c", head: "head-2" });
+
+      await dispatchHook({
+        cwd: "/test",
+        hookType: "post-tool-use",
+        platformCli: "claude-code",
+        toolName: "Bash",
+        toolUseId: "toolu_04",
+        toolInput: { command: "echo new > src/a.ts; git checkout main" },
+      });
+
+      expect(snapshotMocks.diffWorkingTreesWithPatch).not.toHaveBeenCalled();
+      expect(snapshotMocks.appendPendingInferred).not.toHaveBeenCalled();
+    });
+
+    it("does not infer targets for read-only commands or standalone external scripts", async () => {
+      for (const command of ["git status", "python output/edit.py", "node edit.js", "Get-Content src/a.ts"]) {
+        await withRepositories();
+        await dispatchHook({ cwd: "/test", hookType: "pre-tool-use", platformCli: "codex", toolName: "Bash", toolUseId: "read", toolInput: { command } });
+      }
+      expect(snapshotMocks.captureWorkingTree).not.toHaveBeenCalled();
+      expect(snapshotMocks.writeToolSnapshot).not.toHaveBeenCalled();
+    });
+
+    it("does not compare legacy snapshots that have no target scope", async () => {
+      snapshotMocks.takeToolSnapshot.mockReturnValueOnce({
+        toolUseId: "legacy", promptId: null, startedAt: "2026-09-15T00:00:00.000Z",
+        repositories: [{ localRepositoryId: "repo-root", relativePath: ".", path: "/test", tree: "tree-a", head: "head-1" }],
+      });
+      await dispatchHook({ cwd: "/test", hookType: "post-tool-use", platformCli: "codex", toolName: "Bash", toolUseId: "legacy" });
+      expect(snapshotMocks.captureWorkingTree).not.toHaveBeenCalled();
+      expect(snapshotMocks.appendPendingInferred).not.toHaveBeenCalled();
+    });
+
+    it("post-tool-use does nothing without a matching pre-tool-use snapshot", async () => {
+      snapshotMocks.takeToolSnapshot.mockReturnValueOnce(null);
+
+      await dispatchHook({
+        cwd: "/test",
+        hookType: "post-tool-use",
+        platformCli: "claude-code",
+        toolName: "Bash",
+        toolUseId: "toolu_05",
+        toolInput: { command: "ls" },
+      });
+
+      expect(snapshotMocks.captureWorkingTree).not.toHaveBeenCalled();
+      expect(snapshotMocks.appendPendingInferred).not.toHaveBeenCalled();
+    });
+
+    it("stop attaches the turn's inferred file list and Bash diffs to the response event", async () => {
+      snapshotMocks.takePendingInferred.mockReturnValueOnce([
+        {
+          toolUseId: "toolu_03",
+          promptId: "prompt-1",
+          recordedAt: "2026-09-15T00:00:01.000Z",
+          files: [
+            { path: "src/a.ts", status: "M", additions: 1, deletions: 1, diff: "@@ -1 +1 @@\n-a\n+b" },
+            { path: "src/new.ts", status: "A", additions: 1, deletions: 0, diff: "@@ -0,0 +1 @@\n+n" },
+          ],
+        },
+      ]);
+
+      await dispatchHook({
+        cwd: "/test",
+        hookType: "stop",
+        platformCli: "claude-code",
+        stopReason: "completed",
+        lastAssistantMessage: "Done.",
+      });
+
+      expect(snapshotMocks.takePendingInferred).toHaveBeenCalledWith("/tmp/adit-test", "sess-001");
+      const response = mockRecordEvent.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(response.eventType).toBe("assistant_response");
+      expect(JSON.parse(response.inferredFilesJson as string)).toEqual([
+        { path: "src/a.ts", status: "M", source: "claude-bash-snapshot", toolUseId: "toolu_03" },
+        { path: "src/new.ts", status: "A", source: "claude-bash-snapshot", toolUseId: "toolu_03" },
+      ]);
+      // Bash changes flow through the regular mutation pipeline too: per-file
+      // stats tagged with their source, plus a bounded diff text.
+      expect(JSON.parse(response.diffStatJson as string)).toEqual([
+        { path: "src/a.ts", status: "M", additions: 1, deletions: 1, toolName: "Bash", source: "claude-bash-snapshot" },
+        { path: "src/new.ts", status: "A", additions: 1, deletions: 0, toolName: "Bash", source: "claude-bash-snapshot" },
+      ]);
+      expect(mockInsertDiff).toHaveBeenCalledTimes(1);
+      const diffText = (mockInsertDiff.mock.calls[0][1] as { diffText: string }).diffText;
+      expect(diffText).toContain("diff --git a/src/a.ts b/src/a.ts");
+      expect(diffText).toContain("+b");
+      expect(diffText).toContain("diff --git a/src/new.ts b/src/new.ts");
+    });
+
+    it("stop stores null when the turn ran no file-changing Bash commands", async () => {
+      await dispatchHook({
+        cwd: "/test",
+        hookType: "stop",
+        platformCli: "claude-code",
+        stopReason: "completed",
+      });
+
+      const response = mockRecordEvent.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(response.inferredFilesJson).toBeNull();
+      expect(response.diffStatJson).toBeNull();
+      expect(mockInsertDiff).not.toHaveBeenCalled();
+    });
+
+    it("prompt-submit keeps snapshots queued by the running turn (appended prompts join it)", async () => {
+      await dispatchHook({
+        cwd: "/test",
+        hookType: "prompt-submit",
+        platformCli: "claude-code",
+        prompt: "one more thing while you work",
+      });
+
+      expect(snapshotMocks.clearSessionSnapshots).not.toHaveBeenCalled();
+      expect(snapshotMocks.takePendingInferred).not.toHaveBeenCalled();
+    });
   });
 
   it("closes database in finally block even if handler throws", async () => {

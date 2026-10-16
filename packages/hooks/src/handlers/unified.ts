@@ -6,19 +6,13 @@
  */
 
 import {
-  endSession,
-  endStaleSessions,
-  mergeSessionMetadata,
   withPerf,
   insertDiff,
   generateId,
-  type LocalRepository,
 } from "@varveai/adit-core";
 import {
   createTimelineManager,
   captureEnvironment,
-  getCurrentBranch,
-  getHeadSha,
   type FileChange,
 } from "@varveai/adit-engine";
 import { initHookContext, type HookContext } from "../common/context.js";
@@ -26,17 +20,17 @@ import {
   assistantTextFromTranscriptEntry,
   type TranscriptEntryLike,
 } from "../common/transcript-entry.js";
-import {
-  detectAndRecordCommits,
-  initializeSessionRepoBaselines,
-} from "../common/commit-attribution.js";
+import { recordGitCommits } from "../git-operations/index.js";
+import { commandWriteTargets, repositoryTargets } from "../bash-snapshot/command-targets.js";
 import { debugLog } from "../common/debug-log.js";
+import { captureTokenUsage } from "../common/token-usage.js";
+import { attachPendingTokenUsage } from "@varveai/adit-core";
 import {
   classifyPromptSubmit,
   type PromptSubmitClassification,
 } from "../common/system-prompt.js";
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { NormalizedHookInput } from "../adapters/types.js";
 import {
   extractClaudeMutationsFromTranscript,
@@ -48,6 +42,21 @@ import {
   normalizeMutationPaths,
   type AgentFileMutation,
 } from "../mutations/index.js";
+import {
+  appendPendingInferred,
+  captureWorkingTree,
+  diffWorkingTreesWithPatch,
+  mergeInferredFiles,
+  pendingToMutations,
+  takePendingInferred,
+  takeToolSnapshot,
+  toProjectRelativeChanges,
+  writeToolSnapshot,
+  inferredSourceFor,
+  type InferredFileChange,
+  type RepositoryTreeSnapshot,
+  type SnapshotProvider,
+} from "../bash-snapshot/index.js";
 
 /**
  * Dispatch a normalized hook input to the appropriate handler.
@@ -61,23 +70,23 @@ export async function dispatchHook(
   input: NormalizedHookInput,
   options: DispatchHookOptions = {},
 ): Promise<void> {
+  // Older installs can still invoke retired hook commands. Reject them before
+  // context initialization so a stale SessionEnd command cannot create an
+  // otherwise empty local session.
+  if (!isHandledHookType(input.hookType)) return;
+
   const ctx = await initHookContext(
     input.cwd,
     input.platformCli ?? "other",
     input.platformSessionId,
-    { projectRoot: options.projectRoot },
+    { projectRoot: options.projectRoot, transcriptPath: input.transcriptPath ?? null },
   );
   if (!ctx) return;
 
   const dataDir = ctx.config.dataDir;
 
   try {
-    if (isIgnoredSystemSession(ctx)) {
-      if (input.hookType === "session-end") {
-        endSession(ctx.db, ctx.session.id, "completed");
-      }
-      return;
-    }
+    if (isIgnoredSystemSession(ctx)) return;
 
     const classification =
       input.hookType === "prompt-submit"
@@ -98,38 +107,19 @@ export async function dispatchHook(
         case "stop":
           await handleStopUnified(ctx, input);
           break;
-        case "session-start":
-          await handleSessionStart(ctx, input);
+        case "pre-tool-use":
+          await handlePreToolUse(ctx, input);
           break;
-        case "session-end":
-          await handleSessionEnd(ctx, input);
-          break;
-        case "subagent-start":
-          await handleSubagentStart(ctx, input);
-          break;
-        case "subagent-stop":
-          await handleSubagentStop(ctx, input);
+        case "post-tool-use":
+          await handlePostToolUse(ctx, input);
           break;
       }
     });
 
-    // Trigger transcript upload (fail-open).
-    // Every hook event carries transcript_path, so we check on each event.
-    // Awaited so db stays open until the query finishes.
-    if (input.transcriptPath) {
-      await withPerf(dataDir, "hook", "transcript-upload", () =>
-        triggerTranscriptUploadIfEnabled(ctx, input),
-      ).catch(() => {
-        /* fail-open */
-      });
-    }
-
     // Auto-sync to cloud on stable hook boundaries (fail-open).
     // Uses dynamic import so @varveai/adit-cloud is not a build-time dependency.
     // The module name is constructed to prevent TypeScript from resolving it.
-    // All stable hook boundaries, including session-end, use the count/time
-    // thresholds in triggerAutoSync. Session-end force sync is temporarily disabled
-    // because some SDK-driven Claude queries emit SessionEnd after each turn.
+    // Stable hook boundaries use the count/time thresholds in triggerAutoSync.
     // prompt-submit is deliberately skipped so cloud does not receive half a turn
     // containing a user prompt without its assistant response.
     if (shouldTriggerCloudAutoSync(input.hookType)) {
@@ -140,15 +130,16 @@ export async function dispatchHook(
             triggerAutoSync: (
               db: unknown,
               projectId: string,
-              options?: { force?: boolean; projectRoot?: string },
+              options?: { projectRoot?: string; collectRuntimeReport?: () => Promise<import("@varveai/adit-cloud").RuntimeReport> },
             ) => Promise<void>;
           };
           // Awaited so db stays open until triggerAutoSync finishes querying and pushing.
-          // Temporarily disabled: SessionEnd must not bypass the normal sync threshold.
-          // const force = input.hookType === "session-end";
           await cloudModule.triggerAutoSync(ctx.db, ctx.config.projectId, {
-            // ...(force ? { force: true } : {}),
             projectRoot: ctx.config.projectRoot,
+            collectRuntimeReport: async () => {
+              const { collectRuntimeReport } = await import("../diagnostics.js");
+              return collectRuntimeReport(ctx.config, ctx.db, "hooks");
+            },
           });
         });
       } catch {
@@ -158,6 +149,13 @@ export async function dispatchHook(
   } finally {
     ctx.db.close();
   }
+}
+
+function isHandledHookType(hookType: string): boolean {
+  return hookType === "prompt-submit"
+    || hookType === "stop"
+    || hookType === "pre-tool-use"
+    || hookType === "post-tool-use";
 }
 
 interface IgnoredSessionMetadata {
@@ -218,28 +216,42 @@ function parseSessionMetadata(metadataJson: string | null): IgnoredSessionMetada
 }
 
 function shouldTriggerCloudAutoSync(hookType: NormalizedHookInput["hookType"]): boolean {
-  return hookType !== "prompt-submit";
+  return hookType === "stop";
 }
 
 /** Handle prompt submission (kept lightweight — no git operations) */
 async function handlePromptSubmitUnified(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
+  // Bash snapshots queued since the last Stop are deliberately kept: a prompt
+  // appended while the agent is still working joins the running turn (no Stop
+  // fires in between), so clearing here would drop the files it changed so
+  // far. They all land on the next assistant_response.
   if (!input.prompt) return;
 
   const timeline = createTimelineManager(ctx.db, ctx.config);
 
   // Only record the prompt text. Per-turn file mutation extraction is deferred
   // to handleStopUnified so this blocking UserPromptSubmit hook stays fast.
-  await timeline.recordEvent({
+  const promptEvent = await timeline.recordEvent({
     sessionId: ctx.session.id,
     eventType: "prompt_submit",
     actor: "user",
     promptText: input.prompt,
   });
+  try {
+    captureTokenUsage(ctx, input.transcriptPath, "prompt", promptEvent.id);
+  } catch {
+    debugLog({ phase: "token-usage-capture-failed", boundary: "prompt" });
+  }
 }
 
 /** Handle stop (assistant response complete) */
 async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
   const timeline = createTimelineManager(ctx.db, ctx.config);
+  try {
+    captureTokenUsage(ctx, input.transcriptPath, "stop");
+  } catch {
+    debugLog({ phase: "token-usage-capture-failed", boundary: "stop" });
+  }
 
   // Use last_assistant_message as the response text (what the model actually said).
   // Cursor sometimes fires stop before transcript text is fully flushed, so
@@ -297,14 +309,32 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     }
   }
 
+  // Files changed by Bash commands during this turn (working-tree snapshot
+  // diffs). They join the editing-tool mutations — same diff_stat/diff_text
+  // pipeline, tagged source "claude-bash-snapshot" — and additionally land
+  // as a complete path-only list in inferred_files_json for commit matching
+  // (diff bodies can be omitted for size; the path list never is).
+  let inferredFilesJson: string | null = null;
+  const snapshotProvider = bashSnapshotProvider(input.platformCli);
+  if (snapshotProvider) {
+    try {
+      const pending = takePendingInferred(ctx.config.dataDir, ctx.session.id);
+      const inferred = mergeInferredFiles(pending, {
+        exclude: mutations.map((m) => m.path),
+        source: inferredSourceFor(snapshotProvider),
+      });
+      if (inferred.length > 0) inferredFilesJson = JSON.stringify(inferred);
+      const bashMutations = pendingToMutations(pending, snapshotProvider);
+      if (bashMutations.length > 0) {
+        mutations = [...mutations, ...bashMutations];
+        mutationStatJson = JSON.stringify(buildDiffStat(mutations));
+      }
+    } catch (err) {
+      debugLog({ phase: "inferred-files-merge-failed", error: String(err) });
+    }
+  }
+
   const changedFiles = changesFromMutations(mutations);
-  // Mutation paths are project-root-relative after normalization, so repo
-  // matching must resolve them against the project root, not the event cwd.
-  const workspaceGitState = await resolveWorkspaceGitState(
-    ctx,
-    ctx.config.projectRoot,
-    changedFiles,
-  );
 
   const event = await timeline.recordEvent({
     sessionId: ctx.session.id,
@@ -312,11 +342,13 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     actor: "assistant",
     responseText,
     diffStatJson: mutationStatJson,
-    ...(workspaceGitState ? {
-      gitBranch: workspaceGitState.gitBranch,
-      gitHeadSha: workspaceGitState.gitHeadSha,
-    } : {}),
+    inferredFilesJson,
   });
+  try {
+    attachPendingTokenUsage(ctx.db, ctx.session.id);
+  } catch {
+    debugLog({ phase: "token-usage-attach-failed" });
+  }
 
   // Persist bounded diff_text from mutations (replaces old git checkpoint path)
   if (mutations.length > 0) {
@@ -338,9 +370,9 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
     }
   }
 
-  // Attribute commits made during this turn (fail-open inside).
-  await withPerf(ctx.config.dataDir, "git", "commitAttribution", () =>
-    detectAndRecordCommits(ctx, timeline),
+  // Record only successful git commit commands actually executed in this turn.
+  await withPerf(ctx.config.dataDir, "git", "gitCommits", () =>
+    recordGitCommits(ctx, input, timeline),
   );
 
   // Environment snapshots stay local for the TUI env screen and snapshot
@@ -367,9 +399,115 @@ async function handleStopUnified(ctx: HookContext, input: NormalizedHookInput): 
   }
 }
 
-interface WorkspaceGitState {
-  gitBranch: string | null;
-  gitHeadSha: string | null;
+/** Platforms whose shell tool calls are snapshotted (hook tool_name "Bash"). */
+function bashSnapshotProvider(platformCli: NormalizedHookInput["platformCli"]): SnapshotProvider | null {
+  if (platformCli === "claude-code" || platformCli === "claude-vscode" || platformCli === "codex" || platformCli === "cursor") {
+    return platformCli;
+  }
+  return null;
+}
+
+/**
+ * Only the shell tool is snapshotted. Background commands (Claude) are
+ * skipped: their PostToolUse fires when the command is dispatched, not when
+ * it finishes, so there is no window to diff.
+ */
+function isBashSnapshotCandidate(input: NormalizedHookInput): boolean {
+  if (!bashSnapshotProvider(input.platformCli)) return false;
+  if (input.toolName !== "Bash" || !input.toolUseId) return false;
+  return input.toolInput?.run_in_background !== true;
+}
+
+/** PreToolUse(Bash): snapshot only write targets named by the current command. */
+async function handlePreToolUse(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
+  if (!isBashSnapshotCandidate(input) || !input.toolUseId) return;
+  const repositories = ctx.config.repositories;
+  if (repositories.length === 0) return;
+  const command = input.toolInput?.command ?? input.toolInput?.cmd;
+  if (typeof command !== "string") return;
+  const workingDirectory = input.toolInput?.workdir ?? input.toolInput?.cwd;
+  const targets = commandWriteTargets(command, typeof workingDirectory === "string" ? resolve(input.cwd, workingDirectory) : input.cwd);
+  if (targets.length === 0) return;
+  const startedAt = new Date().toISOString();
+
+  const captured = await Promise.all(
+    repositories.map(async (repository): Promise<RepositoryTreeSnapshot | null> => {
+      try {
+        const scopedTargets = repositoryTargets(targets, repository.path);
+        if (scopedTargets.length === 0) return null;
+        const capture = await captureWorkingTree(repository.path, scopedTargets);
+        if (!capture) return null;
+        return {
+          localRepositoryId: repository.localRepositoryId,
+          relativePath: repository.relativePath,
+          path: repository.path,
+          tree: capture.tree,
+          head: capture.head,
+          targets: scopedTargets,
+        };
+      } catch (err) {
+        debugLog({ phase: "bash-snapshot-capture-failed", error: String(err) });
+        return null;
+      }
+    }),
+  );
+  const snapshots = captured.filter((s): s is RepositoryTreeSnapshot => s !== null);
+  if (snapshots.length === 0) return;
+
+  try {
+    writeToolSnapshot(ctx.config.dataDir, ctx.session.id, {
+      toolUseId: input.toolUseId,
+      promptId: input.promptId ?? input.turnId ?? null,
+      startedAt,
+      repositories: snapshots,
+    });
+  } catch (err) {
+    debugLog({ phase: "bash-snapshot-write-failed", error: String(err) });
+  }
+}
+
+/** PostToolUse(Bash): diff against the PreToolUse snapshot and queue the changed files. */
+async function handlePostToolUse(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
+  if (!isBashSnapshotCandidate(input) || !input.toolUseId) return;
+  const snapshot = takeToolSnapshot(ctx.config.dataDir, ctx.session.id, input.toolUseId);
+  if (!snapshot) return;
+
+  const files: InferredFileChange[] = [];
+  await Promise.all(
+    snapshot.repositories.map(async (repository) => {
+      try {
+        if (!repository.targets?.length) return;
+        const after = await captureWorkingTree(repository.path, repository.targets);
+        if (!after || after.tree === repository.tree) return;
+        // HEAD moved: the command was a checkout/pull/reset, and the files it
+        // touched are history moving, not the agent's edits.
+        if (after.head !== repository.head) {
+          debugLog({ phase: "bash-snapshot-head-moved", toolUseId: input.toolUseId });
+          return;
+        }
+        const changes = await diffWorkingTreesWithPatch(repository.path, repository.tree, after.tree);
+        files.push(...toProjectRelativeChanges(changes, {
+          repositoryRelativePath: repository.relativePath,
+          projectRoot: ctx.config.projectRoot,
+          dataDir: ctx.config.dataDir,
+        }));
+      } catch (err) {
+        debugLog({ phase: "bash-snapshot-diff-failed", error: String(err) });
+      }
+    }),
+  );
+  if (files.length === 0) return;
+
+  try {
+    appendPendingInferred(ctx.config.dataDir, ctx.session.id, {
+      toolUseId: input.toolUseId,
+      promptId: input.promptId ?? input.turnId ?? snapshot.promptId,
+      recordedAt: new Date().toISOString(),
+      files,
+    });
+  } catch (err) {
+    debugLog({ phase: "bash-snapshot-append-failed", error: String(err) });
+  }
 }
 
 function changesFromMutations(mutations: AgentFileMutation[]): FileChange[] {
@@ -395,79 +533,6 @@ function mutationKindToFileStatus(kind: AgentFileMutation["kind"]): FileChange["
   if (kind === "delete") return "D";
   if (kind === "rename") return "R";
   return "M";
-}
-
-async function resolveWorkspaceGitState(
-  ctx: HookContext,
-  cwd: string,
-  changedFiles: FileChange[],
-): Promise<WorkspaceGitState | null> {
-  if (ctx.config.projectType !== "workspace") return null;
-  if (changedFiles.length === 0) return { gitBranch: null, gitHeadSha: null };
-
-  const repositories = matchedWorkspaceRepositories(ctx, cwd, changedFiles);
-  if (repositories.length === 0) return { gitBranch: null, gitHeadSha: null };
-
-  const states = await Promise.all(
-    repositories.map(async (repo) => ({
-      branch: await safeGetCurrentBranch(repo.path),
-      headSha: await safeGetHeadSha(repo.path),
-    })),
-  );
-
-  return {
-    gitBranch: joinNullable(states.map((state) => state.branch)),
-    gitHeadSha: joinNullable(states.map((state) => state.headSha)),
-  };
-}
-
-function matchedWorkspaceRepositories(
-  ctx: HookContext,
-  cwd: string,
-  changedFiles: FileChange[],
-): LocalRepository[] {
-  const matched = new Map<string, LocalRepository>();
-
-  for (const change of changedFiles) {
-    const absPath = absoluteMutationPath(cwd, change.path);
-    const repo = ctx.config.repositories.find((candidate) =>
-      isPathInsideOrEqual(absPath, resolve(candidate.path)),
-    );
-    if (repo) matched.set(repo.path, repo);
-  }
-
-  return Array.from(matched.values());
-}
-
-function absoluteMutationPath(cwd: string, path: string): string {
-  const normalized = path.replace(/\\/gu, "/");
-  return resolve(isAbsolute(normalized) ? normalized : join(cwd, normalized));
-}
-
-function isPathInsideOrEqual(path: string, parent: string): boolean {
-  const rel = relative(parent, path);
-  return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
-}
-
-function joinNullable(values: Array<string | null>): string | null {
-  const filtered = values.filter((value): value is string => !!value);
-  return filtered.length > 0 ? filtered.join(",") : null;
-}
-
-async function safeGetCurrentBranch(cwd: string): Promise<string | null> {
-  try {
-    return await getCurrentBranch(cwd);
-  } catch {
-    return null;
-  }
-}
-
-async function safeGetHeadSha(cwd: string): Promise<string | null> {
-  try {
-    return await getHeadSha(cwd);
-  } catch {
-    return null;
-  }
 }
 
 function extractLastAssistantTextFromTranscript(transcriptPath: string): string | undefined {
@@ -504,177 +569,3 @@ async function recoverAssistantMessageFromTranscript(transcriptPath?: string): P
   return undefined;
 }
 
-/** How long a session may sit with no events before the lazy sweep closes it */
-const STALE_SESSION_MAX_IDLE_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Codex has no SessionEnd hook at all, so every codex session stays active
- * until the next codex SessionStart sweeps it. With the default 24h window,
- * "completed" codex sessions were measured lingering for 30+ days locally.
- * A 2h idle window closes them promptly while still surviving long breaks
- * within a real working session.
- */
-const CODEX_STALE_SESSION_MAX_IDLE_MS = 2 * 60 * 60 * 1000;
-
-function staleSessionIdleMsFor(platform: string): number {
-  return platform === "codex" ? CODEX_STALE_SESSION_MAX_IDLE_MS : STALE_SESSION_MAX_IDLE_MS;
-}
-
-/** Handle session start — capture initial env snapshot and record metadata */
-async function handleSessionStart(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  // Lazily close zombie sessions for this platform. Codex has no SessionEnd
-  // hook event, so its sessions would otherwise stay active forever and
-  // become targets for the sessionless getActiveSession fallback.
-  if (input.platformCli) {
-    try {
-      endStaleSessions(ctx.db, {
-        projectId: ctx.config.projectId,
-        platform: input.platformCli,
-        cutoffIso: new Date(Date.now() - staleSessionIdleMsFor(input.platformCli)).toISOString(),
-        excludeSessionId: ctx.session.id,
-      });
-    } catch {
-      // Fail-open
-    }
-  }
-
-  // Seed per-repo HEAD baselines so first-turn commits are attributable.
-  await initializeSessionRepoBaselines(ctx);
-
-  // Persist launch context (model, source, permission mode) on the session
-  // record. Replaces the legacy "checkpoint" marker event. Metadata-only
-  // updates on revived sessions reach the cloud when the session next ends
-  // (sync detects modified sessions via ended_at).
-  const metadata: Record<string, unknown> = {};
-  if (input.model) metadata.model = input.model;
-  if (input.sessionSource) metadata.source = input.sessionSource;
-  if (input.permissionMode) metadata.permissionMode = input.permissionMode;
-
-  if (Object.keys(metadata).length > 0) {
-    try {
-      mergeSessionMetadata(ctx.db, ctx.session.id, metadata);
-    } catch {
-      // Fail-open
-    }
-  }
-
-  if (ctx.config.captureEnv) {
-    try {
-      await withPerf(ctx.config.dataDir, "snapshot", "captureEnvironment", () =>
-        captureEnvironment(ctx.db, ctx.config, ctx.session.id),
-      );
-    } catch {
-      // Fail-open
-    }
-  }
-
-  // Trigger project-link auto-sync (fire-and-forget, fail-open).
-  // Spawns a detached background process to sync branches, commits,
-  // and documents — won't be killed by the 10s hook timeout.
-  try {
-    const cloudModuleName = ["@varveai", "adit-cloud"].join("/");
-    const { triggerProjectLinkSync } = await import(cloudModuleName) as {
-      triggerProjectLinkSync: (db: unknown, projectId: string, projectRoot: string) => Promise<void>;
-    };
-    triggerProjectLinkSync(ctx.db, ctx.config.projectId, ctx.config.projectRoot)
-      .catch(() => {});
-  } catch {
-    // Fail-open — cloud package may not be available
-  }
-}
-
-/** Handle session end — capture final env snapshot and close session */
-async function handleSessionEnd(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  if (ctx.config.captureEnv) {
-    try {
-      await withPerf(ctx.config.dataDir, "snapshot", "captureEnvironment", () =>
-        captureEnvironment(ctx.db, ctx.config, ctx.session.id),
-      );
-    } catch {
-      // Fail-open
-    }
-  }
-
-  // Sweep commits from the final turn before the session closes.
-  const timeline = createTimelineManager(ctx.db, ctx.config);
-  await withPerf(ctx.config.dataDir, "git", "commitAttribution", () =>
-    detectAndRecordCommits(ctx, timeline),
-  );
-
-  // Mark session as completed with end reason
-  const status = input.sessionEndReason === "error" ? "error" : "completed";
-  endSession(ctx.db, ctx.session.id, status);
-}
-
-/** Handle subagent start — record when a subagent is spawned */
-async function handleSubagentStart(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  const timeline = createTimelineManager(ctx.db, ctx.config);
-
-  await timeline.recordEvent({
-    sessionId: ctx.session.id,
-    eventType: "subagent_start",
-    actor: "assistant",
-    responseText: `Subagent started: ${input.agentType ?? "unknown"}`,
-    toolName: input.agentType ?? null,
-    toolInputJson: JSON.stringify({
-      agentId: input.agentId,
-      agentType: input.agentType,
-    }),
-  });
-}
-
-/** Handle subagent stop — record when a subagent finishes */
-async function handleSubagentStop(ctx: HookContext, input: NormalizedHookInput): Promise<void> {
-  const timeline = createTimelineManager(ctx.db, ctx.config);
-
-  await timeline.recordEvent({
-    sessionId: ctx.session.id,
-    eventType: "subagent_stop",
-    actor: "assistant",
-    responseText: input.lastAssistantMessage
-      ? `Subagent finished: ${input.agentType ?? "unknown"}`
-      : `Subagent stopped: ${input.agentType ?? "unknown"}`,
-    toolName: input.agentType ?? null,
-    toolInputJson: JSON.stringify({
-      agentId: input.agentId,
-      agentType: input.agentType,
-      agentTranscriptPath: input.agentTranscriptPath,
-    }),
-    toolOutputJson: input.lastAssistantMessage
-      ? JSON.stringify({ lastAssistantMessage: input.lastAssistantMessage })
-      : null,
-  });
-}
-
-/**
- * Trigger transcript upload if cloud is configured.
- *
- * Uses dynamic import so @varveai/adit-cloud is not a build-time dependency.
- * Fully fail-open: errors are silently swallowed.
- *
- * Reuses the existing HookContext to avoid opening a second DB connection.
- */
-async function triggerTranscriptUploadIfEnabled(
-  ctx: HookContext,
-  input: NormalizedHookInput,
-): Promise<void> {
-  if (!input.transcriptPath) return;
-
-  try {
-    const cloudModuleName = ["@varveai", "adit-cloud"].join("/");
-    const cloudModule = (await import(cloudModuleName)) as {
-      triggerTranscriptUpload: (
-        db: unknown,
-        sessionId: string,
-        transcriptPath: string,
-      ) => Promise<void>;
-    };
-    await cloudModule.triggerTranscriptUpload(
-      ctx.db,
-      ctx.session.id,
-      input.transcriptPath,
-    );
-  } catch {
-    // @varveai/adit-cloud not installed or other error — silently skip
-  }
-}

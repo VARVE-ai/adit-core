@@ -7,15 +7,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  * to verify only the trigger decision logic in triggerAutoSync.
  */
 
-const syncFn = vi.fn().mockResolvedValue({
+const runSyncCycleFn = vi.fn().mockResolvedValue({
   accepted: 0,
   duplicates: 0,
   conflicts: [],
   newSyncCursor: null,
   batches: 0,
   totalRecords: 0,
+  git: null,
 });
-const syncEngineConstructorFn = vi.fn();
 
 // Mock modules before importing the subject
 vi.mock("../config.js", () => ({
@@ -36,6 +36,8 @@ vi.mock("../auth/credentials.js", () => ({
 
 vi.mock("@varveai/adit-core", () => ({
   getSyncState: vi.fn(),
+  // These trigger tests use the repositories supplied by loadConfig.
+  readProjectManifest: vi.fn(() => null),
   // Must return a full AditConfig shape: resolveCloudProjectContext (real,
   // unmocked) maps over config.repositories, so a partial config makes
   // triggerAutoSync throw inside its fail-open catch and sync never runs.
@@ -49,7 +51,6 @@ vi.mock("@varveai/adit-core", () => ({
       projectId: "proj-local-1",
       projectType: "repo",
       initialization: "initialized",
-      refPrefix: "refs/adit/checkpoints",
       captureEnv: true,
       repositories: [{
         localRepositoryId: "proj-local-1",
@@ -87,15 +88,11 @@ vi.mock("./serializer.js", () => ({
   countUnsyncedEvents: vi.fn(),
 }));
 
-vi.mock("./engine.js", () => {
-  return {
-    SyncEngine: class MockSyncEngine {
-      constructor(...args: unknown[]) {
-        syncEngineConstructorFn(...args);
-      }
+vi.mock("./token-usage.js", () => ({ hasPendingTokenUsage: vi.fn() }));
 
-      sync = syncFn;
-    },
+vi.mock("./sync-cycle.js", () => {
+  return {
+    runSyncCycle: (...args: unknown[]) => runSyncCycleFn(...args),
   };
 });
 
@@ -115,6 +112,7 @@ import { loadCloudConfig } from "../config.js";
 import { loadCredentials } from "../auth/credentials.js";
 import { getSyncState } from "@varveai/adit-core";
 import { countUnsyncedEvents } from "./serializer.js";
+import { hasPendingTokenUsage } from "./token-usage.js";
 
 const mockLoadCloudConfig = vi.mocked(loadCloudConfig);
 const mockLoadCredentials = vi.mocked(loadCredentials);
@@ -133,13 +131,6 @@ function setupDefaults() {
     batchSize: 500,
     syncThreshold: 20,
     syncTimeoutHours: 2,
-    transcriptUpload: {
-      enabled: false,
-      pollIntervalSec: 30,
-      maxConcurrent: 2,
-      maxRetries: 3,
-      minIncrementBytes: 1024,
-    },
   });
 
   mockLoadCredentials.mockReturnValue({
@@ -159,6 +150,7 @@ function setupDefaults() {
   });
 
   mockCountUnsyncedEvents.mockReturnValue(0);
+  vi.mocked(hasPendingTokenUsage).mockReturnValue(false);
 }
 
 describe("triggerAutoSync", () => {
@@ -173,10 +165,12 @@ describe("triggerAutoSync", () => {
 
   it("does not sync when count is below threshold and last sync is recent", async () => {
     mockCountUnsyncedEvents.mockReturnValue(10);
-    await triggerAutoSync(fakeDb, PROJECT_ID);
+    const collectRuntimeReport = vi.fn();
+    await triggerAutoSync(fakeDb, PROJECT_ID, { collectRuntimeReport });
 
     expect(mockCountUnsyncedEvents).toHaveBeenCalled();
-    expect(syncFn).not.toHaveBeenCalled();
+    expect(runSyncCycleFn).not.toHaveBeenCalled();
+    expect(collectRuntimeReport).not.toHaveBeenCalled();
   });
 
   it("syncs when count meets threshold", async () => {
@@ -184,7 +178,14 @@ describe("triggerAutoSync", () => {
     await triggerAutoSync(fakeDb, PROJECT_ID);
 
     expect(mockCountUnsyncedEvents).toHaveBeenCalled();
-    expect(syncFn).toHaveBeenCalled();
+    expect(runSyncCycleFn).toHaveBeenCalled();
+  });
+
+  it.each([0, 2, 19])("does not bypass the threshold for pending usage with %i unsynced events", async (count) => {
+    mockCountUnsyncedEvents.mockReturnValue(count);
+    vi.mocked(hasPendingTokenUsage).mockReturnValue(true);
+    await triggerAutoSync(fakeDb, PROJECT_ID);
+    expect(runSyncCycleFn).not.toHaveBeenCalled();
   });
 
   it("passes project name from project root when syncing", async () => {
@@ -194,28 +195,32 @@ describe("triggerAutoSync", () => {
       projectRoot: "C:\\Users\\edy\\item\\windows-project",
     });
 
-    expect(syncEngineConstructorFn).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
+    expect(runSyncCycleFn).toHaveBeenCalledWith(
       expect.objectContaining({
-        projectName: "windows-project",
+        projectContext: expect.objectContaining({ projectName: "windows-project" }),
       }),
     );
   });
 
-  it("passes normalized repository identity when syncing", async () => {
+  it("keeps Git identity on repositories and leaves workspace Git identity empty", async () => {
     mockCountUnsyncedEvents.mockReturnValue(20);
 
     await triggerAutoSync(fakeDb, PROJECT_ID, {
       projectRoot: "/Users/edy/develop/coding/adit/adit-cloud",
     });
 
-    expect(syncEngineConstructorFn).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.anything(),
+    expect(runSyncCycleFn).toHaveBeenCalledWith(
       expect.objectContaining({
-        remoteUrl: "git@github.com:VARVE-ai/adit-cloud.git",
-        canonicalRepoKey: "github:varve-ai/adit-cloud",
+        projectContext: expect.objectContaining({
+          remoteUrl: null,
+          canonicalRepoKey: null,
+          repositories: [expect.objectContaining({
+            localRepositoryId: "proj-local-1",
+            relativePath: ".",
+            repositoryUrl: "git@github.com:VARVE-ai/adit-cloud.git",
+            canonicalRepoKey: "github:varve-ai/adit-cloud",
+          })],
+        }),
       }),
     );
   });
@@ -235,7 +240,7 @@ describe("triggerAutoSync", () => {
 
     // Time trigger should skip the expensive count query
     expect(mockCountUnsyncedEvents).not.toHaveBeenCalled();
-    expect(syncFn).toHaveBeenCalled();
+    expect(runSyncCycleFn).toHaveBeenCalled();
   });
 
   it("falls through to count check when last sync is within timeout", async () => {
@@ -254,7 +259,7 @@ describe("triggerAutoSync", () => {
 
     // Count should be checked since time trigger didn't fire
     expect(mockCountUnsyncedEvents).toHaveBeenCalled();
-    expect(syncFn).not.toHaveBeenCalled();
+    expect(runSyncCycleFn).not.toHaveBeenCalled();
   });
 
   it("uses count-based trigger on first sync (no lastSyncedAt)", async () => {
@@ -265,7 +270,7 @@ describe("triggerAutoSync", () => {
 
     // First sync: no time trigger, falls through to count
     expect(mockCountUnsyncedEvents).toHaveBeenCalled();
-    expect(syncFn).toHaveBeenCalled();
+    expect(runSyncCycleFn).toHaveBeenCalled();
   });
 
   it("respects custom syncTimeoutHours", async () => {
@@ -276,13 +281,6 @@ describe("triggerAutoSync", () => {
       batchSize: 500,
       syncThreshold: 20,
       syncTimeoutHours: 1, // 1 hour
-      transcriptUpload: {
-        enabled: false,
-        pollIntervalSec: 30,
-        maxConcurrent: 2,
-        maxRetries: 3,
-        minIncrementBytes: 1024,
-      },
     });
 
     // Last sync was 2 hours ago (>1h timeout)
@@ -298,7 +296,7 @@ describe("triggerAutoSync", () => {
     await triggerAutoSync(fakeDb, PROJECT_ID);
 
     expect(mockCountUnsyncedEvents).not.toHaveBeenCalled();
-    expect(syncFn).toHaveBeenCalled();
+    expect(runSyncCycleFn).toHaveBeenCalled();
   });
 
   it("does not sync when auto-sync is explicitly disabled via env var", async () => {
@@ -306,7 +304,7 @@ describe("triggerAutoSync", () => {
 
     await triggerAutoSync(fakeDb, PROJECT_ID);
 
-    expect(syncFn).not.toHaveBeenCalled();
+    expect(runSyncCycleFn).not.toHaveBeenCalled();
     delete process.env.ADIT_CLOUD_AUTO_SYNC;
   });
 
@@ -319,30 +317,12 @@ describe("triggerAutoSync", () => {
       batchSize: 500,
       syncThreshold: 20,
       syncTimeoutHours: 2,
-      transcriptUpload: {
-        enabled: false,
-        pollIntervalSec: 30,
-        maxConcurrent: 2,
-        maxRetries: 3,
-        minIncrementBytes: 1024,
-      },
     });
     mockCountUnsyncedEvents.mockReturnValue(25);
 
     await triggerAutoSync(fakeDb, PROJECT_ID);
 
-    expect(syncFn).toHaveBeenCalled();
-  });
-
-  it("force-syncs on session-end even when below threshold and recently synced", async () => {
-    mockCountUnsyncedEvents.mockReturnValue(1); // well below threshold
-
-    await triggerAutoSync(fakeDb, PROJECT_ID, { force: true });
-
-    // Should skip threshold checks entirely
-    expect(mockCountUnsyncedEvents).not.toHaveBeenCalled();
-    expect(mockGetSyncState).not.toHaveBeenCalled();
-    expect(syncFn).toHaveBeenCalled();
+    expect(runSyncCycleFn).toHaveBeenCalled();
   });
 
   it("does not sync when credentials are missing", async () => {
@@ -350,7 +330,7 @@ describe("triggerAutoSync", () => {
 
     await triggerAutoSync(fakeDb, PROJECT_ID);
 
-    expect(syncFn).not.toHaveBeenCalled();
+    expect(runSyncCycleFn).not.toHaveBeenCalled();
   });
 
   it("does not sync when credentials belong to different server", async () => {
@@ -364,6 +344,6 @@ describe("triggerAutoSync", () => {
 
     await triggerAutoSync(fakeDb, PROJECT_ID);
 
-    expect(syncFn).not.toHaveBeenCalled();
+    expect(runSyncCycleFn).not.toHaveBeenCalled();
   });
 });

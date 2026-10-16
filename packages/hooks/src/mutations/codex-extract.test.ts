@@ -15,14 +15,34 @@ function writeJsonl(path: string, entries: unknown[]): void {
   writeFileSync(path, entries.map((entry) => JSON.stringify(entry)).join("\n"));
 }
 
+function userMessage(text: string) {
+  return {
+    type: "response_item",
+    payload: { type: "message", role: "user", content: [{ type: "input_text", text }] },
+  };
+}
+
+/** Shape of the record Codex 0.151+ writes when apply_patch finishes. */
+function fileChange(id: string, changes: Record<string, unknown>, status = "completed") {
+  return {
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      thread_id: "thread-1",
+      turn_id: "turn-1",
+      item: { type: "FileChange", id, changes, status, stdout: "", stderr: "" },
+    },
+  };
+}
+
 describe("extractCodexMutationsFromTranscript", () => {
-  it("extracts successful patch_apply_end updates from the latest Codex turn", () => {
+  it("extracts completed FileChange items from the latest Codex turn", () => {
     const dir = tempDir();
     try {
       const transcriptPath = join(dir, "019efde3-72c7-7f82-9f7c-5f3d63cee24f.jsonl");
       writeJsonl(transcriptPath, [
         userMessage("old turn"),
-        patchApplyEnd("old_call", {
+        fileChange("patch-old", {
           "/project/old.ts": {
             type: "update",
             unified_diff: "@@ -1,1 +1,1 @@\n-old\n+old-new\n",
@@ -30,7 +50,7 @@ describe("extractCodexMutationsFromTranscript", () => {
           },
         }),
         userMessage("current turn"),
-        patchApplyEnd("call_patch", {
+        fileChange("patch-1", {
           "/project/src/app.ts": {
             type: "update",
             unified_diff: "@@ -1,1 +1,1 @@\n-old\n+new\n",
@@ -41,16 +61,15 @@ describe("extractCodexMutationsFromTranscript", () => {
 
       const result = extractCodexMutationsFromTranscript(transcriptPath);
 
-      expect(result?.sessionId).toBe("019efde3-72c7-7f82-9f7c-5f3d63cee24f");
       expect(result?.mutations).toHaveLength(1);
       expect(result?.mutations[0]).toMatchObject({
         provider: "codex",
-        toolUseId: "call_patch",
+        toolUseId: "patch-1",
         toolName: "apply_patch",
         path: "/project/src/app.ts",
         kind: "update",
         status: "completed",
-        source: "codex-patch-apply-end",
+        source: "codex-file-change",
         additions: 1,
         deletions: 1,
         diff: "@@ -1,1 +1,1 @@\n-old\n+new\n",
@@ -66,7 +85,7 @@ describe("extractCodexMutationsFromTranscript", () => {
       const transcriptPath = join(dir, "019efde3-72c7-7f82-9f7c-5f3d63cee24f.jsonl");
       writeJsonl(transcriptPath, [
         userMessage("add a file"),
-        patchApplyEnd("call_add", {
+        fileChange("patch-add", {
           "/project/src/new.ts": {
             type: "add",
             content: "const value = 1;\nexport { value };\n",
@@ -80,6 +99,7 @@ describe("extractCodexMutationsFromTranscript", () => {
       expect(result?.mutations[0]).toMatchObject({
         path: "/project/src/new.ts",
         kind: "add",
+        status: "completed",
         additions: 2,
         deletions: 0,
         diff: "@@ -0,0 +1,2 @@\n+const value = 1;\n+export { value };",
@@ -94,32 +114,21 @@ describe("extractCodexMutationsFromTranscript", () => {
     try {
       const transcriptPath = join(dir, "019efde3-72c7-7f82-9f7c-5f3d63cee24f.jsonl");
       writeJsonl(transcriptPath, [
-        userMessage("try risky patch"),
-        {
-          timestamp: "2026-06-25T08:28:21.484Z",
-          type: "event_msg",
-          payload: {
-            type: "patch_apply_end",
-            call_id: "call_failed",
-            success: false,
-            status: "failed",
-            changes: {
-              "/project/src/risky.ts": {
-                type: "update",
-                unified_diff: "@@ -1,1 +1,1 @@\n-old\n+new\n",
-              },
-            },
+        userMessage("try a patch"),
+        fileChange("patch-failed", {
+          "/project/src/broken.ts": {
+            type: "update",
+            unified_diff: "@@ -1,1 +1,1 @@\n-old\n+new\n",
+            move_path: null,
           },
-        },
+        }, "failed"),
       ]);
 
       const result = extractCodexMutationsFromTranscript(transcriptPath);
 
       expect(result?.mutations).toHaveLength(1);
       expect(result?.mutations[0]).toMatchObject({
-        toolUseId: "call_failed",
-        path: "/project/src/risky.ts",
-        kind: "update",
+        path: "/project/src/broken.ts",
         status: "failed",
         omitted: { reason: "failed" },
       });
@@ -129,113 +138,51 @@ describe("extractCodexMutationsFromTranscript", () => {
     }
   });
 
-  it("extracts concrete Bash write targets from the latest Codex turn", () => {
+  it("ignores exec scripts, command executions and the retired patch_apply_end records", () => {
     const dir = tempDir();
     try {
       const transcriptPath = join(dir, "019efde3-72c7-7f82-9f7c-5f3d63cee24f.jsonl");
       writeJsonl(transcriptPath, [
-        userMessage("old turn"),
-        execCommandEnd("old_call", "printf old > packages/old.txt"),
-        userMessage("write files"),
-        execCommandEnd(
-          "call_shell",
-          "printf hi > packages/core/src/generated.ts\nsips input.png -o packages/cloud/out.png",
-        ),
-      ]);
-
-      const result = extractCodexMutationsFromTranscript(transcriptPath);
-
-      expect(result?.mutations).toMatchObject([
+        userMessage("edit through a script"),
         {
-          provider: "codex",
-          toolUseId: "call_shell",
-          toolName: "Bash",
-          path: "/project/packages/core/src/generated.ts",
-          kind: "update",
-          status: "completed",
-          source: "codex-bash-output",
-          omitted: { reason: "unavailable" },
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            call_id: "call-exec",
+            name: "exec",
+            status: "completed",
+            input: 'text(await tools.apply_patch("*** Begin Patch\\n*** Update File: /project/a.ts\\n@@\\n-1\\n+2\\n*** End Patch"))',
+          },
         },
         {
-          path: "/project/packages/cloud/out.png",
-          source: "codex-bash-output",
-        },
-      ]);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("records rm/unlink targets as deletions", () => {
-    const dir = tempDir();
-    try {
-      const transcriptPath = join(dir, "019efde3-72c7-7f82-9f7c-5f3d63cee24f.jsonl");
-      writeJsonl(transcriptPath, [
-        userMessage("clean up"),
-        execCommandEnd("call_rm", "rm packages/core/src/tmp.ts\ntouch packages/core/src/kept.ts"),
-      ]);
-
-      const result = extractCodexMutationsFromTranscript(transcriptPath);
-
-      expect(result?.mutations).toMatchObject([
-        {
-          path: "/project/packages/core/src/tmp.ts",
-          kind: "delete",
-          source: "codex-bash-output",
+          type: "event_msg",
+          payload: {
+            type: "item_completed",
+            item: {
+              type: "CommandExecution",
+              id: "exec-1",
+              command: ["/bin/zsh", "-lc", "sed -i '' 's/1/2/' /project/a.ts"],
+              cwd: "file:///project",
+              exit_code: 0,
+              status: "completed",
+              aggregated_output: "",
+            },
+          },
         },
         {
-          path: "/project/packages/core/src/kept.ts",
-          kind: "update",
-          source: "codex-bash-output",
+          type: "event_msg",
+          payload: {
+            type: "patch_apply_end",
+            call_id: "legacy",
+            status: "completed",
+            changes: { "/project/a.ts": { type: "update", unified_diff: "@@ -1 +1 @@\n-1\n+2" } },
+          },
         },
       ]);
+
+      expect(extractCodexMutationsFromTranscript(transcriptPath)?.mutations).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 });
-
-function userMessage(text: string): unknown {
-  return {
-    timestamp: "2026-06-25T08:28:00.000Z",
-    type: "response_item",
-    payload: {
-      type: "message",
-      role: "user",
-      content: [{ type: "input_text", text }],
-    },
-  };
-}
-
-function patchApplyEnd(callId: string, changes: Record<string, unknown>): unknown {
-  return {
-    timestamp: "2026-06-25T08:28:21.484Z",
-    type: "event_msg",
-    payload: {
-      type: "patch_apply_end",
-      call_id: callId,
-      turn_id: "019efde3-72c7-7f82-9f7c-5f3d63cee24f",
-      stdout: "Success. Updated the following files:\n",
-      stderr: "",
-      success: true,
-      changes,
-      status: "completed",
-    },
-  };
-}
-
-function execCommandEnd(callId: string, command: string): unknown {
-  return {
-    timestamp: "2026-06-25T08:28:21.484Z",
-    type: "event_msg",
-    payload: {
-      type: "exec_command_end",
-      call_id: callId,
-      command: ["/bin/zsh", "-lc", command],
-      cwd: "/project",
-      parsed_cmd: [{ type: "unknown", cmd: command }],
-      exit_code: 0,
-      status: "completed",
-    },
-  };
-}

@@ -17,11 +17,16 @@ vi.mock("@varveai/adit-core", () => ({
 vi.mock("./serializer.js", () => ({
   buildSyncBatch: vi.fn(),
   batchRecordCount: vi.fn(),
-  countUnsyncedRecords: vi.fn(() => 0),
+  countUnsyncedEvents: vi.fn(() => 0),
 }));
 
 vi.mock("./conflicts.js", () => ({
   handleConflicts: vi.fn(),
+}));
+
+vi.mock("./token-usage.js", () => ({
+  syncTokenUsage: vi.fn(),
+  acknowledgeEventTokenUsage: vi.fn(),
 }));
 
 import { SyncEngine } from "./engine.js";
@@ -29,11 +34,11 @@ import {
   applyAuthoritativeSyncState,
   upsertSyncState,
 } from "@varveai/adit-core";
-import { buildSyncBatch, batchRecordCount, countUnsyncedRecords } from "./serializer.js";
+import { buildSyncBatch, batchRecordCount } from "./serializer.js";
+import { syncTokenUsage } from "./token-usage.js";
 
 const mockBuildSyncBatch = vi.mocked(buildSyncBatch);
 const mockBatchRecordCount = vi.mocked(batchRecordCount);
-const mockCountUnsyncedRecords = vi.mocked(countUnsyncedRecords);
 const mockApplyAuthoritativeSyncState = vi.mocked(applyAuthoritativeSyncState);
 const mockUpsertSyncState = vi.mocked(upsertSyncState);
 
@@ -88,6 +93,7 @@ function createEngine(
 describe("SyncEngine", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(syncTokenUsage).mockResolvedValue({ accepted: 0, duplicates: 0, batches: 0, totalRecords: 0 });
   });
 
   afterEach(() => {
@@ -105,6 +111,23 @@ describe("SyncEngine", () => {
     expect(result.totalRecords).toBe(0);
     expect(result.accepted).toBe(0);
     expect(mockClient.post).not.toHaveBeenCalled();
+  });
+
+  it("uploads usage-only batches through the existing sync push endpoint", async () => {
+    const { engine, mockClient } = createEngine();
+    mockBatchRecordCount.mockReturnValue(0);
+    mockBuildSyncBatch.mockReturnValue({ batch: { events: [], sessions: [], envSnapshots: [], diffs: [] }, diffByteCapApplied: false });
+    vi.mocked(syncTokenUsage).mockImplementationOnce(async (_db, push) => {
+      await push({ sessions: [], events: [], envSnapshots: [], diffs: [] });
+      return { accepted: 1, duplicates: 0, batches: 1, totalRecords: 1 };
+    });
+    const result = await engine.sync();
+    expect(mockClient.post).toHaveBeenCalledExactlyOnceWith("/api/sync/push", expect.objectContaining({
+      localProjectId: "proj-001", syncVersion: 0,
+      batch: expect.objectContaining({ events: [] }),
+    }));
+    expect(result.accepted).toBe(1);
+    expect(mockApplyAuthoritativeSyncState).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ syncVersion: 1 }));
   });
 
   it("pushes a single batch and stops when count < batchSize", async () => {
@@ -185,10 +208,10 @@ describe("SyncEngine", () => {
     const { engine, mockClient } = createEngine({ batchSize: 500 });
     const bigText = "x".repeat(20_000);
 
-    mockBuildSyncBatch.mockImplementation((_db, afterId, _lastSyncedAt, _projectId, _clientId, limit) => {
+    mockBuildSyncBatch.mockImplementation((_db, afterId, _projectId, _clientId, limit) => {
       if (afterId) {
         return {
-          batch: { events: [], sessions: [], envSnapshots: [], plans: [], diffs: [] },
+          batch: { events: [], sessions: [], envSnapshots: [], diffs: [] },
           diffByteCapApplied: false,
         } as never;
       }
@@ -200,7 +223,6 @@ describe("SyncEngine", () => {
           })),
           sessions: [],
           envSnapshots: [],
-          plans: [],
           diffs: [],
         },
         diffByteCapApplied: false,
@@ -228,12 +250,11 @@ describe("SyncEngine", () => {
       1,
       expect.anything(),
       null,
-      null,
       "proj-001",
       "client-001",
       500,
     );
-    const secondLimit = mockBuildSyncBatch.mock.calls[1][5] as number;
+    const secondLimit = mockBuildSyncBatch.mock.calls[1][4] as number;
     expect(secondLimit).toBeGreaterThan(0);
     expect(secondLimit).toBeLessThan(500);
 
@@ -470,7 +491,6 @@ describe("SyncEngine", () => {
       expect(mockBuildSyncBatch).toHaveBeenCalledWith(
         expect.anything(),
         "project-cursor-42",
-        "2025-01-02T00:00:00Z",
         "proj-001",
         "client-001",
         500,
@@ -520,7 +540,6 @@ describe("SyncEngine", () => {
       // Should have started with null cursor (full push)
       expect(mockBuildSyncBatch).toHaveBeenCalledWith(
         expect.anything(),
-        null,
         null,
         "proj-001",
         "client-001",
@@ -606,7 +625,6 @@ describe("SyncEngine", () => {
       expect(mockBuildSyncBatch).toHaveBeenCalledWith(
         expect.anything(),
         "legacy-global-cursor",
-        "2025-01-01T00:00:00Z",
         "proj-001",
         "client-001",
         500,

@@ -2,20 +2,27 @@
  * Manifest planning for `adit init`.
  *
  * Decides — together with the user — what `.adit/project.json` should say,
- * then writes it atomically under the init lock. Covers fresh initialization,
- * migration of pre-manifest projects (identity is carried over, never
- * regenerated), re-init diffs, and member-repository standalone init.
+ * then writes it atomically under the init lock. A project is "this
+ * directory plus the Git repositories registered under it": the root itself
+ * (`.`) when it is a repository, and any immediate child repositories. There
+ * is no project type to choose; init only decides which repositories are
+ * registered and which of them sync to Cloud.
+ *
+ * Covers fresh initialization, migration of pre-manifest projects (identity
+ * is carried over, never regenerated), schema upgrades, re-init diffs, and
+ * independent parent/child projects.
  */
 
 import { existsSync, rmSync } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
+  MANIFEST_SCHEMA_VERSION,
   ProjectManifestError,
   computeLocalRepositoryId,
   computeRepoProjectId,
-  findProjectManifestRoot,
   generateProjectId,
+  isRootRepositoryPath,
   openDatabase,
   closeDatabase,
   readProjectManifest,
@@ -25,22 +32,47 @@ import {
   writeProjectManifest,
   type ProjectManifest,
   type ProjectManifestRepository,
-  type ProjectType,
 } from "@varveai/adit-core";
 import type { ProjectLayoutAnalysis } from "./project-layout.js";
 import { getAditProjectInitializationPaths } from "./project-initialization.js";
+import {
+  applyRepositorySelection,
+  promptRepositorySelection,
+} from "./init-repository-select.js";
+import { dim, marks, printError, printLine, promptPrefix, strong } from "./cli-style.js";
+
+const NO_REPOSITORY_HINT = `run ${strong("git init")} first, or run ${strong("adit init")} in a directory that contains repositories`;
 
 export interface InitModeFlags {
+  /** Shortcut: sync only the root repository (`.`). */
   singleRepo?: boolean;
+  /** Shortcut: sync every child repository; on re-init also apply list changes without asking. */
   multiRepo?: boolean;
+  /** Explicit list of repository paths to sync (`.` for the root). */
+  repos?: string[];
+  /** Deprecated compatibility flag: init always creates an independent project. */
+  detach?: boolean;
+  /** Deprecated; automatic project absorption is no longer supported. */
+  absorb?: boolean;
 }
 
 export type ManifestPlanResult =
-  | { status: "written"; manifest: ProjectManifest; migratedFrom: string | null }
+  | {
+      status: "written";
+      manifest: ProjectManifest;
+      migratedFrom: string | null;
+    }
   | { status: "unchanged"; manifest: ProjectManifest }
   | { status: "cancelled" }
-  | { status: "failed" }
-  | { status: "redirect-child"; childPath: string };
+  | { status: "failed" };
+
+/** A Git repository that may be registered under the init root. */
+export interface RepositoryCandidate {
+  relativePath: string;
+  path: string;
+  displayName: string;
+  originUrl: string | null;
+}
 
 /** Plan and (when needed) write the project manifest for this init run. */
 export async function prepareProjectManifest(
@@ -48,8 +80,20 @@ export async function prepareProjectManifest(
   analysis: ProjectLayoutAnalysis,
   flags: InitModeFlags,
 ): Promise<ManifestPlanResult> {
+  return withProjectInitLock(root, () => prepareLockedManifest(root, analysis, flags));
+}
+
+async function prepareLockedManifest(
+  root: string,
+  analysis: ProjectLayoutAnalysis,
+  flags: InitModeFlags,
+): Promise<ManifestPlanResult> {
+  if (flags.absorb) {
+    printError("init", "--absorb is no longer supported", `run ${strong("adit init")} to register repositories; child projects stay independent`);
+    return { status: "failed" };
+  }
   if (flags.singleRepo && flags.multiRepo) {
-    console.error("  [x] --single-repo and --multi-repo cannot be combined.");
+    printError("init", "--single-repo and --multi-repo cannot be combined");
     return { status: "failed" };
   }
 
@@ -60,14 +104,197 @@ export async function prepareProjectManifest(
     if (!(err instanceof ProjectManifestError)) throw err;
     const rebuilt = await confirmManifestRebuild(err);
     if (!rebuilt) return { status: "failed" };
-    rmSync(err.manifestPath, { force: true });
     existing = null;
   }
 
+  // Explicit init always owns this directory. Never mutate a parent's manifest
+  // or move a child's database. A legacy merged marker is cleared on save.
   if (existing) {
     return reinitExistingManifest(root, existing, analysis, flags);
   }
   return initFreshManifest(root, analysis, flags);
+}
+
+// --- Candidates and default selection ---------------------------------------
+
+/**
+ * Every repository the layout offers: the root itself when it is a Git
+ * repository, followed by the immediate child repositories.
+ */
+export function buildRepositoryCandidates(analysis: ProjectLayoutAnalysis): RepositoryCandidate[] {
+  const candidates: RepositoryCandidate[] = [];
+  if (analysis.root.isGitRepository) {
+    candidates.push({
+      relativePath: ".",
+      path: analysis.root.path,
+      displayName: basename(analysis.root.path),
+      originUrl: analysis.root.originUrl,
+    });
+  }
+  for (const child of analysis.childRepositories) {
+    candidates.push({
+      relativePath: child.relativePath,
+      path: child.path,
+      displayName: child.displayName,
+      originUrl: child.originUrl,
+    });
+  }
+  return candidates;
+}
+
+/**
+ * Which candidates sync by default.
+ *
+ * A root repository with a remote is the project; child repositories are
+ * offered but not synced unless the user picks them. A root without a remote
+ * (an empty marker repository or a meta repository) cannot be shared, so the
+ * children are synced instead. Without a root repository every child syncs.
+ */
+export function defaultRepositorySelection(
+  analysis: ProjectLayoutAnalysis,
+  candidates: RepositoryCandidate[],
+): Set<string> {
+  const hasRoot = analysis.root.isGitRepository;
+  const children = candidates.filter((candidate) => !isRootRepositoryPath(candidate.relativePath));
+  if (!hasRoot) return new Set(children.map((child) => child.relativePath));
+  if (analysis.root.originUrl || children.length === 0) return new Set(["."]);
+  return new Set(children.map((child) => child.relativePath));
+}
+
+type FlagSelection =
+  | { kind: "none" }
+  | { kind: "select"; paths: Set<string> }
+  | { kind: "failed" };
+
+function resolveFlagSelection(
+  flags: InitModeFlags,
+  analysis: ProjectLayoutAnalysis,
+  candidates: RepositoryCandidate[],
+): FlagSelection {
+  const children = candidates.filter((candidate) => !isRootRepositoryPath(candidate.relativePath));
+
+  if (flags.repos && flags.repos.length > 0) {
+    const known = new Set(candidates.map((candidate) => candidate.relativePath));
+    const paths = new Set<string>();
+    for (const raw of flags.repos) {
+      const normalized = normalizeRepoFlag(raw);
+      if (!known.has(normalized)) {
+        printError("init", `--repos: '${raw}' is not a Git repository at this project root`, `available: ${[...known].join(", ")}`);
+        return { kind: "failed" };
+      }
+      paths.add(normalized);
+    }
+    return { kind: "select", paths };
+  }
+  if (flags.singleRepo) {
+    if (!analysis.root.isGitRepository) {
+      printError("init", "--single-repo requires the project root to be a Git repository");
+      return { kind: "failed" };
+    }
+    return { kind: "select", paths: new Set(["."]) };
+  }
+  if (flags.multiRepo) {
+    if (children.length === 0) {
+      printError("init", "--multi-repo requires at least one child Git repository");
+      return { kind: "failed" };
+    }
+    return { kind: "select", paths: new Set(children.map((child) => child.relativePath)) };
+  }
+  return { kind: "none" };
+}
+
+function normalizeRepoFlag(raw: string): string {
+  const trimmed = raw.trim().replace(/\\/gu, "/").replace(/^\.\//u, "").replace(/\/+$/u, "");
+  return trimmed === "" ? "." : trimmed;
+}
+
+// --- Fresh initialization / migration ----------------------------------------
+
+async function initFreshManifest(
+  root: string,
+  analysis: ProjectLayoutAnalysis,
+  flags: InitModeFlags,
+): Promise<ManifestPlanResult> {
+  const candidates = buildRepositoryCandidates(analysis);
+  if (candidates.length === 0) {
+    printError("init", "not a Git repository, and no Git repositories were found one level below", NO_REPOSITORY_HINT);
+    return { status: "failed" };
+  }
+
+  const flagSelection = resolveFlagSelection(flags, analysis, candidates);
+  if (flagSelection.kind === "failed") return { status: "failed" };
+
+  if (candidates.length > 1) printRepositoryCandidates(analysis, candidates);
+
+  const recovered = recoverLegacyProjectId(root);
+  const projectId = recovered?.projectId ?? generateProjectId();
+  const now = new Date().toISOString();
+  const selection = flagSelection.kind === "select"
+    ? flagSelection.paths
+    : defaultRepositorySelection(analysis, candidates);
+  let repositories = candidates.map((candidate) =>
+    toManifestEntry(projectId, candidate, selection.has(candidate.relativePath)),
+  );
+  if (flagSelection.kind === "none" && candidates.length > 1 && isInteractive()) {
+    printLine();
+    repositories = await promptRepositorySelection(repositories);
+  }
+
+  const manifest: ProjectManifest = {
+    schemaVersion: MANIFEST_SCHEMA_VERSION,
+    projectId,
+    repositories,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  writeProjectManifest(root, manifest);
+  const legacyWorkspaceManifest = join(root, workspaceManifestRelativePath);
+  if (existsSync(legacyWorkspaceManifest)) {
+    rmSync(legacyWorkspaceManifest, { force: true });
+    printLine(`${marks.change} Removed the legacy workspace.json ${dim("(migrated into project.json)")}`);
+  }
+  return { status: "written", manifest, migratedFrom: recovered?.source ?? null };
+}
+
+function toManifestEntry(
+  projectId: string,
+  candidate: RepositoryCandidate,
+  enabled: boolean,
+  previous?: ProjectManifestRepository,
+): ProjectManifestRepository {
+  const root = isRootRepositoryPath(candidate.relativePath);
+  return {
+    relativePath: candidate.relativePath,
+    // Preserve an explicit root identity from recreation or collision repair;
+    // ordinary roots continue using the project ID.
+    ...(root
+      ? (previous?.repositoryId ? { repositoryId: previous.repositoryId } : {})
+      : { repositoryId: previous?.repositoryId ?? computeLocalRepositoryId(projectId, candidate.relativePath) }),
+    ...(enabled ? {} : { syncEnabled: false }),
+    ...(previous?.cloudDeletedAt ? { cloudDeletedAt: previous.cloudDeletedAt } : {}),
+    ...(previous?.cloudDeletionOperationId
+      ? { cloudDeletionOperationId: previous.cloudDeletionOperationId }
+      : {}),
+    ...(!root && candidate.originUrl ? { repositoryUrl: candidate.originUrl } : {}),
+  };
+}
+
+function printRepositoryCandidates(
+  analysis: ProjectLayoutAnalysis,
+  candidates: RepositoryCandidate[],
+): void {
+  const children = candidates.filter((candidate) => !isRootRepositoryPath(candidate.relativePath));
+  const found = `${children.length} Git ${children.length === 1 ? "repository" : "repositories"} one level below`;
+  if (analysis.root.isGitRepository) {
+    printLine(`This directory is a Git repository${analysis.root.originUrl ? "" : dim(" (no remote)")} and contains ${found}:`);
+  } else {
+    printLine(`Found ${found}:`);
+  }
+  for (const child of children) {
+    printLine(`  - ${child.relativePath}${child.originUrl ? "" : dim("  (no remote)")}`);
+  }
+  printLine();
 }
 
 // --- Re-init of an already initialized project -------------------------------
@@ -78,71 +305,160 @@ async function reinitExistingManifest(
   analysis: ProjectLayoutAnalysis,
   flags: InitModeFlags,
 ): Promise<ManifestPlanResult> {
-  const targetType: ProjectType | null = flags.singleRepo ? "repo" : flags.multiRepo ? "workspace" : null;
-
-  if (targetType && targetType !== existing.projectType) {
-    return convertManifestType(root, existing, analysis, targetType);
+  if (existing.cloudDeletedAt) {
+    return reinitializeCloudDeletedProject(root, existing, analysis);
   }
 
-  if (existing.projectType === "repo") {
-    console.log("  [=] Project manifest unchanged (single-repo project).");
-    return { status: "unchanged", manifest: existing };
-  }
+  const candidates = buildRepositoryCandidates(analysis);
+  const flagSelection = resolveFlagSelection(flags, analysis, candidates);
+  if (flagSelection.kind === "failed") return { status: "failed" };
 
-  const plan = planWorkspaceRepositories(existing, analysis);
+  const plan = planRepositories(existing, candidates);
+  let target = plan.target;
 
-  if (!plan.hasStructuralChanges) {
-    if (plan.needsRewrite) {
-      const manifest: ProjectManifest = {
-        ...existing,
-        repositories: plan.target,
-        updatedAt: new Date().toISOString(),
-      };
-      await withProjectInitLock(root, async () => writeProjectManifest(root, manifest));
-      console.log("  [+] Recorded repository identities in the manifest.");
-      return { status: "written", manifest, migratedFrom: null };
+  if (plan.hasStructuralChanges) {
+    printLine("Repository changes detected:");
+    for (const rename of plan.renames) {
+      printLine(`  ~ ${rename.fromPath} → ${rename.toPath} ${dim("(renamed, same remote: identity preserved)")}`);
     }
-    console.log(`  [=] Repository list unchanged (${existing.repositories.length} repositories).`);
+    for (const path of plan.addedPaths) printLine(`  + ${path}`);
+    for (const path of plan.removedPaths) printLine(`  - ${path} ${dim("(no longer a Git repository here)")}`);
+    printLine();
+
+    const hasFlags = Boolean(flags.singleRepo || flags.multiRepo || flags.repos?.length);
+    const apply = hasFlags
+      ? true
+      : isInteractive()
+        ? await askYesNo("Update the registered repository list?")
+        : null;
+    if (apply === null) {
+      printLine(`${marks.warn} Kept the current repository list · re-run ${strong("adit init")} in an interactive terminal (or with --multi-repo) to update it`);
+      target = existing.repositories;
+    } else if (!apply) {
+      printLine(`${marks.skip} Kept the current repository list`);
+      target = existing.repositories;
+    } else if (target.length === 0) {
+      printError("init", "no Git repositories left here; a project needs at least one");
+      return { status: "failed" };
+    }
+  }
+
+  // --multi-repo applies structural additions while preserving existing
+  // exclusions/deletions; --repos and the picker choose the included set.
+  if (flagSelection.kind === "select" && !flags.multiRepo) {
+    target = applyRepositorySelection(target, flagSelection.paths);
+  } else if (flagSelection.kind === "none" && isInteractive() && target.length > 0) {
+    printLine();
+    target = await promptRepositorySelection(target);
+  }
+
+  const upgrade = existing.schemaVersion !== MANIFEST_SCHEMA_VERSION;
+  if (!upgrade && !existing.mergedIntoProjectId && sameRepositories(target, existing.repositories)) {
+    // init reports the unchanged repository settings in its Project row.
     return { status: "unchanged", manifest: existing };
   }
 
-  console.log("  Repository changes detected:");
-  for (const rename of plan.renames) {
-    console.log(`    ~ ${rename.fromPath} → ${rename.toPath} (renamed, same remote — identity preserved)`);
-  }
-  for (const path of plan.addedPaths) console.log(`    + ${path}`);
-  for (const path of plan.removedPaths) console.log(`    - ${path} (no longer a Git repository here)`);
-  console.log();
-
-  const apply = flags.multiRepo
-    ? true
-    : isInteractive()
-      ? await askYesNo("  Update the registered repository list?")
-      : null;
-  if (apply === null) {
-    console.log("  [!] Keeping the current repository list. Re-run 'adit init' in an interactive terminal (or with --multi-repo) to update it.");
-    return { status: "unchanged", manifest: existing };
-  }
-  if (!apply) {
-    console.log("  [=] Keeping the current repository list.");
-    return { status: "unchanged", manifest: existing };
-  }
-  if (plan.target.length === 0) {
-    console.error("  [x] No child Git repositories left — a multi-repo project needs at least one.");
-    return { status: "failed" };
-  }
-
+  const { projectType: _legacyType, mergedIntoProjectId: _merged, ...rest } = existing;
+  void _merged;
+  void _legacyType;
   const manifest: ProjectManifest = {
-    ...existing,
-    repositories: plan.target,
-    updatedAt: new Date().toISOString(),
+    ...rest,
+    schemaVersion: MANIFEST_SCHEMA_VERSION,
+    repositories: target,
+    updatedAt: new Date(Math.max(Date.now(), Date.parse(existing.updatedAt) + 1)).toISOString(),
   };
-  await withProjectInitLock(root, async () => writeProjectManifest(root, manifest));
-  console.log("  [+] Updated project manifest.");
+  writeProjectManifest(root, manifest);
+  if (plan.hasStructuralChanges || !sameRepositories(target, existing.repositories)) {
+    printLine(`${marks.ok} Updated the project manifest`);
+  } else if (plan.needsRewrite) {
+    printLine(`${marks.ok} Recorded repository identities in the manifest`);
+  } else {
+    printLine(`${marks.ok} Upgraded the project manifest to schema ${MANIFEST_SCHEMA_VERSION}`);
+  }
   return { status: "written", manifest, migratedFrom: null };
 }
 
-interface WorkspaceRepositoryPlan {
+async function reinitializeCloudDeletedProject(
+  root: string,
+  existing: ProjectManifest,
+  analysis: ProjectLayoutAnalysis,
+): Promise<ManifestPlanResult> {
+  printLine(`${marks.warn} This project was deleted in ADIT Cloud`);
+  if (!isInteractive()) {
+    printLine(dim(`  re-run ${strong("adit init")} in an interactive terminal to create it as a new project`));
+    return { status: "unchanged", manifest: existing };
+  }
+
+  const confirmed = await askYesNo(
+    "Create a new project identity and allow it to sync again?",
+  );
+  if (!confirmed) {
+    printLine(`${marks.skip} Kept the deleted project identity`);
+    return { status: "unchanged", manifest: existing };
+  }
+
+  const replacement = createReplacementProjectManifest(existing, analysis);
+  if (!replacement) {
+    printError("init", "not a Git repository, and no Git repositories were found one level below", NO_REPOSITORY_HINT);
+    return { status: "failed" };
+  }
+
+  let repositories = replacement.repositories;
+  if (repositories.length > 1) {
+    printLine();
+    repositories = await promptRepositorySelection(repositories);
+  }
+  const manifest = { ...replacement, repositories };
+  writeProjectManifest(root, manifest);
+  printLine(`${marks.ok} Created a new project identity ${strong(manifest.projectId)}`);
+  return { status: "written", manifest, migratedFrom: null };
+}
+
+/**
+ * Build a brand-new manifest for a Cloud-deleted project: fresh project and
+ * repository identities, current layout, and the previous sync selection
+ * carried over by path. Deletion tombstones are never copied.
+ */
+export function createReplacementProjectManifest(
+  existing: ProjectManifest,
+  analysis: ProjectLayoutAnalysis,
+  projectId = generateProjectId(),
+  now = new Date().toISOString(),
+): ProjectManifest | null {
+  const candidates = buildRepositoryCandidates(analysis);
+  if (candidates.length === 0) return null;
+
+  const previousByPath = new Map(
+    existing.repositories.map((repository) => [repository.relativePath, repository]),
+  );
+  const defaults = defaultRepositorySelection(analysis, candidates);
+  const repositories = candidates.map((candidate) => {
+    const previous = previousByPath.get(candidate.relativePath);
+    const enabled =
+      typeof previous?.syncEnabled === "boolean"
+        ? previous.syncEnabled
+        : defaults.has(candidate.relativePath);
+    return toManifestEntry(projectId, candidate, enabled);
+  });
+
+  return {
+    schemaVersion: MANIFEST_SCHEMA_VERSION,
+    projectId,
+    repositories,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function sameRepositories(a: ProjectManifestRepository[], b: ProjectManifestRepository[]): boolean {
+  const comparable = (entries: ProjectManifestRepository[]) => entries.map((entry) => [
+    entry.relativePath, entry.repositoryId ?? null, entry.repositoryUrl ?? null,
+    entry.syncEnabled !== false, entry.cloudDeletedAt ?? null, entry.cloudDeletionOperationId ?? null,
+  ]);
+  return JSON.stringify(comparable(a)) === JSON.stringify(comparable(b));
+}
+
+interface RepositoryPlan {
   target: ProjectManifestRepository[];
   renames: Array<{ fromPath: string; toPath: string }>;
   addedPaths: string[];
@@ -153,316 +469,100 @@ interface WorkspaceRepositoryPlan {
 }
 
 /**
- * Plan the workspace member list for a re-init.
+ * Plan the repository list for a re-init.
  *
  * Identity rules: a path already registered keeps its stored repositoryId; a
  * new path whose remote uniquely matches exactly one disappeared entry (in
  * both directions) is treated as a directory rename and inherits that entry's
- * identity; anything ambiguous gets a fresh identity — never guess.
+ * identity; anything ambiguous gets a fresh identity — never guess. The root
+ * entry (`.`) never renames; it normally uses the project ID, unless a
+ * persisted ID is needed to preserve a recreated or legacy absorbed root.
  */
-function planWorkspaceRepositories(
+function planRepositories(
   existing: ProjectManifest,
-  analysis: ProjectLayoutAnalysis,
-): WorkspaceRepositoryPlan {
+  candidates: RepositoryCandidate[],
+): RepositoryPlan {
   const registeredByPath = new Map(
     existing.repositories.map((entry) => [entry.relativePath, entry]),
   );
-  const discovered = analysis.childRepositories;
-  const discoveredPaths = new Set(discovered.map((child) => child.relativePath));
+  const discoveredPaths = new Set(candidates.map((candidate) => candidate.relativePath));
 
   const removedEntries = existing.repositories.filter(
     (entry) => !discoveredPaths.has(entry.relativePath),
   );
-  const addedChildren = discovered.filter((child) => !registeredByPath.has(child.relativePath));
+  const addedCandidates = candidates.filter(
+    (candidate) => !registeredByPath.has(candidate.relativePath),
+  );
 
   const renamePairs = new Map<string, ProjectManifestRepository>();
-  for (const child of addedChildren) {
-    if (!child.originUrl) continue;
+  for (const candidate of addedCandidates) {
+    if (isRootRepositoryPath(candidate.relativePath) || !candidate.originUrl) continue;
     const fromMatches = removedEntries.filter(
-      (entry) => entry.repositoryUrl && entry.repositoryUrl === child.originUrl,
+      (entry) =>
+        !isRootRepositoryPath(entry.relativePath) &&
+        entry.repositoryUrl &&
+        entry.repositoryUrl === candidate.originUrl,
     );
     if (fromMatches.length !== 1) continue;
-    const toMatches = addedChildren.filter((candidate) => candidate.originUrl === child.originUrl);
+    const toMatches = addedCandidates.filter((other) => other.originUrl === candidate.originUrl);
     if (toMatches.length !== 1) continue;
-    renamePairs.set(child.relativePath, fromMatches[0]);
+    renamePairs.set(candidate.relativePath, fromMatches[0]);
   }
 
-  const target: ProjectManifestRepository[] = discovered.map((child) => {
-    const existingEntry = registeredByPath.get(child.relativePath);
-    const renamedFrom = renamePairs.get(child.relativePath);
+  const target: ProjectManifestRepository[] = candidates.map((candidate) => {
+    const existingEntry = registeredByPath.get(candidate.relativePath);
+    const renamedFrom = renamePairs.get(candidate.relativePath);
+    const previousEntry = existingEntry ?? renamedFrom;
+    const enabled = previousEntry?.syncEnabled !== false;
+    if (isRootRepositoryPath(candidate.relativePath)) {
+      // Older absorption reused the child ID for the parent. Keep that
+      // child's row and assign only the colliding root a distinct identity.
+      const collision = existing.repositories.some((entry) =>
+        entry.relativePath !== "." && entry.repositoryId === existing.projectId,
+      );
+      return toManifestEntry(existing.projectId, candidate, enabled,
+        collision && !previousEntry?.repositoryId
+          ? { ...previousEntry, relativePath: ".", repositoryId: computeLocalRepositoryId(existing.projectId, ".") }
+          : previousEntry,
+      );
+    }
     const repositoryId =
       existingEntry?.repositoryId ??
       renamedFrom?.repositoryId ??
       computeLocalRepositoryId(
         existing.projectId,
-        renamedFrom ? renamedFrom.relativePath : child.relativePath,
+        renamedFrom ? renamedFrom.relativePath : candidate.relativePath,
       );
-    return {
-      relativePath: child.relativePath,
+    return toManifestEntry(existing.projectId, candidate, enabled, {
+      ...(previousEntry ?? { relativePath: candidate.relativePath }),
       repositoryId,
-      ...(child.originUrl ? { repositoryUrl: child.originUrl } : {}),
-    };
+    });
   });
+
+  const renamedEntries = new Set(renamePairs.values());
+  for (const entry of removedEntries) {
+    if (!renamedEntries.has(entry)) target.push({ ...entry, syncEnabled: false });
+  }
 
   const renames = [...renamePairs.entries()].map(([toPath, from]) => ({
     fromPath: from.relativePath,
     toPath,
   }));
   const renamedFromPaths = new Set(renames.map((rename) => rename.fromPath));
-  const addedPaths = addedChildren
-    .map((child) => child.relativePath)
+  const addedPaths = addedCandidates
+    .map((candidate) => candidate.relativePath)
     .filter((path) => !renamePairs.has(path));
   const removedPaths = removedEntries
     .map((entry) => entry.relativePath)
-    .filter((path) => !renamedFromPaths.has(path));
+    .filter((path) => !renamedFromPaths.has(path) && registeredByPath.get(path)?.syncEnabled !== false);
 
   const hasStructuralChanges =
     renames.length > 0 || addedPaths.length > 0 || removedPaths.length > 0;
   const needsRewrite =
     !hasStructuralChanges &&
-    JSON.stringify(target) !== JSON.stringify(existing.repositories);
+    !sameRepositories(target, existing.repositories);
 
   return { target, renames, addedPaths, removedPaths, hasStructuralChanges, needsRewrite };
-}
-
-async function convertManifestType(
-  root: string,
-  existing: ProjectManifest,
-  analysis: ProjectLayoutAnalysis,
-  targetType: ProjectType,
-): Promise<ManifestPlanResult> {
-  if (targetType === "repo" && !analysis.root.isGitRepository) {
-    console.error("  [x] --single-repo requires the project root to be a Git repository.");
-    return { status: "failed" };
-  }
-  if (targetType === "workspace" && analysis.childRepositories.length === 0) {
-    console.error("  [x] --multi-repo requires at least one child Git repository.");
-    return { status: "failed" };
-  }
-
-  const label = targetType === "repo" ? "single-repo" : "multi-repo";
-  if (isInteractive()) {
-    const confirmed = await askYesNo(`  Convert this project to ${label}? The project identity is kept.`);
-    if (!confirmed) return { status: "cancelled" };
-  }
-
-  const manifest: ProjectManifest = {
-    ...existing,
-    projectType: targetType,
-    repositories:
-      targetType === "repo"
-        ? [{ relativePath: "." }]
-        : analysis.childRepositories.map((repo) => ({
-            relativePath: repo.relativePath,
-            repositoryId: computeLocalRepositoryId(existing.projectId, repo.relativePath),
-            ...(repo.originUrl ? { repositoryUrl: repo.originUrl } : {}),
-          })),
-    updatedAt: new Date().toISOString(),
-  };
-  await withProjectInitLock(root, async () => writeProjectManifest(root, manifest));
-  console.log(`  [+] Converted project to ${label} (identity preserved).`);
-  return { status: "written", manifest, migratedFrom: null };
-}
-
-// --- Fresh initialization / migration ----------------------------------------
-
-async function initFreshManifest(
-  root: string,
-  analysis: ProjectLayoutAnalysis,
-  flags: InitModeFlags,
-): Promise<ManifestPlanResult> {
-  const mode = await determineInitMode(analysis, flags);
-  if (mode.kind === "cancelled" || mode.kind === "failed") return { status: mode.kind };
-  if (mode.kind === "redirect-child") return { status: "redirect-child", childPath: mode.childPath };
-
-  if (mode.projectType === "repo" && !(await confirmMemberRepositoryInit(root))) {
-    return { status: "cancelled" };
-  }
-
-  const recovered = recoverLegacyProjectId(root);
-  const projectId = recovered?.projectId ?? generateProjectId();
-  const now = new Date().toISOString();
-  const manifest: ProjectManifest = {
-    schemaVersion: 1,
-    projectId,
-    projectType: mode.projectType,
-    repositories:
-      mode.projectType === "repo"
-        ? [{ relativePath: "." }]
-        : analysis.childRepositories.map((repo) => ({
-            relativePath: repo.relativePath,
-            repositoryId: computeLocalRepositoryId(projectId, repo.relativePath),
-            ...(repo.originUrl ? { repositoryUrl: repo.originUrl } : {}),
-          })),
-    createdAt: now,
-    updatedAt: now,
-  };
-
-  await withProjectInitLock(root, async () => {
-    writeProjectManifest(root, manifest);
-    const legacyWorkspaceManifest = join(root, workspaceManifestRelativePath);
-    if (existsSync(legacyWorkspaceManifest)) {
-      rmSync(legacyWorkspaceManifest, { force: true });
-      console.log("  [~] Removed legacy workspace.json (migrated into project.json).");
-    }
-  });
-
-  return { status: "written", manifest, migratedFrom: recovered?.source ?? null };
-}
-
-type InitModeDecision =
-  | { kind: "mode"; projectType: ProjectType }
-  | { kind: "redirect-child"; childPath: string }
-  | { kind: "cancelled" }
-  | { kind: "failed" };
-
-async function determineInitMode(
-  analysis: ProjectLayoutAnalysis,
-  flags: InitModeFlags,
-): Promise<InitModeDecision> {
-  if (flags.singleRepo) {
-    if (!analysis.root.isGitRepository) {
-      console.error("  [x] --single-repo requires the project root to be a Git repository.");
-      return { kind: "failed" };
-    }
-    return { kind: "mode", projectType: "repo" };
-  }
-  if (flags.multiRepo) {
-    if (analysis.childRepositories.length === 0) {
-      console.error("  [x] --multi-repo requires at least one child Git repository.");
-      return { kind: "failed" };
-    }
-    return { kind: "mode", projectType: "workspace" };
-  }
-
-  switch (analysis.recommendation) {
-    case "cannot-initialize":
-      console.error("  [x] Not a Git repository, and no Git repositories were found one level below.");
-      console.error("      Run 'git init' first, or run this from a directory that contains repositories.");
-      return { kind: "failed" };
-    case "single-repo":
-      if (!analysis.requiresConfirmation) return { kind: "mode", projectType: "repo" };
-      return promptSingleWithChildren(analysis);
-    case "choose-explicit":
-      return promptMetaRepository(analysis);
-    case "multi-repo":
-      return promptMultiRepo(analysis);
-    case "choose-child":
-      return promptChooseChild(analysis);
-  }
-}
-
-async function promptSingleWithChildren(analysis: ProjectLayoutAnalysis): Promise<InitModeDecision> {
-  printChildRepositories(analysis);
-  console.log("  This repository has its own remote; the repositories above are NOT included by default.");
-  if (!isInteractive()) return nonInteractiveAmbiguity();
-
-  return askMode([
-    { label: "Track only this repository (recommended)", decision: { kind: "mode", projectType: "repo" } },
-    {
-      label: "Manage only the child repositories as a multi-repo project (this repository itself is NOT tracked)",
-      decision: { kind: "mode", projectType: "workspace" },
-    },
-  ], 0);
-}
-
-async function promptMetaRepository(analysis: ProjectLayoutAnalysis): Promise<InitModeDecision> {
-  printChildRepositories(analysis);
-  console.log("  This repository has commits but no remote — it could be a real project or just a container.");
-  if (!isInteractive()) return nonInteractiveAmbiguity();
-
-  return askMode([
-    {
-      label: "Track only this repository (child repositories are NOT included)",
-      decision: { kind: "mode", projectType: "repo" },
-    },
-    {
-      label: "Manage only the child repositories as a multi-repo project (this repository's commits are NOT synced)",
-      decision: { kind: "mode", projectType: "workspace" },
-    },
-  ], null);
-}
-
-async function promptMultiRepo(analysis: ProjectLayoutAnalysis): Promise<InitModeDecision> {
-  printChildRepositories(analysis);
-  if (analysis.root.isGitRepository) {
-    console.log("  This directory itself is an empty Git repository without a remote.");
-  }
-  if (!isInteractive()) return nonInteractiveAmbiguity();
-
-  const options: Array<{ label: string; decision: InitModeDecision }> = [
-    {
-      label: "Manage them together as one multi-repo project (recommended)",
-      decision: { kind: "mode", projectType: "workspace" },
-    },
-  ];
-  if (analysis.root.isGitRepository) {
-    options.push({
-      label: "Track only this directory as a single-repo project",
-      decision: { kind: "mode", projectType: "repo" },
-    });
-  }
-  return askMode(options, 0);
-}
-
-async function promptChooseChild(analysis: ProjectLayoutAnalysis): Promise<InitModeDecision> {
-  const child = analysis.childRepositories[0];
-  printChildRepositories(analysis);
-  console.log("  This directory looks like a wrapper around a single repository.");
-  if (!isInteractive()) return nonInteractiveAmbiguity();
-
-  return askMode([
-    {
-      label: `Initialize the repository '${child.displayName}' as its own project`,
-      decision: { kind: "redirect-child", childPath: child.path },
-    },
-    { label: "Manage it as a multi-repo project", decision: { kind: "mode", projectType: "workspace" } },
-  ], null);
-}
-
-function printChildRepositories(analysis: ProjectLayoutAnalysis): void {
-  console.log(`  Found ${analysis.childRepositories.length} Git repositories one level below:`);
-  for (const repo of analysis.childRepositories) {
-    const origin = repo.originUrl ? "" : "  (no remote)";
-    console.log(`    - ${repo.relativePath}${origin}`);
-  }
-  console.log();
-}
-
-function nonInteractiveAmbiguity(): InitModeDecision {
-  console.error("  [x] This layout needs a choice, but the current environment is not interactive.");
-  console.error("      Re-run with an explicit mode:");
-  console.error("        adit init --multi-repo");
-  console.error("        adit init --single-repo");
-  return { kind: "failed" };
-}
-
-// --- Member-repository notice ------------------------------------------------
-
-async function confirmMemberRepositoryInit(root: string): Promise<boolean> {
-  const parentRoot = findProjectManifestRoot(dirname(root));
-  if (!parentRoot) return true;
-
-  let parent: ProjectManifest | null = null;
-  try {
-    parent = readProjectManifest(parentRoot);
-  } catch {
-    return true; // a damaged parent manifest never blocks the child
-  }
-  if (!parent || parent.projectType !== "workspace") return true;
-
-  const relativePath = relative(parentRoot, root).replace(/\\/gu, "/");
-  if (!parent.repositories.some((repo) => repo.relativePath === relativePath)) return true;
-
-  const name = basename(root);
-  const parentName = basename(parentRoot);
-  console.log(`  [!] ${name} is already registered in the multi-repo project '${parentName}'.`);
-  console.log("      Continuing will initialize it as an independent project;");
-  console.log("      its Git history will appear in both projects.");
-  console.log();
-
-  if (!isInteractive()) return true; // explicit flag path — notice only
-  return askYesNo("  Continue and initialize it as an independent project?");
 }
 
 // --- Legacy identity recovery ------------------------------------------------
@@ -526,47 +626,24 @@ function isInteractive(): boolean {
 }
 
 async function confirmManifestRebuild(err: ProjectManifestError): Promise<boolean> {
-  console.error(`  [x] Project manifest is damaged: ${err.message}`);
-  console.error("      Restore .adit/project.json from a backup, or rebuild it now —");
-  console.error("      the project identity is recovered from local data when possible.");
   if (!isInteractive()) {
-    console.error("      Re-run 'adit init' in an interactive terminal to rebuild it.");
+    printError(
+      "init",
+      `project manifest is damaged: ${err.message}`,
+      `restore .adit/project.json from a backup, or re-run ${strong("adit init")} in an interactive terminal to rebuild it`,
+    );
     return false;
   }
-  return askYesNo("  Rebuild the project manifest now?");
+  printLine(`${marks.fail} Project manifest is damaged: ${err.message}`, { stream: "stderr" });
+  printLine(dim("  restore .adit/project.json from a backup, or rebuild it now; the identity is recovered from local data when possible"), { stream: "stderr" });
+  return askYesNo("Rebuild the project manifest now?");
 }
 
 async function askYesNo(question: string): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = await rl.question(`${question} (y/N): `);
+    const answer = await rl.question(`${promptPrefix()}${question} ${dim("(y/N)")} `);
     return ["y", "yes"].includes(answer.trim().toLowerCase());
-  } finally {
-    rl.close();
-  }
-}
-
-async function askMode(
-  options: Array<{ label: string; decision: InitModeDecision }>,
-  defaultIndex: number | null,
-): Promise<InitModeDecision> {
-  console.log("  How should ADIT initialize here?");
-  options.forEach((option, index) => {
-    const marker = defaultIndex === index ? " (default)" : "";
-    console.log(`    ${index + 1}. ${option.label}${marker}`);
-  });
-  console.log(`    ${options.length + 1}. Cancel`);
-
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const answer = (await rl.question("  Choose an option: ")).trim();
-    if (answer === "" && defaultIndex !== null) return options[defaultIndex].decision;
-    const index = Number.parseInt(answer, 10) - 1;
-    if (Number.isInteger(index) && index >= 0 && index < options.length) {
-      return options[index].decision;
-    }
-    console.log("  Cancelled. Nothing was changed.");
-    return { kind: "cancelled" };
   } finally {
     rl.close();
   }

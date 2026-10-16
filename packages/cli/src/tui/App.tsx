@@ -39,7 +39,6 @@ export function App(): React.ReactElement {
     state,
     filters,
     setFilters,
-    selectEvent,
     getEventDiff,
     getEnvSnapshot,
   } = useTimeline();
@@ -65,18 +64,11 @@ export function App(): React.ReactElement {
     setSelectedIndex((i) => Math.min(events.length - 1, i + 1));
   }, [events.length]);
 
-  const handleSelect = useCallback(() => {
-    if (selectedEvent) {
-      selectEvent(selectedEvent.id);
-    }
-  }, [selectedEvent, selectEvent]);
-
   const handleShowDiff = useCallback(() => {
     if (selectedEvent) {
-      selectEvent(selectedEvent.id);
       setScreen("diff");
     }
-  }, [selectedEvent, selectEvent]);
+  }, [selectedEvent]);
 
   const handleShowEnv = useCallback(() => {
     const snap = getEnvSnapshot();
@@ -130,9 +122,7 @@ export function App(): React.ReactElement {
     {
       onNavigateUp: navigateUp,
       onNavigateDown: navigateDown,
-      onSelect: handleSelect,
       onShowDiff: handleShowDiff,
-      onShowPrompt: handleSelect,
       onShowEnv: handleShowEnv,
       onSearch: handleSearch,
       onFilter: handleFilter,
@@ -236,7 +226,6 @@ export function App(): React.ReactElement {
           <Text dimColor>{"─".repeat(30)}</Text>
           <Text>j/k or ↑/↓{"   "}Navigate events (detail updates live)</Text>
           <Text>d{"            "}Show diff for checkpoint</Text>
-          <Text>p{"            "}Show prompt text</Text>
           <Text>e{"            "}Show environment snapshot</Text>
           <Text>/{"            "}Open search</Text>
           <Text>f{"            "}Toggle filter panel</Text>

@@ -9,11 +9,16 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { execSync } from "node:child_process";
 import {
   projectNameFromRemoteUrl,
   collectBranches,
+  collectRemoteBranchSnapshot,
+  branchHeadMap,
+  collectGitRefsFingerprint,
+  readGitRefsFingerprint,
+  collectCommitsBetweenRefSnapshots,
   collectCurrentBranch,
   collectCommitLogs,
   collectCommitCount,
@@ -94,6 +99,31 @@ describe("Git Collector (with temp repo)", () => {
     const main = branches.find((b) => b.name === "main");
     expect(main).toBeDefined();
     expect(main!.headSha).toBeTruthy();
+    expect(branchHeadMap(branches).main).toBe(main!.headSha);
+  });
+
+  it("fingerprints refs and collects only commits added after the previous heads", async () => {
+    const beforeBranches = await collectBranches(repoDir);
+    const beforeHeads = branchHeadMap(beforeBranches);
+    const beforeFingerprint = await collectGitRefsFingerprint(repoDir);
+
+    writeFileSync(join(repoDir, "incremental.txt"), "one\n");
+    execSync("git add . && git commit -m 'Incremental one'", { cwd: repoDir, stdio: "pipe" });
+    execSync("git checkout -b feature/incremental", { cwd: repoDir, stdio: "pipe" });
+    writeFileSync(join(repoDir, "feature.txt"), "feature\n");
+    execSync("git add . && git commit -m 'Incremental feature'", { cwd: repoDir, stdio: "pipe" });
+
+    const afterBranches = await collectBranches(repoDir);
+    const afterHeads = branchHeadMap(afterBranches);
+    const afterFingerprint = await collectGitRefsFingerprint(repoDir);
+    const commits = await collectCommitsBetweenRefSnapshots(repoDir, afterHeads, beforeHeads);
+
+    expect(afterFingerprint).not.toBe(beforeFingerprint);
+    expect(commits.map((commit) => commit.message)).toEqual([
+      "Incremental feature",
+      "Incremental one",
+    ]);
+    expect(commits.some((commit) => commit.message === "Initial commit")).toBe(false);
   });
 
   it("collectBranches skips remote HEAD aliases", async () => {
@@ -111,6 +141,36 @@ describe("Git Collector (with temp repo)", () => {
     const branches = await collectBranches(repoDir);
     expect(branches.some((branch) => branch.name === "origin")).toBe(false);
     expect(branches.filter((branch) => branch.name === "main")).toHaveLength(1);
+  });
+
+  it("collectRemoteBranchSnapshot ignores local and stale remote-tracking branches", async () => {
+    const remoteDir = mkdtempSync(join(tmpdir(), "adit-remote-"));
+    try {
+      execSync("git init --bare", { cwd: remoteDir, stdio: "pipe" });
+      execSync(`git remote add origin ${JSON.stringify(remoteDir)}`, {
+        cwd: repoDir,
+        stdio: "pipe",
+      });
+      execSync("git push -u origin main", { cwd: repoDir, stdio: "pipe" });
+      execSync("git checkout -b feature/stale", { cwd: repoDir, stdio: "pipe" });
+      writeFileSync(join(repoDir, "stale.txt"), "stale\n");
+      execSync("git add . && git commit -m 'Stale feature'", { cwd: repoDir, stdio: "pipe" });
+      execSync("git push -u origin feature/stale", { cwd: repoDir, stdio: "pipe" });
+      execSync("git push origin --delete feature/stale", { cwd: repoDir, stdio: "pipe" });
+      execSync("git update-ref refs/remotes/origin/feature/stale HEAD", {
+        cwd: repoDir,
+        stdio: "pipe",
+      });
+
+      const allBranches = await collectBranches(repoDir);
+      const remoteSnapshot = await collectRemoteBranchSnapshot(repoDir);
+
+      expect(allBranches.some((branch) => branch.name === "feature/stale")).toBe(true);
+      expect(remoteSnapshot.branches.map((branch) => branch.name)).toEqual(["main"]);
+      expect(remoteSnapshot.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      rmSync(remoteDir, { recursive: true, force: true });
+    }
   });
 
   it("collectCommitLogs returns commits", async () => {
@@ -551,5 +611,26 @@ describe("collectCommitFileStats (with temp repo)", () => {
   it("returns an empty map for unknown shas", async () => {
     const stats = await collectCommitFileStats(repoDir, ["0000000000000000000000000000000000000000"]);
     expect(stats.size).toBe(0);
+  });
+});
+
+describe("readGitRefsFingerprint", () => {
+  it("keeps git's diagnostic when the directory is not a repository", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "adit-refs-"));
+    try {
+      const result = await readGitRefsFingerprint(dir);
+      expect(result.fingerprint).toBeNull();
+      expect(result.error).toContain("not a git repository");
+      expect(await collectGitRefsFingerprint(dir)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("describes a missing directory", async () => {
+    const missing = join(tmpdir(), `adit-refs-missing-${randomBytes(8).toString("hex")}`);
+    const result = await readGitRefsFingerprint(missing);
+    expect(result.fingerprint).toBeNull();
+    expect(result.error).toContain("not found");
   });
 });

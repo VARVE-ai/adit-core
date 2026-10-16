@@ -6,6 +6,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
+import { prepareLegacyCursorHooksRemoval } from "./cursor-legacy.js";
 import { join } from "node:path";
 import type { Platform } from "@varveai/adit-core";
 import type {
@@ -21,6 +22,8 @@ import {
   classifyAditHookEntries,
   describeHookValidation,
   isAditHookCommand,
+  mergeAditHookEntries,
+  stripAditHookEntries,
 } from "./command.js";
 
 const HOOK_MAPPINGS: HookMapping[] = [
@@ -30,10 +33,10 @@ const HOOK_MAPPINGS: HookMapping[] = [
   // Route it through the stop handler so edits made before the failure are
   // still extracted from the transcript.
   { platformEvent: "StopFailure", aditHandler: "stop" },
-  { platformEvent: "SessionStart", aditHandler: "session-start" },
-  { platformEvent: "SessionEnd", aditHandler: "session-end" },
-  { platformEvent: "SubagentStart", aditHandler: "subagent-start" },
-  { platformEvent: "SubagentStop", aditHandler: "subagent-stop" },
+  // Working-tree snapshots around Bash calls: the only way to learn which
+  // files a shell command rewrote (python heredocs, sed -i, cat > ...).
+  { platformEvent: "PreToolUse", aditHandler: "pre-tool-use", matcher: "Bash" },
+  { platformEvent: "PostToolUse", aditHandler: "post-tool-use", matcher: "Bash" },
 ];
 
 /** Slash command installed into .claude/commands/ */
@@ -41,7 +44,7 @@ const ADIT_COMMAND = {
   filename: "adit.md",
   content: `---
 name: adit
-description: ADIT — manage cloud project linking and development intents
+description: ADIT — manage cloud project linking
 ---
 
 **Requested action:** \`$ARGUMENTS\`
@@ -51,8 +54,7 @@ description: ADIT — manage cloud project linking and development intents
 Parse the requested action above and follow the **first matching rule**:
 
 1. Action is \`link\` (with optional flags) → run \`adit cloud link\` with the appropriate flags mapped from the arguments: \`--force\`, \`--skip-docs\`, \`--skip-commits\`, \`--dry-run\`.
-2. Action is \`intent\` (with optional flags) → run \`adit cloud intent\` with the appropriate flags mapped from the arguments: \`--id <value>\`, \`--state <value>\`. Add \`--json\` for structured output.
-3. No action, empty arguments, or unrecognized action → display the **Help** section below as your response. Do not run any commands.
+2. No action, empty arguments, or unrecognized action → display the **Help** section below as your response. Do not run any commands.
 
 ---
 
@@ -62,7 +64,7 @@ Display the following when no valid action is provided:
 
 ### ADIT Cloud
 
-ADIT tracks your AI-assisted development sessions, links project context to the cloud, and helps you manage development intents (plans).
+ADIT tracks your AI-assisted development sessions and links project context to the cloud.
 
 **Usage:** \`/adit <action> [options]\`
 
@@ -77,21 +79,10 @@ Uploads git metadata (branches, commits) and project documents for intent planni
 | \`--skip-commits\` | Skip commit history upload |
 | \`--dry-run\` | Preview what would be uploaded |
 
-#### \`intent\` — View development intents
-
-Shows intents (development plans) and tasks from the connected adit-cloud project.
-
-| Option | Description |
-|---|---|
-| \`--id <id>\` | Show a specific intent by ID |
-| \`--state <state>\` | Filter by state (e.g. \`capture\`, \`execution\`, \`shipped\`) |
-
 #### Examples
 
 - \`/adit link\` — link the project with defaults
 - \`/adit link --force --skip-docs\` — re-link, git metadata only
-- \`/adit intent\` — list all intents
-- \`/adit intent --state execution\` — show active intents
 
 > **Before linking:** the project must be initialized — run \`adit init\` in the project root once. Link only connects an already initialized project; it never changes the project structure.
 >
@@ -119,10 +110,12 @@ export const claudeCodeAdapter: PlatformAdapter = {
       platformCli: "claude-code",
       platformSessionId: raw.session_id as string | undefined,
       transcriptPath: raw.transcript_path as string | undefined,
+      promptId: raw.prompt_id as string | undefined,
       // Prompt
       prompt: raw.prompt as string | undefined,
       // Tool use fields (Claude Code sends tool_response for tool results)
       toolName: raw.tool_name as string | undefined,
+      toolUseId: raw.tool_use_id as string | undefined,
       toolInput: raw.tool_input as Record<string, unknown> | undefined,
       toolOutput: (raw.tool_response ?? raw.tool_output) as Record<string, unknown> | undefined,
       // Stop / StopFailure (StopFailure carries `error` instead of stop_reason)
@@ -143,19 +136,14 @@ export const claudeCodeAdapter: PlatformAdapter = {
       agentId: raw.agent_id as string | undefined,
       agentType: raw.agent_type as string | undefined,
       agentTranscriptPath: raw.agent_transcript_path as string | undefined,
-      // Common metadata (present in all events)
-      permissionMode: raw.permission_mode as string | undefined,
-      model: raw.model as string | undefined,
-      // Session lifecycle
-      sessionSource: raw.source as string | undefined,
-      sessionEndReason: raw.reason as string | undefined,
       rawPlatformData: raw,
     };
   },
 
   generateHookConfig(aditBinaryPath: string, projectRoot?: string): PlatformHookConfig {
-    const makeHookEntry = (hookType: AditHookType) => [
+    const makeHookEntry = (hookType: AditHookType, matcher?: string) => [
       {
+        ...(matcher ? { matcher } : {}),
         hooks: [{
           type: "command",
           command: buildAditHookCommand(aditBinaryPath, "claude", hookType, projectRoot),
@@ -173,10 +161,8 @@ export const claudeCodeAdapter: PlatformAdapter = {
           UserPromptSubmit: makeHookEntry("prompt-submit"),
           Stop: makeHookEntry("stop"),
           StopFailure: makeHookEntry("stop"),
-          SessionStart: makeHookEntry("session-start"),
-          SessionEnd: makeHookEntry("session-end"),
-          SubagentStart: makeHookEntry("subagent-start"),
-          SubagentStop: makeHookEntry("subagent-stop"),
+          PreToolUse: makeHookEntry("pre-tool-use", "Bash"),
+          PostToolUse: makeHookEntry("post-tool-use", "Bash"),
         },
       },
     };
@@ -272,7 +258,12 @@ export const claudeCodeAdapter: PlatformAdapter = {
     };
   },
 
-  async installHooks(projectRoot: string, aditBinaryPath: string): Promise<void> {
+  async installHooks(
+    projectRoot: string,
+    aditBinaryPath: string,
+    options?: { hookProjectRoot?: string },
+  ): Promise<void> {
+    const legacyCursor = prepareLegacyCursorHooksRemoval(projectRoot);
     const claudeDir = join(projectRoot, ".claude");
     if (!existsSync(claudeDir)) {
       mkdirSync(claudeDir, { recursive: true });
@@ -297,41 +288,30 @@ export const claudeCodeAdapter: PlatformAdapter = {
       }
     }
 
-    const hookConfig = this.generateHookConfig(aditBinaryPath, projectRoot);
+    const hookConfig = this.generateHookConfig(aditBinaryPath, options?.hookProjectRoot ?? projectRoot);
     const existingHooks = (settings.hooks as Record<string, unknown[]>) ?? {};
     const newHooks = hookConfig.content.hooks as Record<string, unknown[]>;
 
-    // Merge hook entries per event key: preserve other tools' hooks,
-    // remove stale ADIT entries, then append new ADIT entries.
-    const mergedHooks: Record<string, unknown[]> = { ...existingHooks };
-    for (const [eventKey, aditEntries] of Object.entries(newHooks)) {
-      const existing = Array.isArray(mergedHooks[eventKey]) ? mergedHooks[eventKey] : [];
-
-      // Remove stale ADIT entries (same logic as uninstallHooks)
-      const nonAditEntries = existing.filter(
-        (raw) => {
-          const entry = raw as { command?: string; hooks?: Array<{ command?: string }> };
-          if (typeof entry.command === "string" && isAditHookCommand(entry.command)) return false;
-          if (Array.isArray(entry.hooks)) {
-            return !entry.hooks.some(
-              (h) => typeof h.command === "string" && isAditHookCommand(h.command),
-            );
-          }
-          return true;
-        },
-      );
-
-      // Append new ADIT entries after other tools' hooks
-      mergedHooks[eventKey] = [...nonAditEntries, ...aditEntries];
-    }
+    // Merge: strip ADIT entries from every event (including events ADIT no
+    // longer installs, so upgrades leave nothing behind), keep other tools'
+    // entries, then append this release's ADIT entries.
+    const mergedHooks = mergeAditHookEntries(existingHooks, newHooks);
 
     settings.hooks = mergedHooks;
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+    // Older versions installed into the shared settings.json. ADIT does not
+    // write there any more, but its entries for events it no longer installs
+    // are pruned from it so upgrades leave nothing behind.
+    removeRetiredAditHookEventsFromConfig(
+      join(claudeDir, "settings.json"),
+      HOOK_MAPPINGS.map((m) => m.platformEvent),
+    );
 
     // Install slash command
     const commandsDir = join(claudeDir, "commands");
     mkdirSync(commandsDir, { recursive: true });
     writeFileSync(join(commandsDir, ADIT_COMMAND.filename), ADIT_COMMAND.content);
+    legacyCursor.remove();
   },
 
   async hasHooks(projectRoot: string): Promise<boolean> {
@@ -341,12 +321,14 @@ export const claudeCodeAdapter: PlatformAdapter = {
   },
 
   async uninstallHooks(projectRoot: string): Promise<void> {
+    const legacyCursor = prepareLegacyCursorHooksRemoval(projectRoot);
     removeAditHooksFromConfig(join(projectRoot, ".claude", "settings.local.json"));
     removeAditHooksFromConfig(join(projectRoot, ".claude", "settings.json"));
 
     // Remove slash command
     const commandsDir = join(projectRoot, ".claude", "commands");
     try { unlinkSync(join(commandsDir, ADIT_COMMAND.filename)); } catch { /* best-effort */ }
+    legacyCursor.remove();
   },
 };
 
@@ -403,4 +385,28 @@ function entryContainsAditHook(entry: unknown): boolean {
   if (typeof raw.command === "string" && isAditHookCommand(raw.command)) return true;
   return Array.isArray(raw.hooks) &&
     raw.hooks.some((hook) => typeof hook.command === "string" && isAditHookCommand(hook.command));
+}
+
+/**
+ * Remove ADIT entries for events other than `currentEvents` from a settings
+ * file ADIT does not otherwise write. Leaves the file untouched when there is
+ * nothing to remove.
+ */
+function removeRetiredAditHookEventsFromConfig(
+  settingsPath: string,
+  currentEvents: readonly string[],
+): void {
+  if (!existsSync(settingsPath)) return;
+  try {
+    const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { hooks?: unknown };
+    if (!settings.hooks || typeof settings.hooks !== "object" || Array.isArray(settings.hooks)) return;
+    const hooks = settings.hooks as Record<string, unknown>;
+    const pruned = stripAditHookEntries(hooks, { keepEvents: currentEvents });
+    if (JSON.stringify(pruned) === JSON.stringify(hooks)) return;
+    if (Object.keys(pruned).length === 0) delete settings.hooks;
+    else settings.hooks = pruned;
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  } catch {
+    // Preserve invalid or unreadable user settings.
+  }
 }
