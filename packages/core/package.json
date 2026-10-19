@@ -23,6 +23,8 @@
   },
   "dependencies": {
     "better-sqlite3": "13.0.3",
+    "fzstd": "0.1.1",
+    "parse5": "^8.0.1",
     "ulid": "^2.3.0"
   },
   "devDependencies": {

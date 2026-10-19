@@ -139,6 +139,14 @@ export {
 } from "./perf/perf-log.js";
 
 export { recordAgentRuntime, readAgentRuntimeVersions } from "./config/runtime-agents.js";
+export * from "./local-state.js";
+export { createAttributionSchema } from './local-history/attribution-schema.js';
+export { NON_MERGE_COMMIT_SQL } from './local-history/commit-policy.js';
+export { insideDirectory } from "./local-history/sources.js";
+export { redactOverview } from "./local-history/analytics.js";
+export * from "./local-history/sources.js";
+export * from "./local-history/archive.js";
+export * from "./local-history/analytics.js";
 
 // Sync primitives
 export {

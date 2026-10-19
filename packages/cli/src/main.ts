@@ -8,6 +8,7 @@
  */
 
 import { Command } from "commander";
+import { serveCommand, startDaemon, stopDaemon, daemonStatus } from "./local/daemon.js";
 import { initCommand } from "./commands/init.js";
 import { listCommand } from "./commands/list.js";
 import { showCommand } from "./commands/show.js";
@@ -77,6 +78,16 @@ export function createProgram(): Command {
   // Set before any subcommand exists so every subcommand inherits it.
   program.configureOutput({ outputError: (text, write) => write(formatParseError(text)) });
   configureTopLevelHelp(program);
+
+  program.command("serve").description("Open the local settings workbench (keeps collecting in the background)")
+    .option("--port <port>", "Local port for a new daemon")
+    .option("--no-browser", "Print the address without opening a browser")
+    .action(serveCommand);
+  const daemon = program.command("daemon").description("Manage the independent local collection service");
+  daemon.command("start").action(async () => { console.log((await startDaemon()).url); });
+  daemon.command("status").action(async () => { const s = await daemonStatus(); console.log(s ? `Running: ${s.url} (PID ${s.pid})` : "Stopped"); });
+  daemon.command("stop").action(async () => { await stopDaemon(); console.log("Stopped"); });
+  daemon.command("restart").action(async () => { await stopDaemon(); console.log((await startDaemon()).url); });
 
   program
     .command("init")

@@ -15,6 +15,7 @@
     "build:hooks": "pnpm --filter @varveai/adit-hooks run build",
     "build:cli": "pnpm --filter @varveai/adit-cli run build",
     "build:cloud": "pnpm --filter @varveai/adit-cloud run build",
+    "build:local": "pnpm --filter @varveai/adit-cli... build && pnpm --filter @varveai/adit-local-web build",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint packages/*/src/**/*.ts",

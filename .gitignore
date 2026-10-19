@@ -37,3 +37,5 @@ coverage/
 *.log
 
 .understand-anything/
+.cache/
+packages/cli/local-assets/
