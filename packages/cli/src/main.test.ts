@@ -67,6 +67,7 @@ describe("CLI help", () => {
     expect(help).not.toContain("upgrade");
     expect(help).toContain("timeline|list [options]");
     expect(help).toContain("uninstall [options]");
+    expect(help).toMatch(/^  restart\s+Restart the local background service$/m);
     expect(help).toContain("help [command...]");
     expect(help).not.toMatch(/^  db\s/m);
     expect(help).not.toMatch(/^  perf\s/m);

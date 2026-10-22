@@ -88,6 +88,11 @@ export function createProgram(): Command {
     .option("--port <port>", "Local port for a new daemon")
     .option("--no-browser", "Print the address without opening a browser")
     .action(serveCommand);
+  const restartService = async () => {
+    await stopDaemon();
+    console.log((await startDaemon()).url);
+  };
+  program.command("restart").description("Restart the local background service").action(restartService);
   const daemon = program.command("daemon").description("Manage the independent local collection service");
   daemon.command("start")
     .addOption(new Option("--on-login").hideHelp())
@@ -97,7 +102,7 @@ export function createProgram(): Command {
     });
   daemon.command("status").action(async () => { const s = await daemonStatus(); console.log(s ? `Running: ${s.url} (PID ${s.pid})` : "Stopped"); });
   daemon.command("stop").action(async () => { await stopDaemon(); console.log("Stopped"); });
-  daemon.command("restart").action(async () => { await stopDaemon(); console.log((await startDaemon()).url); });
+  daemon.command("restart").description("Restart the local background service (same as adit restart)").action(restartService);
 
   program
     .command("init")
@@ -533,6 +538,7 @@ Options:
 
 Commands:
   server|serve [options]     Open the local web UI (starts the service if needed)
+  restart                    Restart the local background service
   daemon                     Start, stop or inspect the background service
   init [options]             Initialize ADIT in the current project
   uninstall [options]        Uninstall ADIT from the current project
