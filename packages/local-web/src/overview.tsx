@@ -18,12 +18,10 @@ import {
   X,
   Award,
   ShieldCheck,
-  Sun,
-  Orbit,
-  Sparkles,
 } from "lucide-react";
 import type { OverviewData } from "../../core/src/local-history/analytics";
 import "./overview.css";
+import { PlatformIcon } from "./platform-icon";
 import { dailyCostWindow, costAxisMaximum } from "./overview-chart-data";
 import { OverviewCloudPush, type CloudSyncSummary } from "./overview-cloud-push";
 
@@ -253,13 +251,7 @@ export function OverviewPage({
     );
   const agent = (id: string) => (
     <span className="overview-agent" style={{ color: colors.get(id) || palette[0] }}>
-      {id === "claude" ? (
-        <Sun />
-      ) : id === "codex" ? (
-        <Orbit />
-      ) : (
-        <Sparkles />
-      )}
+      <PlatformIcon platform={id} />
       {names.get(id) || id}
     </span>
   );

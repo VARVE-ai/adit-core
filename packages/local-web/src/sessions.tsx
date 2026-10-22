@@ -38,6 +38,7 @@ import { sc } from "./sessions-copy";
 import { agentName } from "./achievement-export";
 import { SessionTurnActions, SessionTurnEditor } from "./session-turn-editor";
 import "./sessions.css";
+import { PlatformIcon } from "./platform-icon";
 
 type Api = <T = any>(
   path: string,
@@ -102,13 +103,7 @@ const toolIcons = {
   tool: Wrench,
 };
 function AgentIcon({ provider }: { provider: string }) {
-  return ["claude", "codex"].includes(provider) ? (
-    <svg className={`session-agent-icon ${provider}`} aria-hidden="true">
-      <use href={`/agent-icons.svg#${provider}`} />
-    </svg>
-  ) : (
-    <Terminal size={12} aria-hidden="true" />
-  );
+  return <PlatformIcon platform={provider} size={12} className="session-agent-icon" />;
 }
 function AgentDot({ provider }: { provider: string }) {
   return (

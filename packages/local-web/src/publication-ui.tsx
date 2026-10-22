@@ -8,6 +8,7 @@ import { AditMark } from "./adit-mark";
 import type { ShareSnapshot, SharedCommit } from "../../core/src/local-history/sharing-types";
 import "./publications.css";
 import "./sessions.css";
+import { PlatformIcon } from "./platform-icon";
 export type PublicationApi = <T = any>(path: string, method?: string, body?: unknown, signal?: AbortSignal) => Promise<T>;
 export const p = (zh: string, en: string) => getLanguage() === "zh" ? zh : en;
 export const number = (v: number) => v.toLocaleString(locale());
@@ -36,7 +37,8 @@ export function PublicationError({ error }: { error: string }) {
   return error ? <p className="publication-error" role="alert">{publicationError(systemMessage(error.replace(/^Error:\s*/, "")))}</p> : null;
 }
 export function PublicationAgent({ provider }: { provider: string }) {
-  return ["claude", "codex"].includes(provider) ? <svg className={`session-agent-icon ${provider}`} aria-hidden="true"><use href={`/agent-icons.svg#${provider}`} /></svg> : <Terminal size={13} />;
+  const compact = ["claude", "codex"].includes(provider);
+  return <PlatformIcon platform={provider} size={compact ? 12 : 13} className={compact ? "session-agent-icon" : undefined} />;
 }
 export function SharedCommitRow({ commit: c }: { commit: SharedCommit }) {
   return <div className="shared-commit"><GitCommitHorizontal size={17} /><code>{c.sha.slice(0, 7)}</code><span>{c.subject}</span><small>{c.repository} · {c.files} {p("个文件", "files")}</small>{c.additions !== null && <em>+{c.additions} −{c.deletions ?? 0}</em>}</div>;
