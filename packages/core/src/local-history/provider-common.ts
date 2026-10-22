@@ -56,3 +56,11 @@ export function group(rows: Row[], key: string): Map<unknown, Row[]> {
   for (const row of rows) { const list = result.get(row[key]) || []; list.push(row); result.set(row[key], list); }
   return result;
 }
+
+export function requireSession(session: HistorySession): HistorySession {
+  if (!session.id)
+    throw new HistoryFormatError(
+      "Session identity or workspace evidence is missing",
+    );
+  return session;
+}

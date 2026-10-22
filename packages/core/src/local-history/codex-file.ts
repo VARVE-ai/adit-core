@@ -1,7 +1,7 @@
 import {openSync,readSync,closeSync,fstatSync,lstatSync} from "node:fs";
 import {basename} from "node:path";
 import {HistoryFormatError,record,string} from "./types.js";
-import {parseCodexRows,codexContinuationRoot} from "./parsers.js";
+import {parseCodexRows,codexContinuationRoot} from "./codex.js";
 import {sourceFiles,insideDirectory} from "./sources.js";
 import {trackSource} from "./source-checkpoints.js";
 import type Database from "better-sqlite3";

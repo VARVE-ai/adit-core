@@ -6,11 +6,9 @@ import { readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import type Database from "better-sqlite3";
-import {
-  parseClaude,
-  parseDeepseek,
-  parseGemini,
-} from "./parsers.js";
+import { parseClaude } from "./claude.js";
+import { parseDeepseek } from "./deepseek-tui.js";
+import { parseGemini } from "./gemini.js";
 import { geminiWorkspace, insideDirectory, sourceFiles } from "./sources.js";
 import type { HistorySession } from "./types.js";
 import { readOpenCodeDatabase, readOpenCodeStorage } from "./opencode.js";
@@ -31,7 +29,7 @@ export type {SourceScanProgress,SourceProgressListener} from "./scan-progress.js
 
 const PARSER_VERSION = 5;
 // Parser fixes invalidate only the affected provider's file and session checkpoints.
-const parserVersion = (provider: string) => ["cursor", "codex", "traex", "augure-code"].includes(provider) ? 6 : PARSER_VERSION;
+const parserVersion = (provider: string) => ["codex", "traex", "augure-code"].includes(provider) ? 7 : provider === "cursor" ? 6 : PARSER_VERSION;
 export interface ScanSource {
   id: string;
   paths: string[];

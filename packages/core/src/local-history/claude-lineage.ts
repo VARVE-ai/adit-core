@@ -1,6 +1,6 @@
 import {basename,dirname} from "node:path";
 import {readSource,readSourceJSON} from "./source-io.js";
-import {parseClaude} from "./parsers.js";
+import {parseClaude} from "./claude.js";
 import {HistoryFormatError,jsonLines,string,type HistorySession,type HistoryMessage,record} from "./types.js";
 import {message,session,type Row} from "./provider-common.js";
 export const claudeLineageProviders=["claude","qoder","iflow"];
