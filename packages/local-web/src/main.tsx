@@ -2065,16 +2065,6 @@ function Account({
         </p>
       )}
       <section className="settings-rows" aria-busy={checking}>
-        {!data.connected && (
-          <div className="field">
-            <label htmlFor="server-url">{t("服务地址")}</label>
-            <input
-              id="server-url"
-              value={server}
-              onChange={(e) => setServer(e.target.value)}
-            />
-          </div>
-        )}
         <div className="field">
           <span>{t("云端账号")}</span>
           <div className="account-value">
@@ -2275,10 +2265,6 @@ function Account({
               .finally(() => setTokenSaving(false));
           }}>
             <p className="muted">{t("先在 Cloud 中创建设备并复制 Token，再粘贴到这里连接。")}</p>
-            <div className="field">
-              <span>{t("服务地址")}</span>
-              <span className="cloud-token-server">{server}</span>
-            </div>
             <div className="field">
               <label htmlFor="cloud-device-token">{t("设备 Token")}</label>
               <input id="cloud-device-token" type="password" autoComplete="off" spellCheck={false}
