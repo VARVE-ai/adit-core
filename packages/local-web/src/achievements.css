@@ -1,13 +1,5 @@
 .achievements-page {
-  --background: 0 0% 100%;
-  --muted: 210 40% 96.1%;
-  --border: 214.3 31.8% 91.4%;
   background: hsl(var(--background));
-}
-.dark .achievements-page {
-  --background: 240 5% 9%;
-  --muted: 240 5% 16%;
-  --border: 240 5% 21%;
 }
 .achievements-page {
   height: 100%;

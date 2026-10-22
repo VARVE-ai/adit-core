@@ -3,19 +3,26 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  padding: 0;
+  border: 0;
 }
 .commits-toolbar {
+  min-height: 46px;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 18px;
+  padding: 8px 12px;
   border-bottom: 1px solid hsl(var(--border));
   flex-wrap: wrap;
 }
 .commits-segment {
   display: flex;
   gap: 2px;
-  padding: 3px;
+  padding: 2px;
+  height: 28px;
+  max-width: 100%;
+  overflow-x: auto;
   border-radius: 6px;
   background: hsl(var(--muted));
 }
@@ -23,7 +30,10 @@
   border: 0;
   background: transparent;
   font-size: 12px;
-  padding: 4px 10px;
+  padding: 0 10px;
+  height: 24px;
+  min-height: 24px;
+  flex-shrink: 0;
   white-space: nowrap;
 }
 .commits-segment button.on {
@@ -42,6 +52,9 @@
   background: transparent;
   outline: none;
   font-size: 12px;
+}
+.commits-toolbar .commits-search input {
+  height: 28px;
 }
 .commits-summary {
   margin-left: auto;
