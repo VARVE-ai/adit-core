@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
 import { LocalHistory } from "./archive.js";
+import { StructuredHistory } from "./structured-store.js";
 import { parseCursor } from "./cursor.js";
 import { parseHarness, decodeHarness } from "./deepseek-harness.js";
 import { parseGemini } from "./parsers.js";
@@ -171,6 +172,51 @@ describe("additional provider archive integration", () => {
 });
 
 describe("independent provider readers", () => {
+  it("reparses unchanged Cursor files once after the parser update, leaving other providers cached", async () => {
+    const f = fixture("cursor");
+    const slug = f.workspace.split(/[:\\/._-]+/).filter(Boolean).join("-");
+    const path = join(f.source, slug, "agent-transcripts", "s.jsonl");
+    const content = "<timestamp>Thursday, Sep 10, 2026, 1:27 PM (UTC+8)</timestamp>\n<user_query>到底</user_query>";
+    write(path, lines({ role: "user", message: { content } }));
+    const other = join(f.root, "claude");
+    write(join(other, "c.jsonl"), lines({ type: "user", uuid: "u", sessionId: "c", cwd: f.workspace, message: { content: "unchanged" } }));
+    const sources = [...f.sources, { id: "claude", paths: [other] }];
+    expect((await f.archive.scan(f.workspace, sources)).updated).toBe(2);
+    // Recreate the old archive and both old checkpoint versions, without changing source stats.
+    const session = f.archive.session("cursor", "s")!;
+    new StructuredHistory(f.db).write({ ...session, messages: session.messages.map(m => ({ ...m, timestamp: undefined })) });
+    f.db.prepare("UPDATE adit_history_sessions SET first_prompt=? WHERE provider='cursor'").run(content);
+    f.db.exec("UPDATE adit_history_sources SET parser_version=5; UPDATE adit_history_file_checkpoints SET parser_version=5;");
+    const refreshed = await new LocalHistory(f.db).scan(f.workspace, sources);
+    expect(refreshed.errors).toEqual([]);
+    expect(refreshed.updated).toBe(1);
+    expect(f.archive.session("cursor", "s")!.messages[0].timestamp).toBe("2026-09-10T05:27:00.000Z");
+    expect(f.db.prepare("SELECT first_prompt,started_at FROM adit_history_sessions WHERE provider='cursor'").get()).toEqual({ first_prompt: "到底", started_at: Date.parse("2026-09-10T05:27:00Z") });
+    expect((await new LocalHistory(f.db).scan(f.workspace, sources)).updated).toBe(0);
+  });
+  it("does not guess a Cursor workspace when multiple selected roots share an encoded path",async()=>{
+    const f=fixture("cursor"),one=join(f.root,"one-two"),two=join(f.root,"one_two");mkdirSync(one);mkdirSync(two);
+    const slug=one.split(/[:\\/._-]+/).filter(Boolean).join("-");
+    write(join(f.source,slug,"agent-transcripts","s.jsonl"),lines({role:"user",message:{content:"question"}}));
+    const result=await f.archive.scan(one,f.sources,{scopes:[{path:one,providers:["cursor"]},{path:two,providers:["cursor"]}]});
+    expect(result.errors).toEqual([expect.stringContaining("unambiguously")]);
+    expect(f.db.prepare("SELECT count(*) n FROM adit_history_sessions").get()).toEqual({n:0});
+    expect((await f.archive.scan(one,f.sources)).updated).toBe(1);
+  });
+  it("keeps other projects in a shared database when a single project is recollected", async () => {
+    const f=fixture("opencode"),source=openCode(f),other=join(f.root,"outside");mkdirSync(other);
+    source.session("one");source.session("two",other);
+    source.message("m1","one","first");source.message("m2","two","second");
+    const scopes=[{path:f.workspace,providers:["opencode"]},{path:other,providers:["opencode"]}];
+    expect((await f.archive.scan(f.workspace,f.sources,{scopes})).updated).toBe(2);
+    source.message("m3","one","changed first");
+    expect((await f.archive.scan(f.workspace,f.sources)).updated).toBe(1);
+    expect(f.archive.session("opencode","two")!.messages).toHaveLength(1);
+    source.db.prepare("DELETE FROM session WHERE id='one'").run();
+    expect((await f.archive.scan(f.workspace,f.sources)).updated).toBe(1);
+    expect(f.archive.session("opencode","one")).toBeUndefined();
+    expect(f.archive.session("opencode","two")!.messages).toHaveLength(1);
+  });
   it.each(["opencode", "kilo"])(
     "reads multiple %s sessions, WAL-only updates and unchanged checkpoints",
     async (provider) => {

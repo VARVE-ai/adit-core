@@ -13,7 +13,7 @@ import { LocalStore } from "@varveai/adit-core";
 import { createHistorySchema } from "../../../core/src/local-history/schema.js";
 import { StructuredHistory } from "../../../core/src/local-history/structured-store.js";
 import { analyzeAttribution } from "./attribution-analysis.js";
-import { queryCommits } from "./commits.js";
+import { branchFromCommitOutput, queryCommits } from "./commits.js";
 import { queryCommitSources } from "./commit-sources.js";
 let root: string, store: LocalStore;
 afterEach(() => {
@@ -71,6 +71,21 @@ function fixture(
     history: new StructuredHistory(store.db),
   };
 }
+it("keeps saved commit sources and can reanalyze original absolute write paths after a directory move",async()=>{
+  const {workspace,sha,now,history}=fixture();
+  history.write({provider:"claude",id:"writer-before-move",cwd:root,messages:[{key:"write",role:"assistant",timestamp:new Date(now-1000).toISOString(),raw:{},content:[
+    {type:"tool_use",id:"write",name:"Write",input:{file_path:join(root,"code.ts"),content:"export const originalValue = 123;"}},
+  ]}]});
+  const native=JSON.stringify(history.read("claude","writer-before-move"));
+  await analyzeAttribution(store,workspace);
+  const before=await queryCommitSources(store,workspace,root,sha);expect(before.matched).toBe(1);
+  const moved=join(root,"moved");mkdirSync(moved);renameSync(join(root,".git"),join(moved,".git"));renameSync(join(root,"code.ts"),join(moved,"code.ts"));
+  const saved=store.saveWorkspace({version:workspace.version,path:moved},workspace.id);
+  expect((await queryCommitSources(store,saved,moved,sha)).matched).toBe(1);
+  await analyzeAttribution(store,saved,{recheck:[{repository:moved,sha}]});
+  expect((await queryCommitSources(store,saved,moved,sha)).sources[0].sessionId).toBe("writer-before-move");
+  expect(JSON.stringify(history.read("claude","writer-before-move"))).toBe(native);
+});
 it("hides previously collected merges and skips their analysis without filtering subjects", async () => {
   const { sha, workspace } = fixture();
   await analyzeAttribution(store, workspace);
@@ -199,6 +214,196 @@ it("saves hunk-majority attribution and candidates without changing any original
   });
   expect(original()).toBe(before);
 });
+it("does not attribute identical or similar text from another write target or repository", async () => {
+  const { sha, now, workspace, history } = fixture();
+  const otherRepository = join(root, "other-repo");
+  workspace.repositories.push(otherRepository);
+  store.saveWorkspace(workspace, workspace.id);
+  // Explicit patch targets own each write, even when the outer session is
+  // opened in the repository whose commit is being analyzed.
+  for (const [id, path, text] of [
+    [
+      "other-project",
+      join(otherRepository, "code.ts"),
+      "export const originalValue = 123;",
+    ],
+    [
+      "other-file",
+      join(root, "unrelated.ts"),
+      "export const originalValue = 123;",
+    ],
+    [
+      "similar-other-file",
+      join(root, "unrelated.ts"),
+      "export const unknownValue = 456;",
+    ],
+  ])
+    history.write({
+      provider: "codex",
+      id,
+      cwd: root,
+      messages: [
+        {
+          key: "write",
+          role: "assistant",
+          timestamp: new Date(now - 1000).toISOString(),
+          content: null,
+          raw: {
+            payload: {
+              type: "custom_tool_call",
+              call_id: id,
+              name: "exec",
+              input: `await tools.apply_patch(${JSON.stringify(`*** Begin Patch\n*** Add File: ${path}\n+${text}\n*** End Patch`)});`,
+            },
+          },
+        },
+      ],
+    });
+  history.write({
+    provider: "codex",
+    id: "actual-writer",
+    cwd: join(root, "subdirectory"),
+    messages: [
+      {
+        key: "write",
+        role: "assistant",
+        timestamp: new Date(now - 2000).toISOString(),
+        content: null,
+        // Both files receive the same line in one call; deduplication must keep each target.
+        raw: {
+          payload: {
+            type: "custom_tool_call",
+            call_id: "actual",
+            name: "apply_patch",
+            input: `*** Begin Patch\n*** Add File: ${join(root, "unrelated.ts")}\n+export const originalValue = 123;\n*** Add File: ../code.ts\n+export const originalValue = 123;\n*** End Patch`,
+          },
+        },
+      },
+    ],
+  });
+  history.write({
+    provider: "claude",
+    id: "unscoped-script",
+    cwd: root,
+    messages: [
+      {
+        key: "write",
+        role: "assistant",
+        timestamp: new Date(now - 1000).toISOString(),
+        raw: {},
+        content: [
+          {
+            type: "tool_use",
+            id: "outside",
+            name: "exec_command",
+            input: {
+              cwd: tmpdir(),
+              command: `writeFileSync('somewhere.ts', 'export const unknownValue = 456;')`,
+            },
+          },
+        ],
+      },
+    ],
+  });
+  await analyzeAttribution(store, workspace);
+  const result = await queryCommitSources(store, workspace, root, sha);
+  expect(result).toMatchObject({ matched: 1, unknown: 1 });
+  expect(result.sources).toHaveLength(1);
+  expect(result.sources[0]).toMatchObject({
+    sessionId: "actual-writer",
+    certain: 1,
+    alternatives: [],
+  });
+});
+
+it("rechecks a selected SHA atomically while keeping other commits and native history intact", async () => {
+  const { sha, now, workspace, history, git } = fixture();
+  writeFileSync(join(root, "second.ts"), "const secondCommitValue = 9000;\n");
+  git(["add", "second.ts"]);
+  git(["-c", "core.hooksPath=NUL", "commit", "-m", "second"]);
+  const second = git(["rev-parse", "HEAD"]).trim();
+  store.db
+    .prepare(
+      "INSERT INTO adit_local_commits SELECT repository,?,tree_sha,authored_at,author_name,author_email,committed_at,committer_name,committer_email,subject,body,indexed_at FROM adit_local_commits WHERE sha=?",
+    )
+    .run(second, sha);
+  await analyzeAttribution(store, workspace);
+  const old = await queryCommitSources(store, workspace, root, sha);
+  const otherLines = () =>
+    store.db
+      .prepare(
+        "SELECT id,tier,evidence_id FROM adit_attribution_lines WHERE sha=? ORDER BY id",
+      )
+      .all(second);
+  const before = otherLines();
+  history.write({
+    provider: "claude",
+    id: "late-evidence",
+    cwd: root,
+    messages: [
+      {
+        key: "write",
+        role: "assistant",
+        timestamp: new Date(now - 1000).toISOString(),
+        raw: {},
+        content: [
+          {
+            type: "tool_use",
+            id: "w",
+            name: "Write",
+            input: {
+              file_path: "code.ts",
+              content: "export const originalValue = 123;",
+            },
+          },
+        ],
+      },
+    ],
+  });
+  const native = JSON.stringify(
+    store.db.prepare("SELECT * FROM adit_history_sessions").all(),
+  );
+  const recheck = [{ repository: root, sha }];
+  renameSync(join(root, ".git"), join(root, "git-unavailable"));
+  try {
+    await expect(
+      analyzeAttribution(store, workspace, { recheck }),
+    ).rejects.toThrow();
+  } finally {
+    renameSync(join(root, "git-unavailable"), join(root, ".git"));
+  }
+  expect(
+    (await queryCommitSources(store, workspace, root, sha)).sources,
+  ).toEqual(old.sources);
+  expect(otherLines()).toEqual(before);
+  await analyzeAttribution(store, workspace, { recheck });
+  expect(
+    (await queryCommitSources(store, workspace, root, sha)).sources[0]
+      .sessionId,
+  ).toBe("late-evidence");
+  expect(otherLines()).toEqual(before);
+  expect(
+    JSON.stringify(
+      store.db.prepare("SELECT * FROM adit_history_sessions").all(),
+    ),
+  ).toBe(native);
+  expect(
+    store.db
+      .prepare(
+        "SELECT commit_count,completed_count FROM adit_attribution_runs WHERE status='done'",
+      )
+      .get(),
+  ).toEqual({ commit_count: 1, completed_count: 1 });
+  expect(store.db.pragma("foreign_key_check")).toEqual([]);
+  const changes = store.db.prepare("SELECT total_changes() n").get();
+  expect((await analyzeAttribution(store, workspace)).cached).toBe(true);
+  expect(store.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+  await expect(
+    analyzeAttribution(store, workspace, {
+      recheck: [{ repository: root + "-unconfigured", sha }],
+    }),
+  ).rejects.toThrow("outside the collected workspace");
+});
 it("stores JSON-value matches and ninety-percent token matches, while ignoring tool output as authorship", async () => {
   const words =
     "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango";
@@ -301,6 +506,7 @@ it("saves weaker submission bases for quiet commits and rewritten hashes instead
   expect(queryCommits(store, workspace).commits[0].record).toMatchObject({
     method: "subject_time",
   });
+  expect(queryCommits(store, workspace).commits[0].branch).toBeNull();
   const originalHash = "c".repeat(40);
   history.write(
     session(
@@ -316,9 +522,44 @@ it("saves weaker submission bases for quiet commits and rewritten hashes instead
     method: "rewritten_subject",
     matchedSha: originalHash,
   });
+  expect(queryCommits(store, workspace).commits[0].branch).toBeNull();
+});
+it("extracts the matching commit's recorded branch without guessing from other commits or detached HEAD", () => {
+  const sha = "a".repeat(40);
+  expect(
+    branchFromCommitOutput(
+      [
+        "[feature/other bbbbbbb] other commit\n[feature/original (root-commit) aaaaaaa] target",
+      ],
+      sha,
+    ),
+  ).toBe("feature/original");
+  expect(
+    branchFromCommitOutput(
+      [
+        JSON.stringify({
+          output: "[feature/original aaaaaaa] target\n 1 file changed",
+        }),
+      ],
+      sha,
+    ),
+  ).toBe("feature/original");
+  expect(
+    branchFromCommitOutput(["[feature/other bbbbbbb] other commit"], sha),
+  ).toBeNull();
+  expect(
+    branchFromCommitOutput(["[detached HEAD aaaaaaa] target"], sha),
+  ).toBeNull();
+  expect(
+    branchFromCommitOutput(
+      ["[feature/a aaaaaaa] target", "[feature/b aaaaaaa] target"],
+      sha,
+    ),
+  ).toBeNull();
+  expect(branchFromCommitOutput([], sha)).toBeNull();
 });
 it("returns only configured repository commits and confirms native Git hash evidence", async () => {
-  const { sha, now, workspace, history } = fixture();
+  const { git, sha, now, workspace, history } = fixture();
   history.write({
     provider: "claude",
     id: "s",
@@ -361,6 +602,12 @@ it("returns only configured repository commits and confirms native Git hash evid
     ],
   });
   await analyzeAttribution(store, workspace);
+  git(["branch", "-m", "feature/renamed"]);
+  const before = store.db.prepare("SELECT total_changes() n").get();
+  expect(queryCommits(store, workspace).commits[0].branch).toBe(
+    "feature/fixture",
+  );
+  expect(store.db.prepare("SELECT total_changes() n").get()).toEqual(before);
   expect(queryCommits(store, workspace).commits[0].record).toMatchObject({
     provider: "claude",
     title: "please commit",
@@ -402,6 +649,7 @@ it("returns only configured repository commits and confirms native Git hash evid
   });
   await analyzeAttribution(store, workspace, { force: true });
   expect(queryCommits(store, workspace).commits[0].record).toBeNull();
+  expect(queryCommits(store, workspace).commits[0].branch).toBeNull();
 });
 it("compares actual added code with earlier same-repository writes and never treats unknown as manual", async () => {
   const { sha, now, workspace, history } = fixture();
@@ -577,7 +825,7 @@ it("reads adjacent Claude backups and preserves the saved generation if a later 
 
 it("analyzes only newly collected SHAs and atomically carries forward historical results across retries", async () => {
   const { git, sha, now, workspace, history } = fixture();
-  const write = (id: string, content: string) =>
+  const write = (id: string, content: string, file = "code.ts") =>
     history.write({
       provider: "claude",
       id,
@@ -592,7 +840,7 @@ it("analyzes only newly collected SHAs and atomically carries forward historical
               type: "tool_use",
               id: "write-" + id,
               name: "Write",
-              input: { file_path: "code.ts", content },
+              input: { file_path: file, content },
             },
           ],
           raw: {},
@@ -679,7 +927,7 @@ it("analyzes only newly collected SHAs and atomically carries forward historical
   };
   const newText =
     "export function greeting() { return 'hello incremental world'; }";
-  write("new-writer", newText);
+  write("new-writer", newText, "new.ts");
   const next = add("new.ts", newText, 1000);
   const bad = "f".repeat(40);
   store.db

@@ -7,8 +7,10 @@
  * the ADIT timeline.
  */
 
-import { Command } from "commander";
+import { Command, Option } from "commander";
+import { localLoginStartupEnabled } from "@varveai/adit-core";
 import { serveCommand, startDaemon, stopDaemon, daemonStatus } from "./local/daemon.js";
+import { registerPrCommand } from "./commands/pr.js";
 import { initCommand } from "./commands/init.js";
 import { listCommand } from "./commands/list.js";
 import { showCommand } from "./commands/show.js";
@@ -78,13 +80,19 @@ export function createProgram(): Command {
   // Set before any subcommand exists so every subcommand inherits it.
   program.configureOutput({ outputError: (text, write) => write(formatParseError(text)) });
   configureTopLevelHelp(program);
+  registerPrCommand(program);
 
-  program.command("serve").description("Open the local settings workbench (keeps collecting in the background)")
+  program.command("server").alias("serve").description("Open the local web UI, starting the background service if needed")
     .option("--port <port>", "Local port for a new daemon")
     .option("--no-browser", "Print the address without opening a browser")
     .action(serveCommand);
   const daemon = program.command("daemon").description("Manage the independent local collection service");
-  daemon.command("start").action(async () => { console.log((await startDaemon()).url); });
+  daemon.command("start")
+    .addOption(new Option("--on-login").hideHelp())
+    .action(async (options) => {
+      if (options.onLogin && !localLoginStartupEnabled()) return;
+      console.log((await startDaemon()).url);
+    });
   daemon.command("status").action(async () => { const s = await daemonStatus(); console.log(s ? `Running: ${s.url} (PID ${s.pid})` : "Stopped"); });
   daemon.command("stop").action(async () => { await stopDaemon(); console.log("Stopped"); });
   daemon.command("restart").action(async () => { await stopDaemon(); console.log((await startDaemon()).url); });
@@ -279,6 +287,11 @@ export function createProgram(): Command {
 
   // Cloud sync
   const cloudCmd = program.command("cloud").description("Cloud sync commands");
+  cloudCmd.hook("preAction", async (_command, action) => {
+    // Local sync and coding commands need the collector; diagnostics and remote
+    // queries must not change the local service's running/stopped state.
+    if (["sync", "claude", "codex"].includes(action.name())) await startDaemon();
+  });
   registerCloudTaskCommands(cloudCmd);
   registerCloudHistoryCommands(cloudCmd);
   registerCloudMemoryCommands(cloudCmd);
@@ -517,6 +530,8 @@ Options:
   -h, --help                 display help for command
 
 Commands:
+  server|serve [options]     Open the local web UI (starts the service if needed)
+  daemon                     Start, stop or inspect the background service
   init [options]             Initialize ADIT in the current project
   uninstall [options]        Uninstall ADIT from the current project
 

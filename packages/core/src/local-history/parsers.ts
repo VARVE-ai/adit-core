@@ -1,4 +1,5 @@
 import { basename, dirname } from "node:path";
+import { isCompactedReply } from "./message-semantics.js";
 import {
   HistoryFormatError,
   jsonLines,
@@ -15,6 +16,14 @@ function requireSession(session: HistorySession): HistorySession {
       "Session identity or workspace evidence is missing",
     );
   return session;
+}
+
+/** A page can point to the previous page while retaining the same native thread. */
+export function codexContinuationRoot(meta: Record<string,unknown>, physicalId:string): string | null {
+  const root=string(meta.id), legacy=string(meta.session_id), base=string(record(meta.history_base).thread_id);
+  if(!root || meta.forked_from_id || (legacy && legacy!==root) || !physicalId.startsWith(`${root}_`))return null;
+  if(!/^[a-f\d-]{36}$/i.test(physicalId.slice(root.length+1)))return null;
+  return base===root || (legacy===root && /^[a-f\d-]{36}$/i.test(base)) ? root : null;
 }
 
 export function parseCodex(text: string, parentTurns?: ReadonlySet<string>,path?:string): HistorySession {
@@ -71,6 +80,11 @@ export function parseCodexRows(rows:Iterable<Record<string,unknown>>, parentTurn
     }
     if (type === "event_msg") {
       if (payload.type === "task_started") usageDigest = "";
+      if (["task_complete", "task_completed"].includes(string(payload.type)) && lastAssistant >= 0) {
+        const completed = session.messages[lastAssistant];
+        const native = record(completed.raw.payload);
+        if (["message", "agent_message"].includes(string(native.type)) && !["analysis", "commentary"].includes(string(native.phase ?? native.channel))) completed.finalReply = true;
+      }
       if (payload.type === "token_count") {
         const usage = record(record(payload.info).last_token_usage);
         const digest = JSON.stringify(usage);
@@ -86,6 +100,7 @@ export function parseCodexRows(rows:Iterable<Record<string,unknown>>, parentTurn
       }
       continue;
     }
+    if(type==="compacted" && lastAssistant>=0 && isCompactedReply(row,session.messages[lastAssistant].raw))session.messages[lastAssistant].contextKind="compaction";
     if (type !== "response_item") continue;
     const kind = string(payload.type);
     const role =
@@ -130,7 +145,7 @@ export function parseCodexRows(rows:Iterable<Record<string,unknown>>, parentTurn
     } else session.messages[index] = message;
     if (role === "assistant" && kind !== "reasoning") lastAssistant = index;
   }
-  session.metadata={...session.metadata,turnIds:[...turns],...(positive&&!parentTurns?{lineageRetry:`Parent turns unresolved: ${parent}`}:{})};
+  session.metadata={...session.metadata,nativeContextVersion:1,turnIds:[...turns],...(positive&&!parentTurns?{lineageRetry:`Parent turns unresolved: ${parent}`}:{})};
   if(path){
     const stem=basename(path,".jsonl"),legacyThread=string(nativeMeta.session_id),metaId=session.id;
     const thread=legacyThread&&stem.endsWith(`${legacyThread}_${metaId}`)?legacyThread:metaId;
@@ -141,6 +156,14 @@ export function parseCodexRows(rows:Iterable<Record<string,unknown>>, parentTurn
       session.id=`${thread}_${page}`;
       session.parentId=inherited?fork:baseThread&&baseThread!==thread?`${thread}_${baseThread}`:thread;
       session.relationship="fork";
+      // A rollout page is a storage segment, not a fork of the conversation.
+      // Require native lineage evidence; filename similarity alone is insufficient.
+      const continuation=codexContinuationRoot(nativeMeta,session.id);
+      if(continuation) {
+        session.parentId=continuation;
+        session.relationship="continuation";
+        session.metadata={...session.metadata,nativeSessionId:continuation};
+      }
     }
   }
   return requireSession(session);

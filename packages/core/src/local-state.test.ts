@@ -1,8 +1,8 @@
 import { afterEach, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalStore } from "./local-state.js";
+import { LocalStore, localLoginStartupEnabled } from "./local-state.js";
 
 const resources: { root: string; store: LocalStore }[] = [];
 afterEach(() => {
@@ -50,6 +50,7 @@ it("rejects duplicates, stale updates and invalid configuration atomically", () 
 });
 it("keeps per-directory cloud settings independent from local collection", () => {
   const { store, path } = fixture();
+  store.set("login-startup", { enabled: true });
   const w = store.saveWorkspace({
     path,
     cloud: { enabled: true, mode: "automatic", interval: 60 },
@@ -58,4 +59,51 @@ it("keeps per-directory cloud settings independent from local collection", () =>
   expect(store.workspace(w.id).cloud.interval).toBe(60);
   expect(store.schedule().enabled).toBe(false);
   expect(store.jobs()).toEqual([]);
+});
+it("removes only the workspace registration and its jobs, preserving files and other workspaces", () => {
+  const { store, path } = fixture();
+  const file = join(path, "keep.txt");
+  writeFileSync(file, "source file");
+  const first = store.saveWorkspace({ path });
+  const nested = join(path, "nested");
+  mkdirSync(nested);
+  const other = store.saveWorkspace({ path: nested });
+  store.job({ id: "removed", workspaceId: first.id, status: "done" });
+  store.job({ id: "kept", workspaceId: other.id, status: "done" });
+  expect(() => store.deleteWorkspace(first.id, first.version + 1)).toThrow(/changed/);
+  expect(store.workspaces()).toHaveLength(2);
+  store.deleteWorkspace(first.id, first.version);
+  expect(store.workspaces()).toEqual([other]);
+  expect(store.jobs()).toEqual([{ id: "kept", workspaceId: other.id, status: "done" }]);
+  expect(existsSync(file)).toBe(true);
+  expect(() => store.workspace(first.id)).toThrow(/not found/);
+  expect(() => store.deleteWorkspace(first.id, first.version)).toThrow(/not found/);
+  expect(store.saveWorkspace({ path }).id).not.toBe(first.id);
+});
+it("rejects deletion while queued or running, even when the job is older than the latest 100 jobs", () => {
+  const { store, path } = fixture();
+  const workspace = store.saveWorkspace({ path });
+  store.job({ id: "active", workspaceId: workspace.id, status: "queued" });
+  for (let i = 0; i < 101; i++) store.job({ id: `other-${i}`, workspaceId: "other", status: "done" });
+  expect(() => store.deleteWorkspace(workspace.id, workspace.version)).toThrow(/finish/);
+  store.job({ id: "active", workspaceId: workspace.id, status: "running" });
+  expect(() => store.deleteWorkspace(workspace.id, workspace.version)).toThrow(/finish/);
+  expect(store.workspace(workspace.id)).toEqual(workspace);
+  store.job({ id: "active", workspaceId: workspace.id, status: "done" });
+  store.deleteWorkspace(workspace.id, workspace.version);
+  expect(store.workspaces()).toEqual([]);
+});
+it("requires explicit login-startup consent and reads it without creating a database", () => {
+  const { store, path } = fixture();
+  const missing = join(path, "absent");
+  expect(localLoginStartupEnabled(missing)).toBe(false);
+  expect(existsSync(missing)).toBe(false);
+  expect(() => store.saveWorkspace({ path, cloud: { enabled: true, mode: "automatic", interval: 5 } })).toThrow(/Start automatically/);
+  const registration = join(path, "startup-entry");
+  store.set("login-startup", { enabled: true, version: 1, registration });
+  expect(localLoginStartupEnabled(store.directory)).toBe(false);
+  writeFileSync(registration, "test");
+  expect(localLoginStartupEnabled(store.directory)).toBe(true);
+  store.set("login-startup", { enabled: false, version: 2, registration });
+  expect(localLoginStartupEnabled(store.directory)).toBe(false);
 });

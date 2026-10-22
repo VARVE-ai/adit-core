@@ -1,7 +1,7 @@
 import { Command, Option } from "commander";
 import { queryCloudMemories, type CloudMemoryQuery, type CloudMemoryResult } from "@varveai/adit-cloud";
 import { requireCloudClient, reportFailure } from "./cloud-read-output.js";
-import { loadInitializedProjectConfig } from "./project-initialization.js";
+import { loadProjectContext } from "./project-context.js";
 
 type Options = { scope?: string; project?: string; version?: string; offset?: string; limit?: string; json?: boolean };
 export function memoryQueryOptions(action: CloudMemoryQuery["action"], options: Options, value?: string): CloudMemoryQuery {
@@ -9,8 +9,8 @@ export function memoryQueryOptions(action: CloudMemoryQuery["action"], options: 
   if (options.scope === "personal" && options.project) throw new Error("Personal memory does not take --project.");
   let project = options.project;
   if (options.scope === "project" && !project) {
-    project = loadInitializedProjectConfig("adit cloud memories")?.projectId;
-    if (!project) throw new Error("Initialize this project or provide --project <id>.");
+    project = loadProjectContext("adit cloud memories")?.projectId;
+    if (!project) throw new Error("Add this working directory in Settings or provide --project <id>.");
   }
   const number = (name: "version" | "offset" | "limit", min: number, max = Number.MAX_SAFE_INTEGER) => {
     const raw = options[name];

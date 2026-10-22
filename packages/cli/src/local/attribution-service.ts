@@ -1,5 +1,6 @@
 import { Worker } from "node:worker_threads";
 import type { LocalWorkspace } from "@varveai/adit-core";
+import type {CollectionJob} from "./collector.js";
 export class AttributionService {
   private worker: Worker;
   private id = 0;
@@ -29,12 +30,12 @@ export class AttributionService {
     this.worker.on("error", fail);
     this.worker.on("exit", fail);
   }
-  analyze(workspace: LocalWorkspace): Promise<void> {
+  analyze(workspace: LocalWorkspace,job?:CollectionJob): Promise<void> {
     if (this.failed) return Promise.reject(new Error("提交分析服务不可用"));
     return new Promise((resolve, reject) => {
       const id = ++this.id;
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, workspace });
+      this.worker.postMessage({ id, workspace, job });
     });
   }
   async close() {

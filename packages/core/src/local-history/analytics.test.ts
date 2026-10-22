@@ -76,6 +76,16 @@ const scope = {
   now: Date.parse("2026-10-19T12:00:00Z"),
   year: 2026,
 };
+it("counts a continued native conversation once and includes usage/messages from both segments",()=>{
+ const {root,history,analytics,workspace}=fixture();history.write(session(root));
+ const first=analytics.overview(workspace,scope);
+ history.write({...session(root,"s_page"),parentId:"s",relationship:"continuation"});
+ const combined=analytics.overview(workspace,scope);
+ expect(combined.summary.sessions).toBe(1);expect(combined.summary.subtasks).toBe(0);
+ expect(combined.summary.messages).toBe(first.summary.messages*2);
+ expect(combined.summary.prompts).toBe(first.summary.prompts*2);
+ expect(combined.summary.estimatedCost).toBe(first.summary.estimatedCost!*2);
+});
 it("aggregates structured facts, excludes child tasks, respects directory boundaries and repeated replacements", () => {
   const { root, history, analytics, workspace } = fixture();
   const s = session(root);
@@ -162,6 +172,64 @@ it("keeps zero distinct from missing usage and rejects invalid scope instead of 
   expect(() =>
     analytics.overview(workspace, { ...scope, timezone: "invalid" }),
   ).toThrow();
+});
+
+it("counts profile activity and model shares by original prompts, not replies, tokens or child tasks", () => {
+  const { root, history, analytics, workspace } = fixture();
+  const first = session(root);
+  first.messages.push({
+    ...first.messages[1],
+    key: "another-reply",
+    model: "expensive-model",
+    timestamp: "2026-10-19T00:10:00Z",
+  });
+  history.write(first);
+  history.write({
+    ...session(root, "child"),
+    parentId: "s",
+    relationship: "subagent",
+  });
+  history.write({
+    ...session(root, "codex"),
+    provider: "codex",
+    messages: [
+      {
+        key: "u",
+        role: "user",
+        timestamp: "2026-10-19T05:00:00Z",
+        content: "second prompt",
+        raw: {},
+      },
+      {
+        key: "a",
+        role: "assistant",
+        timestamp: "2026-10-19T05:01:00Z",
+        content: "reply without model",
+        raw: {},
+      },
+    ],
+  });
+  const data = analytics.overview(workspace, scope);
+  expect(data.summary.prompts).toBe(2);
+  expect(data.profile.days).toEqual([
+    { date: "2026-10-18", count: 1 },
+    { date: "2026-10-19", count: 1 },
+  ]);
+  expect(data.profile.agents.map((a) => [a.id, a.count])).toEqual([
+    ["claude", 1],
+    ["codex", 1],
+  ]);
+  expect(data.profile.models).toEqual([{ model: "model-a", count: 1 }]);
+  expect(data.profile.unknownModelPrompts).toBe(1);
+  expect(data.profile.submissionAnalyzed).toBe(false);
+  const later = analytics.overview(workspace, {
+    ...scope,
+    range: "30d",
+    now: Date.parse("2026-11-18T12:00:00Z"),
+  });
+  expect(later.summary.prompts).toBe(0);
+  expect(later.profile.models).toEqual([]);
+  expect(later.profile.days).toEqual([]);
 });
 it("clips work at the local midnight including a half-hour timezone and does not extend missing timestamps", () => {
   const { root, history, analytics, workspace } = fixture();
@@ -343,6 +411,127 @@ it("reuses unchanged projections and invalidates them after fact correction, del
   store.db.prepare("DELETE FROM adit_history_sessions").run();
   expect(analytics.overview(workspace, scope).summary.sessions).toBe(0);
 });
+it("keeps cached filters through unrelated writes while refreshing assignments, Git facts and saved associations", () => {
+  const { root, store, history, analytics, workspace } = fixture();
+  history.write(session(root));
+  const first = analytics.overview(workspace, scope);
+  const week = analytics.overview(workspace, { ...scope, range: "7d" });
+  store.set("inspection-progress-test", { checked: 10 });
+  history.write(session(root + "-other", "outside"));
+  expect(analytics.overview(workspace, scope)).toBe(first);
+  expect(analytics.overview(workspace, { ...scope, range: "7d" })).toBe(week);
+  expect(
+    analytics.overview({ ...workspace, version: workspace.version + 1 }, scope),
+  ).toBe(first);
+
+  history.write(session("", "imported"));
+  expect(analytics.overview(workspace, scope)).toBe(first);
+  store.db
+    .prepare("INSERT INTO adit_history_assignments VALUES (?,?,?)")
+    .run("claude", "imported", root);
+  expect(analytics.overview(workspace, scope).summary.sessions).toBe(2);
+
+  const sha = "d".repeat(40);
+  store.db
+    .prepare("INSERT INTO adit_local_commits VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+    .run(
+      root,
+      sha,
+      "tree",
+      Date.parse("2026-10-19T00:10:00Z"),
+      "Me",
+      "me@example.test",
+      Date.now(),
+      "Me",
+      "me@example.test",
+      "subject",
+      "body",
+      Date.now(),
+    );
+  const withCommit = analytics.overview(workspace, scope);
+  expect(withCommit.summary.totalCommits).toBe(1);
+  expect(withCommit.summary.linkedCommits).toBe(0);
+  store.db
+    .prepare(
+      "INSERT INTO adit_attribution_runs (id,workspace_id,algorithm_version,input_fingerprint,status,started_at) VALUES (?,?,?,?,?,?)",
+    )
+    .run("saved-cache", workspace.id, 2, "fixture", "done", Date.now());
+  store.db
+    .prepare(
+      "INSERT INTO adit_attribution_commits VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    )
+    .run(
+      "saved-cache",
+      root,
+      sha,
+      "claude",
+      "s",
+      null,
+      null,
+      "hash",
+      sha,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+    );
+  expect(analytics.overview(workspace, scope).summary.linkedCommits).toBe(1);
+  store.db
+    .prepare(
+      "UPDATE adit_attribution_commits SET submit_session_id=NULL WHERE run_id=?",
+    )
+    .run("saved-cache");
+  expect(analytics.overview(workspace, scope).summary.linkedCommits).toBe(0);
+  store.db.prepare("DELETE FROM adit_local_commits").run();
+  expect(analytics.overview(workspace, scope).summary.totalCommits).toBe(0);
+});
+it("reuses compiled prices without mixing threshold rates or retaining an outdated catalog", () => {
+  const { analytics } = fixture();
+  const prices = analytics.prices;
+  prices.install({
+    fixture: {
+      mode: "chat",
+      input_cost_per_token: 0.000001,
+      output_cost_per_token: 0,
+      input_cost_per_token_above_200k_tokens: 0.000004,
+      input_cost_per_token_above_100k_tokens: 0.000002,
+      input_cost_per_token_above_300k_tokens: null,
+    },
+  });
+  const usage = {
+    provider: "claude",
+    model: "fixture",
+    scope: "message",
+    input_total_tokens: 200001,
+    uncached_input_tokens: 10,
+    output_tokens: 0,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    cache_write_5m_tokens: null,
+    cache_write_1h_tokens: null,
+  };
+  for (const [input, expected] of [
+    [200001, 40],
+    [100000, 10],
+    [200000, 20],
+    [300001, null],
+    [100001, 20],
+  ] as const)
+    expect(prices.estimate({ ...usage, input_total_tokens: input })).toBe(
+      expected,
+    );
+  prices.install({
+    fixture: {
+      mode: "chat",
+      input_cost_per_token: 0.000003,
+      output_cost_per_token: 0,
+    },
+  });
+  expect(prices.estimate(usage)).toBe(30);
+});
 it("uses Cloud-compatible exact model/unique alias, decimal pricing, per-request tiers and unknown rates", () => {
   const { analytics } = fixture(),
     p = analytics.prices;
@@ -405,6 +594,71 @@ it("uses Cloud-compatible exact model/unique alias, decimal pricing, per-request
   expect(
     p.estimate({ ...usage, model: "model-a", input_total_tokens: 128001 }),
   ).toBeNull();
+});
+it("maps bare GLM names to stored official prices while preserving exact channel prices and offline use", async () => {
+  const { analytics, store } = fixture(), p = analytics.prices;
+  const official = {
+    mode: "chat", litellm_provider: "zai", input_cost_per_token: 0.0000014,
+    output_cost_per_token: 0.0000044, cache_read_input_token_cost: 0.00000026,
+    cache_creation_input_token_cost: 0,
+  };
+  const reseller = {
+    ...official, litellm_provider: "tencent", input_cost_per_token: 0.000003,
+    output_cost_per_token: 0.000004, cache_read_input_token_cost: 0,
+    aliases: ["glm-5.3"],
+  };
+  const usage = {
+    provider: "claude", model: "glm-5.3", scope: "message",
+    input_total_tokens: 130, uncached_input_tokens: 100, output_tokens: 50,
+    cache_read_tokens: 20, cache_write_tokens: 10,
+    cache_write_5m_tokens: null, cache_write_1h_tokens: null,
+  };
+  // The fixture's previous snapshot predates the new catalog, as on a real refresh.
+  store.db.prepare("UPDATE adit_model_price_snapshots SET fetched_at=0").run();
+  p.install({ "tencent/glm-5.3": reseller, "zai/glm-5.3": official });
+  expect(p.estimate(usage)).toBe(365);
+  expect(p.estimate({ ...usage, model: " GLM-5.3 " })).toBe(365);
+  expect(p.estimate({ ...usage, model: "zai/glm-5.3" })).toBe(365);
+  expect(p.estimate({ ...usage, model: "tencent/glm-5.3" })).toBe(500);
+  expect(p.estimate({ ...usage, model: "another/glm-5.3" })).toBeNull();
+  const offline = new LocalPrices(store.db);
+  expect(offline.estimate(usage)).toBe(365);
+  await offline.close();
+  // Refresh invalidates both the resolved model and its compiled rates.
+  p.install({ "zai/glm-5.3": { ...official, input_cost_per_token: 0.0000024 } });
+  expect(p.estimate(usage)).toBe(465);
+  // Exact model IDs take precedence even when an official mapping also exists.
+  p.install({ "glm-5.3": reseller, "zai/glm-5.3": official });
+  expect(p.estimate(usage)).toBe(500);
+  // An unavailable official model never silently falls back to a reseller or variant.
+  p.install({ "tencent/glm-5.3": reseller, "zai/glm-5.3-flash": official });
+  expect(p.estimate(usage)).toBeNull();
+  p.install({ "zai/glm-5.3": { ...official, cache_read_input_token_cost: null } });
+  expect(p.estimate(usage)).toBeNull();
+});
+it("includes mapped Claude usage beside Codex in daily stacks without rewriting the recorded model", () => {
+  const { root, store, history, analytics, workspace } = fixture();
+  const claude = session(root);
+  claude.messages[1].model = "glm-5.3";
+  history.write(claude);
+  const codex = session(root, "codex");
+  codex.provider = "codex";
+  codex.messages[1].usage = { input_tokens: 100, cached_input_tokens: 20, output_tokens: 50 };
+  history.write(codex);
+  expect(analytics.overview(workspace, scope).usage.unpriced).toBe(1);
+  analytics.prices.install({
+    ...catalog,
+    "zai/glm-5.3": {
+      mode: "chat", input_cost_per_token: 0.0000014,
+      output_cost_per_token: 0.0000044, cache_read_input_token_cost: 0.00000026,
+      cache_creation_input_token_cost: 0,
+    },
+  });
+  const result = analytics.overview(workspace, scope);
+  expect(result.usage).toMatchObject({ priced: 2, unpriced: 0 });
+  expect(result.costs.daily).toEqual([{ date: "2026-10-19", providers: { claude: 365, codex: 570 } }]);
+  expect(result.costs.models).toContainEqual({ model: "glm-5.3", amount: 365, requests: 1 });
+  expect(store.db.prepare("SELECT model FROM adit_history_usage_entries WHERE provider='claude'").get()).toEqual({ model: "glm-5.3" });
 });
 it("retains a successful price snapshot on network failure and reloads it offline", async () => {
   const { store } = fixture(),

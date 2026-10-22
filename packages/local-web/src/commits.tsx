@@ -1,10 +1,9 @@
-import React, { useEffect, useState, useRef } from "react";
-import { createPortal } from "react-dom";
+import { t, locale, systemMessage } from "./i18n";
+import React, { useEffect, useState } from "react";
 import {
   GitCommitHorizontal,
   ChevronRight,
   Search,
-  Share2,
 } from "lucide-react";
 import "./commits.css";
 
@@ -13,6 +12,7 @@ type Commit = {
   sha: string;
   subject: string;
   authoredAt: number | null;
+  branch: string | null;
   analyzed: boolean;
   sourceCount: number | null;
   files: {
@@ -71,7 +71,7 @@ const agents: Record<string, string> = {
 const date = (at: number | null, full = false) =>
   at
     ? new Date(at).toLocaleString(
-        "zh-CN",
+        locale(),
         full
           ? {
               month: "long",
@@ -81,7 +81,7 @@ const date = (at: number | null, full = false) =>
             }
           : { month: "long", day: "numeric" },
       )
-    : "时间未知";
+    : t("时间未知");
 export function CommitsPage({
   workspace,
   api,
@@ -96,16 +96,15 @@ export function CommitsPage({
 }) {
   const [data, setData] = useState<Data>();
   const [error, setError] = useState("");
-  const [repo, setRepo] = useState("");
-  const [filter, setFilter] = useState("全部");
+  const [repo, setRepo] = useState(() => new URLSearchParams(location.search).get("repository") || "");
+  const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
-  const [selected, setSelected] = useState("");
+  const [selected, setSelected] = useState(() => {
+    const params = new URLSearchParams(location.search);
+    return params.get("sha") ? `${params.get("repository") || ""}@${params.get("sha")}` : "";
+  });
   const [limit, setLimit] = useState(50);
   const [event, setEvent] = useState(false);
-  const badgeDialog = useRef<HTMLDialogElement>(null);
-  const [badgeError, setBadgeError] = useState("");
-  const badgeLabel = `${data?.analysis.runId?data.commits.filter((c) => c.record).length:'—'}/${data?.commits.length ?? '—'}`;
-  const badgeSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="238" height="20" role="img" aria-label="commits in AI sessions: ${badgeLabel}"><rect width="238" height="20" rx="3" fill="#555"/><path d="M168 0h67q3 0 3 3v14q0 3-3 3h-67z" fill="#059669"/><g fill="#fff" font-family="Verdana,sans-serif" font-size="11" text-anchor="middle"><text x="84" y="14">commits in AI sessions</text><text x="203" y="14">${badgeLabel}</text></g></svg>`;
   useEffect(() => {
     const controller = new AbortController();
     const load = () =>
@@ -135,8 +134,8 @@ export function CommitsPage({
   const rows = (data?.commits || []).filter(
     (c) =>
       (!repo || c.repository === repo) &&
-      (filter === "全部" ||
-        (filter === "有提交会话" ? !!c.record : c.analyzed&&!c.record)) &&
+      (filter === "all" ||
+        (filter === "linked" ? !!c.record : c.analyzed && !c.record)) &&
       (!query ||
         `${c.subject} ${c.sha}`.toLowerCase().includes(query.toLowerCase())),
   );
@@ -167,19 +166,11 @@ export function CommitsPage({
   }, [workspace.id, current?.repository, current?.sha, data?.analysis.runId]);
   let previous = "";
   return (
-    <section className="commits-page" aria-label="提交">
-      {document.getElementById("overview-header-status") &&
-        createPortal(
-          <span className="commit-connected">
-            已接入{" "}
-            {workspace.providers.map((p) => agents[p] || p).join("、") || "—"}
-          </span>,
-          document.getElementById("overview-header-status")!,
-        )}
+    <section className="commits-page" aria-label={t("提交")}>
       <div className="commits-toolbar">
         <div className="commits-segment">
           <button className={!repo ? "on" : ""} onClick={() => setRepo("")}>
-            全部仓库
+            {t("全部仓库")}
           </button>
           {data?.repositories.map((r) => (
             <button
@@ -192,61 +183,80 @@ export function CommitsPage({
           ))}
         </div>
         <div className="commits-segment">
-          {["全部", "有提交会话", "未找到提交会话"].map((f) => (
+          {[
+            ["all", t("全部")],
+            ["linked", t("有提交会话")],
+            ["unlinked", t("未找到提交会话")],
+          ].map(([f, label]) => (
             <button
               key={f}
               className={filter === f ? "on" : ""}
               onClick={() => setFilter(f)}
             >
-              {f}
+              {label}
             </button>
           ))}
         </div>
         <label className="commits-search">
           <Search size={14} />
           <input
-            placeholder="搜索提交说明或编号"
+            placeholder={t("搜索提交说明或编号")}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
         </label>
         <span className="commits-summary">
           {data?.commits.length
-            ? `${date(Math.min(...data.commits.map((c) => c.authoredAt || Infinity)))}以来 `
+            ? t(
+                "{0}以来 ",
+                date(
+                  Math.min(
+                    ...data.commits.map((c) => c.authoredAt || Infinity),
+                  ),
+                ),
+              )
             : ""}
-          <b>{data?.commits.length ?? "—"}</b> 个提交，
-          <b>{data?.analysis.runId?data.commits.filter((c) => c.record).length : "—"}</b>{" "}
-          个找到提交会话
+          <b>{data?.commits.length ?? "—"}</b> {t("个提交，")}
+          <b>
+            {data?.analysis.runId
+              ? data.commits.filter((c) => c.record).length
+              : "—"}
+          </b>{" "}
+          {t("个找到提交会话")}
         </span>
-        <button disabled={!data?.analysis.runId} onClick={() => badgeDialog.current?.showModal()}>
-          <Share2 size={14} />
-          做成徽章
-        </button>
       </div>
       {error && (
         <p className="error" role="alert">
-          {error}
+          {systemMessage(error)}
         </p>
       )}
       {data && data.analysis.status !== "done" && (
         <p className="commit-note" role="status">
           {data.analysis.status === "running"
-            ? `正在整理提交关联 ${data.analysis.completed} / ${data.analysis.total}`
+            ? t(
+                "正在整理提交关联 {0} / {1}",
+                data.analysis.completed,
+                data.analysis.total,
+              )
             : data.analysis.status === "failed"
-              ? `提交关联分析失败：${data.analysis.error || "请重新整理"}`
-              : "等待整理提交关联"}
-          {data.analysis.stale ? " · 当前显示上次完成的结果" : ""}
+              ? t(
+                  "提交关联分析失败：{0}",
+                  (data.analysis.error && systemMessage(data.analysis.error)) ||
+                    t("请重新整理"),
+                )
+              : t("等待整理提交关联")}
+          {data.analysis.stale ? t(" · 当前显示上次完成的结果") : ""}
         </p>
       )}
       <div className="commits-work">
-        <div className="commits-list" aria-label="提交列表">
+        <div className="commits-list" aria-label={t("提交列表")}>
           {!data ? (
-            <p className="commits-empty">正在读取本地提交…</p>
+            <p className="commits-empty">{t("正在读取本地提交…")}</p>
           ) : !rows.length ? (
             <p className="commits-empty">
               {data.commits.length
-                ? "没有符合筛选条件的提交"
-                : "暂未找到提交记录"}
+                ? t("没有符合筛选条件的提交")
+                : t("暂未找到提交记录")}
             </p>
           ) : (
             rows.slice(0, limit).map((c) => {
@@ -280,7 +290,7 @@ export function CommitsPage({
                           ·{" "}
                           {c.authoredAt
                             ? new Date(c.authoredAt).toLocaleTimeString(
-                                "zh-CN",
+                                locale(),
                                 { hour: "2-digit", minute: "2-digit" },
                               )
                             : "—"}
@@ -288,7 +298,7 @@ export function CommitsPage({
                       </div>
                       <div className="commit-relations">
                         <span>
-                          提交：{" "}
+                          {t("提交：")}{" "}
                           {c.record ? (
                             <>
                               <b className={"agent-" + c.record.provider}>
@@ -297,16 +307,16 @@ export function CommitsPage({
                               · {c.record.title}
                             </>
                           ) : c.analyzed ? (
-                            "未找到提交会话"
+                            t("未找到提交会话")
                           ) : (
-                            "等待分析"
+                            t("等待分析")
                           )}
                         </span>
                         <span>
-                          代码来源：
+                          {t("代码来源：")}
                           {c.sourceCount === null
-                            ? "未分析"
-                            : `${c.sourceCount} 个会话`}{" "}
+                            ? t("未分析")
+                            : t("{0} 个会话", c.sourceCount)}{" "}
                           <ChevronRight size={12} />
                         </span>
                       </div>
@@ -321,7 +331,7 @@ export function CommitsPage({
               className="commits-more"
               onClick={() => setLimit((n) => n + 50)}
             >
-              加载更多
+              {t("加载更多")}
             </button>
           )}
         </div>
@@ -329,7 +339,7 @@ export function CommitsPage({
           className="commit-detail"
           id="commit-detail-panel"
           role="region"
-          aria-label="选中提交的详情"
+          aria-label={t("选中提交的详情")}
         >
           {current ? (
             <>
@@ -338,10 +348,23 @@ export function CommitsPage({
                 <code>{current.sha.slice(0, 7)}</code>
                 <span>{name(current.repository)}</span>
                 <span>{date(current.authoredAt, true)}</span>
-                <span>{current.files.length} 个文件</span>
+                <span>
+                  {current.files.length} {t("个文件")}
+                </span>
+                <code
+                  className="commit-branch"
+                  aria-label={t("分支：{0}", current.branch || "—")}
+                  title={
+                    current.branch
+                      ? t("Git 提交记录中的分支：{0}", current.branch)
+                      : t("未记录提交时的分支")
+                  }
+                >
+                  {current.branch || "—"}
+                </code>
               </div>
               <section>
-                <h4>提交记录</h4>
+                <h4>{t("提交记录")}</h4>
                 {current.record ? (
                   <>
                     <div className="commit-session">
@@ -353,7 +376,7 @@ export function CommitsPage({
                     </div>
                     <p className="commit-note">
                       {current.record.ordinal
-                        ? `第 ${current.record.ordinal} 轮提问 · `
+                        ? t("第 {0} 轮提问 · ", current.record.ordinal)
                         : ""}
                       {date(current.record.at, true)}
                     </p>
@@ -372,7 +395,7 @@ export function CommitsPage({
                       }}
                     >
                       <ChevronRight size={12} />
-                      定位提交事件
+                      {t("定位提交事件")}
                     </button>
                     {(event || current.record.prompt) && (
                       <blockquote
@@ -381,43 +404,54 @@ export function CommitsPage({
                         className={event ? "located" : ""}
                       >
                         {current.record.prompt ||
-                          "在会话记录中找到关联的提交操作"}
+                          t("在会话记录中找到关联的提交操作")}
                       </blockquote>
                     )}
                     <details open={event || undefined}>
-                      <summary>查看提交命令</summary>
+                      <summary>{t("查看提交命令")}</summary>
                       <pre>{current.record.command}</pre>
                     </details>
                   </>
                 ) : (
                   <>
-                    <p>{current.analyzed ? "未找到提交会话" : "等待分析"}</p>
+                    <p>
+                      {current.analyzed ? t("未找到提交会话") : t("等待分析")}
+                    </p>
                     <p className="commit-note">
-                      当前记录无法定位提交操作发生在哪个会话，代码来源单独判断。
+                      {t(
+                        "当前记录无法定位提交操作发生在哪个会话，代码来源单独判断。",
+                      )}
                     </p>
                   </>
                 )}
               </section>
               <section>
                 <h4>
-                  代码来源{" "}
-                  {sources && <small>{sources.sources.length} 个会话</small>}
+                  {t("代码来源")}{" "}
+                  {sources && (
+                    <small>
+                      {sources.sources.length} {t("个会话")}
+                    </small>
+                  )}
                 </h4>
                 <div className="commit-source-scope">
-                  纳入比对 <b>{sources?.eligible ?? "—"}</b> 行{" "}
+                  {t("纳入比对")} <b>{sources?.eligible ?? "—"}</b> {t("行")}{" "}
                   <span>
-                    匹配到 <b>{sources?.matched ?? "—"}</b> 行
+                    {t("匹配到")} <b>{sources?.matched ?? "—"}</b> {t("行")}
                   </span>
                 </div>
                 <div className="commit-source-empty">
                   {sourceError ? (
-                    <span role="alert">代码来源分析失败：{sourceError}</span>
+                    <span role="alert">
+                      {t("代码来源分析失败：")}
+                      {systemMessage(sourceError)}
+                    </span>
                   ) : !sources ? (
-                    "正在读取代码来源…"
+                    t("正在读取代码来源…")
                   ) : sources.eligible === null ? (
-                    "等待整理代码来源"
+                    t("等待整理代码来源")
                   ) : !sources.sources.length ? (
-                    "暂未在会话记录中匹配到代码来源。"
+                    t("暂未在会话记录中匹配到代码来源。")
                   ) : (
                     sources.sources.map((s) => (
                       <article
@@ -429,34 +463,48 @@ export function CommitsPage({
                             {agents[s.provider] || s.provider}
                           </b>
                           <strong className="commit-line-total">
-                            {s.certain + s.likely + s.possible} 行
+                            {s.certain + s.likely + s.possible} {t("行")}
                           </strong>
                         </div>
                         <div className="commit-source-title">{s.title}</div>
                         <div className="commit-source-levels">
-                          {!!s.certain && <em>确定 {s.certain} 行</em>}
-                          {!!s.likely && <em>较确定 {s.likely} 行</em>}
+                          {!!s.certain && (
+                            <em>
+                              {t("确定")} {s.certain} {t("行")}
+                            </em>
+                          )}
+                          {!!s.likely && (
+                            <em>
+                              {t("较确定")} {s.likely} {t("行")}
+                            </em>
+                          )}
                           {!!s.possible && (
-                            <em className="possible">可能 {s.possible} 行</em>
+                            <em className="possible">
+                              {t("可能")} {s.possible} {t("行")}
+                            </em>
                           )}
                         </div>
                         <details>
-                          <summary>查看匹配文件</summary>
+                          <summary>{t("查看匹配文件")}</summary>
                           {s.files.map((f) => (
                             <div className="commit-file" key={f.path}>
                               <code>{f.path}</code>
-                              <span>{f.lines} 行</span>
+                              <span>
+                                {f.lines} {t("行")}
+                              </span>
                             </div>
                           ))}
                         </details>
                         {!!s.alternatives.length && (
                           <details>
-                            <summary>也写过这些内容</summary>
+                            <summary>{t("也写过这些内容")}</summary>
                             {s.alternatives.map((a) => (
                               <p key={a.provider + a.sessionId}>
                                 {agents[a.provider] || a.provider} · {a.title}
                                 <br />
-                                <small>候选会话，不重复计入匹配行数</small>
+                                <small>
+                                  {t("候选会话，不重复计入匹配行数")}
+                                </small>
                               </p>
                             ))}
                           </details>
@@ -466,25 +514,35 @@ export function CommitsPage({
                   )}
                 </div>
                 <div className="commit-other">
-                  <span>复制或挪动</span>
-                  <span>{sources?.moved ?? "—"} 行</span>
+                  <span>{t("复制或挪动")}</span>
+                  <span>
+                    {sources?.moved ?? "—"} {t("行")}
+                  </span>
                 </div>
                 <div className="commit-other">
-                  <span>来源不明</span>
-                  <span>{sources?.unknown ?? "—"} 行</span>
+                  <span>{t("来源不明")}</span>
+                  <span>
+                    {sources?.unknown ?? "—"} {t("行")}
+                  </span>
                 </div>
                 <p className="commit-note">
-                  仅统计纳入比对的新增代码行；生成文件和过短的行不参与。来源不明不代表人工编写。
+                  {t(
+                    "仅统计纳入比对的新增代码行；生成文件和过短的行不参与。来源不明不代表人工编写。",
+                  )}
                 </p>
-                {sources && <p className="commit-note">{sources.coverage}</p>}
+                {sources && (
+                  <p className="commit-note">
+                    {systemMessage(sources.coverage)}
+                  </p>
+                )}
                 <details>
-                  <summary>查看提交文件</summary>
+                  <summary>{t("查看提交文件")}</summary>
                   {current.files.map((f) => (
                     <div className="commit-file" key={f.path}>
                       <code>{f.path}</code>
                       <span>
                         {f.binary
-                          ? "二进制"
+                          ? t("二进制")
                           : `+${f.additions ?? "—"} −${f.deletions ?? "—"}`}
                       </span>
                     </div>
@@ -492,82 +550,51 @@ export function CommitsPage({
                 </details>
               </section>
               <section>
-                <h4>关联依据</h4>
+                <h4>{t("关联依据")}</h4>
                 <div className="commit-basis">
-                  <span>提交会话</span>
+                  <span>{t("提交会话")}</span>
                   {current.record ? (
                     <>
                       <em>
                         {current.record.method === "hash"
-                          ? "编号一致"
+                          ? t("编号一致")
                           : current.record.method === "subject_time"
-                            ? "说明与时间相近"
-                            : "历史编号变更"}
+                            ? t("说明与时间相近")
+                            : t("历史编号变更")}
                       </em>
                       <span>
                         {current.record.method === "hash"
-                          ? `会话中的提交编号与仓库记录 ${current.sha.slice(0, 7)} 一致。`
+                          ? t(
+                              "会话中的提交编号与仓库记录 {0} 一致。",
+                              current.sha.slice(0, 7),
+                            )
                           : current.record.method === "subject_time"
-                            ? "提交说明相同，提交操作时间与仓库记录相近。"
-                            : `提交说明相同，原编号 ${current.record.matchedSha || "—"} 已不在当前提交历史中。`}
+                            ? t("提交说明相同，提交操作时间与仓库记录相近。")
+                            : t(
+                                "提交说明相同，原编号 {0} 已不在当前提交历史中。",
+                                current.record.matchedSha || "—",
+                              )}
                       </span>
                     </>
                   ) : (
-                    <span>尚无可用的提交操作匹配依据。</span>
+                    <span>{t("尚无可用的提交操作匹配依据。")}</span>
                   )}
                 </div>
                 <div className="commit-basis">
-                  <span>代码来源</span>
+                  <span>{t("代码来源")}</span>
                   <span>
-                    按写入内容匹配；逐字匹配、多个候选和近似匹配分别标注，不用提交编号判断代码来源。
+                    {t(
+                      "按写入内容匹配；逐字匹配、多个候选和近似匹配分别标注，不用提交编号判断代码来源。",
+                    )}
                   </span>
                 </div>
               </section>
             </>
           ) : (
-            <p className="commits-empty">选择提交查看详情</p>
+            <p className="commits-empty">{t("选择提交查看详情")}</p>
           )}
         </div>
       </div>
-      <dialog
-        ref={badgeDialog}
-        className="commit-badge-dialog"
-        aria-labelledby="commit-badge-title"
-      >
-        <h2 id="commit-badge-title">做成徽章</h2>
-        <img
-          alt={`commits in AI sessions ${badgeLabel}`}
-          src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(badgeSvg)}`}
-        />
-        <p className="commit-note">按当前工作目录的提交记录生成。</p>
-        <pre>![commits in AI sessions](.github/adit/badge-commits.svg)</pre>
-        {badgeError && (
-          <p role="alert" className="error">
-            {badgeError}
-          </p>
-        )}
-        <div>
-          <a
-            className="commit-badge-download"
-            download="badge-commits.svg"
-            href={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(badgeSvg)}`}
-          >
-            下载 SVG
-          </a>
-          <button
-            onClick={() => {
-              void navigator.clipboard
-                .writeText(
-                  "![commits in AI sessions](.github/adit/badge-commits.svg)",
-                )
-                .catch(() => setBadgeError("无法复制，请手动复制上方内容。"));
-            }}
-          >
-            复制 Markdown
-          </button>
-          <button onClick={() => badgeDialog.current?.close()}>关闭</button>
-        </div>
-      </dialog>
     </section>
   );
 }

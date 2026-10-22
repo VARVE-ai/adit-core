@@ -1,0 +1,41 @@
+import { afterEach, expect, it } from "vitest";
+import { mkdtempSync,mkdirSync,rmSync,writeFileSync,existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join,resolve } from "node:path";
+import { LocalStore } from "./local-state.js";
+import { createHistorySchema } from "./local-history/schema.js";
+import { StructuredHistory } from "./local-history/structured-store.js";
+import { LocalSharing } from "./local-history/sharing.js";
+import { LocalPrices } from "./local-history/pricing.js";
+const resources:{root:string;store:LocalStore}[]=[];
+afterEach(()=>{for(const {root,store} of resources.splice(0)){store.close();if(!resolve(root).startsWith(resolve(tmpdir())))throw new Error("Unsafe cleanup");rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:100});}});
+function fixture(){const root=mkdtempSync(join(tmpdir(),"adit-project-delete-")),path=join(root,"project"),nested=join(path,"child");mkdirSync(nested,{recursive:true});const store=new LocalStore(join(root,"state"));resources.push({root,store});createHistorySchema(store.db);const history=new StructuredHistory(store.db);return {root,path,nested,store,history};}
+it("deletes exclusive history, publications and sync state, while keeping shared data and source files",()=>{
+  const {path,nested,store,history}=fixture();
+  const first=store.saveWorkspace({path,providers:["codex"],repositories:[path]}),other=store.saveWorkspace({path:nested,providers:["codex"],repositories:[nested]});
+  writeFileSync(join(path,"source.txt"),"keep");
+  for(const [id,cwd] of [["exclusive",path],["shared",nested]])history.write({provider:"codex",id,cwd,messages:[{key:"p",role:"user",content:`question ${id}`,timestamp:"2026-10-21T00:00:00Z",raw:{}},{key:"a",role:"assistant",content:"response",raw:{},usage:{input_tokens:20,output_tokens:3}}]});
+  history.write({provider:"codex",id:"child-session",cwd:"",parentId:"exclusive",relationship:"subagent",messages:[]});
+  const sharing=new LocalSharing(store.db,new LocalPrices(store.db));
+  sharing.create(first,"codex","exclusive");sharing.create(other,"codex","shared");
+  store.db.exec("CREATE TABLE adit_local_cloud_scopes(id TEXT PRIMARY KEY,workspace_id TEXT,baseline TEXT); CREATE TABLE adit_local_cloud_receipts(scope TEXT,kind TEXT,id TEXT,confirmed_at INTEGER); CREATE TABLE adit_local_cloud_sessions(scope TEXT,provider TEXT,native_id TEXT,cloud_id TEXT)");
+  store.db.prepare("INSERT INTO adit_local_cloud_scopes VALUES ('scope',?,'{}')").run(first.id);
+  store.db.exec("INSERT INTO adit_local_cloud_receipts VALUES ('scope','event','e',1);INSERT INTO adit_local_cloud_sessions VALUES ('scope','codex','exclusive','cloud')");
+  store.set(`cloud-job:account:${first.id}`,{workspaceId:first.id,status:"done"});store.set("keep-global",true);
+  expect(store.deletionPreview(first.id)).toMatchObject({sessions:2,sharedSessions:1});
+  store.deleteWorkspace(first.id,first.version);
+  expect(store.db.prepare("SELECT id FROM adit_history_sessions").all()).toEqual([{id:"shared"}]);
+  expect(store.db.prepare("SELECT count(*) n FROM adit_history_text_fts WHERE text_content MATCH 'exclusive'").get()).toEqual({n:0});
+  expect(store.db.prepare("SELECT workspace_id FROM adit_shares").all()).toEqual([{workspace_id:other.id}]);
+  for(const table of ["adit_local_cloud_scopes","adit_local_cloud_receipts","adit_local_cloud_sessions"])expect(store.db.prepare(`SELECT count(*) n FROM ${table}`).get()).toEqual({n:0});
+  expect(store.get(`cloud-job:account:${first.id}`,null)).toBeNull();expect(store.get("keep-global",false)).toBe(true);
+  expect(store.db.pragma("foreign_key_check")).toEqual([]);expect(existsSync(join(path,"source.txt"))).toBe(true);
+});
+it("blocks publishing and keeps registration when file cleanup fails",()=>{
+  const {path,store}=fixture(),w=store.saveWorkspace({path});
+  expect(()=>store.deleteWorkspace(w.id,w.version,()=>{throw new Error("file locked");})).toThrow("file locked");
+  expect(store.workspace(w.id).id).toBe(w.id);
+  store.db.exec("CREATE TABLE adit_shares(id TEXT,workspace_id TEXT,status TEXT)");
+  store.db.prepare("INSERT INTO adit_shares VALUES ('share',?,'publishing')").run(w.id);
+  expect(()=>store.deleteWorkspace(w.id,w.version)).toThrow(/finish/);
+});

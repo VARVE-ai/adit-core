@@ -4,6 +4,7 @@ import { join, relative, isAbsolute, sep, basename, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { record, string } from "./types.js";
 import { directoryEntries } from "./source-io.js";
+import { trackSource } from "./source-checkpoints.js";
 import { additionalSourceDefinitions, additionalSourceFile } from "./additional-sources.js";
 
 export interface SourceDefinition {
@@ -391,6 +392,7 @@ export async function geminiWorkspace(
   for (const name of ["projects.json", "trustedFolders.json"]) {
     let data;
     try {
+      trackSource(join(root, name));
       data = record(JSON.parse(await readFile(join(root, name), "utf8")));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;

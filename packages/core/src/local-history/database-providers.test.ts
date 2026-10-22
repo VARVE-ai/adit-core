@@ -31,7 +31,11 @@ it("discovers Crush registry projects outside the source root and reads committe
   const archiveDB = new Database(":memory:");
   cleanup.push(() => archiveDB.close());
   expect((await new LocalHistory(archiveDB).scan(workspace,[{id:"crush",paths:[config]}])).counts.crush).toBe(1);
-  expect(source.prepare("SELECT count(*) AS n FROM messages").get()).toEqual({n:1});
+  expect((await new LocalHistory(archiveDB).scan(workspace,[{id:"crush",paths:[config]}])).updated).toBe(0);
+  source.prepare("INSERT INTO messages VALUES (?,?,?,?,?)").run("m2", "s", "assistant", JSON.stringify([{type:"text",data:{text:"new WAL reply"}}]), 1700000010);
+  expect((await new LocalHistory(archiveDB).scan(workspace,[{id:"crush",paths:[config]}])).updated).toBe(1);
+  expect(new LocalHistory(archiveDB).session("crush","s")!.messages).toHaveLength(2);
+  expect(source.prepare("SELECT count(*) AS n FROM messages").get()).toEqual({n:2});
   expect(await Array.fromAsync(sourceFiles("crush", path))).toEqual([path]);
 });
 it("rejects malformed Crush registry paths instead of assigning sessions to a guessed workspace", async () => {

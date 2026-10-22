@@ -1,5 +1,7 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import { t, locale, useLanguage, systemMessage } from "./i18n";
+import React, { useEffect, useState, useCallback, useRef, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
+import { createPortal } from "react-dom";
 import {
   Folder,
   FolderPlus,
@@ -9,13 +11,16 @@ import {
   Terminal,
   Settings,
   Globe,
+  KeyRound,
   ChartNoAxesCombined,
   MessageSquare,
   GitCommitHorizontal,
+  GitBranch,
   GitPullRequest,
   Share2,
   Moon,
   Sun,
+  Languages,
   X,
   ExternalLink,
   Save,
@@ -23,24 +28,42 @@ import {
   ShieldCheck,
   Loader2,
   Trash2,
+  MoreHorizontal,
   UserRound,
 } from "lucide-react";
 import "./style.css";
 import { AditMark } from "./adit-mark";
 import { OverviewPage } from "./overview";
+import type { CloudSyncSummary } from "./overview-cloud-push";
 import { CommitsPage } from "./commits";
+import { AchievementsPage } from "./achievements";
+import { ProfileCardsPage } from "./profile-cards";
+import { InspectionPage } from "./inspection";
+import { ic } from "./inspection-copy";
+import { ac } from "./achievement-copy";
+import { LocalSyncStatus } from "./local-sync-status";
+import {CollectionRowProgress,progressCount,progressSum,type RowProgress} from "./collection-progress";
+import { SharingPage } from "./sharing";
+import { PrDescriptionsPage } from "./pr-descriptions";
+import "./app-header.css";
+const SessionsPage = lazy(() => import("./sessions").then(module => ({ default: module.SessionsPage })));
 
+type RepositoryInfo = { path: string; count: number | null; error?: string; skipReason?: "missing-git-email" };
 type Workspace = {
   id: string;
   name: string;
   path: string;
+  directoryAvailable?: boolean;
   version: number;
   started: boolean;
   providers: string[];
   repositories: string[];
+  repositoryInfo?: RepositoryInfo[];
   counts: Record<string, number>;
   gistConfigured: boolean;
+  achievements?: { unread: number };
   cloud: { enabled: boolean; mode: "manual" | "automatic"; interval: number };
+  cloudSync?: CloudSyncSummary & { startedAt?: string; endedAt?: string; events?: number; commits?: number; error?: string; warnings?: string[]; nextAt?: string | null; serverProjectId?: string };
 };
 type Provider = {
   id: string;
@@ -70,7 +93,12 @@ type Job = {
   endedAt?: string;
   error?: string;
   providers?: Record<string, number>;
-  repositories?: { path: string; count: number | null; error?: string }[];
+  pending?: Record<string, number>;
+  phase?: "git" | "sessions" | "inspection" | "analysis" | "achievements";
+  sourceProgress?:Record<string,RowProgress>;
+  repositoryProgress?:Record<string,RowProgress>;
+  activeRepository?:string;
+  repositories?: RepositoryInfo[];
   progress?: { files: number; updated: number };
 };
 type Schedule = {
@@ -79,7 +107,13 @@ type Schedule = {
   version: number;
   nextAt?: string;
 };
-type State = { workspaces: Workspace[]; schedule: Schedule; jobs: Job[] };
+type LoginStartup = { enabled: boolean; supported: boolean; version: number };
+type State = {
+  workspaces: Workspace[];
+  schedule: Schedule;
+  jobs: Job[];
+  startup?: LoginStartup;
+};
 type AccountData = {
   connected: boolean;
   server: string;
@@ -118,21 +152,21 @@ async function api<T = any>(
 }
 const time = (value?: string) =>
   value
-    ? new Date(value).toLocaleString("zh-CN", {
+    ? new Date(value).toLocaleString(locale(), {
         month: "2-digit",
         day: "2-digit",
         hour: "2-digit",
         minute: "2-digit",
       })
-    : "尚未整理";
-const labels: Record<string, string> = {
-  queued: "排队中",
-  running: "整理中",
-  done: "整理完成",
-  partial: "部分失败",
-  failed: "整理失败",
-  interrupted: "整理已中断",
-};
+    : t("尚未整理");
+const labels = (): Record<string, string> => ({
+  queued: t("排队中"),
+  running: t("整理中"),
+  done: t("整理完成"),
+  partial: t("部分失败"),
+  failed: t("整理失败"),
+  interrupted: t("整理已中断"),
+});
 function Badge({
   status,
   children,
@@ -143,7 +177,7 @@ function Badge({
   return (
     <span className={`badge ${status || ""}`}>
       {status === "running" && <Loader2 size={12} className="spin" />}
-      {children || labels[status || ""] || status}
+      {children || labels()[status || ""] || status}
     </span>
   );
 }
@@ -170,11 +204,11 @@ function Toggle({
       <span>
         {statusFirst
           ? checked
-            ? "已启用"
-            : "已停用"
+            ? t("已启用")
+            : t("已停用")
           : checked
-            ? "已开启"
-            : "已关闭"}
+            ? t("已开启")
+            : t("已关闭")}
       </span>
     </label>
   );
@@ -192,6 +226,81 @@ function IconButton({
     <button className="icon" title={title} aria-label={title} onClick={onClick}>
       {children}
     </button>
+  );
+}
+function WorkspaceActions({ workspace, onView, onDelete }: {
+  workspace: Workspace;
+  onView: () => void;
+  onDelete: () => void;
+}) {
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState<{ top: number; left: number }>();
+  const menuId = `workspace-actions-${workspace.id}`;
+  const open = () => {
+    const rect = trigger.current?.getBoundingClientRect();
+    setPosition(rect ? {
+      left: Math.max(8, Math.min(rect.right - 176, window.innerWidth - 184)),
+      top: rect.bottom + 54 > window.innerHeight ? rect.top - 54 : rect.bottom + 6,
+    } : { top: 0, left: 0 });
+  };
+  useEffect(() => {
+    if (!position) return;
+    menu.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    const outside = (event: Event) => {
+      const target = event.target as Node;
+      if (!trigger.current?.contains(target) && !menu.current?.contains(target)) setPosition(undefined);
+    };
+    const close = () => setPosition(undefined);
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape" || event.key === "Tab") {
+        if (event.key === "Escape") event.preventDefault();
+        close();
+        trigger.current?.focus();
+      } else if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+        event.preventDefault();
+        menu.current?.querySelector<HTMLButtonElement>("button")?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("focusin", outside);
+    document.addEventListener("keydown", key);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("focusin", outside);
+      document.removeEventListener("keydown", key);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [position]);
+  return (
+    <div className="workspace-row-actions">
+      <button className="text-action" title={t("查看详情")} onClick={onView}>
+        {t("查看详情")}<ChevronRight size={14} />
+      </button>
+      <button ref={trigger} className="workspace-more" title={t("更多操作")} aria-label={t("更多操作")}
+        aria-haspopup="menu" aria-expanded={!!position} aria-controls={position ? menuId : undefined}
+        onClick={() => position ? setPosition(undefined) : open()}
+        onKeyDown={event => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            open();
+          }
+        }}>
+        <MoreHorizontal size={17} aria-hidden="true" />
+      </button>
+      {position && createPortal(
+        <div ref={menu} id={menuId} className="workspace-action-menu" role="menu" aria-label={t("操作")} style={position}>
+          <button role="menuitem" className="workspace-delete" onClick={() => {
+            setPosition(undefined);
+            trigger.current?.focus();
+            onDelete();
+          }}><Trash2 size={15} aria-hidden="true" />{t("删除工作目录")}</button>
+        </div>, document.body,
+      )}
+    </div>
   );
 }
 function Modal({
@@ -250,7 +359,7 @@ function Modal({
       >
         <header>
           <h2>{title}</h2>
-          <IconButton title="关闭" onClick={onClose}>
+          <IconButton title={t("关闭")} onClick={onClose}>
             <X size={16} />
           </IconButton>
         </header>
@@ -290,11 +399,11 @@ function Browser({
     void load(initial);
   }, []);
   return (
-    <Modal title="选择工作目录" onClose={onClose}>
+    <Modal title={t("选择工作目录")} onClose={onClose}>
       <div className="browser-path">
         {!!data?.drives.length && (
           <select
-            aria-label="磁盘"
+            aria-label={t("磁盘")}
             value={
               data.drives.find((drive) =>
                 data.path.toLowerCase().startsWith(drive.toLowerCase()),
@@ -303,7 +412,7 @@ function Browser({
             onChange={(e) => void load(e.target.value)}
           >
             <option value="" disabled>
-              选择磁盘
+              {t("选择磁盘")}
             </option>
             {data.drives.map((drive) => (
               <option key={drive} value={drive}>
@@ -313,18 +422,18 @@ function Browser({
           </select>
         )}
         <input
-          aria-label="目录路径"
+          aria-label={t("目录路径")}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") void load(value);
           }}
         />
-        <button onClick={() => void load(value)}>打开</button>
+        <button onClick={() => void load(value)}>{t("打开")}</button>
       </div>
       {error && (
         <p role="alert" className="error">
-          {error}
+          {systemMessage(error)}
         </p>
       )}
       <div className="directory-list">
@@ -334,7 +443,7 @@ function Browser({
             onClick={() => void load(data.parent)}
           >
             <ArrowLeft size={15} />
-            上一级
+            {t("上一级")}
           </button>
         )}
         {data?.entries.map((entry) => (
@@ -346,7 +455,7 @@ function Browser({
         ))}
       </div>
       <footer>
-        <button onClick={onClose}>取消</button>
+        <button onClick={onClose}>{t("取消")}</button>
         <button
           className="primary"
           disabled={!data}
@@ -354,13 +463,14 @@ function Browser({
             if (data) onSelect(data.path);
           }}
         >
-          选择此目录
+          {t("选择此目录")}
         </button>
       </footer>
     </Modal>
   );
 }
-function App() {
+export function App() {
+  const [language, setLanguage] = useLanguage();
   const [state, setState] = useState<State>(emptyState);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [account, setAccount] = useState<AccountData>();
@@ -370,6 +480,18 @@ function App() {
     location.pathname === "/" ? "/settings/workspaces" : location.pathname,
   );
   const [busy, setBusy] = useState(false);
+  const [deletingWorkspace, setDeletingWorkspace] = useState<Workspace>();
+  const [deletePending, setDeletePending] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const [deletePreview,setDeletePreview] = useState<{sharedSessions:number;sharedRepositories:number}>();
+  useEffect(() => {
+    setDeletePreview(undefined);
+    if (!deletingWorkspace) return;
+    const controller=new AbortController();
+    void api<{sharedSessions:number;sharedRepositories:number}>(`/workspaces/${deletingWorkspace.id}/deletion-preview`,"GET",undefined,controller.signal)
+      .then(setDeletePreview).catch(e=>{if(!controller.signal.aborted)setDeleteError(String(e));});
+    return ()=>controller.abort();
+  },[deletingWorkspace?.id]);
   const [dark, setDark] = useState(
     localStorage.getItem("adit-theme") === "dark",
   );
@@ -409,20 +531,23 @@ function App() {
       alive = false;
     };
   }, []);
+  const fastProgress=route.startsWith("/settings/workspaces/")&&state.jobs.some(job=>["queued","running"].includes(job.status));
   useEffect(() => {
     if (!ready) return;
+    let pending=false;
     const timer = setInterval(() => {
-      void refresh().catch((e) => setError(String(e)));
-    }, 2000);
+      if(pending)return;pending=true;
+      void refresh().catch((e) => setError(String(e))).finally(()=>{pending=false;});
+    }, fastProgress?500:2000);
     return () => clearInterval(timer);
-  }, [ready]);
+  }, [ready,fastProgress]);
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
     localStorage.setItem("adit-theme", dark ? "dark" : "light");
   }, [dark]);
   useEffect(() => {
     const pop = () => {
-      if (dirty && !confirm("存在未保存的修改，是否离开？")) {
+      if (dirty && !confirm(t("存在未保存的修改，是否离开？"))) {
         history.pushState(null, "", route);
         return;
       }
@@ -443,7 +568,8 @@ function App() {
     return () => window.removeEventListener("beforeunload", unload);
   }, [dirty]);
   const go = (path: string, discard = false) => {
-    if (!discard && dirty && !confirm("存在未保存的修改，是否离开？")) return;
+    if (!discard && dirty && !confirm(t("存在未保存的修改，是否离开？")))
+      return;
     setDirty(false);
     history.pushState(null, "", path);
     setRoute(path);
@@ -463,9 +589,22 @@ function App() {
   };
   const isOverview = route.startsWith("/overview/");
   const isCommits = route.startsWith("/commits/");
-  const isWorkspacePage = isOverview || isCommits;
+  const isSessions = route.startsWith("/sessions/");
+  const isShareReview = route.startsWith("/share-review/");
+  const isSharing = route.startsWith("/share/");
+  const isPrCreate = route.startsWith("/pr-create/");
+  const isPr = route.startsWith("/pr/");
+  const isInspection = route.startsWith("/inspection/");
+  const isAchievements = route.startsWith("/achievements/");
+  const isProfileCards = route.startsWith("/profile-cards/");
+  const isBadgeExamples = route.startsWith("/badge-examples/");
+  const isExportPage = isAchievements || isProfileCards || isBadgeExamples;
+  const isWorkspacePage = isOverview || isSessions || isCommits || isExportPage || isInspection || isShareReview || isSharing || isPr || isPrCreate;
+  useEffect(() => {
+    document.title = `ADIT Local · ${isSharing || isShareReview ? t("分享") : isPr || isPrCreate ? t("PR 说明") : isInspection ? ic("历史对话体检") : isProfileCards ? ac("档案卡和徽章") : isBadgeExamples ? ac("应用示例") : isAchievements ? ac("成就") : isOverview ? t("概览") : isSessions ? t("会话") : isCommits ? t("提交") : t("设置")}`;
+  }, [route, language]);
   const id = route.match(
-    /^\/(?:settings\/workspaces|overview|commits)\/([^/]+)$/,
+    /^\/(?:settings\/workspaces|overview|sessions|commits|achievements|profile-cards|badge-examples|inspection|share|share-review|pr|pr-create)\/([^/?]+)(?:\?.*)?$/,
   )?.[1];
   const selected = state.workspaces.find((w) => w.id === id);
   const previousStarted = useRef<Record<string, boolean>>({});
@@ -485,9 +624,9 @@ function App() {
     );
   }, [state.workspaces, ready, route, dirty]);
   const nav = [
-    ["workspaces", "工作目录", Folder],
-    ["providers", "接入的 Agent", Terminal],
-    ["account", "数据云端", Globe],
+    ["workspaces", t("工作目录"), Folder],
+    ["providers", t("接入的 Agent"), Terminal],
+    ["account", t("数据云端"), Globe],
     ["cli", "ADIT CLI", Terminal],
   ] as const;
   return (
@@ -502,37 +641,40 @@ function App() {
           }}
         >
           <AditMark />
-          <strong>ADIT</strong>
+          <strong>ADIT Local</strong>
         </a>
-        <nav aria-label="主导航">
+        <nav aria-label={t("主导航")}>
           {(
             [
-              ["概览", ChartNoAxesCombined],
-              ["会话", MessageSquare],
-              ["提交", GitCommitHorizontal],
-              ["分享", Share2],
-              ["PR 说明", GitPullRequest],
+              ["overview", t("概览"), ChartNoAxesCombined],
+              ["sessions", t("会话"), MessageSquare],
+              ["commits", t("提交"), GitCommitHorizontal],
+              ["share", t("分享"), Share2],
+              ["pr", t("PR 说明"), GitPullRequest],
             ] as const
-          ).map(([n, Icon]) => (
+          ).map(([key, n, Icon]) => (
             <button
-              key={n}
+              key={key}
               disabled={
-                !["概览", "提交"].includes(n) ||
                 !state.workspaces.some((w) => w.started)
               }
               className={
-                (n === "概览" && isOverview) || (n === "提交" && isCommits)
+                (key === "overview" && (isOverview || isExportPage || isInspection)) ||
+                (key === "sessions" && (isSessions || isShareReview)) ||
+                (key === "commits" && isCommits) ||
+                (key === "share" && isSharing) ||
+                (key === "pr" && (isPr || isPrCreate))
                   ? "selected"
                   : ""
               }
               title={
-                ["概览", "提交"].includes(n) ? `当前工作目录的${n}` : "尚未开放"
+                t("当前工作目录的{0}", n)
               }
               onClick={() => {
                 const w = selected?.started
                   ? selected
                   : state.workspaces.find((w) => w.started);
-                if (w) go(`/${n === "提交" ? "commits" : "overview"}/${w.id}`);
+                if (w) go(`/${key}/${w.id}`);
               }}
             >
               <Icon size={16} />
@@ -544,15 +686,24 @@ function App() {
             onClick={() => go("/settings/workspaces")}
           >
             <Settings size={16} />
-            设置
+            {t("设置")}
           </button>
         </nav>
         <div className="top-right">
-          {isWorkspacePage && <div id="overview-header-status" />}
-          <div className="workspace-picker">
+          {selected?.started && selected.directoryAvailable !== false && (
+            <LocalSyncStatus
+              workspaceId={selected.id}
+              jobs={state.jobs}
+              pending={busy}
+              onRefresh={() => void act(async () => {
+                await api(`/workspaces/${selected.id}/collect`, "POST");
+              })}
+            />
+          )}
+          <div className="workspace-picker" title={selected?.path}>
             <Folder size={16} aria-hidden="true" />
             <select
-              aria-label="当前工作目录"
+              aria-label={t("当前工作目录")}
               value={selected?.id || ""}
               onChange={(e) => {
                 if (e.target.value)
@@ -560,12 +711,12 @@ function App() {
                     isWorkspacePage &&
                       state.workspaces.find((w) => w.id === e.target.value)
                         ?.started
-                      ? `/${isCommits ? "commits" : "overview"}/${e.target.value}`
+                      ? `/${isSharing || isShareReview ? "share" : isPr || isPrCreate ? "pr" : isInspection ? "inspection" : isSessions ? "sessions" : isCommits ? "commits" : isAchievements ? "achievements" : isProfileCards ? "profile-cards" : isBadgeExamples ? "badge-examples" : "overview"}/${e.target.value}`
                       : `/settings/workspaces/${e.target.value}`,
                   );
               }}
             >
-              <option value="">工作目录</option>
+              <option value="">{t("工作目录")}</option>
               {state.workspaces.map((w) => (
                 <option key={w.id} value={w.id}>
                   {w.name}
@@ -579,17 +730,42 @@ function App() {
             )}
           </div>
           <IconButton
-            title={dark ? "浅色主题" : "深色主题"}
+            title={dark ? t("浅色主题") : t("深色主题")}
             onClick={() => setDark(!dark)}
           >
             {dark ? <Sun size={16} /> : <Moon size={16} />}
           </IconButton>
+          <div
+            className="language-switch"
+            role="group"
+            aria-label={t("界面语言")}
+          >
+            <Languages size={16} aria-hidden="true" />
+            <button
+              type="button"
+              lang="en"
+              aria-pressed={language === "en"}
+              onClick={() => setLanguage("en")}
+            >
+              English
+            </button>
+            <button
+              type="button"
+              lang="zh-CN"
+              aria-pressed={language === "zh"}
+              onClick={() => setLanguage("zh")}
+            >
+              中文
+            </button>
+          </div>
         </div>
       </header>
-      <div className={`layout${isWorkspacePage ? " overview-layout" : ""}`}>
+      <div
+        className={`layout${isWorkspacePage ? " overview-layout" : ""}${isOverview ? " overview-dashboard" : ""}`}
+      >
         {!isWorkspacePage && (
           <aside>
-            <h1>设置</h1>
+            <h1>{t("设置")}</h1>
             {nav.map(([key, name, Icon]) => (
               <button
                 key={key}
@@ -602,17 +778,24 @@ function App() {
                 <Icon size={16} />
                 {name}
                 {key === "account" && account?.connected && (
-                  <span className="nav-status">已连接</span>
+                  <span className="nav-status">{t("已连接")}</span>
                 )}
               </button>
             ))}
           </aside>
         )}
         <main>
+          {selected?.directoryAvailable === false && (
+            <div role="status" className="directory-warning">
+              <Folder size={16} aria-hidden="true" />
+              <span>{t("工作目录不可用，请在设置中更新目录。")}</span>
+              {isWorkspacePage && <button className="link" onClick={() => go(`/settings/workspaces/${selected.id}`)}>{t("更新目录")}</button>}
+            </div>
+          )}
           {error && (
             <div role="alert" className="error banner">
-              <span>{error}</span>
-              <IconButton title="关闭提示" onClick={() => setError("")}>
+              <span>{systemMessage(error)}</span>
+              <IconButton title={t("关闭提示")} onClick={() => setError("")}>
                 <X size={15} />
               </IconButton>
             </div>
@@ -620,15 +803,29 @@ function App() {
           {!ready ? (
             <div className="empty">
               <Settings size={32} />
-              <h2>{error ? "无法连接本地服务" : "正在连接"}</h2>
+              <h2>{error ? t("无法连接本地服务") : t("正在连接")}</h2>
               {error ? (
-                <p>请通过 adit serve 打开此页面。</p>
+                <p>{t("请通过 adit serve 打开此页面。")}</p>
               ) : (
                 <Loader2 className="spin" />
               )}
             </div>
+          ) : (isSharing || isShareReview) && selected ? (
+            <SharingPage key={`${selected.id}:${isShareReview}:${route}`} workspace={selected} api={api} review={isShareReview} onNavigate={go} />
+          ) : (isPr || isPrCreate) && selected ? (
+            <PrDescriptionsPage key={`${selected.id}:${isPrCreate}:${route}`} workspace={selected} api={api} create={isPrCreate} onNavigate={go} />
+          ) : (isProfileCards || isBadgeExamples) && selected ? (
+            <ProfileCardsPage key={selected.id} workspace={selected} api={api} tab={isBadgeExamples ? "badge-examples" : "profile-cards"} onOverview={() => go(`/overview/${selected.id}`)} onTab={(tab) => go(`/${tab}/${selected.id}`)}/>
+          ) : isInspection && selected ? (
+            <InspectionPage key={selected.id} workspace={selected} api={api} onOverview={() => go(`/overview/${selected.id}`)}/>
+          ) : isAchievements && selected ? (
+            <AchievementsPage key={selected.id} workspace={selected} api={api} onOverview={() => go(`/overview/${selected.id}`)} onTab={(tab) => go(`/${tab}/${selected.id}`)} />
           ) : isCommits && selected ? (
             <CommitsPage key={selected.id} workspace={selected} api={api} />
+          ) : isSessions && selected ? (
+            <Suspense fallback={<div className="empty"><Loader2 className="spin" /></div>}>
+            <SessionsPage key={selected.id} workspace={selected} api={api} revision={state.jobs.find(job=>job.workspaceId===selected.id&&job.kind==='collect'&&['done','partial'].includes(job.status))?.id} onCommit={(commit) => go(`/commits/${selected.id}?${new URLSearchParams({repository:commit.repository,sha:commit.sha})}`)} onShare={(session) => go(`/share-review/${selected.id}?${new URLSearchParams({provider:session.provider,session:session.id})}`)} />
+            </Suspense>
           ) : isOverview && selected ? (
             <OverviewPage
               key={selected.id}
@@ -636,6 +833,12 @@ function App() {
               jobs={state.jobs}
               api={api}
               onSettings={() => go(`/settings/workspaces/${selected.id}`)}
+              onAchievements={() => go(`/achievements/${selected.id}`)}
+              onInspection={() => go(`/inspection/${selected.id}`)}
+              onProfileCards={() => go(`/profile-cards/${selected.id}`)}
+              onCloudAccount={() => go("/settings/account")}
+              cloudAccountState={account?.auth}
+              onCloudSync={account?.auth === "valid" && selected.cloud.enabled ? () => void act(async () => { await api(`/workspaces/${selected.id}/sync`, "POST", {}); }) : undefined}
             />
           ) : (
             <fieldset
@@ -646,37 +849,51 @@ function App() {
                 <>
                   <div className="page-heading">
                     <div>
-                      <h2>工作目录</h2>
+                      <h2>{t("工作目录")}</h2>
                     </div>
                     <button
                       className="primary"
                       onClick={() => go("/settings/workspaces/new")}
                     >
                       <FolderPlus size={15} />
-                      添加工作目录
+                      {t("添加工作目录")}
                     </button>
                   </div>
                   <p className="workspace-summary">
-                    管理这台电脑上的工作目录，选择一个目录查看和调整它的设置。
+                    {t(
+                      "管理这台电脑上的工作目录，选择一个目录查看和调整它的设置。",
+                    )}
                   </p>
                   <div className="table-scroll">
                     <table className="workspace-table">
                       <colgroup>
-                        <col style={{ width: "40%" }} />
-                        <col style={{ width: "7.5%" }} />
-                        <col style={{ width: "7.5%" }} />
-                        <col style={{ width: "19%" }} />
-                        <col style={{ width: "19%" }} />
-                        <col style={{ width: "7%" }} />
+                        <col
+                          style={{ width: language === "en" ? "26%" : "35%" }}
+                        />
+                        <col
+                          style={{ width: language === "en" ? "11%" : "7.5%" }}
+                        />
+                        <col
+                          style={{ width: language === "en" ? "9%" : "7.5%" }}
+                        />
+                        <col
+                          style={{ width: language === "en" ? "22%" : "19%" }}
+                        />
+                        <col
+                          style={{ width: language === "en" ? "12%" : "15%" }}
+                        />
+                        <col
+                          style={{ width: language === "en" ? "20%" : "16%" }}
+                        />
                       </colgroup>
                       <thead>
                         <tr>
-                          <th scope="col">名字 / 路径</th>
-                          <th scope="col">仓库</th>
-                          <th scope="col">会话</th>
-                          <th scope="col">整理状态</th>
-                          <th scope="col">云端同步</th>
-                          <th scope="col" aria-label="操作" />
+                          <th scope="col">{t("名字 / 路径")}</th>
+                          <th scope="col">{t("仓库")}</th>
+                          <th scope="col">{t("会话")}</th>
+                          <th scope="col">{t("整理状态")}</th>
+                          <th scope="col">{t("云端同步")}</th>
+                          <th scope="col" aria-label={t("操作")} />
                         </tr>
                       </thead>
                       <tbody>
@@ -700,6 +917,7 @@ function App() {
                                 <div className="path" title={w.path}>
                                   {w.path}
                                 </div>
+                                {w.directoryAvailable === false && <small className="directory-unavailable">{t("目录不可用")}</small>}
                               </td>
                               <td>{w.repositories.length}</td>
                               <td>
@@ -715,17 +933,17 @@ function App() {
                                           ].includes(p),
                                       )
                                       .reduce((n, [, v]) => n + v, 0)
-                                  : "还没有整理"}
+                                  : t("还没有整理")}
                               </td>
                               <td>
                                 <Badge
                                   status={w.started ? "done" : job?.status}
                                 >
                                   {w.started
-                                    ? "整理完成"
+                                    ? t("整理完成")
                                     : job
                                       ? undefined
-                                      : "未整理"}
+                                      : t("未整理")}
                                 </Badge>
                               </td>
                               <td>
@@ -733,26 +951,25 @@ function App() {
                                   <>
                                     <span>
                                       {w.cloud.mode === "manual"
-                                        ? "手动"
-                                        : `自动 · 每 ${w.cloud.interval} 分钟`}
+                                        ? t("手动")
+                                        : t(
+                                            "自动 · 每 {0} 分钟",
+                                            w.cloud.interval,
+                                          )}
                                     </span>
-                                    <small>推送未接入</small>
+                                    <small>{t(w.cloudSync?.status === "done" ? "同步完成" : w.cloudSync?.status === "failed" ? "同步失败" : w.cloudSync?.status === "partial" ? "部分记录待同步" : ["queued", "running"].includes(w.cloudSync?.status || "") ? "正在同步新记录…" : "尚未同步")}</small>
                                   </>
                                 ) : (
-                                  "未开启"
+                                  t("未开启")
                                 )}
                               </td>
                               <td>
-                                <button
-                                  className="text-action"
-                                  title="查看详情"
-                                  onClick={() =>
-                                    go(`/settings/workspaces/${w.id}`)
-                                  }
-                                >
-                                  查看详情
-                                  <ChevronRight size={14} />
-                                </button>
+                                <WorkspaceActions workspace={w}
+                                  onView={() => go(`/settings/workspaces/${w.id}`)}
+                                  onDelete={() => {
+                                    setDeleteError("");
+                                    setDeletingWorkspace(w);
+                                  }} />
                               </td>
                             </tr>
                           );
@@ -762,7 +979,7 @@ function App() {
                             <td colSpan={6}>
                               <div className="workspace-empty">
                                 <Folder size={28} aria-hidden="true" />
-                                <span>暂无工作目录</span>
+                                <span>{t("暂无工作目录")}</span>
                               </div>
                             </td>
                           </tr>
@@ -771,8 +988,8 @@ function App() {
                     </table>
                   </div>
                   <p className="repo-hint">
-                    共 {state.workspaces.length} 个工作目录 ·
-                    各目录的数据与设置独立管理。
+                    {t("共")} {state.workspaces.length}{" "}
+                    {t("个工作目录 · 各目录的数据与设置独立管理。")}
                   </p>
                 </>
               )}
@@ -801,10 +1018,10 @@ function App() {
               {route === "/settings/providers" && (
                 <div className="provider-page">
                   <div className="page-heading">
-                    <h2>接入的 Agent</h2>
+                    <h2>{t("接入的 Agent")}</h2>
                     <div className="provider-refresh">
                       <IconButton
-                        title="重新检查"
+                        title={t("重新检查")}
                         onClick={() =>
                           void act(async () =>
                             setProviders(await api("/providers")),
@@ -816,8 +1033,9 @@ function App() {
                     </div>
                   </div>
                   <p className="provider-summary">
-                    选择要读取和整理哪些 Agent
-                    的会话记录，并查看它们的记录目录。
+                    {t(
+                      "选择要读取和整理哪些 Agent 的会话记录，并查看它们的记录目录。",
+                    )}
                   </p>
                   <div className="provider-list">
                     {[...providers]
@@ -842,7 +1060,7 @@ function App() {
                       ))}
                   </div>
                   {!providers.length && (
-                    <p className="muted">整理引擎尚未就绪</p>
+                    <p className="muted">{t("整理引擎尚未就绪")}</p>
                   )}
                   <ConversationImport workspaces={state.workspaces} act={act} />
                 </div>
@@ -855,6 +1073,40 @@ function App() {
           )}
         </main>
       </div>
+      {deletingWorkspace && (
+        <Modal title={t("删除工作目录")} onClose={() => {
+          if (!deletePending) setDeletingWorkspace(undefined);
+        }}>
+          <p>{t("删除项目“{0}”？", deletingWorkspace.name)}</p>
+          <p className="workspace-delete-path">{deletingWorkspace.path}</p>
+          <p className="muted">{t("将删除此项目在本机 ADIT 中保存的会话、提交、统计、分析结果、分享记录和配置，并停止自动整理与同步。尚未同步的本地修改也会删除。")}</p>
+          <p className="muted">{t("云端数据和已发布的分享不会删除。项目文件、Git 仓库和 Agent 原始记录会保留。")}</p>
+          {deletePreview && (deletePreview.sharedSessions>0 || deletePreview.sharedRepositories>0) && <p className="muted">{t("其他项目仍在使用的共享记录会保留，仅解除与此项目的关联。")}</p>}
+          {deleteError && <p role="alert" className="danger">{systemMessage(deleteError)}</p>}
+          <footer>
+            <button disabled={deletePending} onClick={() => setDeletingWorkspace(undefined)}>{t("取消")}</button>
+            <button className="workspace-delete-confirm" disabled={deletePending || !deletePreview} onClick={async () => {
+              if (deletePending) return;
+              setDeletePending(true);
+              setDeleteError("");
+              try {
+                await api(`/workspaces/${deletingWorkspace.id}`, "DELETE", { version: deletingWorkspace.version });
+                try { localStorage.removeItem(`adit-profile-v1:${deletingWorkspace.id}`); } catch { /* Browser storage may be unavailable. */ }
+                setState(s => ({ ...s,
+                  workspaces: s.workspaces.filter(w => w.id !== deletingWorkspace.id),
+                  jobs: s.jobs.filter(j => j.workspaceId !== deletingWorkspace.id),
+                }));
+                setDeletingWorkspace(undefined);
+                await refresh().catch(e => setError(e instanceof Error ? e.message : String(e)));
+              } catch (e) {
+                setDeleteError(e instanceof Error ? e.message : String(e));
+              } finally {
+                setDeletePending(false);
+              }
+            }}>{deletePending ? t("正在删除") : t("删除本地项目")}</button>
+          </footer>
+        </Modal>
+      )}
     </>
   );
 }
@@ -869,17 +1121,17 @@ function ConversationImport({
   const [provider, setProvider] = useState("claude-ai");
   const [workspaceId, setWorkspaceId] = useState("");
   const [path, setPath] = useState("");
-  const [result, setResult] = useState("");
+  const [result, setResult] = useState<number | "assigned" | null>(null);
   const [unassigned, setUnassigned] = useState<
     { provider: string; id: string; title: string; messages: number }[]
   >([]);
   const [sessionId, setSessionId] = useState("");
   return (
     <section className="provider-homes">
-      <h3>导入会话</h3>
-      <p className="muted">将导出文件中的会话导入指定工作目录。</p>
+      <h3>{t("导入会话")}</h3>
+      <p className="muted">{t("将导出文件中的会话导入指定工作目录。")}</p>
       <label>
-        来源
+        {t("来源")}
         <select value={provider} onChange={(e) => setProvider(e.target.value)}>
           <option value="claude-ai">Claude.ai</option>
           <option value="chatgpt">ChatGPT</option>
@@ -887,12 +1139,12 @@ function ConversationImport({
         </select>
       </label>
       <label>
-        工作目录
+        {t("工作目录")}
         <select
           value={workspaceId}
           onChange={(e) => setWorkspaceId(e.target.value)}
         >
-          <option value="">选择工作目录</option>
+          <option value="">{t("选择工作目录")}</option>
           {workspaces.map((w) => (
             <option key={w.id} value={w.id}>
               {w.name}
@@ -901,14 +1153,14 @@ function ConversationImport({
         </select>
       </label>
       <label>
-        导出文件路径
+        {t("导出文件路径")}
         <input
           value={path}
           onChange={(e) => setPath(e.target.value)}
           placeholder={
             provider === "gemini-apps"
-              ? "Takeout HTML 文件路径"
-              : "JSON 导出文件路径"
+              ? t("Takeout HTML 文件路径")
+              : t("JSON 导出文件路径")
           }
         />
       </label>
@@ -916,19 +1168,25 @@ function ConversationImport({
         disabled={!workspaceId || !path.trim()}
         onClick={() =>
           void act(async () => {
-            setResult("");
+            setResult(null);
             const imported = await api<{ imported: number }>(
               "/imports",
               "POST",
               { provider, workspaceId, path },
             );
-            setResult(`已导入 ${imported.imported} 个会话`);
+            setResult(imported.imported);
           })
         }
       >
-        导入会话
+        {t("导入会话")}
       </button>
-      {result && <p role="status">{result}</p>}
+      {result !== null && (
+        <p role="status">
+          {result === "assigned"
+            ? t("已归属到所选工作目录")
+            : t("已导入 {0} 个会话", result)}
+        </p>
+      )}
       <details
         onToggle={(e) => {
           if (e.currentTarget.open)
@@ -937,24 +1195,24 @@ function ConversationImport({
             );
         }}
       >
-        <summary>未归属会话</summary>
+        <summary>{t("未归属会话")}</summary>
         {!unassigned.length ? (
-          <p className="muted">暂无未归属会话</p>
+          <p className="muted">{t("暂无未归属会话")}</p>
         ) : (
           <>
             <label>
-              会话
+              {t("会话")}
               <select
                 value={sessionId}
                 onChange={(e) => setSessionId(e.target.value)}
               >
-                <option value="">选择会话</option>
+                <option value="">{t("选择会话")}</option>
                 {unassigned.map((s) => (
                   <option
                     key={JSON.stringify([s.provider, s.id])}
                     value={JSON.stringify([s.provider, s.id])}
                   >
-                    {s.provider} · {s.title} · {s.messages} 条消息
+                    {s.provider} · {s.title} · {s.messages} {t("条消息")}
                   </option>
                 ))}
               </select>
@@ -971,11 +1229,11 @@ function ConversationImport({
                   });
                   setUnassigned(await api("/sessions/unassigned"));
                   setSessionId("");
-                  setResult("已归属到所选工作目录");
+                  setResult("assigned");
                 })
               }
             >
-              归属到所选工作目录
+              {t("归属到所选工作目录")}
             </button>
           </>
         )}
@@ -1021,21 +1279,63 @@ function WorkspaceEditor({
   const [editing, setEditing] = useState(fresh);
   const [browser, setBrowser] = useState(false);
   const [cloudEditing, setCloudEditing] = useState(false);
+  const [cloudDraft, setCloudDraft] = useState<Workspace["cloud"] | null>(null);
+  const [cloudSaving, setCloudSaving] = useState(false);
+  const [workspaceDirty, setWorkspaceDirty] = useState(false);
+  const savedCloud = workspace?.cloud ?? form.cloud;
+  const cloudForm = fresh ? form.cloud : cloudDraft ?? savedCloud;
+  const cloudDirty = !!cloudDraft && (cloudDraft.enabled !== savedCloud.enabled || cloudDraft.mode !== savedCloud.mode || cloudDraft.interval !== savedCloud.interval);
+  useEffect(() => setDirty(workspaceDirty || cloudDirty), [workspaceDirty, cloudDirty]);
+  const sync = state.workspaces.find(w => w.id === workspace?.id)?.cloudSync;
+  const syncing = sync?.status === "queued" || sync?.status === "running";
+  const [startupBusy, setStartupBusy] = useState(false);
+  const startup = state.startup ?? {
+    enabled: false,
+    supported: false,
+    version: 0,
+  };
+  useEffect(() => {
+    if (!startup.enabled) {
+      setForm((f) => ({ ...f, cloud: { ...f.cloud, mode: "manual" } }));
+      setCloudDraft((draft) => draft ? { ...draft, mode: "manual" } : null);
+    }
+  }, [startup.enabled, startup.version]);
+  const changeStartup = async (enabled: boolean) => {
+    setStartupBusy(true);
+    try {
+      await act(async () => {
+        await api("/startup", "PATCH", { enabled, version: startup.version });
+        if (!enabled) {
+          // The global change also pauses saved settings for this directory.
+          const current = form.id
+            ? await api<Workspace>(`/workspaces/${form.id}`)
+            : undefined;
+          setForm((f) => ({
+            ...f,
+            version: current?.version ?? f.version,
+            cloud: { ...f.cloud, mode: "manual" },
+          }));
+        }
+      });
+    } finally {
+      setStartupBusy(false);
+    }
+  };
   const [discovery, setDiscovery] = useState("");
+  const discoverySelection = useRef({id:"",repositories:false,providers:false,choices:new Map<string,boolean>()});
   const [providerLimit, setProviderLimit] = useState(6);
   useEffect(() => setProviderLimit(6), [form.path]);
   const [token, setToken] = useState("");
   const [gist, setGist] = useState(workspace?.gistConfigured || false);
   useEffect(() => {
     if (workspace && !editing) setForm(workspace);
-  }, [workspace?.version, workspace?.started, editing]);
+  }, [workspace?.version, workspace?.started, workspace?.directoryAvailable, editing]);
   const job = discovery
     ? state.jobs.find((j) => j.id === discovery)
-    : state.jobs.find(
+    : state.jobs.find(j=>j.workspaceId===workspace?.id && j.kind==="collect" && ["queued","running"].includes(j.status)) || state.jobs.find(
         (j) =>
           j.workspaceId === workspace?.id &&
-          j.kind === "collect" &&
-          (!workspace.started || j.status === "done"),
+          j.kind === "collect",
       );
   const collectionRunning = state.jobs.some(
     (j) =>
@@ -1043,52 +1343,111 @@ function WorkspaceEditor({
       j.kind === "collect" &&
       ["queued", "running"].includes(j.status),
   );
-  const discoveryDone = state.jobs.find(
-    (j) => j.id === discovery && ["done", "partial"].includes(j.status),
-  );
+  const firstCollection=useRef<string|null>(null);
+  useEffect(()=>{
+    if(!workspace?.started&&job?.kind==="collect"&&["queued","running"].includes(job.status))firstCollection.current=job.id;
+    if(workspace?.started&&job?.status==="done"&&firstCollection.current===job.id&&!editing&&!discovery){firstCollection.current=null;go(`/overview/${workspace.id}`);}
+  },[workspace?.started,job?.id,job?.status,editing,discovery]);
   useEffect(() => {
-    if (discoveryDone && fresh) {
+    if (job?.id === discovery && fresh) {
+      if(discoverySelection.current.id!==discovery)discoverySelection.current={id:discovery,repositories:false,providers:false,choices:new Map()};
+      const selection=discoverySelection.current;
+      const applyRepositories=!selection.repositories && job.repositories!==undefined;
+      const applyProviders=!selection.providers && ["done","partial"].includes(job.status);
+      if(!applyRepositories&&!applyProviders)return;
+      selection.repositories ||= applyRepositories;selection.providers ||= applyProviders;
       setForm((f) => ({
         ...f,
-        providers: providers
+        providers: applyProviders ? providers
           .filter(
-            (p) => p.enabled && (discoveryDone.providers?.[p.id] || 0) > 0,
+            (p) => p.enabled && (selection.choices.get(p.id) ?? (job.providers?.[p.id] || 0) > 0),
           )
-          .map((p) => p.id),
-        repositories: (discoveryDone.repositories || [])
-          .filter((r) => !r.error)
-          .map((r) => r.path),
+          .map((p) => p.id) : f.providers,
+        repositories: applyRepositories ? (job.repositories || [])
+          .filter((r) => !r.error && !r.skipReason)
+          .map((r) => r.path) : f.repositories,
       }));
-      setDirty(true);
+      setWorkspaceDirty(true);
     }
-  }, [discoveryDone?.id, discoveryDone?.status]);
+  }, [job?.id, job?.status, job?.repositories, discovery, fresh]);
   const change = (next: Partial<Workspace>) => {
+    if(next.path!==undefined&&next.path!==form.path)setDiscovery("");
+    if(next.providers&&discovery)for(const p of providers)if(next.providers.includes(p.id)!==form.providers.includes(p.id))discoverySelection.current.choices.set(p.id,next.providers.includes(p.id));
     setForm((f) => ({ ...f, ...next }));
-    setDirty(true);
+    setWorkspaceDirty(true);
+  };
+  const changeCloud = (cloud: Workspace["cloud"]) => {
+    if (fresh) change({ cloud });
+    else setCloudDraft(cloud);
+  };
+  const closeCloudSettings = () => {
+    setCloudDraft(null);
+    setCloudEditing(false);
+  };
+  const persistCloudSettings = async (cloud: Workspace["cloud"]) => {
+    if (!workspace) return;
+    setCloudSaving(true);
+    try {
+      const saved = await api<Workspace>(`/workspaces/${workspace.id}`, "PATCH", { version: workspace.version, cloud });
+      setForm((f) => ({ ...f, version: saved.version, cloud: saved.cloud }));
+      onSaved(saved);
+      return saved;
+    } finally { setCloudSaving(false); }
+  };
+  const saveCloudSettings = async () => {
+    await persistCloudSettings(cloudForm);
+    closeCloudSettings();
+  };
+  const changeCloudEnabled = async (enabled: boolean) => {
+    if (fresh) { change({ cloud: { ...form.cloud, enabled } }); return; }
+    const saved = await persistCloudSettings({ ...savedCloud, enabled });
+    if (saved) setCloudDraft(draft => draft ? { ...draft, enabled: saved.cloud.enabled } : null);
   };
   const scan = async (path = form.path) => {
     const result = await api<Job>("/discoveries", "POST", { path });
     setDiscovery(result.id);
   };
-  const save = async (collect = false) => {
+  const save = async (collect = false, navigate = true) => {
     const result = await api<Workspace>(
       fresh ? "/workspaces" : `/workspaces/${form.id}`,
       fresh ? "POST" : "PATCH",
       form,
     );
-    setDirty(false);
+    setWorkspaceDirty(false);
     const savedWorkspace = { ...form, ...result };
     setForm(savedWorkspace);
     onSaved(savedWorkspace);
     setDiscovery("");
     setEditing(false);
     if (collect) await api(`/workspaces/${result.id}/collect`, "POST", {});
-    if (fresh) go(`/settings/workspaces/${result.id}`, true);
+    if (fresh && navigate) go(`/settings/workspaces/${result.id}`, true);
+    return savedWorkspace;
   };
-  if (!fresh && !workspace) return <p>工作目录不存在</p>;
-  const knownRepos =
-    job?.repositories ||
-    form.repositories.map((path) => ({ path, count: null }));
+  const startCloudSync = async () => {
+    // The shared sync executor already collects and analyzes before uploading.
+    // A new directory only needs registration here, never a second collector.
+    const target = fresh ? await save(false, false) : workspace!;
+    try { await api(`/workspaces/${target.id}/sync`, "POST", {}); }
+    finally {
+      // Registration remains valid even if starting sync fails; retries must
+      // use that saved identity instead of attempting to register it again.
+      if (fresh) go(`/settings/workspaces/${target.id}`, true);
+    }
+  };
+  if (!fresh && !workspace) return <p>{t("工作目录不存在")}</p>;
+  const syncBlockedReason = !savedCloud.enabled ? t("请先开启云端存储。")
+    : !account ? t("正在读取云端账号状态…")
+    : account.auth === "expired" ? t("云端登录已失效，请重新登录。")
+    : account.auth !== "valid" ? t("请先连接云端账号。")
+    : fresh && (!form.name.trim() || !form.path.trim()) ? t("请先填写工作目录的名称和路径。")
+    : fresh && !form.providers.length && !form.repositories.length ? t("请至少选择一个 Git 仓库或会话来源。")
+    : fresh && ["queued", "running"].includes(job?.status || "") ? t("请等待发现完成后再同步。")
+    : workspace?.directoryAvailable === false ? t("工作目录不可用，请在设置中更新目录。") : "";
+  const knownRepos: RepositoryInfo[] = [...new Map([
+    ...form.repositories.map(path=>({path,count:null as number|null})),
+    ...(form.path === workspace?.path ? workspace.repositoryInfo || [] : []),
+    ...(job?.repositories || []).filter(r => discovery || form.repositories.includes(r.path) || r.path.replaceAll("\\","/").toLowerCase().startsWith(form.path.replaceAll("\\","/").replace(/\/$/,"").toLowerCase()+"/")),
+  ].map(r=>[r.path,r])).values()];
   const cursorPending =
     !!job?.error &&
     [
@@ -1096,10 +1455,20 @@ function WorkspaceEditor({
       "cursor-ide: Cursor IDE transcript has missing bubbles; previous archive retained",
     ].includes(job.error);
   const providerCounts = job?.providers || form.counts;
+  const showCollectionProgress=!editing&&job?.kind==="collect"&&!!(job.sourceProgress||job.repositoryProgress);
+  const progressActive=!!job&&["queued","running"].includes(job.status);
+  const selectedRepos=knownRepos.filter(r=>form.repositories.includes(r.path));
+  const repositorySummary=progressSum(selectedRepos.filter(r=>!r.skipReason).map(r=>job?.repositoryProgress?.[r.path]));
+  const sessionSummary=progressSum(form.providers.map(id=>job?.sourceProgress?.[id]));
+  const collectionStage=job?.phase==="sessions"?t("正在读取会话记录…"):job?.phase==="git"?t("正在读取 Git 提交…"):job?.phase==="inspection"?t("正在检查敏感信息…"):job?.phase==="analysis"?t("正在比对提交来源…"):job?.phase==="achievements"?t("正在更新概览和成就…"):t("等待整理");
+  const discoveryLabel = job?.kind === "discover"
+    ? ["running","queued"].includes(job.status) ? t("发现中") : job.status === "done" ? t("发现完成") : job.status === "partial" ? t("发现完成，部分来源未能读取") : t("发现已中断")
+    : undefined;
   const orderedProviders = [...providers].sort(
     (a, b) =>
       Number((providerCounts[b.id] || 0) > 0) -
         Number((providerCounts[a.id] || 0) > 0) ||
+      Number(!!job?.pending?.[b.id]) - Number(!!job?.pending?.[a.id]) ||
       Number(form.providers.includes(b.id)) -
         Number(form.providers.includes(a.id)),
   );
@@ -1107,22 +1476,22 @@ function WorkspaceEditor({
     <>
       <button className="back" onClick={() => go("/settings/workspaces")}>
         <ArrowLeft size={14} />
-        全部工作目录
+        {t("全部工作目录")}
       </button>
       <div className="page-heading">
         <div>
-          <h2>工作目录</h2>
+          <h2>{t("工作目录")}</h2>
           {workspace?.started && !discovery ? (
             <Badge status="done" />
           ) : job ? (
             cursorPending && job.status === "partial" ? (
-              <span className="muted">部分记录待重试</span>
+              <span className="muted">{t("部分记录待重试")}</span>
             ) : (
-              <Badge status={job.status} />
+              <Badge status={job.status}>{discoveryLabel || (showCollectionProgress&&progressActive?t("正在整理"):undefined)}</Badge>
             )
           ) : (
             <span className="muted">
-              {workspace?.started ? "已配置" : "还没有整理"}
+              {workspace?.started ? t("已配置") : t("还没有整理")}
             </span>
           )}
         </div>
@@ -1134,27 +1503,27 @@ function WorkspaceEditor({
             }}
           >
             <Pencil size={14} />
-            编辑
+            {t("编辑")}
           </button>
         )}
         {editing && workspace?.started && (
           <button
             className="primary"
-            disabled={!form.path || !form.name.trim()}
-            onClick={() => void act(() => save())}
+            disabled={!form.path || !form.name.trim() || collectionRunning}
+            onClick={() => void act(async () => { await save(); })}
           >
-            保存
+            {t("保存")}
           </button>
         )}
       </div>
       <p className="page-description">
-        ADIT 会读取这台电脑上各个 Agent
-        自己保存的对话记录，把在这个目录里发生的会话和提交整理到一起，之后在任何一个
-        Agent 里都能查。选好目录后，概览、会话和提交才有内容。
+        {showCollectionProgress&&progressActive&&!workspace?.started?t("已经整理好的会话可以先看，剩下的会在后台继续，全部整理完后直接进入概览。"):t(
+          "ADIT 会读取这台电脑上各个 Agent 自己保存的对话记录，把在这个目录里发生的会话和提交整理到一起，之后在任何一个 Agent 里都能查。选好目录后，概览、会话和提交才有内容。",
+        )}
       </p>
       <section className="settings-rows">
         <div className="field">
-          <label htmlFor="workspace-name">名字</label>
+          <label htmlFor="workspace-name">{t("名字")}</label>
           <input
             id="workspace-name"
             value={form.name}
@@ -1164,7 +1533,7 @@ function WorkspaceEditor({
           />
         </div>
         <div className="field">
-          <label htmlFor="workspace-path">目录</label>
+          <label htmlFor="workspace-path">{t("目录")}</label>
           <div className="input-actions">
             <input
               id="workspace-path"
@@ -1174,52 +1543,63 @@ function WorkspaceEditor({
             />
             {editing && (
               <>
-                <IconButton title="选择目录" onClick={() => setBrowser(true)}>
+                <IconButton
+                  title={t("选择目录")}
+                  onClick={() => setBrowser(true)}
+                >
                   <Folder size={16} />
                 </IconButton>
                 <button
-                  disabled={!form.path}
+                  disabled={!form.path || (job?.kind === "discover" && ["queued","running"].includes(job.status))}
                   onClick={() => void act(() => scan())}
                 >
                   <RefreshCw size={14} />
-                  发现
+                  {t("发现")}
                 </button>
               </>
             )}
           </div>
+          {!fresh && editing && <p className="repo-hint">{t("目录改名或移动后，在这里选择新目录并保存。项目身份和已有记录会保留，已选仓库按原相对位置更新。")}</p>}
         </div>
       </section>
-      {job && (
+      {job && (!showCollectionProgress || job.error || (progressActive&&(["inspection","achievements"].includes(job.phase||"")||(job.phase==="analysis"&&!job.activeRepository)))) && (
         <div className="progress-row">
           {cursorPending && job.status === "partial" ? (
-            <span className="muted">部分记录待重试</span>
+            <span className="muted">{t("部分记录待重试")}</span>
           ) : (
-            <Badge status={job.status} />
+            <Badge status={job.status}>{discoveryLabel}</Badge>
           )}
-          {job.progress && (
+          {job.kind === "discover" ? (
+            <span>{["queued","running"].includes(job.status)
+              ? job.phase === "sessions" ? t("Git 仓库已显示，正在读取会话元信息…") : t("正在发现仓库")
+              : t("完整正文解析和分析将在“开始整理”时执行。")}</span>
+          ) : showCollectionProgress ? progressActive?<span>{collectionStage}</span>:null : job.progress && (
             <span>
-              已检查 {job.progress.files} 个文件，更新 {job.progress.updated} 个
+              {t("已检查")} {job.progress.files} {t("个文件，更新")}{" "}
+              {job.progress.updated} {t("个")}
             </span>
           )}
           <span className="muted">{time(job.endedAt || job.startedAt)}</span>
           {job.error && (
             <span className={cursorPending ? "muted" : "error"}>
               {cursorPending
-                ? "Cursor IDE 有会话记录尚未写入完整，将在下次整理时重试；其他来源可正常整理。"
-                : job.error}
+                ? t(
+                    "Cursor IDE 有会话记录尚未写入完整，将在下次整理时重试；其他来源可正常整理。",
+                  )
+                : systemMessage(job.error)}
             </span>
           )}
         </div>
       )}
       <section className="workspace-setting">
-        <h3>Git 仓库</h3>
+        <h3>{t("Git 仓库")}</h3>
         <div className="workspace-options">
-          <div className="selection-summary">
-            {form.repositories.length} 个已选
+          <div className={`selection-summary${showCollectionProgress?" collection-summary":""}`}>
+            {showCollectionProgress?<><span>{t("比对 {0} 个仓库的提交来源",form.repositories.length)}</span><span>{progressCount(repositorySummary,"commits")}</span></>:<>{form.repositories.length} {t("个已选")}</>}
           </div>
           {knownRepos.length ? (
-            knownRepos.map((r) => (
-              <label className="selection-row" key={r.path}>
+            (showCollectionProgress?knownRepos.filter(r=>form.repositories.includes(r.path)||r.skipReason):knownRepos).map((r) => (
+              <label className={`selection-row repository-row${showCollectionProgress?" collection-item":""}`} key={r.path}>
                 <input
                   type="checkbox"
                   disabled={!editing}
@@ -1232,32 +1612,38 @@ function WorkspaceEditor({
                     })
                   }
                 />
+                {showCollectionProgress&&<GitBranch className="muted" size={14}/>}
                 <span className="path" title={r.path}>
-                  {r.path}
+                  {showCollectionProgress?r.path.replaceAll("\\","/").split("/").filter(Boolean).at(-1):r.path}
                 </span>
-                <span className="muted">
-                  {r.count === null ? "未统计" : `${r.count} 个提交`}
-                </span>
+                {showCollectionProgress&&!r.skipReason?<CollectionRowProgress progress={job.repositoryProgress?.[r.path]} unit="commits" active={progressActive}/>:<span className={`muted${r.skipReason ? " repository-note" : ""}`}>
+                  {r.skipReason === "missing-git-email"
+                    ? t("缺少 Git user.email，无法提取提交信息；已跳过。")
+                    : r.count === null ? t("未统计") : t("{0} 个提交", r.count)}
+                </span>}
               </label>
             ))
           ) : (
             <p className="muted">
-              {job?.status === "running" ? "正在发现仓库" : "尚未发现仓库"}
+              {job?.status === "running" && !job.repositories
+                ? t("正在发现仓库")
+                : t("尚未发现仓库")}
             </p>
           )}
+          {showCollectionProgress&&<p className="repo-hint">{t("点击右上角“编辑”，调整纳入管理的 Git 仓库。")}</p>}
         </div>
       </section>
       <section className="workspace-setting">
-        <h3>会话记录</h3>
+        <h3>{t("会话记录")}</h3>
         <div className="workspace-options">
-          <div className="selection-summary">
-            {form.providers.length} 个来源已选
+          <div className={`selection-summary${showCollectionProgress?" collection-summary":""}`}>
+            {showCollectionProgress?<><span>{t("读取 {0} 个 Agent 的记录",form.providers.length)}</span><span>{progressCount(sessionSummary,"sessions")}</span></>:<>{form.providers.length} {t("个来源已选")}</>}
           </div>
-          <p className="repo-hint">
-            只读取并整理勾选来源在这个目录里的会话记录。
-          </p>
-          {orderedProviders.slice(0, providerLimit).map((p) => (
-            <label className="selection-row" key={p.id}>
+          {!showCollectionProgress&&<p className="repo-hint">
+            {t("只读取并整理勾选来源在这个目录里的会话记录。")}
+          </p>}
+          {(showCollectionProgress?providers.filter(p=>form.providers.includes(p.id)):orderedProviders.slice(0, providerLimit)).map((p) => (
+            <label className={`selection-row${showCollectionProgress?" collection-item":""}`} key={p.id}>
               <input
                 type="checkbox"
                 disabled={!editing || !p.enabled}
@@ -1270,53 +1656,56 @@ function WorkspaceEditor({
                   })
                 }
               />
-              <span>{p.name}</span>
-              <span className="muted">
+              <span className="collection-provider">{showCollectionProgress&&<i className={`collection-agent-dot agent-${p.id}`} aria-hidden="true"/>}{p.name}</span>
+              {showCollectionProgress?<CollectionRowProgress progress={job.sourceProgress?.[p.id]} unit="sessions" active={progressActive}/>:<span className="muted">
                 {!p.supported
-                  ? "暂未支持"
+                  ? t("暂未支持")
                   : !p.enabled
-                    ? "已停用"
+                    ? t("已停用")
                     : (providerCounts[p.id] || 0) > 0
-                      ? `${providerCounts[p.id]} 个会话`
-                      : "未发现"}
-              </span>
+                      ? job?.pending?.[p.id] ? t("已确认 {0} 个会话，其余待整理时确认", providerCounts[p.id]) : t("{0} 个会话", providerCounts[p.id])
+                      : job?.pending?.[p.id] ? t("发现记录，所属目录待整理时确认")
+                      : job?.kind === "discover" && ["queued","running"].includes(job.status) ? t("正在读取元信息") : t("未发现")}
+              </span>}
             </label>
           ))}
-          {providerLimit < orderedProviders.length && (
+          {showCollectionProgress&&<p className="repo-hint">{t("点击右上角“编辑”，调整需要读取的会话记录。")}</p>}
+          {!showCollectionProgress&&providerLimit < orderedProviders.length && (
             <button
               className="provider-load-more"
               onClick={() => setProviderLimit((limit) => limit + 6)}
             >
-              加载更多（剩余 {orderedProviders.length - providerLimit} 个来源）
+              {t("加载更多（剩余")} {orderedProviders.length - providerLimit}{" "}
+              {t("个来源）")}
             </button>
           )}
-          {providerLimit > 6 && (
+          {!showCollectionProgress&&providerLimit > 6 && (
             <button
               className="provider-load-more"
               onClick={() => setProviderLimit(6)}
             >
-              收起
+              {t("收起")}
             </button>
           )}
         </div>
       </section>
       <section className="workspace-setting workspace-sharing">
-        <h3>会话分享</h3>
+        <h3>{t("会话分享")}</h3>
         <div className="workspace-options">
           <p className="repo-hint">
-            配置 GitHub 令牌，用于将本工作目录的会话发布为 GitHub Gist。
+            {t("配置 GitHub 令牌，用于将本工作目录的会话发布为 GitHub Gist。")}
           </p>
           <div className="session-share-status">
-            <span>状态</span>
+            <span>{t("状态")}</span>
             <Badge status={gist ? "done" : ""}>
-              {gist ? "已配置" : "未配置"}
+              {gist ? t("已配置") : t("未配置")}
             </Badge>
           </div>
           <div className="input-actions session-share-token">
             <input
               type="password"
               autoComplete="new-password"
-              aria-label="GitHub 令牌"
+              aria-label={t("GitHub 令牌")}
               placeholder="ghp_..."
               value={token}
               onChange={(e) => setToken(e.target.value)}
@@ -1335,138 +1724,179 @@ function WorkspaceEditor({
                 })
               }
             >
-              保存令牌
+              {t("保存令牌")}
             </button>
           </div>
         </div>
       </section>
       <section className="workspace-setting workspace-cloud">
-        <h3>云端存储</h3>
+        <h3>{t("云端存储")}</h3>
         <div className="workspace-options">
           <div className="directory-cloud-line">
-            <span className="label">状态</span>
-            <Badge>{form.cloud.enabled ? "推送未接入" : "未开启"}</Badge>
+            <span className="label">{t("状态")}</span>
+            <Badge>{!savedCloud.enabled ? t("未开启") : syncing ? t("正在同步新记录…") : sync?.status === "done" ? t("同步完成") : sync?.status === "failed" ? t("同步失败") : sync?.status === "partial" ? t("部分记录待同步") : t("已开启")}</Badge>
             <span className="muted">
               {account?.account
-                ? `通过云端账号 ${account.account} 存储`
+                ? t("通过云端账号 {0} 存储", account.account)
                 : account?.connected
-                  ? "云端账号已连接"
-                  : "云端账号未连接"}
+                  ? t("云端账号已连接")
+                  : t("云端账号未连接")}
             </span>
+            <label className="cloud-storage-toggle">
+              <span>{t("开启云端存储")}</span>
+              <input className="switch" type="checkbox" aria-label={t("开启云端存储")}
+                checked={savedCloud.enabled} disabled={cloudSaving || startupBusy || syncing}
+                onChange={event => void act(() => changeCloudEnabled(event.target.checked))} />
+            </label>
           </div>
           <div className="directory-cloud-line">
-            <span className="label">云端项目</span>
-            <span>尚未关联</span>
-            <span className="muted">首次推送时自动创建</span>
+            <span className="label">{t("云端项目")}</span>
+            <span>{sync?.serverProjectId ? workspace?.name : t("尚未关联")}</span>
+            {!sync?.serverProjectId && <span className="muted">{t("首次推送时自动创建")}</span>}
             <button
               className="text-action cloud-row-action"
-              disabled
-              title="尚未关联云端项目"
+              disabled={!sync?.serverProjectId}
+              title={sync?.serverProjectId ? t("在云端查看") : t("尚未关联云端项目")}
+              onClick={() => { if (account?.server && sync?.serverProjectId) window.open(`${account.server}/dashboard?projectId=${encodeURIComponent(sync.serverProjectId)}`, "_blank", "noopener,noreferrer"); }}
             >
-              在云端查看
+              {t("在云端查看")}
             </button>
           </div>
           <div className="directory-cloud-line">
-            <span className="label">同步方式</span>
+            <span className="label">{t("同步方式")}</span>
             <span>
-              {form.cloud.mode === "automatic"
-                ? `自动同步 · ${form.cloud.interval === 60 ? "每小时" : `每 ${form.cloud.interval} 分钟`}`
-                : "手动同步"}
+              {savedCloud.mode === "automatic"
+                ? t(
+                    "自动同步 · {0}",
+                    savedCloud.interval === 60
+                      ? t("每小时")
+                      : t("每 {0} 分钟", savedCloud.interval),
+                  )
+                : t("手动同步")}
             </span>
             <button
               className="text-action cloud-row-action"
               aria-expanded={cloudEditing}
+              aria-controls="cloud-settings"
+              disabled={cloudSaving}
               onClick={() => {
-                setCloudEditing(!cloudEditing);
-                setEditing(true);
+                if (cloudEditing) closeCloudSettings();
+                else setCloudEditing(true);
               }}
             >
-              调整频率
+              {t("调整频率")}
             </button>
           </div>
           <div className="directory-cloud-line">
-            <span className="label">最近同步</span>
-            <span>尚未同步</span>
+            <span className="label">{t("最近同步")}</span>
+            <span>{sync?.endedAt ? new Date(sync.endedAt).toLocaleString() : t("尚未同步")}</span>
           </div>
           <div className="directory-cloud-line">
-            <span className="label">下次同步</span>
-            <span>未安排</span>
+            <span className="label">{t("下次同步")}</span>
+            <span>{sync?.nextAt ? new Date(sync.nextAt).toLocaleString() : t("未安排")}</span>
           </div>
-          <div hidden={!cloudEditing}>
-            <fieldset disabled={!editing}>
-              <div className="field">
-                <span>开启云端存储</span>
-                <Toggle
-                  label="开启云端存储"
-                  checked={form.cloud.enabled}
-                  onChange={(enabled) =>
-                    change({ cloud: { ...form.cloud, enabled } })
-                  }
+          {cloudEditing && <div id="cloud-settings" className="cloud-settings">
+            <div className="field">
+              <label className="startup-option">
+                <input
+                  type="checkbox"
+                  checked={startup.enabled}
+                  disabled={startupBusy || !startup.supported || syncing || cloudSaving}
+                  onChange={(event) => void changeStartup(event.target.checked)}
                 />
-              </div>
+                <span>{t("登录电脑后自动启动")}</span>
+              </label>
+            </div>
+            <p className="repo-hint">
+              {startup.supported
+                ? t(
+                    "此选项对本机所有目录立即生效。勾选后才可自动同步；取消勾选会暂停所有目录的自动同步，仍可手动同步。",
+                  )
+                : t("当前系统不支持登录后自动启动，可使用手动同步。")}
+            </p>
+            <fieldset disabled={syncing || cloudSaving}>
               <div className="field">
-                <span>同步方式</span>
+                <span>{t("同步方式")}</span>
                 <div className="segments">
                   {(["manual", "automatic"] as const).map((mode) => (
                     <label
                       key={mode}
-                      className={form.cloud.mode === mode ? "active" : ""}
+                      className={cloudForm.mode === mode ? "active" : ""}
                     >
                       <input
                         type="radio"
                         name="cloud-mode"
-                        checked={form.cloud.mode === mode}
+                        disabled={
+                          mode === "automatic" &&
+                          (!startup.enabled || startupBusy)
+                        }
+                        checked={cloudForm.mode === mode}
                         onChange={() =>
-                          change({ cloud: { ...form.cloud, mode } })
+                          changeCloud({ ...cloudForm, mode })
                         }
                       />
-                      {mode === "manual" ? "手动同步" : "自动同步新记录"}
+                      {mode === "manual" ? t("手动同步") : t("自动同步新记录")}
                     </label>
                   ))}
                 </div>
               </div>
               <div className="field">
-                <label htmlFor="cloud-frequency">同步频率</label>
+                <label htmlFor="cloud-frequency">{t("同步频率")}</label>
                 <select
                   id="cloud-frequency"
-                  disabled={form.cloud.mode !== "automatic"}
-                  value={form.cloud.interval}
+                  disabled={cloudForm.mode !== "automatic"}
+                  value={cloudForm.interval}
                   onChange={(e) =>
-                    change({
-                      cloud: {
-                        ...form.cloud,
-                        interval: Number(e.target.value),
-                      },
-                    })
+                    changeCloud({ ...cloudForm, interval: Number(e.target.value) })
                   }
                 >
                   {[5, 15, 30, 60].map((n) => (
                     <option key={n} value={n}>
-                      {n === 60 ? "每小时" : `每 ${n} 分钟`}
+                      {n === 60 ? t("每小时") : t("每 {0} 分钟", n)}
                     </option>
                   ))}
                 </select>
               </div>
             </fieldset>
-          </div>
+            {!fresh && <div className="directory-cloud-actions cloud-settings-actions">
+              <button className="primary" disabled={cloudSaving || startupBusy || syncing || !cloudDirty}
+                onClick={() => void act(saveCloudSettings)}>{t("保存")}</button>
+              <button disabled={cloudSaving} onClick={closeCloudSettings}>{t("取消")}</button>
+            </div>}
+          </div>}
           <p className="repo-hint">
-            尚未同步，本机记录保留。配置仅保存在本机，云端推送暂未接入。
+            {syncing ? t("正在同步新记录…") : sync?.error || (sync?.status === "done" || sync?.status === "partial"
+              ? t("已同步 {0} 条记录、{1} 个提交", sync.events || 0, sync.commits || 0) : t("尚未同步，本机记录保留。"))}
+            {sync?.warnings?.map(warning => <span key={warning} className="repo-hint">{warning}</span>)}
           </p>
           <div className="directory-cloud-actions">
-            <button className="primary" disabled title="云端推送暂未接入">
-              立即同步
+            <button className="primary" disabled={syncing || cloudSaving || !!syncBlockedReason}
+              title={syncBlockedReason || undefined}
+              onClick={() => void act(startCloudSync)}>
+              {t("立即同步")}
             </button>
-            <button disabled title="云端推送暂未接入">
-              暂停自动同步
+            <button disabled={syncing || cloudSaving || workspace?.cloud.mode !== "automatic"}
+              onClick={() => void act(async () => {
+                const saved = await api<Workspace>(`/workspaces/${workspace!.id}`, "PATCH", { version: workspace!.version, cloud: { ...workspace!.cloud, mode: "manual" } });
+                setForm(f => ({ ...f, version: saved.version, cloud: saved.cloud })); setCloudDraft(null); onSaved(saved);
+              })}>
+              {t("暂停自动同步")}
             </button>
           </div>
+          {(syncBlockedReason || fresh) && <p className="repo-hint cloud-sync-hint">
+            {syncBlockedReason || t("点击后会先保存工作目录、整理本地记录，再同步到云端。")}
+          </p>}
         </div>
       </section>
       <p className="workspace-local-note">
         <ShieldCheck size={14} aria-hidden="true" />
-        {form.cloud.enabled
-          ? "当前目录已保存云端存储配置，云端推送暂未接入，记录仅保存在本机。"
-          : "当前目录尚未开启云端存储，记录仅保存在本机；连接账号不会自动上传。"}
+        {savedCloud.enabled
+          ? t(
+              "仅同步新增的提问、最终回复、提交及用量。工具记录保留在本机。",
+            )
+          : t(
+              "当前目录尚未开启云端存储，记录仅保存在本机；连接账号不会自动上传。",
+            )}
       </p>
       {!workspace?.started && (
         <footer className="form-footer workspace-start">
@@ -1477,6 +1907,7 @@ function WorkspaceEditor({
               !form.name.trim() ||
               (!form.providers.length && !form.repositories.length) ||
               collectionRunning ||
+              (!editing && workspace?.directoryAvailable === false) ||
               ["queued", "running"].includes(job?.status || "")
             }
             onClick={(event) => {
@@ -1493,9 +1924,9 @@ function WorkspaceEditor({
               });
             }}
           >
-            开始整理
+            {t("开始整理")}
           </button>
-          <span className="muted">大约需要 1 分钟</span>
+          <span className="muted">{t("大约需要 1 分钟")}</span>
         </footer>
       )}
       {browser && (
@@ -1541,8 +1972,8 @@ function ProviderRow({
           {p.homesSupported && !primaryHomes && (
             <button
               className={`icon provider-config${showHomes ? " expanded" : ""}`}
-              title={`${p.name} 备用主目录`}
-              aria-label={`${p.name} 备用主目录设置`}
+              title={t("{0} 备用主目录", p.name)}
+              aria-label={t("{0} 备用主目录设置", p.name)}
               aria-expanded={showHomes}
               aria-controls={`homes-${p.id}`}
               onClick={() => setShowHomes(!showHomes)}
@@ -1558,7 +1989,7 @@ function ProviderRow({
             </div>
           ))}
           {!p.paths.length && p.supported && (
-            <span className="muted">未配置目录</span>
+            <span className="muted">{t("未配置目录")}</span>
           )}
         </div>
         {p.homesSupported && (
@@ -1568,16 +1999,18 @@ function ProviderRow({
             hidden={!showHomes}
           >
             <label className="provider-homes-title" htmlFor={`home-${p.id}`}>
-              备用主目录
+              {t("备用主目录")}
             </label>
             <div>
               {p.homes.map((path) => (
                 <div className="input-actions" key={path}>
                   <span className="path">{path}</span>
                   <IconButton
-                    title="移除备用主目录"
+                    title={t("移除备用主目录")}
                     onClick={() => {
-                      if (confirm("移除这个备用主目录配置？不会删除原始文件。"))
+                      if (
+                        confirm(t("移除这个备用主目录配置？不会删除原始文件。"))
+                      )
                         save({ homes: p.homes.filter((h) => h !== path) });
                     }}
                   >
@@ -1588,8 +2021,8 @@ function ProviderRow({
               <div className="input-actions provider-add">
                 <input
                   id={`home-${p.id}`}
-                  aria-label={`${p.name} 备用主目录`}
-                  placeholder="备用主目录路径"
+                  aria-label={t("{0} 备用主目录", p.name)}
+                  placeholder={t("备用主目录路径")}
                   value={home}
                   onChange={(e) => setHome(e.target.value)}
                 />
@@ -1607,11 +2040,11 @@ function ProviderRow({
                     })
                   }
                 >
-                  添加主目录
+                  {t("添加主目录")}
                 </button>
               </div>
               <p className="provider-home-count">
-                使用了多个账号或自定义存储位置时，在这里添加其他主目录。
+                {t("使用了多个账号或自定义存储位置时，在这里添加其他主目录。")}
               </p>
             </div>
           </div>
@@ -1619,13 +2052,13 @@ function ProviderRow({
       </div>
       {p.supported ? (
         <Toggle
-          label={`${p.name} 启用`}
+          label={t("{0} 启用", p.name)}
           checked={p.enabled}
           onChange={(enabled) => save({ enabled })}
           statusFirst
         />
       ) : (
-        <Badge>暂未支持</Badge>
+        <Badge>{t("暂未支持")}</Badge>
       )}
     </section>
   );
@@ -1642,6 +2075,17 @@ function Account({
   const [server, setServer] = useState("");
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState("");
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [tokenOpen, setTokenOpen] = useState(false);
+  const [deviceToken, setDeviceToken] = useState("");
+  const [tokenSaving, setTokenSaving] = useState(false);
+  const [tokenError, setTokenError] = useState("");
+  const closeToken = () => {
+    if (tokenSaving) return;
+    setTokenOpen(false);
+    setDeviceToken("");
+    setTokenError("");
+  };
   useEffect(() => {
     let alive = true;
     void (async () => {
@@ -1707,7 +2151,7 @@ function Account({
   if (!data)
     return error ? (
       <p role="alert" className="error">
-        {error}
+        {systemMessage(error)}
       </p>
     ) : (
       <Loader2 className="spin" />
@@ -1716,36 +2160,38 @@ function Account({
   const connected =
     data.connected && data.auth === "valid" && data.reachable === true;
   const lastChecked = data.checkedAt
-    ? new Intl.DateTimeFormat("zh-CN", {
+    ? new Intl.DateTimeFormat(locale(), {
         month: "long",
         day: "numeric",
         hour: "2-digit",
         minute: "2-digit",
         hour12: false,
       }).format(new Date(data.checkedAt))
-    : "尚未检查";
+    : t("尚未检查");
   return (
     <div className="account-page">
       <div className="page-heading">
         <div>
-          <h2>数据云端</h2>
+          <h2>{t("数据云端")}</h2>
           <Badge status={data.connected ? "done" : ""}>
-            {data.connected ? "已连接" : "未连接"}
+            {data.connected ? t("已连接") : t("未连接")}
           </Badge>
         </div>
       </div>
       <p className="page-description">
-        管理这台电脑与云端账号的连接。各工作目录是否上传及同步频率，在工作目录详情中设置。
+        {t(
+          "管理这台电脑与云端账号的连接。各工作目录是否上传及同步频率，在工作目录详情中设置。",
+        )}
       </p>
       {error && (
         <p role="alert" className="error">
-          {error}
+          {systemMessage(error)}
         </p>
       )}
       <section className="settings-rows" aria-busy={checking}>
         {!data.connected && (
           <div className="field">
-            <label htmlFor="server-url">服务地址</label>
+            <label htmlFor="server-url">{t("服务地址")}</label>
             <input
               id="server-url"
               value={server}
@@ -1754,7 +2200,7 @@ function Account({
           </div>
         )}
         <div className="field">
-          <span>云端账号</span>
+          <span>{t("云端账号")}</span>
           <div className="account-value">
             <span className="cloud-avatar" aria-hidden="true">
               {data.account ? (
@@ -1764,17 +2210,18 @@ function Account({
               )}
             </span>
             <span className="account-name">
-              {data.account || (data.connected ? "账号名称未返回" : "未登录")}
+              {data.account ||
+                (data.connected ? t("账号名称未返回") : t("未登录"))}
             </span>
             {data.connected && (
               <Badge status={data.auth === "valid" ? "done" : "partial"}>
-                {data.auth === "valid" ? "已登录" : "授权待更新"}
+                {data.auth === "valid" ? t("已登录") : t("授权待更新")}
               </Badge>
             )}
           </div>
         </div>
         <div className="field">
-          <span>本机账号连接</span>
+          <span>{t("本机账号连接")}</span>
           <div className="account-value">
             <Badge
               status={
@@ -1782,21 +2229,21 @@ function Account({
               }
             >
               {!data.connected
-                ? "未连接"
+                ? t("未连接")
                 : checking
-                  ? "检查中"
+                  ? t("检查中")
                   : connected
-                    ? "连接正常"
+                    ? t("连接正常")
                     : data.auth === "expired"
-                      ? "需要重新授权"
+                      ? t("需要重新授权")
                       : data.reachable === false
-                        ? "连接异常"
-                        : "待检查"}
+                        ? t("连接异常")
+                        : t("待检查")}
             </Badge>
           </div>
         </div>
         <div className="field">
-          <span>账号授权</span>
+          <span>{t("账号授权")}</span>
           <Badge
             status={
               data.auth === "valid"
@@ -1807,14 +2254,14 @@ function Account({
             }
           >
             {data.auth === "valid"
-              ? "有效"
+              ? t("有效")
               : data.auth === "expired"
-                ? "需要刷新授权"
-                : "未连接"}
+                ? t("需要刷新授权")
+                : t("未连接")}
           </Badge>
         </div>
         <div className="field">
-          <span>云端服务</span>
+          <span>{t("云端服务")}</span>
           <Badge
             status={
               data.reachable === true
@@ -1825,16 +2272,16 @@ function Account({
             }
           >
             {checking
-              ? "检查中"
+              ? t("检查中")
               : data.reachable === undefined || data.reachable === null
-                ? "未检查"
+                ? t("未检查")
                 : data.reachable
-                  ? "可连接"
-                  : "连接失败"}
+                  ? t("可连接")
+                  : t("连接失败")}
           </Badge>
         </div>
         <div className="field">
-          <span>最近检查</span>
+          <span>{t("最近检查")}</span>
           <div className="account-value">
             <span>{lastChecked}</span>
             <button
@@ -1842,14 +2289,14 @@ function Account({
               disabled={checking || pending}
               onClick={() => void check()}
             >
-              {checking ? "检查中" : "重新检查"}
+              {checking ? t("检查中") : t("重新检查")}
             </button>
           </div>
         </div>
       </section>
       {data.attempt?.status === "pending" && (
         <section>
-          <h3>等待浏览器授权</h3>
+          <h3>{t("等待浏览器授权")}</h3>
           {data.attempt.verificationUrl && (
             <>
               <a
@@ -1859,7 +2306,7 @@ function Account({
                 rel="noreferrer"
               >
                 <ExternalLink size={14} />
-                打开授权页面
+                {t("打开授权页面")}
               </a>
               <code className="device-code">{data.attempt.userCode}</code>
             </>
@@ -1871,35 +2318,32 @@ function Account({
               )
             }
           >
-            取消授权
+            {t("取消授权")}
           </button>
         </section>
       )}
-      {data.attempt?.error && <p className="error">{data.attempt.error}</p>}
+      {data.attempt?.error && (
+        <p className="error">{systemMessage(data.attempt.error)}</p>
+      )}
       <footer className="account-actions">
         <button
           className="primary"
-          onClick={() =>
-            void act(async () => {
-              await api("/account/login", "POST", { server });
-              setData(await api("/account"));
-            })
-          }
+          onClick={() => setLoginOpen(true)}
           disabled={pending || checking || !server.trim()}
         >
-          {data.connected ? "切换账号" : "连接云端账号"}
+          {data.connected ? t("切换账号") : t("连接云端账号")}
         </button>
         {data.connected && (
           <button
             disabled={checking || pending}
             onClick={() => {
-              if (confirm("断开当前账号？本地历史和配置将保留。"))
+              if (confirm(t("断开当前账号？本地历史和配置将保留。")))
                 void act(async () =>
                   setData(await api("/account/logout", "POST", {})),
                 );
             }}
           >
-            断开连接
+            {t("断开连接")}
           </button>
         )}
         <a
@@ -1908,11 +2352,79 @@ function Account({
           target="_blank"
           rel="noreferrer"
         >
-          打开云端
+          {t("打开云端")}
         </a>
       </footer>
+      {loginOpen && (
+        <Modal title={t("选择登录方式")} onClose={() => setLoginOpen(false)}>
+          <div className="cloud-login-methods">
+            <button className="cloud-login-method" aria-label={t("浏览器授权")} onClick={() => {
+              setLoginOpen(false);
+              void act(async () => {
+                await api("/account/login", "POST", { server });
+                setData(await api("/account"));
+              });
+            }}>
+              <Globe size={20} aria-hidden="true" />
+              <span><strong>{t("浏览器授权")}</strong><small>{t("在浏览器中登录 Cloud 并确认授权。")}</small></span>
+              <ChevronRight size={16} aria-hidden="true" />
+            </button>
+            <button className="cloud-login-method" aria-label={t("使用设备 Token")} onClick={() => {
+              setLoginOpen(false);
+              setTokenOpen(true);
+            }}>
+              <KeyRound size={20} aria-hidden="true" />
+              <span><strong>{t("使用设备 Token")}</strong><small>{t("使用在 Cloud 中创建设备时生成的 Token。")}</small></span>
+              <ChevronRight size={16} aria-hidden="true" />
+            </button>
+          </div>
+        </Modal>
+      )}
+      {tokenOpen && (
+        <Modal title={t("使用设备 Token")} onClose={closeToken}>
+          <form className="cloud-token-form" onSubmit={event => {
+            event.preventDefault();
+            if (tokenSaving || !deviceToken.trim()) return;
+            setTokenSaving(true);
+            setTokenError("");
+            void api<AccountData>("/account/token", "POST", { server, token: deviceToken.trim() })
+              .then(next => {
+                setData(next);
+                setServer(next.server);
+                setError("");
+                setDeviceToken("");
+                setTokenOpen(false);
+              })
+              .catch(e => setTokenError(e instanceof Error ? e.message : String(e)))
+              .finally(() => setTokenSaving(false));
+          }}>
+            <p className="muted">{t("先在 Cloud 中创建设备并复制 Token，再粘贴到这里连接。")}</p>
+            <div className="field">
+              <span>{t("服务地址")}</span>
+              <span className="cloud-token-server">{server}</span>
+            </div>
+            <div className="field">
+              <label htmlFor="cloud-device-token">{t("设备 Token")}</label>
+              <input id="cloud-device-token" type="password" autoComplete="off" spellCheck={false}
+                placeholder={t("粘贴 Cloud 生成的 adit_… Token")} required maxLength={8192}
+                value={deviceToken} disabled={tokenSaving} onChange={e => setDeviceToken(e.target.value)} />
+            </div>
+            {tokenError && <p role="alert" className="error">{systemMessage(tokenError)}</p>}
+            <footer>
+              <button type="button" className="cloud-login-back" disabled={tokenSaving} onClick={() => {
+                closeToken();
+                setLoginOpen(true);
+              }}><ArrowLeft size={14} aria-hidden="true" />{t("返回")}</button>
+              <button type="button" disabled={tokenSaving} onClick={closeToken}>{t("取消")}</button>
+              <button type="submit" className="primary" disabled={tokenSaving || !deviceToken.trim()}>
+                {tokenSaving ? t("验证中…") : t("保存并连接")}
+              </button>
+            </footer>
+          </form>
+        </Modal>
+      )}
       <p className="account-footnote">
-        连接账号不会自动上传数据；云端推送暂未接入。
+        {t("连接账号后，按各工作目录的云端存储及同步设置上传新增记录。")}
       </p>
     </div>
   );
@@ -1942,60 +2454,66 @@ function Runtime({ state, act }: { state: State; act: Act }) {
           }
         >
           <RefreshCw size={14} />
-          重新检查
+          {t("重新检查")}
         </button>
       </div>
       <p className="page-description">
-        查看这台电脑上的 ADIT 安装情况，管理本地数据采集，以及各 Agent
-        的接入状态。
+        {t(
+          "查看这台电脑上的 ADIT 安装情况，管理本地数据采集，以及各 Agent 的接入状态。",
+        )}
       </p>
       <section className="settings-rows">
         <div className="field">
-          <span>当前状态</span>
+          <span>{t("当前状态")}</span>
           <Badge status={runtime?.cli?.path ? "done" : ""}>
             {!runtime
-              ? "检测中"
+              ? t("检测中")
               : runtime.cli?.path
-                ? "已安装 · 可调用"
-                : "PATH 中未找到"}
+                ? t("已安装 · 可调用")
+                : t("PATH 中未找到")}
           </Badge>
         </div>
         <div className="field">
-          <span>当前版本</span>
+          <span>{t("当前版本")}</span>
           <span>
-            {runtime?.version || "检测中"}
-            <small>当前后台服务版本</small>
+            {runtime?.version || t("检测中")}
+            <small>{t("当前后台服务版本")}</small>
           </span>
         </div>
         <div className="field">
-          <span>安装位置</span>
+          <span>{t("安装位置")}</span>
           <code className="path">
-            {runtime?.cli?.path || runtime?.cli?.error || "检测中"}
+            {runtime?.cli?.path ||
+              (runtime?.cli?.error && systemMessage(runtime.cli.error)) ||
+              t("检测中")}
           </code>
         </div>
         <div className="field">
-          <span>最近检查</span>
-          <span>{runtime?.checkedAt ? time(runtime.checkedAt) : "检测中"}</span>
+          <span>{t("最近检查")}</span>
+          <span>
+            {runtime?.checkedAt ? time(runtime.checkedAt) : t("检测中")}
+          </span>
         </div>
       </section>
       <section>
         <h3>
-          本地数据采集 <span className="muted">所有已添加的工作目录</span>
+          {t("本地数据采集")}{" "}
+          <span className="muted">{t("所有已添加的工作目录")}</span>
         </h3>
-        <p className="repo-hint">自动读取本地新增的会话和提交记录。</p>
+        <p className="repo-hint">{t("自动读取本地新增的会话和提交记录。")}</p>
         <div className="field">
-          <span>自动采集</span>
+          <span>{t("自动采集")}</span>
           <div className="field-value">
             <Toggle
-              label="自动采集"
+              label={t("自动采集")}
               checked={state.schedule.enabled}
               onChange={(enabled) => save({ enabled })}
             />
-            <span className="muted">关闭后仅手动采集</span>
+            <span className="muted">{t("关闭后仅手动采集")}</span>
           </div>
         </div>
         <div className="field">
-          <label htmlFor="collection-frequency">采集频率</label>
+          <label htmlFor="collection-frequency">{t("采集频率")}</label>
           <div className="field-value">
             <select
               id="collection-frequency"
@@ -2004,33 +2522,33 @@ function Runtime({ state, act }: { state: State; act: Act }) {
             >
               {[1, 5, 15, 30].map((n) => (
                 <option value={n} key={n}>
-                  每 {n} 分钟
+                  {t("每")} {n} {t("分钟")}
                 </option>
               ))}
             </select>
-            <span className="muted">默认每 5 分钟</span>
+            <span className="muted">{t("默认每 5 分钟")}</span>
           </div>
         </div>
         <div className="field">
-          <span>运行状态</span>
+          <span>{t("运行状态")}</span>
           <Badge status={active?.status}>
             {active
               ? undefined
               : state.schedule.enabled
-                ? "等待采集"
-                : "自动采集已关闭"}
+                ? t("等待采集")
+                : t("自动采集已关闭")}
           </Badge>
         </div>
         <div className="field">
-          <span>上次采集</span>
+          <span>{t("上次采集")}</span>
           <span>
             {time(last?.endedAt)} {last && <Badge status={last.status} />}
           </span>
         </div>
         <div className="field">
-          <span>下次采集</span>
+          <span>{t("下次采集")}</span>
           <span>
-            {state.schedule.nextAt ? time(state.schedule.nextAt) : "未安排"}
+            {state.schedule.nextAt ? time(state.schedule.nextAt) : t("未安排")}
           </span>
         </div>
         <footer>
@@ -2043,18 +2561,19 @@ function Runtime({ state, act }: { state: State; act: Act }) {
             }
           >
             <RefreshCw size={14} />
-            立即采集
+            {t("立即采集")}
           </button>
           <span className="muted">
-            仅更新本机数据；云端上传在工作目录中设置。
+            {t("仅更新本机数据；云端上传在工作目录中设置。")}
           </span>
         </footer>
       </section>
       <section>
-        <h3>Skill 安装情况</h3>
+        <h3>{t("Skill 安装情况")}</h3>
         <p className="repo-hint">
-          Skill 全局安装，所有工作目录共用，让 Agent 知道如何使用 ADIT
-          查询历史、记忆、报告和任务。
+          {t(
+            "Skill 全局安装，所有工作目录共用，让 Agent 知道如何使用 ADIT 查询历史、记忆、报告和任务。",
+          )}
         </p>
         <div className="table-scroll">
           <table>
@@ -2071,10 +2590,10 @@ function Runtime({ state, act }: { state: State; act: Act }) {
                   <td>
                     <span>
                       {{
-                        "adit-history": "历史会话与提交",
-                        "adit-memory": "个人与项目记忆",
-                        "adit-reports": "工作报告与用量",
-                        "adit-tasks": "任务管理",
+                        "adit-history": t("历史会话与提交"),
+                        "adit-memory": t("个人与项目记忆"),
+                        "adit-reports": t("工作报告与用量"),
+                        "adit-tasks": t("任务管理"),
                       }[s.name as string] || s.name}
                     </span>
                     <small>
@@ -2086,10 +2605,10 @@ function Runtime({ state, act }: { state: State; act: Act }) {
                       <Badge status={p.status === "installed" ? "done" : ""}>
                         {
                           {
-                            installed: "已安装",
-                            modified: "内容有修改",
-                            missing: "未安装",
-                            inaccessible: "无法访问",
+                            installed: t("已安装"),
+                            modified: t("内容有修改"),
+                            missing: t("未安装"),
+                            inaccessible: t("无法访问"),
                           }[p.status as string]
                         }
                       </Badge>

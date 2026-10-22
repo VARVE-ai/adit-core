@@ -8,6 +8,8 @@ export interface HistoryMessage {
   usage?: Record<string, unknown>;
   parentKey?: string;
   raw: Record<string, unknown>;
+  finalReply?: boolean;
+  contextKind?: "compaction";
 }
 
 export interface HistorySession {
@@ -15,7 +17,7 @@ export interface HistorySession {
   provider: string;
   cwd: string;
   parentId?: string;
-  relationship?: "fork" | "subagent";
+  relationship?: "fork" | "subagent" | "continuation";
   metadata?: Record<string, unknown>;
   messages: HistoryMessage[];
 }

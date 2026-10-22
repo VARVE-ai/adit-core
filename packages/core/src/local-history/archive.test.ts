@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as codexReader from "./codex-file.js";
 import {
   mkdtempSync,
   mkdirSync,
@@ -20,6 +21,7 @@ import { insideDirectory, sourceDefinitions } from "./sources.js";
 
 const resources: { root: string; store: LocalStore }[] = [];
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const r of resources.splice(0)) {
     r.store.close();
     rmSync(r.root, { recursive: true, force: true });
@@ -75,6 +77,31 @@ function fixture() {
 }
 
 describe("Core-owned local history", () => {
+  it("skips unchanged source parsing after restart, retries failed changes and isolates selected scopes", async () => {
+    const f=fixture(),read=vi.spyOn(codexReader,"readCodexSession");
+    const other=join(f.root,"other");mkdirSync(other);
+    const otherPath=join(f.source,"rollout-other.jsonl");
+    writeFileSync(otherPath,lines({type:"session_meta",payload:{id:"other",cwd:other}},item("user","other project")));
+    const scopes=[{path:f.workspace,providers:["codex"]},{path:other,providers:[]}];
+    await f.archive.scan(f.workspace,f.sources,{scopes});
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(f.archive.session("codex","other")).toBeUndefined();
+    await new LocalHistory(f.store.db).scan(f.workspace,f.sources,{scopes});
+    expect(read).toHaveBeenCalledTimes(2);
+    scopes[1].providers.push("codex");
+    expect((await f.archive.scan(f.workspace,f.sources,{scopes})).scanned).toBe(2);
+    expect(f.archive.session("codex","other")).toBeDefined();
+    read.mockClear();
+    await f.archive.scan(f.workspace,f.sources);
+    expect(read).not.toHaveBeenCalled();
+    appendFileSync(f.path,"{broken}\n");
+    for(let i=0;i<2;i++)expect((await f.archive.scan(f.workspace,f.sources,{scopes})).errors).toHaveLength(1);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(f.archive.session("codex","one")!.messages).toHaveLength(2);
+    writeFileSync(f.path,f.initial+lines(item("user","new turn")));
+    expect((await f.archive.scan(f.workspace,f.sources,{scopes})).updated).toBe(1);
+    expect(f.archive.session("codex","one")!.messages).toHaveLength(3);
+  });
   it("keeps model and effort before first token record, without duplicate usage", () => {
     const f = fixture();
     const session = parseCodex(f.initial + lines(usage));

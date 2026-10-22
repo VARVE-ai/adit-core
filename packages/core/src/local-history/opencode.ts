@@ -61,7 +61,7 @@ function rows(db: Database.Database, table: "session" | "session_v2") {
 export function readOpenCodeDatabase(
   path: string,
   provider: string,
-  workspace: string,
+  workspace: string | string[],
   signal?: AbortSignal,
 ): HistorySession[] {
   return databaseSnapshot(path, (db) => {
@@ -99,7 +99,7 @@ export function readOpenCodeDatabase(
           .get(s.project_id) as { worktree: string } | undefined;
         cwd = project?.worktree || cwd;
       }
-      if (!id || !cwd || cwd === "/" || !insideDirectory(workspace, cwd))
+      if (!id || !cwd || cwd === "/" || !(Array.isArray(workspace) ? workspace : [workspace]).some(scope => insideDirectory(scope, cwd)))
         continue;
       const messages = new Map<string, HistoryMessage>();
       const projected: HistoryMessage[] = [];
@@ -207,7 +207,7 @@ function time(data: Record<string, unknown>, part = false): number {
 export async function readOpenCodeStorage(
   path: string,
   provider: string,
-  workspace: string,
+  workspace: string | string[],
   signal?: AbortSignal,
 ): Promise<HistorySession[]> {
   const data = await readSourceJSON(path, signal);
@@ -229,7 +229,7 @@ export async function readOpenCodeStorage(
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
-  if (!cwd || cwd === "/" || !insideDirectory(workspace, cwd)) return [];
+  if (!cwd || cwd === "/" || !(Array.isArray(workspace) ? workspace : [workspace]).some(scope => insideDirectory(scope, cwd))) return [];
   const sourceMessages = await jsonDirectory(
     childPath(join(root, "storage/message"), id),
     signal,

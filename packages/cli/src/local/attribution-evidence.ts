@@ -151,7 +151,9 @@ export function extractWritten(
   if (/patch/i.test(tool) && script.includes("*** Begin Patch"))
     return patchTexts(script);
   if (
-    !/write|replace|patch|set-content|add-content|out-file|(?:cat|printf|echo)[^\n]*>|open\([^\n]*["'](?:w|a)/i.test(
+    // String replacement, reads, HTTP headers and temporary diagnostic bodies
+    // are not writes. Require an explicit file-writing API or shell operation.
+    !/\b(?:writeFile(?:Sync)?|appendFile(?:Sync)?|write_text|write_bytes|WriteAllText|WriteAllLines|WriteAllBytes|AppendAllText)\s*\(|\bapply_patch\b|\b(?:set-content|add-content|out-file)\b|\b(?:cat|printf|echo)[^\n]*>|\bopen\([^\n]*["'](?:w|a)[+b]?["']/i.test(
       script,
     )
   )

@@ -12,7 +12,8 @@ describe("runGit", () => {
   });
 
   afterAll(() => {
-    rmSync(dir, { recursive: true, force: true });
+    // Windows may release Git's working-directory handle just after timeout completion.
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   it("keeps git's own stderr when git fails", async () => {

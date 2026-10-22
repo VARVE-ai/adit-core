@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import {createHistorySchema} from "./schema.js";
 import {StructuredHistory} from "./structured-store.js";
+import {applyTranscriptEdits} from "./transcript-edits.js";
 import { readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
@@ -22,9 +23,15 @@ import { sidecarProviders, readSidecarSession } from "./sidecar-sessions.js";
 import { parseZencoder } from "./zencoder.js";
 import { additionalProviders, readAdditionalSource } from "./additional-sources.js";
 import { readConversationExport } from "./export-import.js";
-import {readCodexSession} from "./codex-file.js";
+import {readCodexSession,refreshCodexContinuations,refreshCodexContexts} from "./codex-file.js";
+import {SourceCheckpoints, trackSourceReads} from "./source-checkpoints.js";
+import {discoverHistory} from "./discovery.js";
+import {ScanProgressTracker, type SourceProgressListener, type SourceScanProgress} from "./scan-progress.js";
+export type {SourceScanProgress,SourceProgressListener} from "./scan-progress.js";
 
 const PARSER_VERSION = 5;
+// Parser fixes invalidate only the affected provider's file and session checkpoints.
+const parserVersion = (provider: string) => ["cursor", "codex", "traex", "augure-code"].includes(provider) ? 6 : PARSER_VERSION;
 export interface ScanSource {
   id: string;
   paths: string[];
@@ -34,26 +41,35 @@ export interface ScanResult {
   errors: string[];
   scanned: number;
   updated: number;
+  /** Discovery files whose workspace/identity needs full collection to confirm. */
+  pending?: Record<string, number>;
+  cached?: number;
+  sourceProgress?:Record<string,Record<string,SourceScanProgress>>;
 }
 
 export class LocalHistory {
-  constructor(readonly db: Database.Database) {
+  constructor(readonly db: Database.Database, options: {discovery?:boolean} = {}) {
     createHistorySchema(db);
+    if(!options.discovery){refreshCodexContinuations(db);new StructuredHistory(db).refreshCodexPromptSummaries();}
   }
 
   counts(workspace: string, providers?: string[]): Record<string, number> {
     const result: Record<string, number> = {};
+    const counted=new Set<string>();
     const rows = this.db
       .prepare(
-        "SELECT s.provider,CASE WHEN s.cwd='' THEN coalesce(a.workspace,'') ELSE s.cwd END AS cwd FROM adit_history_sessions s LEFT JOIN adit_history_assignments a ON a.provider=s.provider AND a.session_id=s.id WHERE s.parent_id IS NULL OR s.relationship='fork'",
+        "SELECT s.provider,CASE WHEN s.relationship='continuation' THEN s.parent_id ELSE s.id END AS conversation_id,CASE WHEN s.cwd='' THEN coalesce(a.workspace,'') ELSE s.cwd END AS cwd FROM adit_history_sessions s LEFT JOIN adit_history_assignments a ON a.provider=s.provider AND a.session_id=s.id WHERE s.parent_id IS NULL OR s.relationship IN ('fork','continuation')",
       )
-      .all() as { provider: string; cwd: string }[];
+      .all() as { provider: string; conversation_id:string; cwd: string }[];
     for (const row of rows)
       if (
         (!providers || providers.includes(row.provider) || ["claude-ai", "chatgpt", "gemini-apps"].includes(row.provider)) &&
-        !!row.cwd && insideDirectory(workspace, row.cwd)
+        !!row.cwd && insideDirectory(workspace, row.cwd) && !counted.has(`${row.provider}\0${row.conversation_id}`)
       )
+      {
+        counted.add(`${row.provider}\0${row.conversation_id}`);
         result[row.provider] = (result[row.provider] || 0) + 1;
+      }
     return result;
   }
 
@@ -91,11 +107,14 @@ export class LocalHistory {
     sources: ScanSource[],
     options: {
       preview?: boolean;
+      scopes?: { path: string; providers: string[] }[];
       signal?: AbortSignal;
       beforeSource?: (id: string) => void;
       progress?: (scanned: number, updated: number) => void;
+      sourceProgress?: SourceProgressListener;
     } = {},
   ): Promise<ScanResult> {
+    if(options.preview)return discoverHistory(this.db,workspace,sources,options);
     const result: ScanResult = {
       counts: {},
       errors: [],
@@ -104,13 +123,26 @@ export class LocalHistory {
     };
     const seenFiles = new Set<string>();
     const databaseSessions = new Set<string>();
-    const sessions = new Map<string, HistorySession>();
+    const sessions = new Map<string, Pick<HistorySession,"provider"|"id"|"cwd"|"parentId"|"relationship">>();
+    const checkpoints = new SourceCheckpoints(this.db);
     for (const source of sources) {
+      const version = parserVersion(source.id);
+      const scopes = options.scopes?.filter(s => s.providers.includes(source.id)).map(s => s.path) ?? [workspace];
+      if (!scopes.length) continue;
+      const accepts = (cwd: string) => scopes.some(scope => insideDirectory(scope, cwd));
       options.signal?.throwIfAborted();
       options.beforeSource?.(source.id);
+      refreshCodexContexts(this.db,{provider:source.id,scopes,signal:options.signal});
+      const sourceErrors=result.errors.length;
+      const detail=options.sourceProgress?new ScanProgressTracker(this.db,source,scopes,(scope,provider,progress)=>{
+        result.sourceProgress ??= {};result.sourceProgress[scope] ??= {};result.sourceProgress[scope][provider]=progress;
+        options.sourceProgress!(scope,provider,progress);
+      }):undefined;
+      await detail?.plan({signal:options.signal,beforeSource:options.beforeSource});
+      if(detail)result.errors.push(...detail.errors);
       for (const root of source.paths) {
         try {
-          for await (const path of sourceFiles(
+          for await (const path of detail ? detail.files.get(root)||[] : sourceFiles(
             source.id,
             root,
             options.signal,
@@ -124,7 +156,21 @@ export class LocalHistory {
             const fileKey = `${source.id}:${pathKey}`;
             if (seenFiles.has(fileKey)) continue;
             seenFiles.add(fileKey);
+            const previousUpdated=result.updated;
             try {
+              const scopeKey = JSON.stringify([resolve(root), [...scopes].sort()]);
+              const cached = !options.preview ? checkpoints.unchanged(source.id, pathKey, scopeKey, version, insideDirectory) : undefined;
+              if (cached) {
+                if(path.endsWith(".db"))for(const [provider,id] of cached)databaseSessions.add(`${provider}:${id}`);
+                result.scanned++;
+                detail?.processed(cached);
+                options.progress?.(result.scanned, result.updated);
+                continue;
+              }
+              const references: [string, string][] = [];
+              const writes: (() => void)[] = [];
+              let retry = false;
+              const captured = await trackSourceReads(path, async () => {
               if (
                 (["codex","traex","augure-code","opencode", "kilo", "mimocode", "icodemate", "cursor-ide", ...piProviders, ...sidecarProviders, ...additionalProviders].includes(
                   source.id,
@@ -140,27 +186,30 @@ export class LocalHistory {
                   : piProviders.includes(source.id)
                   ? await readPi(path, source.id, root, options.signal)
                   : source.id === "cursor-ide"
-                    ? readCursorIDE(path, workspace, options.signal,(id,error)=>{
+                    ? readCursorIDE(path, scopes, options.signal,(id,error)=>{
                         failedMembers.add(id);
+                        retry = true;
                         result.errors.push(`cursor-ide: ${error instanceof Error?error.message:"Session could not be read"}`);
                       })
                     : path.endsWith(".db")
                       ? readOpenCodeDatabase(
                           path,
                           source.id,
-                          workspace,
+                          scopes,
                           options.signal,
                         )
                       : await readOpenCodeStorage(
                           path,
                           source.id,
-                          workspace,
+                          scopes,
                           options.signal,
                         );
                 // A container/sidecar can change without the primary file changing.
                 // Check each logical session, using its own stable checkpoint.
                 for (const session of snapshots) {
-                  if (session.cwd && !insideDirectory(workspace, session.cwd)) continue;
+                  if (session.metadata?.lineageRetry) retry = true;
+                  if (session.cwd && !accepts(session.cwd)) continue;
+                  references.push([session.provider, session.id]);
                   const sessionKey = `${session.provider}:${session.id}`;
                   if (["opencode", "kilo", "mimocode", "icodemate"].includes(source.id)) {
                     if (path.endsWith(".db")) databaseSessions.add(sessionKey);
@@ -177,41 +226,41 @@ export class LocalHistory {
                     .get(source.id, key) as
                     | { fingerprint: string; parser_version: number }
                     | undefined;
-                  sessions.set(`${session.provider}:${session.id}`, session);
+                  if(options.preview)sessions.set(`${session.provider}:${session.id}`, {provider:session.provider,id:session.id,cwd:session.cwd,parentId:session.parentId,relationship:session.relationship});
                   options.signal?.throwIfAborted();
                   options.beforeSource?.(source.id);
                   if (
                     !options.preview &&
                     (old?.fingerprint !== fingerprint ||
-                      old.parser_version !== PARSER_VERSION)
+                      old.parser_version !== version)
                   ) {
-                    this.save(
+                    writes.push(() => { this.save(
                       session,
                       key,
                       fingerprint,
                       undefined,
                       path.endsWith(".db"),
                     );
-                    result.updated++;
+                    result.updated++; });
                   }
                 }
                 if(!options.preview){
                   options.signal?.throwIfAborted();options.beforeSource?.(source.id);
                   const retained=new Set(snapshots.map(session=>`${pathKey}#${encodeURIComponent(session.id)}`));
                   for(const id of failedMembers)retained.add(`${pathKey}#${encodeURIComponent(id)}`);
-                  this.db.transaction(()=>{
+                  writes.push(()=>{
                     const prefix=`${pathKey}#`;
-                    const previous=this.db.prepare("SELECT path,session_id FROM adit_history_sources WHERE provider=? AND substr(path,1,length(?))=?").all(source.id,prefix,prefix) as {path:string;session_id:string}[];
-                    for(const old of previous)if(!retained.has(old.path)){
+                    const previous=this.db.prepare(`SELECT src.path,src.session_id,s.cwd FROM adit_history_sources src
+                      JOIN adit_history_sessions s ON s.provider=src.provider AND s.id=src.session_id
+                      WHERE src.provider=? AND substr(src.path,1,length(?))=?`).all(source.id,prefix,prefix) as {path:string;session_id:string;cwd:string}[];
+                    for(const old of previous)if(!retained.has(old.path) && (!old.cwd || accepts(old.cwd))){
                       this.db.prepare("DELETE FROM adit_history_sources WHERE provider=? AND path=?").run(source.id,old.path);
                       this.db.prepare("DELETE FROM adit_history_sessions WHERE provider=? AND id=? AND NOT EXISTS(SELECT 1 FROM adit_history_sources WHERE provider=? AND session_id=?)").run(source.id,old.session_id,source.id,old.session_id);
                       result.updated++;
                     }
-                  })();
+                  });
                 }
-                result.scanned++;
-                options.progress?.(result.scanned, result.updated);
-                continue;
+                return;
               }
               const before = await stat(path);
               if (before.size > 128 * 1024 * 1024)
@@ -226,18 +275,16 @@ export class LocalHistory {
                 throw new Error(
                   "Source changed while reading; retry on the next collection",
                 );
-              const cwdHint =
+              let cwdHint =
                 source.id === "gemini"
                   ? await geminiWorkspace(root, path)
-                  : source.id === "cursor"
-                    ? await cursorWorkspace(
-                        root,
-                        path,
-                        workspace,
-                        options.signal,
-                      )
-                    : "";
-              if (source.id === "cursor" && !cwdHint) continue;
+                  : "";
+              if(source.id==="cursor"){
+                const matches=[...new Set((await Promise.all(scopes.map(scope=>cursorWorkspace(root,path,scope,options.signal)))).filter(Boolean))];
+                if(matches.length>1)throw new Error("Cursor project path cannot be resolved unambiguously");
+                cwdHint=matches[0]||"";
+              }
+              if (source.id === "cursor" && !cwdHint) return;
               let metadata: Record<string, unknown> = {};
               if (source.id === "commandcode") {
                 try { metadata = await readSourceJSON(path.replace(/\.jsonl$/, ".meta.json"), options.signal); }
@@ -262,7 +309,7 @@ export class LocalHistory {
               let session: HistorySession | undefined;
               if (
                 old?.fingerprint === fingerprint &&
-                old.parser_version === PARSER_VERSION
+                old.parser_version === version
               )
                 session = this.session(source.id, old.session_id);
               if (!session) {
@@ -301,19 +348,30 @@ export class LocalHistory {
                     throw new Error("Source parser is not implemented");
                 }
               }
-              if (session.cwd && !insideDirectory(workspace, session.cwd)) continue;
-              sessions.set(`${session.provider}:${session.id}`, session);
+              if (session.cwd && !accepts(session.cwd)) return;
+              references.push([session.provider, session.id]);
+              if(options.preview)sessions.set(`${session.provider}:${session.id}`, {provider:session.provider,id:session.id,cwd:session.cwd,parentId:session.parentId,relationship:session.relationship});
               options.signal?.throwIfAborted();
               options.beforeSource?.(source.id);
               if (
                 !options.preview &&
                 (old?.fingerprint !== fingerprint ||
-                  old.parser_version !== PARSER_VERSION)
+                  old.parser_version !== version)
               ) {
-                this.save(session, pathKey, fingerprint, old?.session_id);
-                result.updated++;
+                const snapshot=session;
+                writes.push(()=>{this.save(snapshot, pathKey, fingerprint, old?.session_id);result.updated++;});
               }
+              });
+              options.signal?.throwIfAborted();
+              options.beforeSource?.(source.id);
+              if(!captured.stable)throw new Error("Source changed while reading; retry on the next collection");
+              if (!options.preview) this.db.transaction(()=>{
+                for(const write of writes)write();
+                if(!retry)checkpoints.save(source.id, pathKey, scopeKey, version, captured.manifest, references);
+              })();
+              detail?.processed(references);
             } catch (error) {
+              result.updated=previousUpdated;
               options.signal?.throwIfAborted();
               result.errors.push(
                 `${source.id}: ${error instanceof Error ? error.message : "Source could not be read"}`,
@@ -329,6 +387,7 @@ export class LocalHistory {
           );
         }
       }
+      detail?.publish(result.errors.length>sourceErrors?"partial":"done");
     }
     for (const session of sessions.values()) {
       const assignment = !session.cwd ? this.db.prepare("SELECT workspace FROM adit_history_assignments WHERE provider=? AND session_id=?").get(session.provider,session.id) as {workspace:string}|undefined : undefined;
@@ -385,7 +444,7 @@ export class LocalHistory {
         ? this.session(session.provider, session.id)
         : undefined;
       // Copies of the same source may coexist; never let an older copy erase a newer transcript.
-      if (current && !isDeepStrictEqual(JSON.parse(JSON.stringify(current)),JSON.parse(JSON.stringify(session))))
+      if (current && !isDeepStrictEqual(JSON.parse(JSON.stringify(current)),JSON.parse(JSON.stringify(applyTranscriptEdits(this.db,session)))))
         throw new Error(
           "Conflicting copies of the same session; existing archive retained",
         );
@@ -394,7 +453,7 @@ export class LocalHistory {
         .prepare(
           "INSERT INTO adit_history_sources VALUES (?,?,?,?,?) ON CONFLICT(provider,path) DO UPDATE SET session_id=excluded.session_id,fingerprint=excluded.fingerprint,parser_version=excluded.parser_version",
         )
-        .run(session.provider, path, session.id, fingerprint, PARSER_VERSION);
+        .run(session.provider, path, session.id, fingerprint, parserVersion(session.provider));
       if (previousId && previousId !== session.id)
         this.db
           .prepare(

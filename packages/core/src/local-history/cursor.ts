@@ -15,6 +15,8 @@ import {
   type HistorySession,
 } from "./types.js";
 import { insideDirectory } from "./sources.js";
+import { cursorUserQuery } from "./cursor-prompt.js";
+import { textContent } from "./prompt-summary.js";
 
 export async function cursorWorkspace(
   root: string,
@@ -73,7 +75,7 @@ export function parseCursor(
         role: row.role,
         content: m.content,
         model: string(m.model) || undefined,
-        timestamp: timestamp(row.timestamp),
+        timestamp: timestamp(row.timestamp) ?? (row.role === "user" ? cursorUserQuery(textContent(m.content))?.timestamp : undefined),
         raw: row,
       });
     }
@@ -86,6 +88,7 @@ export function parseCursor(
           key: String(messages.length),
           role,
           content: body.join("\n").trim(),
+          timestamp: role === "user" ? cursorUserQuery(body.join("\n"))?.timestamp : undefined,
           raw: { role, text: body.join("\n") },
         });
     };
@@ -112,7 +115,7 @@ export function parseCursor(
 
 export function readCursorIDE(
   path: string,
-  workspace: string,
+  workspace: string | string[],
   signal?: AbortSignal,
   onMemberError?: (id:string,error:unknown)=>void,
 ): HistorySession[] {
@@ -140,7 +143,7 @@ export function readCursorIDE(
       const cwd =
         string(record(record(data.workspaceIdentifier).uri).fsPath) ||
         string(record(repos[0]).repoPath);
-      if (!cwd || !insideDirectory(workspace, cwd)) continue;
+      if (!cwd || !(Array.isArray(workspace) ? workspace : [workspace]).some(scope => insideDirectory(scope, cwd))) continue;
       if (!Array.isArray(data.fullConversationHeadersOnly)) continue;
       const messages: HistoryMessage[] = [];
       for (const value of data.fullConversationHeadersOnly) {

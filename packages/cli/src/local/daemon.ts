@@ -7,7 +7,7 @@ import {
   writeFileSync,
   unlinkSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { localDataDir, LocalStore } from "@varveai/adit-core";
@@ -56,6 +56,7 @@ export async function runDaemon(port?: number): Promise<void> {
   mkdirSync(dir, { recursive: true });
   const instance = randomBytes(16).toString("hex");
   const lockStore = new LocalStore(dir);
+  const preferredPort = lockStore.get<number | undefined>("daemon-port", undefined);
   try {
     lockStore.db.transaction(() => {
       const current = lockStore.get<{pid: number; instance: string} | null>("daemon-lock", null);
@@ -74,7 +75,17 @@ export async function runDaemon(port?: number): Promise<void> {
   };
   const token = randomBytes(32).toString("hex");
   try {
-    const app = await startLocalServer({ port, token, instance });
+    const requestedPort = port ?? preferredPort;
+    const app = await startLocalServer({ port: requestedPort, token, instance }).catch(async (error: NodeJS.ErrnoException) => {
+      // Reuse the previous address after login/restart. If another app now owns
+      // that port, choose an available port; an explicitly requested port still fails.
+      if (port === undefined && preferredPort && error.code === "EADDRINUSE")
+        return startLocalServer({ token, instance });
+      throw error;
+    });
+    const settings = new LocalStore(dir);
+    try { settings.set("daemon-port", Number(new URL(app.origin).port)); }
+    finally { settings.close(); }
     writeFileSync(
       join(dir, "daemon.json"),
       JSON.stringify({
@@ -122,7 +133,12 @@ export async function startDaemon(port?: number): Promise<Instance> {
       detached: true,
       windowsHide: true,
       stdio: ["ignore", log, log],
-      env: process.env,
+      env: {
+        ...process.env,
+        ADIT_CLI_ENTRY: process.env.ADIT_CLI_ENTRY ||
+          (process.argv[1] && basename(process.argv[1]) === "index.js"
+            ? resolve(process.argv[1]) : fileURLToPath(new URL("../index.js", import.meta.url))),
+      },
     },
   );
   let startupError: Error | undefined;

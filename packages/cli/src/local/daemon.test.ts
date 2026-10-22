@@ -14,6 +14,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { LocalStore } from "@varveai/adit-core";
+import { UserLoginRegistration, LoginStartup } from "./login-startup.js";
+import { createServer } from "node:net";
 
 const exec = promisify(execFile);
 it("keeps one detached instance and resumes collection after restart without a browser", async () => {
@@ -80,9 +82,11 @@ it("keeps one detached instance and resumes collection after restart without a b
       .join("\n") + "\n",
   );
   try {
+    await cli("daemon", "start", "--on-login");
+    expect((await cli("daemon", "status")).stdout.trim()).toBe("Stopped");
     const started = await Promise.all([
-      cli("daemon", "start"),
-      cli("daemon", "start"),
+      cli("server", "--no-browser"),
+      cli("serve", "--no-browser"),
     ]);
     expect(started[0].stdout.trim()).toBe(started[1].stdout.trim());
     const originalPid = info().pid;
@@ -118,6 +122,7 @@ it("keeps one detached instance and resumes collection after restart without a b
       }) + "\n",
     );
     await cli("daemon", "start");
+    expect(info().url).toBe(started[0].stdout.trim());
     let resumed = false;
     expect(
       (
@@ -169,3 +174,39 @@ it("keeps one detached instance and resumes collection after restart without a b
     rmSync(root, { recursive: true, force: true });
   }
 }, 30000);
+
+it("runs the login launcher only with consent and falls back safely if the previous port is occupied", async () => {
+  const root = mkdtempSync(join(tmpdir(), "adit-login-daemon-"));
+  const data = join(root, "用户's local data");
+  const entry = fileURLToPath(new URL("../../dist/index.js", import.meta.url));
+  const env = { ...process.env, ADIT_LOCAL_DATA_DIR: data };
+  const cli = (...args: string[]) => exec(process.execPath, [entry, ...args], { cwd: root, env, windowsHide: true, timeout: 20000 });
+  const settings = new LocalStore(data);
+  const registration = new UserLoginRegistration(data, { entry, appData: root, home: root, configHome: join(root, "config") });
+  const startup = new LoginStartup(settings, registration);
+  const occupied = createServer();
+  try {
+    await new Promise<void>(resolve => occupied.listen(0, "127.0.0.1", resolve));
+    const port = (occupied.address() as { port: number }).port;
+    settings.set("daemon-port", port);
+    await startup.save({ enabled: true, version: 0 });
+    const launch = () => exec(process.execPath, [join(data, "startup", "start.cjs")], { cwd: root, env, windowsHide: true, timeout: 25000 });
+    await launch();
+    const info = JSON.parse(readFileSync(join(data, "daemon.json"), "utf8")) as { url: string; pid: number };
+    expect(new URL(info.url).port).not.toBe(String(port));
+    expect((await cli("daemon", "status")).stdout).toContain("Running:");
+    await launch();
+    expect(JSON.parse(readFileSync(join(data, "daemon.json"), "utf8")).pid).toBe(info.pid);
+    await startup.save({ enabled: false, version: 1 });
+    expect((await cli("daemon", "status")).stdout).toContain("Running:");
+    await cli("daemon", "stop");
+    await launch();
+    expect((await cli("daemon", "status")).stdout.trim()).toBe("Stopped");
+  } finally {
+    await cli("daemon", "stop");
+    await registration.remove();
+    await new Promise<void>(resolve => occupied.close(() => resolve()));
+    settings.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 45000);

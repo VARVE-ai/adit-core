@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
-import { randomUUID } from "node:crypto";
+import { assertDeletionIdle, deleteProjectData, projectDeletionPlan } from "./local-project-deletion.js";
+import { createHash, randomUUID } from "node:crypto";
 import {
   mkdirSync,
   realpathSync,
@@ -9,6 +10,8 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, basename, resolve } from "node:path";
+import { generateProjectId, readProjectManifest, readWorkspaceManifest, workspaceManifestRelativePath } from "./config/project.js";
+import { assertProjectIdle, createProjectRegistry, pathKey, relocatedRepositories, relocateProjectHistory, saveProjectRepositories } from "./local-projects.js";
 
 export interface LocalWorkspace {
   id: string;
@@ -43,6 +46,19 @@ export class LocalStateError extends Error {
 export function localDataDir(): string {
   return resolve(process.env.ADIT_LOCAL_DATA_DIR || join(homedir(), ".adit"));
 }
+/** Read-only consent check for hook processes. Never creates a local database. */
+export function localLoginStartupEnabled(directory = localDataDir()): boolean {
+  const path = join(directory, "local.sqlite");
+  if (!existsSync(path)) return false;
+  let db: Database.Database | undefined;
+  try {
+    db = new Database(path, { readonly: true, fileMustExist: true, timeout: 1000 });
+    const row = db.prepare("SELECT data FROM adit_local_settings WHERE key='login-startup'").get() as { data: string } | undefined;
+    const settings = row ? JSON.parse(row.data) : null;
+    return settings?.enabled === true && typeof settings.registration === "string" && existsSync(settings.registration);
+  } catch { return false; }
+  finally { db?.close(); }
+}
 export function canonicalDirectory(path: string): string {
   if (typeof path !== "string" || !path.trim())
     throw new LocalStateError("Directory is required");
@@ -69,6 +85,35 @@ function interval(value: unknown, allowed: number[]): number {
     throw new LocalStateError("Invalid interval");
   return value;
 }
+
+/** Recover saved identity without initializing or migrating the old database. */
+function savedLegacyProjectId(root: string): string | undefined {
+  const workspace = readWorkspaceManifest(root);
+  if (workspace) return workspace.workspaceId;
+  const dbPath = join(root, ".adit", "adit.sqlite");
+  if (existsSync(dbPath) && statSync(dbPath).size > 0) {
+    let db: Database.Database | undefined;
+    try {
+      db = new Database(dbPath, { readonly: true, fileMustExist: true });
+      // Older releases may only have one of these tables. Link identity takes
+      // precedence, as in the original CLI's initialization path.
+      for (const table of ["project_link_cache", "sessions"]) {
+        const columns = db.prepare(`PRAGMA table_info(${table})`).all() as {name: string}[];
+        if (!columns.some(column => column.name === "project_id")) continue;
+        const ids = db.prepare(`SELECT DISTINCT project_id FROM ${table} WHERE trim(coalesce(project_id,'')) <> '' LIMIT 2`).all() as {project_id: string}[];
+        if (ids.length > 1) throw new LocalStateError("Saved ADIT history contains multiple project identities. Restore the original project configuration.", 409);
+        if (ids.length === 1) return ids[0].project_id;
+      }
+    } catch (error) {
+      if (error instanceof LocalStateError) throw error;
+      throw new LocalStateError("Unable to read the saved ADIT project identity. Check the local database.", 409);
+    } finally { db?.close(); }
+  }
+  if (existsSync(join(root, workspaceManifestRelativePath)))
+    throw new LocalStateError("The saved ADIT workspace configuration is unreadable. Check .adit/workspace.json.", 409);
+  // A directory, or an empty database, is not evidence of a lost identity.
+  return undefined;
+}
 export class LocalStore {
   readonly db: Database.Database;
   readonly dbPath: string;
@@ -92,6 +137,12 @@ export class LocalStore {
       CREATE TABLE IF NOT EXISTS adit_local_repositories (
         path TEXT PRIMARY KEY, indexed_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS adit_local_git_checkpoints (
+        repository TEXT PRIMARY KEY, identity TEXT NOT NULL, refs TEXT NOT NULL, commit_count INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS adit_local_collection_checkpoints (
+        workspace_id TEXT PRIMARY KEY REFERENCES adit_local_workspaces(id) ON DELETE CASCADE, fingerprint TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS adit_local_commits (
         repository TEXT NOT NULL, sha TEXT NOT NULL, tree_sha TEXT NOT NULL,
         authored_at INTEGER, author_name TEXT NOT NULL, author_email TEXT NOT NULL,
@@ -113,6 +164,7 @@ export class LocalStore {
       );
       CREATE INDEX IF NOT EXISTS adit_local_commit_files_path ON adit_local_commit_files(repository,path,sha);
     `);
+    createProjectRegistry(this.db);
   }
   close(): void {
     this.db.close();
@@ -124,7 +176,10 @@ export class LocalStore {
           .prepare("SELECT value FROM adit_local_identity WHERE kind=?")
           .get(kind) as { value: string } | undefined;
         if (found) return found.value;
-        const value = seed || randomUUID().replaceAll("-", "").slice(0, 16);
+        // All callers (including device login) preserve the original machine identity.
+        const legacy = join(this.directory, "client-id");
+        const value = seed || (kind === "client" && existsSync(legacy) ? readFileSync(legacy, "utf8").trim() : "") ||
+          (kind === "client" ? createHash("sha256").update(`${homedir()}-${process.pid}-${Date.now()}`).digest("hex").slice(0,16) : randomUUID().replaceAll("-", "").slice(0,16));
         this.db
           .prepare("INSERT INTO adit_local_identity VALUES (?,?)")
           .run(kind, value);
@@ -169,6 +224,15 @@ export class LocalStore {
             409,
           );
         const path = canonicalDirectory(String(input.path ?? old?.path ?? ""));
+        const manifest = readProjectManifest(path);
+        const legacyProjectId = !manifest ? savedLegacyProjectId(path) : undefined;
+        if (manifest?.mergedIntoProjectId)
+          throw new LocalStateError("This directory belongs to its parent ADIT project. Register the parent directory.", 409);
+        if (old && (manifest?.projectId ?? legacyProjectId) && (manifest?.projectId ?? legacyProjectId) !== old.id)
+          throw new LocalStateError("Project identity conflicts with the registered workspace. Choose the original project's directory.", 409);
+        const projectId = old?.id ?? manifest?.projectId ?? legacyProjectId ?? generateProjectId();
+        if (!old && this.db.prepare("SELECT 1 FROM adit_local_workspaces WHERE id=?").get(projectId))
+          throw new LocalStateError("This project is already registered. Update its directory in Settings.",409);
         const key = process.platform === "win32" ? path.toLowerCase() : path;
         const duplicate = this.db
           .prepare("SELECT id FROM adit_local_workspaces WHERE path=?")
@@ -179,9 +243,10 @@ export class LocalStore {
         if (!name || name.length > 200)
           throw new LocalStateError("Name must contain 1 to 200 characters");
         const providers = list(input.providers ?? old?.providers ?? []);
-        const repositories = list(
+        const selection = list(
           input.repositories ?? old?.repositories ?? [],
         );
+        const repositories = old ? relocatedRepositories(old,path,selection) : selection;
         const cloud = (input.cloud ??
           old?.cloud ?? {
             enabled: false,
@@ -191,7 +256,7 @@ export class LocalStore {
         if (!cloud || !["manual", "automatic"].includes(String(cloud.mode)))
           throw new LocalStateError("Invalid cloud mode");
         const workspace: LocalWorkspace = {
-          id: old?.id ?? `p_${randomUUID()}`,
+          id: projectId,
           name,
           path,
           version: (old?.version ?? 0) + 1,
@@ -205,14 +270,35 @@ export class LocalStore {
           },
           updatedAt: new Date().toISOString(),
         };
+        if (workspace.cloud.mode === "automatic" && !this.get("login-startup", { enabled: false }).enabled)
+          throw new LocalStateError('Enable "Start automatically when you sign in" before automatic cloud sync', 409);
+        if (old && pathKey(old.path) !== pathKey(path)) {
+          assertProjectIdle(this.db,old.id);
+          relocateProjectHistory(this.db,old,workspace);
+        }
         this.db
           .prepare(
             "INSERT INTO adit_local_workspaces VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,data=excluded.data",
           )
           .run(workspace.id, key, JSON.stringify(workspace));
+        saveProjectRepositories(this.db,workspace,manifest,!!legacyProjectId);
         return workspace;
       })
       .immediate();
+  }
+  deletionPreview(id: string) {
+    const plan=projectDeletionPlan(this.db,this.workspace(id),this.workspaces());
+    return { sessions:plan.sessions.length,repositories:plan.repositories.length,sharedSessions:plan.sharedSessions,sharedRepositories:plan.sharedRepositories };
+  }
+  deleteWorkspace(id: string, version: unknown, cleanup?: () => void): void {
+    this.db.transaction(() => {
+      const workspace = this.workspace(id);
+      if (version !== workspace.version)
+        throw new LocalStateError("Workspace settings changed. Reload before deleting.", 409);
+      assertDeletionIdle(this.db,workspace);
+      cleanup?.();
+      deleteProjectData(this.db, workspace, this.workspaces());
+    }).immediate();
   }
   markStarted(id: string): void {
     const w = this.workspace(id);
@@ -298,12 +384,7 @@ export class LocalStore {
 export function getLocalClientId(): string {
   const store = new LocalStore();
   try {
-    // Preserve the device identity only; no project history or credentials are imported.
-    const legacy = join(store.directory, "client-id");
-    const seed = existsSync(legacy)
-      ? readFileSync(legacy, "utf8").trim()
-      : undefined;
-    return store.identity("client", seed || undefined);
+    return store.identity("client");
   } finally {
     store.close();
   }

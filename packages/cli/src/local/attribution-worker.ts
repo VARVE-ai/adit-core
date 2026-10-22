@@ -5,10 +5,12 @@ if (parentPort) {
   const store = new LocalStore(workerData.directory);
   store.db.pragma("busy_timeout=10000");
   let queue = Promise.resolve();
-  parentPort.on("message", ({ id, workspace }) => {
+  parentPort.on("message", ({ id, workspace, job }) => {
     queue = queue.then(async () => {
       try {
-        const result = await analyzeAttribution(store, workspace);
+        const result = await analyzeAttribution(store, workspace,{progress:repository=>{
+          if(job&&job.activeRepository!==repository){job.activeRepository=repository;store.job(job);}
+        }});
         parentPort!.postMessage({ id, result });
       } catch (error) {
         parentPort!.postMessage({

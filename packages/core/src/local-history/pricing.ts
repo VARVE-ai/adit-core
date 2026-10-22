@@ -27,6 +27,11 @@ const fields = [
   "cache_read_input_token_cost",
   "cache_creation_input_token_cost",
 ];
+// Bare model names use the official API's reference price. Explicit channel
+// IDs keep their own prices; never select an arbitrary matching suffix.
+const officialModelIds = new Map([
+  ["glm-5.3", "zai/glm-5.3"],
+]);
 function valid(value: unknown): value is string | number {
   return (
     (typeof value === "number" ||
@@ -89,6 +94,10 @@ export class LocalPrices {
   private pending?: Promise<void>;
   private controller = new AbortController();
   private lookup = new Map<string, Price | null>();
+  private compiled = new WeakMap<
+    Price,
+    { threshold: number; rate: [bigint, bigint] | null }[][]
+  >();
   error: string | null = null;
   constructor(private db: Database.Database) {
     db.exec(
@@ -224,14 +233,44 @@ export class LocalPrices {
     if (!record.model || record.scope !== "message") return null;
     if (!this.lookup.has(record.model)) {
       const exact = this.prices.find((p) => p.model === record.model),
+        officialId = officialModelIds.get(record.model.trim().toLowerCase()),
         aliases = this.prices.filter((p) => p.aliases.includes(record.model!));
       this.lookup.set(
         record.model,
-        exact || (aliases.length === 1 ? aliases[0] : null),
+        exact || (officialId
+          ? this.prices.find((p) => p.model === officialId) ?? null
+          : aliases.length === 1 ? aliases[0] : null),
       );
     }
     const price = this.lookup.get(record.model);
     if (!price) return null;
+    let rules = this.compiled.get(price);
+    if (!rules) {
+      rules = fields.map((field) => {
+        const pattern = new RegExp(`^${field}_above_(\\d+)k_tokens$`);
+        const thresholds = Object.entries(price.rates).flatMap(
+          ([key, value]) => {
+            const match = pattern.exec(key);
+            return match
+              ? [
+                  {
+                    threshold: Number(match[1]) * 1000,
+                    rate: value === null ? null : fraction(value),
+                  },
+                ]
+              : [];
+          },
+        );
+        thresholds.sort((a, b) => b.threshold - a.threshold);
+        const base = price.rates[field];
+        thresholds.push({
+          threshold: -1,
+          rate: base == null ? null : fraction(base),
+        });
+        return thresholds;
+      });
+      this.compiled.set(price, rules);
+    }
     if (record.provider === "codex" && (record.cache_write_tokens ?? 0) > 0)
       return null;
     const counts = [
@@ -249,24 +288,14 @@ export class LocalPrices {
       if (!count) continue;
       // A known TTL split needs an exact matching price; do not apply generic creation pricing.
       if (i === 3 && (record.cache_write_1h_tokens ?? 0) > 0) return null;
-      let rate = price.rates[fields[i]],
-        threshold = -1;
-      for (const [key, value] of Object.entries(price.rates)) {
-        const match = new RegExp(`^${fields[i]}_above_(\\d+)k_tokens$`).exec(
-          key,
-        );
-        if (
-          match &&
-          record.input_total_tokens !== null &&
-          record.input_total_tokens > Number(match[1]) * 1000 &&
-          Number(match[1]) > threshold
-        ) {
-          threshold = Number(match[1]);
-          rate = value;
-        }
-      }
-      if (rate === undefined || rate === null) return null;
-      const [n, d] = fraction(rate);
+      const rule = rules[i].find(
+        ({ threshold }) =>
+          threshold < 0 ||
+          (record.input_total_tokens !== null &&
+            record.input_total_tokens > threshold),
+      )!;
+      if (rule.rate === null) return null;
+      const [n, d] = rule.rate;
       numerator = numerator * d + n * BigInt(count) * denominator;
       denominator *= d;
     }

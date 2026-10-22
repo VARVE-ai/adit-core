@@ -1,13 +1,15 @@
 import type Database from "better-sqlite3";
 import type { LocalWorkspace } from "../local-state.js";
 import { LocalStateError } from "../local-state.js";
-import { insideDirectory, sourceDefinitions } from "./sources.js";
+import { sourceDefinitions } from "./sources.js";
 import { LocalPrices, type CostUsage } from "./pricing.js";
 import { NON_MERGE_COMMIT_SQL } from "./commit-policy.js";
+import { analyticsSessions } from "./analytics-scope.js";
+import { redactSecrets } from "./secret-detector.js";
 
 type Row = Record<string, any>;
 export function redactOverview(text: string): string {
-  return text
+  return redactSecrets(text)
     .replace(
       /(?:-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----|sk-[a-zA-Z0-9_-]{12,}|gh[pousr]_[a-zA-Z0-9_]{16,}|github_pat_[a-zA-Z0-9_]+|AKIA[A-Z0-9]{16}|AIza[\w-]{20,}|xox[baprs]-[\w-]+|eyJ[\w-]+\.[\w-]+\.[\w-]+|Bearer\s+\S+|(?:api[_-]?key|token|password|secret)["']?\s*[:=]\s*["']?[^\s"']+)/gi,
       "[已隐藏]",
@@ -32,8 +34,7 @@ export class LocalAnalytics {
   private cache = new Map<
     string,
     {
-      changes: number;
-      dataVersion: number;
+      revision: string;
       result: ReturnType<LocalAnalytics["calculate"]>;
     }
   >();
@@ -41,9 +42,6 @@ export class LocalAnalytics {
     this.prices = new LocalPrices(db);
     db.exec(
       "CREATE TEMP TABLE IF NOT EXISTS overview_scope(provider TEXT,id TEXT,PRIMARY KEY(provider,id))",
-    );
-    db.exec(
-      "CREATE TEMP TABLE IF NOT EXISTS overview_all(provider TEXT,id TEXT,PRIMARY KEY(provider,id))",
     );
   }
   overview(
@@ -56,7 +54,6 @@ export class LocalAnalytics {
       now?: number;
     } = {},
   ) {
-    this.prices.reload();
     const now = options.now ?? Date.now(),
       zone =
         options.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -67,33 +64,53 @@ export class LocalAnalytics {
       throw new LocalStateError("Invalid timezone");
     }
     const cacheKey = JSON.stringify([
-      workspace,
-      options.range,
-      options.provider,
-      options.year,
+      workspace.id,
+      workspace.path,
+      workspace.providers,
+      workspace.repositories,
+      options.range || "all",
+      options.provider || "all",
+      options.year ?? Number(today.slice(0, 4)),
       zone,
       today,
-      this.prices.status(),
     ]);
-    const changes = () =>
-      Number(
-        (this.db.prepare("SELECT total_changes() AS n").get() as { n: number })
-          .n,
-      );
-    const dataVersion = Number(
-      this.db.pragma("data_version", { simple: true }),
-    );
-    const cached = this.cache.get(cacheKey);
-    if (
-      cached &&
-      cached.changes === changes() &&
-      cached.dataVersion === dataVersion
-    )
-      return cached.result;
-    const result = this.calculate(workspace, options);
-    if (this.cache.size >= 32) this.cache.clear();
-    this.cache.set(cacheKey, { changes: changes(), dataVersion, result });
-    return result;
+    return this.db.transaction(() => {
+      this.prices.reload();
+      const inputs = this.inputs(workspace);
+      // Transcript revisions change atomically with their structured facts.
+      // Inspection progress, browser sessions, job updates and another filter's
+      // temporary tables must not invalidate an otherwise identical overview.
+      const revision = JSON.stringify([inputs, this.prices.status()]);
+      const cached = this.cache.get(cacheKey);
+      if (cached?.revision === revision) return cached.result;
+      const result = this.calculate(workspace, options, inputs);
+      if (this.cache.size >= 32) this.cache.clear();
+      this.cache.set(cacheKey, { revision, result });
+      return result;
+    })();
+  }
+  private inputs(workspace: LocalWorkspace) {
+    const sessions = analyticsSessions(this.db, workspace);
+    const commits = workspace.repositories.length
+      ? (this.db
+          .prepare(
+            `SELECT c.sha,c.repository,c.authored_at FROM adit_local_commits c WHERE c.repository IN (${workspace.repositories.map(() => "?").join(",")}) AND ${NON_MERGE_COMMIT_SQL} ORDER BY c.repository,c.sha`,
+          )
+          .all(...workspace.repositories) as Row[])
+      : [];
+    const savedRun = this.db
+      .prepare(
+        "SELECT id FROM adit_attribution_runs WHERE workspace_id=? AND status='done' ORDER BY started_at DESC,id DESC LIMIT 1",
+      )
+      .get(workspace.id) as Row | undefined;
+    const associations = savedRun
+      ? (this.db
+          .prepare(
+            "SELECT repository,sha,submit_provider,submit_session_id FROM adit_attribution_commits WHERE run_id=? AND submit_session_id IS NOT NULL ORDER BY repository,sha",
+          )
+          .all(savedRun.id) as Row[])
+      : [];
+    return { sessions, commits, savedRun, associations };
   }
   private calculate(
     workspace: LocalWorkspace,
@@ -104,6 +121,7 @@ export class LocalAnalytics {
       timezone?: string;
       now?: number;
     },
+    inputs: ReturnType<LocalAnalytics["inputs"]>,
   ) {
     const range = options.range || "all",
       provider = options.provider || "all",
@@ -147,19 +165,7 @@ export class LocalAnalytics {
       at === null ? null : Number(hourFormat.format(at)),
     );
     const run = () => {
-      const sessions = (
-        this.db
-          .prepare(
-            `SELECT s.provider,s.id,s.parent_id,s.relationship,s.started_at,s.last_activity_at,s.transcript_revision,coalesce(nullif(s.cwd,''),a.workspace,'') AS cwd FROM adit_history_sessions s LEFT JOIN adit_history_assignments a ON a.provider=s.provider AND a.session_id=s.id`,
-          )
-          .all() as Row[]
-      ).filter(
-        (s) =>
-          (workspace.providers.includes(s.provider) ||
-            ["claude-ai", "chatgpt", "gemini-apps"].includes(s.provider)) &&
-          s.cwd &&
-          insideDirectory(workspace.path, s.cwd),
-      );
+      const { sessions } = inputs;
       const agents = [
         ...new Set(sessions.map((s) => s.provider as string)),
       ].map((id) => ({
@@ -172,17 +178,11 @@ export class LocalAnalytics {
           (s) => provider === "all" || s.provider === provider,
         ),
         main = selected.filter(
-          (s) => !s.parent_id || s.relationship === "fork",
+          (s) => !s.parent_id || s.relationship === "fork" || s.relationship === "continuation",
         );
       this.db.prepare("DELETE FROM overview_scope").run();
       const add = this.db.prepare("INSERT INTO overview_scope VALUES(?,?)");
       for (const s of main) add.run(s.provider, s.id);
-      this.db.prepare("DELETE FROM overview_all").run();
-      const addAll = this.db.prepare("INSERT INTO overview_all VALUES(?,?)");
-      for (const s of sessions.filter(
-        (s) => !s.parent_id || s.relationship === "fork",
-      ))
-        addAll.run(s.provider, s.id);
       const join =
         "JOIN overview_scope q ON q.provider=m.provider AND q.id=m.session_id";
       const messageFrom =
@@ -230,14 +230,35 @@ export class LocalAnalytics {
             ? rows(`SELECT count(*) AS n FROM adit_history_turns m ${join}`)[0]
                 .n
             : prompts.reduce((n, p) => n + p.count, 0);
-      const sessionCount =
-        range === "all"
-          ? main.length
-          : rows(
-              `SELECT count(*) AS n FROM (SELECT m.provider,m.session_id FROM ${messageFrom} WHERE ov_day(m.occurred_at)>=? AND ov_day(m.occurred_at)<? GROUP BY m.provider,m.session_id)`,
-              from,
-              to,
-            )[0].n;
+      const conversationIds=new Map(main.map(s=>[`${s.provider}:${s.id}`,`${s.provider}:${s.conversation_id}`]));
+      const sessionCount = new Set((range === "all" ? main.map(s=>({provider:s.provider,session_id:s.id})) : rows(
+        `SELECT DISTINCT m.provider,m.session_id FROM ${messageFrom} WHERE ov_day(m.occurred_at)>=? AND ov_day(m.occurred_at)<?`,from,to))
+        .map(s=>conversationIds.get(`${s.provider}:${s.session_id}`))).size;
+      // One prompt, one Agent and one model vote. Use the first identified
+      // assistant response in the turn; repeated tool/usage messages add no votes.
+      const promptGroups = rows(
+        `SELECT m.provider,(SELECT nullif(a.model,'') FROM adit_history_messages a
+          WHERE a.turn_id=m.id AND a.role='assistant' AND nullif(a.model,'') IS NOT NULL AND a.model NOT IN ('<synthetic>','unknown')
+          ORDER BY a.ordinal LIMIT 1) AS model,count(*) AS count
+         FROM adit_history_turns m ${join}
+         WHERE ?='all' OR (ov_day(m.started_at)>=? AND ov_day(m.started_at)<?)
+         GROUP BY m.provider,model`,
+        range,
+        from,
+        to,
+      );
+      const promptAgents = new Map<string, number>(),
+        promptModels = new Map<string, number>();
+      let unknownModelPrompts = 0;
+      for (const p of promptGroups) {
+        promptAgents.set(
+          p.provider,
+          (promptAgents.get(p.provider) || 0) + p.count,
+        );
+        if (p.model)
+          promptModels.set(p.model, (promptModels.get(p.model) || 0) + p.count);
+        else unknownModelPrompts += p.count;
+      }
       const intervals = rows(
         `SELECT i.*,m.provider,m.session_id FROM adit_history_work_intervals i JOIN adit_history_turns m ON m.id=i.turn_id ${join}`,
       );
@@ -355,7 +376,7 @@ export class LocalAnalytics {
         }
         priced++;
         amount += cost;
-        const key = u.provider + ":" + u.session_id;
+        const key = conversationIds.get(u.provider + ":" + u.session_id)||u.provider + ":" + u.session_id;
         sessionCosts.set(key, (sessionCosts.get(key) || 0) + cost);
         const model = models.get(u.model) || {
           model: u.model,
@@ -374,43 +395,33 @@ export class LocalAnalytics {
       }
       if (!usage.length)
         for (const key of Object.keys(totals)) totals[key] = null;
-      const commits = workspace.repositories.length
-        ? rows(
-            `SELECT c.sha,c.repository,c.authored_at FROM adit_local_commits c WHERE c.repository IN (${workspace.repositories.map(() => "?").join(",")}) AND ${NON_MERGE_COMMIT_SQL}`,
-            ...workspace.repositories,
-          ).filter((c) => range === "all" || inRange(c.authored_at))
-        : [];
+      const commits = inputs.commits.filter(
+        (c) => range === "all" || inRange(c.authored_at),
+      );
       const uniqueCommits = new Map<string, Row>();
       for (const c of commits) uniqueCommits.set(c.sha, c);
       // Submission associations are produced once after collection and read from saved analysis.
-      const savedRun = this.db
-        .prepare(
-          "SELECT id FROM adit_attribution_runs WHERE workspace_id=? AND status='done' ORDER BY started_at DESC LIMIT 1",
-        )
-        .get(workspace.id) as Row | undefined;
+      const { savedRun } = inputs;
       const links = new Map<string, Set<string>>();
       if (savedRun) {
-        const saved = rows(
-          "SELECT repository,sha,submit_provider,submit_session_id FROM adit_attribution_commits WHERE run_id=? AND submit_session_id IS NOT NULL",
-          savedRun.id,
+        const commitKeys = new Set(
+          commits.map((c) => JSON.stringify([c.repository, c.sha])),
         );
-        for (const association of saved) {
+        for (const association of inputs.associations) {
           if (
-            !commits.some(
-              (c) =>
-                c.repository === association.repository &&
-                c.sha === association.sha,
+            !commitKeys.has(
+              JSON.stringify([association.repository, association.sha]),
             )
           )
             continue;
           const set = links.get(association.sha) || new Set<string>();
           set.add(
-            association.submit_provider + ":" + association.submit_session_id,
+            conversationIds.get(association.submit_provider + ":" + association.submit_session_id)||association.submit_provider + ":" + association.submit_session_id,
           );
           links.set(association.sha, set);
         }
       }
-      const selectedKeys = new Set(main.map((s) => s.provider + ":" + s.id));
+      const selectedKeys = new Set(conversationIds.values());
       const definite = [...links].filter(
           ([, s]) => s.size === 1 && selectedKeys.has([...s][0]),
         ),
@@ -458,12 +469,38 @@ export class LocalAnalytics {
           ),
         },
         agents,
+        profile: {
+          generatedAt: now,
+          through: today,
+          repositories: workspace.repositories.length,
+          days: prompts.map((p) => ({
+            date: String(p.date),
+            count: Number(p.count),
+          })),
+          agents: [...promptAgents]
+            .map(([id, count]) => ({
+              id,
+              name: agents.find((a) => a.id === id)?.name || id,
+              count,
+            }))
+            .sort((a, b) => b.count - a.count || a.id.localeCompare(b.id)),
+          models: [...promptModels]
+            .map(([model, count]) => ({ model, count }))
+            .sort(
+              (a, b) => b.count - a.count || a.model.localeCompare(b.model),
+            ),
+          unknownModelPrompts,
+          missingPromptDates:
+            promptCount - prompts.reduce((n, p) => n + p.count, 0),
+          submissionAnalyzed: !!savedRun,
+        },
         summary: {
           sessions: sessionCount,
           subtasks: selected.filter(
             (s) =>
               s.parent_id &&
               s.relationship !== "fork" &&
+              s.relationship !== "continuation" &&
               (range === "all" ||
                 inRange(s.started_at) ||
                 inRange(s.last_activity_at)),

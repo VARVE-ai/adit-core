@@ -140,6 +140,10 @@ export {
 
 export { recordAgentRuntime, readAgentRuntimeVersions } from "./config/runtime-agents.js";
 export * from "./local-state.js";
+export * from "./local-projects.js";
+export * from "./project-resolution.js";
+export { analyticsSessions } from "./local-history/analytics-scope.js";
+export { promptText } from "./local-history/prompt-summary.js";
 export { createAttributionSchema } from './local-history/attribution-schema.js';
 export { NON_MERGE_COMMIT_SQL } from './local-history/commit-policy.js';
 export { insideDirectory } from "./local-history/sources.js";
@@ -147,6 +151,14 @@ export { redactOverview } from "./local-history/analytics.js";
 export * from "./local-history/sources.js";
 export * from "./local-history/archive.js";
 export * from "./local-history/analytics.js";
+export * from "./local-history/achievements.js";
+export * from "./local-history/achievement-rules.js";
+export * from "./local-history/inspection.js";
+export * from "./local-history/secret-detector.js";
+export * from "./local-history/session-browser.js";
+export * from "./local-history/sharing.js";
+export * from "./local-history/pr-descriptions.js";
+export { LocalPrices } from "./local-history/pricing.js";
 
 // Sync primitives
 export {
@@ -161,3 +173,6 @@ export {
   serialize,
   deserialize,
 } from "./sync/index.js";
+export { nativeConversationId, conversationSegments, conversationScope } from "./local-history/session-identity.js";
+export { submittedPromptText, promptImageCount, PROMPT_IMAGE_KINDS } from "./local-history/prompt-summary.js";
+export { nativeContextKind, nativeContextSql, historyFinalReply, replyCompleted } from "./local-history/message-semantics.js";

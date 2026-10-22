@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { request } from "node:http";
@@ -18,7 +18,16 @@ beforeEach(async () => {
     "DEEPSEEK_TUI_SESSIONS_DIR",
   ])
     vi.stubEnv(name, join(root, "missing"));
-  app = await startLocalServer({ directory: join(root, "state") });
+  const registration = join(root, "test-login-entry");
+  app = await startLocalServer({
+    directory: join(root, "state"),
+    startupRegistration: {
+      supported: true, path: registration,
+      installed: () => existsSync(registration),
+      install: async () => { writeFileSync(registration, "test"); },
+      remove: async () => { rmSync(registration, { force: true }); },
+    },
+  });
 });
 afterEach(async () => {
   await app?.close();
@@ -41,6 +50,58 @@ function api(
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
+it("checks directory availability on page state and repairs the path without replacing project identity",async()=>{
+  const original=join(root,"original"),moved=join(root,"moved");mkdirSync(original);
+  const w=app.store.saveWorkspace({path:original,providers:["codex"]});
+  renameSync(original,moved);
+  const state=await (await api("/state")).json() as any;
+  expect(state.workspaces.find((item:any)=>item.id===w.id).directoryAvailable).toBe(false);
+  expect((await api(`/workspaces/${w.id}/collect`,"POST",{})).status).toBe(409);
+  const response=await api(`/workspaces/${w.id}`,"PATCH",{version:w.version,path:moved});
+  expect(response.status).toBe(200);expect(await response.json()).toMatchObject({id:w.id,path:moved,directoryAvailable:true});
+  const resolved=await (await api(`/projects/resolve?path=${encodeURIComponent(moved)}`)).json();
+  expect(resolved).toMatchObject({projectId:w.id,source:"registry"});
+});
+it("requires local authentication and validates device token input without changing the account", async () => {
+  expect((await fetch(app.origin + "/api/local/account/token", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: "adit_test" }),
+  })).status).toBe(401);
+  const response = await api("/account/token", "POST", { token: "wrong_test_token" });
+  expect(response.status).toBe(400);
+  expect(await response.text()).not.toContain("wrong_test_token");
+  expect(await (await api("/account")).json()).toMatchObject({ connected: false, auth: "disconnected" });
+});
+it("authenticates achievement reads and validates workspace-scoped preferences", async () => {
+  const workspace = app.store.saveWorkspace({ path: root, providers: [], repositories: [] });
+  const query = `?workspaceId=${workspace.id}`;
+  expect((await fetch(app.origin + "/api/local/achievements" + query)).status).toBe(401);
+  const response = await api("/achievements" + query);
+  const data = await response.json() as { status: string; items: unknown[] };
+  expect(data.status).toBe("pending"); expect(data.items).toHaveLength(8);
+  expect((await api("/achievements/preferences" + query,"PATCH",{key:"marathon",selected:true})).status).toBe(409);
+  expect((await api("/achievements/preferences" + query,"PATCH",{notify:"yes"})).status).toBe(400);
+  expect((await api("/achievements/preferences" + query,"PATCH",{notify:false})).status).toBe(200);
+  expect((await api("/achievements/acknowledge" + query,"POST",{ids:["another-workspace-unlock"]})).status).toBe(200);
+  expect((await api("/achievements?workspaceId=missing")).status).toBe(404);
+});
+it("requires authenticated explicit login startup before automatic sync, including API callers", async () => {
+  const automatic = { enabled: true, mode: "automatic", interval: 5 };
+  expect((await fetch(app.origin + "/api/local/startup", {
+    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true, version: 0 }),
+  })).status).toBe(401);
+  expect((await api("/workspaces", "POST", { path: root, cloud: automatic })).status).toBe(409);
+  expect(app.store.workspaces()).toHaveLength(0);
+  expect((await api("/startup", "PATCH", { enabled: true, version: 0 })).status).toBe(200);
+  const response = await api("/workspaces", "POST", { path: root, cloud: automatic });
+  expect(response.status).toBe(201);
+  const workspace = await response.json() as { id: string; version: number };
+  expect((await api("/startup", "PATCH", { enabled: false, version: 1 })).status).toBe(200);
+  const saved = app.store.workspace(workspace.id);
+  expect(saved.cloud.mode).toBe("manual");
+  expect((await api(`/workspaces/${workspace.id}`, "PATCH", { version: saved.version, cloud: automatic })).status).toBe(409);
+  const state = await (await api("/state")).json() as { startup: { enabled: boolean } };
+  expect(state.startup.enabled).toBe(false);
+});
 it("lists available Windows drives and opens a drive letter at its root", async () => {
   const response = await api("/directories/list", "POST", { path: root });
   expect(response.status).toBe(200);
@@ -62,6 +123,35 @@ it("lists available Windows drives and opens a drive letter at its root", async 
     path: currentDrive,
     parent: currentDrive,
   });
+});
+it("authenticates workspace deletion, removes collected history and cancels future scheduling", async () => {
+  const workspace = app.store.saveWorkspace({ path: root, providers: ["codex"] });
+  app.store.markStarted(workspace.id);
+  app.collector.schedule();
+  expect(app.collector.nextAt).not.toBeNull();
+  const file = join(root, "keep.txt");
+  writeFileSync(file, "keep this source");
+  app.store.db.prepare("INSERT INTO adit_history_sessions(provider,id,cwd,message_count,user_prompt_count,extra_json) VALUES('codex','keep-session',?,0,0,'{}')").run(root);
+  const secrets = join(root, "state", "secrets");
+  mkdirSync(secrets, { recursive: true });
+  const credential = join(secrets, `${workspace.id}.${process.platform === "win32" ? "dpapi" : "keychain"}`);
+  if (process.platform === "win32") writeFileSync(credential, "test-encrypted-placeholder");
+  const endpoint = `/workspaces/${workspace.id}`;
+  expect((await fetch(app.origin + "/api/local" + endpoint, { method: "DELETE" })).status).toBe(401);
+  expect((await api(endpoint, "DELETE", { version: workspace.version + 1 })).status).toBe(409);
+  app.store.job({ id: "active", workspaceId: workspace.id, kind: "collect", status: "running" });
+  expect((await api(endpoint, "DELETE", { version: workspace.version })).status).toBe(409);
+  app.store.job({ id: "active", workspaceId: workspace.id, kind: "collect", status: "done" });
+  expect((await api(endpoint, "DELETE", { version: workspace.version })).status).toBe(200);
+  expect(app.store.workspaces()).toEqual([]);
+  expect(app.store.jobs()).toEqual([]);
+  expect(app.collector.nextAt).toBeNull();
+  expect(existsSync(file)).toBe(true);
+  expect(existsSync(credential)).toBe(false);
+  expect(app.store.db.prepare("SELECT id FROM adit_history_sessions WHERE id='keep-session'").get()).toBeUndefined();
+  expect((await api(endpoint)).status).toBe(404);
+  expect((await api(endpoint, "DELETE", { version: workspace.version })).status).toBe(404);
+  expect((await api("/workspaces", "POST", { path: root })).status).toBe(201);
 });
 it("authenticates overview, validates scope and returns real empty structured metrics", async () => {
   const created = await api("/workspaces", "POST", {
@@ -291,6 +381,7 @@ it("does not authorize browser cookies issued by a different local data director
   ).toBe(401);
 });
 it("validates repository scope on create and update", async () => {
+  await api("/startup", "PATCH", { enabled: true, version: 0 });
   const path = join(root, "workspace"),
     outside = join(root, "outside");
   mkdirSync(path);

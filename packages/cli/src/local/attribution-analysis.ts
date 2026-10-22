@@ -2,12 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, stat } from "node:fs/promises";
-import { dirname, join, resolve, isAbsolute, basename } from "node:path";
+import { dirname, join, resolve, isAbsolute, basename, relative } from "node:path";
 import {
   LocalStore,
   createAttributionSchema,
   NON_MERGE_COMMIT_SQL,
   insideDirectory,
+  analyticsSessions,
+  projectSessionLocations,
   type LocalWorkspace,
 } from "@varveai/adit-core";
 import {
@@ -20,7 +22,7 @@ import {
   literals,
 } from "./attribution-evidence.js";
 const execute = promisify(execFile);
-export const ATTRIBUTION_VERSION = 3;
+export const ATTRIBUTION_VERSION = 4;
 const digest = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 type Row = Record<string, any>;
@@ -74,8 +76,6 @@ const gitSourcePaths = [
     "package-lock.json",
   ].map((file) => `:(exclude,glob)**/${file}`),
 ];
-const scoped = (workspace: LocalWorkspace, cwd: string) =>
-  !!cwd && insideDirectory(workspace.path, cwd);
 
 // This equivalence map exists only in memory for a single analysis. No native session is changed.
 export function analysisIdentities(sessions: Row[], calls: Row[]) {
@@ -103,11 +103,12 @@ export function analysisIdentities(sessions: Row[], calls: Row[]) {
     if (old) union(old, id);
     else seen.set(native, id);
   }
-  // Child work belongs to the dispatching parent; forks remain independent unless calls overlap.
+  // Native continuation pages and child work share the parent identity for analysis.
+  // Actual forks remain independent unless copied calls establish equivalence.
   for (const s of sessions)
     if (
       s.parent_id &&
-      s.relationship === "subagent" &&
+      ["subagent","continuation"].includes(s.relationship) &&
       parent.has(key(s.provider, s.parent_id))
     )
       union(key(s.provider, s.parent_id), key(s.provider, s.id));
@@ -124,8 +125,8 @@ export function analysisIdentities(sessions: Row[], calls: Row[]) {
       root,
       group.sort(
         (a, b) =>
-          Number(a.relationship === "subagent") -
-            Number(b.relationship === "subagent") ||
+          Number(["subagent","continuation"].includes(a.relationship)) -
+            Number(["subagent","continuation"].includes(b.relationship)) ||
           (a.started_at ?? Infinity) - (b.started_at ?? Infinity) ||
           a.id.localeCompare(b.id),
       )[0],
@@ -156,13 +157,16 @@ function savedRun(store: LocalStore, workspaceId: string) {
 function inputSnapshot(store: LocalStore, w: LocalWorkspace) {
   const db = store.db;
   return db.transaction(() => {
+    const scopes = new Map(analyticsSessions(db,w).map(s=>[key(s.provider,s.id),s.cwd]));
+    const locations = projectSessionLocations(db,w);
     const sessions = (
       db
         .prepare(
           `SELECT s.*,coalesce(nullif(s.cwd,''),a.workspace,'') scope_cwd FROM adit_history_sessions s LEFT JOIN adit_history_assignments a ON a.provider=s.provider AND a.session_id=s.id`,
         )
         .all() as Row[]
-    ).filter((s) => w.providers.includes(s.provider) && scoped(w, s.scope_cwd));
+    ).filter((s) => w.providers.includes(s.provider) && scopes.has(key(s.provider,s.id)))
+      .map((s): Row=>({...s,scope_cwd:scopes.get(key(s.provider,s.id))!,original_root:locations.get(key(s.provider,s.id))?.original_root}));
     const keys = new Set(sessions.map((s) => key(s.provider, s.id)));
     const calls = (
       db
@@ -170,7 +174,11 @@ function inputSnapshot(store: LocalStore, w: LocalWorkspace) {
           `SELECT t.* FROM adit_history_tool_calls t WHERE NOT EXISTS (SELECT 1 FROM adit_history_tool_results r WHERE r.tool_call_id=t.id AND (r.status IN ('error','failed') OR r.exit_code<>0))`,
         )
         .all() as Row[]
-    ).filter((c) => keys.has(key(c.provider, c.session_id)));
+    ).filter((c) => keys.has(key(c.provider, c.session_id))).map(c=> {
+      const location=locations.get(key(c.provider,c.session_id));
+      if (!location || !c.working_directory || !insideDirectory(location.original_root,c.working_directory)) return c;
+      return {...c,working_directory:resolve(w.path,relative(location.original_root,c.working_directory))};
+    });
     const callIds = new Set(calls.map((c) => c.id));
     const results = (
       db
@@ -252,25 +260,60 @@ async function git(repository: string, args: string[], signal?: AbortSignal) {
     })
   ).stdout;
 }
+function workingLocations(cwd: string, script: string): string[] {
+  const locations = [cwd];
+  for (const m of script.matchAll(
+    /(?:\b(?:workdir|cwd)["']?\s*:\s*|\bgit\s+-C\s+|\bcd\s+)(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g,
+  ))
+    locations.unshift(m[1] || m[2] || m[3]);
+  return locations
+    .filter(Boolean)
+    .map((location) =>
+      isAbsolute(location) ? resolve(location) : resolve(cwd, location),
+    );
+}
 function repositoryFor(
   w: LocalWorkspace,
   cwd: string,
   script = "",
+  originalRoot?: string,
 ): string | null {
-  const locations = [cwd];
-  for (const m of script.matchAll(
-    /(?:\b(?:workdir|cwd)\s*:\s*|\bgit\s+-C\s+|\bcd\s+)(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/g,
-  ))
-    locations.unshift(m[1] || m[2] || m[3]);
-  for (const location of locations) {
-    if (!location) continue;
-    const absolute = isAbsolute(location) ? location : resolve(cwd, location);
+  for (const location of workingLocations(cwd, script)) {
+    const absolute = relocateEvidencePath(w,location,originalRoot);
     const repo = w.repositories
       .filter((r) => insideDirectory(r, absolute))
       .sort((a, b) => b.length - a.length)[0];
     if (repo) return repo;
   }
   return null;
+}
+function relocateEvidencePath(w: LocalWorkspace, path: string, originalRoot?: string) {
+  return originalRoot && !insideDirectory(w.path,path) && insideDirectory(originalRoot,path) ? resolve(w.path,relative(originalRoot,path)) : path;
+}
+
+function writeLocation(
+  w: LocalWorkspace,
+  cwd: string,
+  command: string,
+  path: string | null,
+  originalRoot?: string,
+) {
+  // Explicit write targets take precedence over a session opened at the workspace
+  // root or a wrapper that happens to execute commands in several repositories.
+  const repository = repositoryFor(w, cwd, command,originalRoot);
+  if (!path) return { filePath: null, repository };
+  const filePath = relocateEvidencePath(w,isAbsolute(path)
+    ? resolve(path)
+    : resolve(workingLocations(cwd, command)[0] || cwd, path),originalRoot);
+  return { filePath, repository: repositoryFor(w, filePath) };
+}
+
+function samePath(a: string, b: string): boolean {
+  const normalize = (value: string) => {
+    const path = resolve(value);
+    return process.platform === "win32" ? path.toLowerCase() : path;
+  };
+  return normalize(a) === normalize(b);
 }
 function commandOf(call: Row): string {
   if (call.command_text) return call.command_text;
@@ -414,6 +457,7 @@ async function backupEvidence(
               .split("\n")
               .filter((l) => !oldLines.has(normalizeLine(l)))
               .join("\n");
+            const location = writeLocation(w, session.scope_cwd, "", file,session.original_root);
             add(
               {
                 provider: source.provider,
@@ -422,9 +466,9 @@ async function backupEvidence(
                 toolId: null,
                 kind: "claude_backup",
                 sourcePath: path,
-                filePath: file,
+                filePath: location.filePath,
                 at,
-                repository: repositoryFor(w, session.scope_cwd),
+                repository: location.repository,
               },
               added,
             );
@@ -443,7 +487,12 @@ async function backupEvidence(
 export async function analyzeAttribution(
   store: LocalStore,
   w: LocalWorkspace,
-  options: { signal?: AbortSignal; force?: boolean } = {},
+  options: {
+    signal?: AbortSignal;
+    force?: boolean;
+    recheck?: { repository: string; sha: string }[];
+    progress?: (repository:string)=>void;
+  } = {},
 ) {
   createAttributionSchema(store.db);
   const db = store.db;
@@ -452,6 +501,16 @@ export async function analyzeAttribution(
   // algorithm versions do not silently rewrite previously saved attribution.
   const { previous, analyzed, pending } = db.transaction(() => {
     const previous = savedRun(store, w.id);
+    const commits = collectedCommits(store, w);
+    for (const target of options.recheck || [])
+      if (
+        !commits.some(
+          (c) => c.repository === target.repository && c.sha === target.sha,
+        )
+      )
+        throw new Error(
+          "Cannot recheck a commit outside the collected workspace",
+        );
     const analyzed = new Set(
       previous && !options.force
         ? (
@@ -463,12 +522,12 @@ export async function analyzeAttribution(
           ).map((c) => key(c.repository, c.sha))
         : [],
     );
+    for (const target of options.recheck || [])
+      analyzed.delete(key(target.repository, target.sha));
     return {
       previous,
       analyzed,
-      pending: collectedCommits(store, w).some(
-        (c) => !analyzed.has(key(c.repository, c.sha)),
-      ),
+      pending: commits.some((c) => !analyzed.has(key(c.repository, c.sha))),
     };
   })();
   if (!options.force && previous && !pending)
@@ -498,6 +557,7 @@ export async function analyzeAttribution(
         source.toolId,
         source.sourcePath,
         source.kind,
+        source.filePath,
         line,
       ]);
       if (unique.has(id)) continue;
@@ -526,7 +586,14 @@ export async function analyzeAttribution(
       call.tool_name || "",
       input,
       call.command_text,
-    ))
+    )) {
+      const location = writeLocation(
+        w,
+        call.working_directory || session.scope_cwd,
+        command,
+        written.path,
+        session.original_root,
+      );
       add(
         {
           provider: call.provider,
@@ -535,16 +602,13 @@ export async function analyzeAttribution(
           toolId: call.id,
           kind: written.kind,
           sourcePath: null,
-          filePath: written.path,
+          filePath: location.filePath,
           at: call.occurred_at ?? NaN,
-          repository: repositoryFor(
-            w,
-            call.working_directory || session.scope_cwd,
-            command,
-          ),
+          repository: location.repository,
         },
         written.text,
       );
+    }
   }
   const backups = await backupEvidence(snapshot, w, add),
     fingerprint = digest([snapshot.fingerprint, backups.manifest]);
@@ -609,6 +673,7 @@ export async function analyzeAttribution(
           w,
           call.working_directory || session.scope_cwd,
           commandOf(call),
+          session.original_root,
         ),
         hashes: [...output.matchAll(/^\[[^\]\r\n]+ ([a-f0-9]{7,64})\]/gm)].map(
           (m) => m[1],
@@ -622,6 +687,7 @@ export async function analyzeAttribution(
     let completed = 0;
     for (const commit of targets) {
       options.signal?.throwIfAborted();
+      options.progress?.(commit.repository);
       const at = commit.committed_at ?? commit.authored_at;
       const patch = await git(
         commit.repository,
@@ -688,14 +754,16 @@ export async function analyzeAttribution(
       type Candidate = { e: Evidence; method: string; score: number };
       const perLine = new Map<AddedLine, Candidate[]>(),
         support = new Map<string, number>();
-      const allowed = (e: Evidence) =>
+      const allowed = (e: Evidence, line: AddedLine) =>
         at !== null &&
         e.at <= at &&
-        (!e.repository || e.repository === commit.repository);
+        (e.filePath
+          ? samePath(e.filePath, resolve(commit.repository, line.path))
+          : e.repository === commit.repository);
       for (const line of lines) {
         if (line.excluded || oldLines.has(line.text)) continue;
         let matches = (exact.get(line.text) || [])
-          .filter(allowed)
+          .filter((e) => allowed(e, line))
           .map((e) => ({ e, method: "exact", score: 1 }));
         if (!matches.length) {
           const value = jsonTextValue(line.text);
@@ -704,7 +772,7 @@ export async function analyzeAttribution(
               ...(values.get(value) || []),
               ...(exact.get(value) || []),
             ]
-              .filter(allowed)
+              .filter((e) => allowed(e, line))
               .map((e) => ({ e, method: "json_value", score: 1 }));
         }
         perLine.set(line, matches);
@@ -775,7 +843,7 @@ export async function analyzeAttribution(
                 const score = tokenOverlap(words, other);
                 if (score < 0.9) continue;
                 for (const e of texts.get(text) || [])
-                  if (allowed(e))
+                  if (allowed(e, line))
                     candidates.push({ e, method: "token_overlap", score });
               }
             }
@@ -1006,6 +1074,14 @@ export async function analyzeAttribution(
           "已有分析结果已更新，将在下一次采集后重试未完成的提交分析",
         );
       if (previous && !options.force) {
+        // Replace only explicitly rechecked commits at publication time. A failed
+        // recheck leaves the previous complete snapshot readable and untouched.
+        for (const target of options.recheck || []) {
+          for (const table of ["lines", "commits"])
+            db.prepare(
+              `DELETE FROM adit_attribution_${table} WHERE run_id=? AND repository=? AND sha=?`,
+            ).run(previous.id, target.repository, target.sha);
+        }
         // Publish a complete readable snapshot without re-matching old commits.
         // Stable line/evidence IDs preserve candidates and original-session links.
         // Previously seen SHAs stay cached even when a branch/repository is hidden;

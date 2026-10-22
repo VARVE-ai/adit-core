@@ -1,5 +1,6 @@
 import {basename,dirname,join} from "node:path";
 import {lstat} from "node:fs/promises";
+import {trackSource} from "./source-checkpoints.js";
 import {readSource,readSourceJSON,databaseSnapshot,hasTable} from "./source-io.js";
 import {at,array,first,message,session,table,sorted} from "./provider-common.js";
 import {HistoryFormatError,jsonLines,record,string,type HistoryMessage} from "./types.js";
@@ -36,6 +37,7 @@ export async function readCopilotPaw(path:string,provider:string,signal?:AbortSi
   const storePath=join(dirname(dirname(dirname(path))),"session-store.db");
   let storeUsage:unknown[]=[];
   try{
+    trackSource(storePath);
     if((await lstat(storePath)).isFile())storeUsage=databaseSnapshot(storePath,db=>hasTable(db,"assistant_usage_events")?sorted(table(db,"assistant_usage_events",["id","session_id","model","input_tokens","output_tokens","cache_read_tokens","cache_write_tokens","reasoning_tokens","cost","timestamp","created_at","duration_ms","initiator","interaction_id"],["id","session_id"]),"id").filter(row=>row.session_id===id):[]);
   }catch(error){if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;}
   return [session(provider,id,cwd,messages,{usageEvents:storeUsage.length?storeUsage:usageEvents,transcriptUsageEvents:storeUsage.length?usageEvents:undefined,usageSource:storeUsage.length?"session-store":"transcript"})];

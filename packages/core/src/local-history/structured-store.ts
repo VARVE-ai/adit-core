@@ -1,6 +1,8 @@
 import {createHash} from "node:crypto";
 import type Database from "better-sqlite3";
 import {record,string,type HistoryMessage,type HistorySession} from "./types.js";
+import {hasCodexPromptContext,promptSummary} from "./prompt-summary.js";
+import {applyTranscriptEdits,isHistoryPrompt as isPrompt} from "./transcript-edits.js";
 
 const encode=(value:unknown)=>value === undefined ? null : JSON.stringify(value);
 const decode=(value:string|null)=>value === null ? undefined : JSON.parse(value);
@@ -9,10 +11,6 @@ const time=(value?:string)=>value && Number.isFinite(Date.parse(value)) ? Date.p
 const text=(value:unknown):string=>typeof value === "string" ? value : Array.isArray(value) ? value.map(text).filter(Boolean).join("\n") : string(record(value).text) || string(record(value).content);
 const optional=(value:unknown)=>typeof value === "string" && value ? value : null;
 const integer=(value:unknown):number|null=>typeof value === "number" && Number.isSafeInteger(value) && value>=0 ? value : null;
-function isPrompt(message:HistoryMessage):boolean {
-  return message.role==="user" && !(Array.isArray(message.content) && message.content.length>0 &&
-    message.content.every(block=>["tool_result","toolResult","function_call_output","custom_tool_call_output"].includes(string(record(block).type))));
-}
 function numberAt(value:Record<string,unknown>,...fields:string[]):number|null {
   for(const field of fields) { const found=integer(value[field]); if(found!==null)return found; }
   return null;
@@ -25,6 +23,26 @@ function sum(...values:(number|null)[]):number|null {
 /** All list/analytics fields are columns. Original payloads remain per-message evidence only. */
 export class StructuredHistory {
   constructor(readonly db:Database.Database) {}
+
+  /** Refresh only affected display summaries, without replacing transcripts or invalidating attribution. */
+  refreshCodexPromptSummaries():number {
+    const sessions=this.db.prepare("SELECT provider,id,first_prompt FROM adit_history_sessions WHERE provider IN ('codex','traex','augure-code') AND first_prompt IS NOT NULL").all() as {provider:string;id:string;first_prompt:string}[];
+    const affected=sessions.filter(s=>hasCodexPromptContext(s.provider,s.first_prompt));
+    if(!affected.length)return 0;
+    const messages=this.db.prepare("SELECT content_json FROM adit_history_messages WHERE provider=? AND session_id=? AND role='user' ORDER BY ordinal");
+    const update=this.db.prepare("UPDATE adit_history_sessions SET first_prompt=? WHERE provider=? AND id=?");
+    return this.db.transaction(()=>{
+      for(const session of affected) {
+        let summary:string|null=null;
+        for(const row of messages.iterate(session.provider,session.id) as Iterable<{content_json:string|null}>) {
+          summary=promptSummary(session.provider,decode(row.content_json));
+          if(summary)break;
+        }
+        update.run(summary,session.provider,session.id);
+      }
+      return affected.length;
+    })();
+  }
 
   read(provider:string,id:string):HistorySession|undefined {
     const session=this.db.prepare("SELECT * FROM adit_history_sessions WHERE provider=? AND id=?").get(provider,id) as Record<string,unknown>|undefined;
@@ -48,15 +66,31 @@ export class StructuredHistory {
   }
 
   write(session:HistorySession):void {
-    this.db.transaction(()=>this.replace(session))();
+    this.db.transaction(()=>this.replace(applyTranscriptEdits(this.db,session)))();
   }
 
   private replace(session:HistorySession):void {
     const {id,provider,cwd,parentId,relationship,metadata,messages,...extra}=session;
     if(new Set(messages.map(m=>m.key)).size!==messages.length)throw new Error("Duplicate native message identity in collected session");
+    const digests=messages.map(message=>historyKey(message));
+    const previous=this.db.prepare(`SELECT m.id,m.ordinal,d.digest FROM adit_history_messages m
+      LEFT JOIN adit_history_message_digests d ON d.message_id=m.id
+      WHERE m.provider=? AND m.session_id=? ORDER BY m.ordinal`).all(provider,id) as {id:string;ordinal:number;digest:string|null}[];
+    let prefix=0;
+    while(prefix<messages.length && prefix<previous.length && previous[prefix].ordinal===prefix && previous[prefix].digest===digests[prefix])prefix++;
+    if(prefix===messages.length && previous.length>prefix && prefix>0)prefix--;
+    // Rebuild only the affected turn and subsequent turns. Completed earlier turns retain
+    // their blocks, FTS rows, tool evidence, usage/prices and identifiers.
+    if(prefix<messages.length && !isPrompt(messages[prefix]))
+      while(prefix>0 && !isPrompt(messages[prefix]))prefix--;
+    const prefixTurns=messages.slice(0,prefix).filter(isPrompt).length;
     const times=messages.map(m=>time(m.timestamp)).filter((value):value is number=>value!==null);
     const title=string(metadata?.title) || null;
-    const firstPrompt=text(messages.find(isPrompt)?.content).slice(0,240)||null;
+    let firstPrompt:string|null=null;
+    for(const message of messages)if(isPrompt(message)) {
+      firstPrompt=promptSummary(provider,message.content);
+      if(firstPrompt)break;
+    }
     this.db.prepare(`INSERT INTO adit_history_sessions
       (provider,id,cwd,parent_id,relationship,title,first_prompt,started_at,last_activity_at,message_count,user_prompt_count,metadata_json,extra_json)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,id) DO UPDATE SET
@@ -66,20 +100,41 @@ export class StructuredHistory {
       transcript_revision=adit_history_sessions.transcript_revision+1`).run(
         provider,id,cwd,parentId??null,relationship??null,title,firstPrompt,times.length?times.reduce((a,b)=>Math.min(a,b)):null,
         times.length?times.reduce((a,b)=>Math.max(a,b)):null,messages.length,messages.filter(isPrompt).length,encode(metadata),encode(extra));
-    // All replacements run inside LocalHistory.save's transaction; failed parsing never reaches this boundary.
-    this.db.prepare("DELETE FROM adit_history_usage_observations WHERE provider=? AND session_id=?").run(provider,id);
-    this.db.prepare("DELETE FROM adit_history_messages WHERE provider=? AND session_id=?").run(provider,id);
-    this.db.prepare("DELETE FROM adit_history_turns WHERE provider=? AND session_id=?").run(provider,id);
+    this.db.prepare("DELETE FROM adit_history_usage_observations WHERE provider=? AND session_id=? AND message_id IS NULL").run(provider,id);
+    this.db.prepare("DELETE FROM adit_history_messages WHERE provider=? AND session_id=? AND ordinal>=?").run(provider,id,prefix);
+    this.db.prepare("DELETE FROM adit_history_turns WHERE provider=? AND session_id=? AND ordinal>?").run(provider,id,prefixTurns);
     this.db.prepare("DELETE FROM adit_history_relations WHERE provider=? AND session_id=?").run(provider,id);
     if(parentId)this.db.prepare("INSERT INTO adit_history_relations VALUES (?,?,?,?)").run(provider,id,parentId,relationship||"unknown");
 
-    let turn:string|null=null,turnOrdinal=0;
+    let turn:string|null=null,turnOrdinal=prefixTurns;
     const turns=new Map<string,{prompt:string;last:string;start:number|null;end:number|null;previous:{id:string;at:number}|null;duration:number;missing:boolean}>();
     const calls=new Map<string,string>();
     const usageGroups=new Map<string,{entry:string;weight:number}>();
+    for(const call of this.db.prepare("SELECT id,source_call_id FROM adit_history_tool_calls WHERE provider=? AND session_id=? ORDER BY occurred_at,call_index").all(provider,id) as {id:string;source_call_id:string|null}[])
+      if(call.source_call_id)calls.set(call.source_call_id,call.id);
+    // Reconcile retained request groups before appending: an old suffix may have
+    // superseded an earlier usage observation and can now have been removed.
+    const retained=this.db.prepare(`SELECT e.*,o.raw_usage_json,o.request_id,o.response_id FROM adit_history_usage_entries e
+      JOIN adit_history_usage_observations o ON o.id=e.id JOIN adit_history_messages m ON m.id=e.message_id
+      WHERE e.provider=? AND e.session_id=? ORDER BY m.ordinal`).all(provider,id) as Record<string,unknown>[];
+    const ledger=this.db.prepare("UPDATE adit_history_usage_entries SET ledger_role=?,exclusion_reason=? WHERE id=? AND (ledger_role<>? OR exclusion_reason IS NOT ?)");
+    for(const entry of retained) {
+      const raw=JSON.parse(entry.raw_usage_json as string);
+      const weight=[entry.input_reported_tokens,entry.output_tokens,entry.cache_read_tokens,entry.cache_write_tokens,entry.reasoning_tokens,numberAt(raw,"total_tokens","totalTokens","totalTokenCount")].filter(value=>value!==null).length;
+      const key=entry.request_id||entry.response_id?JSON.stringify([entry.request_id,entry.response_id]):entry.id as string;
+      const old=usageGroups.get(key);
+      let role=weight?"canonical":"observation",reason:string|null=weight?null:"unrecognized_usage_fields";
+      if(old && weight<old.weight){role="superseded";reason="same_native_request";}
+      else {
+        if(old)ledger.run("superseded","same_native_request",old.entry,"superseded","same_native_request");
+        usageGroups.set(key,{entry:entry.id as string,weight});
+      }
+      ledger.run(role,reason,entry.id,role,reason);
+    }
     const insertMessage=this.db.prepare(`INSERT INTO adit_history_messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     const insertBlock=this.db.prepare("INSERT INTO adit_history_blocks VALUES (?,?,?,?,?,?)");
     for(const [ordinal,message] of messages.entries()) {
+      if(ordinal<prefix)continue;
       const mid=historyKey(provider,id,message.key),occurred=time(message.timestamp);
       if(isPrompt(message)) {
         turn=historyKey(provider,id,"turn",message.key);turnOrdinal++;
@@ -104,6 +159,7 @@ export class StructuredHistory {
       const {key,role,timestamp,model,effort,content,usage,parentKey,raw,...messageExtra}=message;
       insertMessage.run(mid,provider,id,key,ordinal,role,parentKey??null,turn,occurred,timestamp??null,model??null,effort??null,
         request,response,encode(content),encode(raw),encode(messageExtra));
+      this.db.prepare("INSERT INTO adit_history_message_digests VALUES (?,?)").run(mid,digests[ordinal]);
       const blocks=Array.isArray(content)?content:[content];
       const toolNodes:Record<string,unknown>[]=[];
       for(const [index,block] of blocks.entries()) {

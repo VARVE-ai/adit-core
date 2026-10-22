@@ -1,12 +1,14 @@
 import { lstat, open, readdir } from "node:fs/promises";
 import { join, resolve, relative, isAbsolute, sep } from "node:path";
 import Database from "better-sqlite3";
+import { trackSource } from "./source-checkpoints.js";
 import { HistoryFormatError, jsonDocument } from "./types.js";
 
 export async function readSource(
   path: string,
   signal?: AbortSignal,
 ): Promise<Buffer> {
+  trackSource(path);
   signal?.throwIfAborted();
   if ((await lstat(path)).isSymbolicLink())
     throw new Error("Symbolic source links are not collected");
@@ -32,6 +34,7 @@ export async function readSourceJSON(path: string, signal?: AbortSignal) {
 }
 
 export async function directoryEntries(path: string) {
+  trackSource(path);
   try {
     if ((await lstat(path)).isSymbolicLink()) return [];
     return (await readdir(path, { withFileTypes: true })).sort((a, b) =>
@@ -68,6 +71,8 @@ export function databaseSnapshot<T>(
   path: string,
   read: (db: Database.Database) => T,
 ): T {
+  trackSource(path);
+  trackSource(`${path}-wal`);
   const db = new Database(path, {
     readonly: true,
     fileMustExist: true,

@@ -6,7 +6,7 @@ import {
   type LocalWorkspace,
 } from "@varveai/adit-core";
 type Row = Record<string, any>;
-export function attributionStatus(store: LocalStore, workspaceId: string) {
+export function attributionStatus(store: Pick<LocalStore, "db">, workspaceId: string) {
   const latest = store.db
     .prepare(
       "SELECT id,status,finished_at,completed_count,commit_count,error FROM adit_attribution_runs WHERE workspace_id=? ORDER BY started_at DESC LIMIT 1",
@@ -31,7 +31,7 @@ export function attributionStatus(store: LocalStore, workspaceId: string) {
 }
 /** Read-only projection. GET never runs Git, scans transcripts, or writes analysis. */
 export async function queryCommitSources(
-  store: LocalStore,
+  store: Pick<LocalStore, "db">,
   w: LocalWorkspace,
   repository: string,
   sha: string,
@@ -41,7 +41,7 @@ export async function queryCommitSources(
   )();
 }
 function readCommitSources(
-  store: LocalStore,
+  store: Pick<LocalStore, "db">,
   w: LocalWorkspace,
   repository: string,
   sha: string,

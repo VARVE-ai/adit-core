@@ -4,6 +4,7 @@ vi.mock("node:fs", () => ({ existsSync: mocks.existsSync }));
 vi.mock("@varveai/adit-core", () => ({ ...mocks, normalizeServerUrl: (url: string) => url }));
 vi.mock("@varveai/adit-cloud", () => ({ ...mocks }));
 vi.mock("./project-initialization.js", () => ({ loadInitializedProjectConfig: vi.fn() }));
+vi.mock("../local/daemon.js", () => ({ startDaemon: vi.fn(), daemonStatus: vi.fn() }));
 import { cloudLogoutCommand } from "./cloud.js";
 beforeEach(() => {
   vi.resetAllMocks();

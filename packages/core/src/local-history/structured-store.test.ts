@@ -16,6 +16,25 @@ function sample():HistorySession{return {provider:"claude",id:"s",cwd:"/work",me
   {key:"t",role:"user",timestamp:"2026-10-19T00:10:01Z",content:[{type:"tool_result",tool_use_id:"call-1",content:"saved"}],raw:{}},
   {key:"a2",role:"assistant",timestamp:"2026-10-19T00:10:02Z",content:"done",raw:{}},
 ]};}
+it("retains completed turns on append, reconciles usage groups and rebuilds only a changed suffix",()=>{
+  const {db,store}=fixture(),first=sample();
+  store.write(first);
+  db.exec(`CREATE TEMP TABLE deleted_messages(id TEXT); CREATE TEMP TRIGGER count_deleted AFTER DELETE ON adit_history_messages
+    BEGIN INSERT INTO deleted_messages VALUES (OLD.id); END;`);
+  const second:HistorySession={...first,messages:[...first.messages,{key:"u2",role:"user",content:"next",raw:{}},
+    {...first.messages[1],key:"duplicate-request"}]};
+  store.write(second);
+  expect(db.prepare("SELECT count(*) n FROM deleted_messages").get()).toEqual({n:0});
+  expect(db.prepare("SELECT count(*) n FROM adit_history_usage_entries WHERE ledger_role='canonical'").get()).toEqual({n:1});
+  const firstBlocks=db.prepare("SELECT b.rowid,b.* FROM adit_history_blocks b JOIN adit_history_messages m ON m.id=b.message_id WHERE m.ordinal<4 ORDER BY b.rowid").all();
+  store.write({...second,messages:[...second.messages,{key:"last",role:"assistant",content:"final",raw:{}}]});
+  expect(db.prepare("SELECT count(*) n FROM deleted_messages").get()).toEqual({n:2});
+  expect(db.prepare("SELECT b.rowid,b.* FROM adit_history_blocks b JOIN adit_history_messages m ON m.id=b.message_id WHERE m.ordinal<4 ORDER BY b.rowid").all()).toEqual(firstBlocks);
+  store.write(first);
+  expect(store.read("claude","s")!.messages).toHaveLength(4);
+  expect(db.prepare("SELECT ledger_role FROM adit_history_usage_entries").get()).toEqual({ledger_role:"canonical"});
+  expect(db.prepare("SELECT count(*) n FROM adit_history_turns").get()).toEqual({n:1});
+});
 it("stores queryable messages, token columns, tools, evidence and Chinese FTS without a session JSON blob",()=>{
   const {db,store}=fixture(),session=sample();db.transaction(()=>store.write(session))();
   expect((db.prepare("PRAGMA table_info(adit_history_sessions)").all() as {name:string}[]).some(c=>c.name==="data")).toBe(false);

@@ -1,5 +1,6 @@
 import {basename,dirname,join} from "node:path";
 import {lstat} from "node:fs/promises";
+import {trackSource} from "./source-checkpoints.js";
 import {createDecipheriv} from "node:crypto";
 import {databaseSnapshot,hasTable,readSource,readSourceJSON} from "./source-io.js";
 import {array,first,message,session,sorted,table} from "./provider-common.js";
@@ -33,7 +34,7 @@ export function decryptAntigravity(bytes:Buffer,keyBase64:string):Buffer{
  }
  throw new HistoryFormatError("Antigravity archive could not be decrypted with the configured key");
 }
-async function exists(path:string){try{return (await lstat(path)).isFile();}catch(error){if((error as NodeJS.ErrnoException).code==="ENOENT")return false;throw error;}}
+async function exists(path:string){trackSource(path);try{return (await lstat(path)).isFile();}catch(error){if((error as NodeJS.ErrnoException).code==="ENOENT")return false;throw error;}}
 export function antigravitySource(path:string){return (/\.(db|pb|trajectory\.json)$/.test(path)&&["conversations","implicit"].includes(basename(dirname(path)))) || (basename(path)==="transcript.jsonl"&&basename(dirname(path))==="logs"&&basename(dirname(dirname(path)))===".system_generated");}
 export async function readAntigravity(path:string,provider:string,signal?:AbortSignal){
  const brain=basename(path)==="transcript.jsonl";const id=brain?basename(dirname(dirname(dirname(path)))):basename(path).replace(/\.(?:trajectory\.json|db|pb)$/,"");

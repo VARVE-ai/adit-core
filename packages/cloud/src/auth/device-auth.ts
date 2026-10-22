@@ -24,6 +24,7 @@ export interface TokenResponse {
   tokenType?: "Bearer";
   expiresIn?: number;
   expiresAt?: string;
+  user?: { id: string; name: string | null; email: string | null };
 }
 
 export interface DeviceAuthOptions {

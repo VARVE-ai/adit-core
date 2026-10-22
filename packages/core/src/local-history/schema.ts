@@ -1,8 +1,10 @@
 import type Database from "better-sqlite3";
 import { createAttributionSchema } from './attribution-schema.js';
+import { createInspectionSchema, registerHistoryRedaction } from './inspection-schema.js';
 
 /** Fresh development schema. Older JSON archives must be explicitly reset, never migrated here. */
 export function createHistorySchema(db: Database.Database): void {
+  registerHistoryRedaction(db);
   const columns = db.prepare("PRAGMA table_info(adit_history_sessions)").all() as { name: string }[];
   if (columns.some(column => column.name === "data"))
     throw new Error("The development history schema changed. Clear collected local history and collect again; automatic migration is disabled.");
@@ -17,6 +19,17 @@ export function createHistorySchema(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS adit_history_session_activity ON adit_history_sessions(last_activity_at DESC,provider,id);
     CREATE INDEX IF NOT EXISTS adit_history_session_scope ON adit_history_sessions(cwd,provider,last_activity_at DESC);
+    CREATE TABLE IF NOT EXISTS adit_history_deleted_turns (
+      provider TEXT NOT NULL, session_id TEXT NOT NULL, prompt_key TEXT NOT NULL, deleted_at INTEGER NOT NULL,
+      PRIMARY KEY(provider,session_id,prompt_key),
+      FOREIGN KEY(provider,session_id) REFERENCES adit_history_sessions(provider,id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS adit_history_text_edits (
+      provider TEXT NOT NULL, session_id TEXT NOT NULL, message_key TEXT NOT NULL,
+      block_index INTEGER NOT NULL, text_content TEXT NOT NULL, updated_at INTEGER NOT NULL,
+      PRIMARY KEY(provider,session_id,message_key,block_index),
+      FOREIGN KEY(provider,session_id) REFERENCES adit_history_sessions(provider,id) ON DELETE CASCADE
+    );
     CREATE TABLE IF NOT EXISTS adit_history_sources (
       provider TEXT NOT NULL, path TEXT NOT NULL, session_id TEXT NOT NULL,
       fingerprint TEXT NOT NULL, parser_version INTEGER NOT NULL,
@@ -24,6 +37,10 @@ export function createHistorySchema(db: Database.Database): void {
       FOREIGN KEY(provider,session_id) REFERENCES adit_history_sessions(provider,id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS adit_history_sources_session ON adit_history_sources(provider,session_id);
+    CREATE TABLE IF NOT EXISTS adit_history_file_checkpoints (
+      provider TEXT NOT NULL, path TEXT NOT NULL, scope TEXT NOT NULL, parser_version INTEGER NOT NULL,
+      manifest_json TEXT NOT NULL, sessions_json TEXT NOT NULL, PRIMARY KEY(provider,path,scope)
+    );
     CREATE TABLE IF NOT EXISTS adit_history_assignments (
       provider TEXT NOT NULL, session_id TEXT NOT NULL, workspace TEXT NOT NULL,
       PRIMARY KEY(provider,session_id),
@@ -39,6 +56,9 @@ export function createHistorySchema(db: Database.Database): void {
       FOREIGN KEY(provider,session_id) REFERENCES adit_history_sessions(provider,id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS adit_history_messages_time ON adit_history_messages(occurred_at,provider,model);
+    CREATE TABLE IF NOT EXISTS adit_history_message_digests (
+      message_id TEXT PRIMARY KEY REFERENCES adit_history_messages(id) ON DELETE CASCADE, digest TEXT NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS adit_history_messages_turn ON adit_history_messages(turn_id,ordinal);
     CREATE INDEX IF NOT EXISTS adit_history_message_scope_time ON adit_history_messages(provider,session_id,occurred_at);
     CREATE TABLE IF NOT EXISTS adit_history_blocks (
@@ -49,12 +69,18 @@ export function createHistorySchema(db: Database.Database): void {
     CREATE VIRTUAL TABLE IF NOT EXISTS adit_history_text_fts USING fts5(
       text_content, block_id UNINDEXED, message_id UNINDEXED, tokenize='trigram'
     );
-    CREATE TRIGGER IF NOT EXISTS adit_history_blocks_insert AFTER INSERT ON adit_history_blocks
+    DROP TRIGGER IF EXISTS adit_history_blocks_insert;
+    CREATE TRIGGER adit_history_blocks_insert AFTER INSERT ON adit_history_blocks
     WHEN NEW.text_content IS NOT NULL BEGIN
-      INSERT INTO adit_history_text_fts(rowid,text_content,block_id,message_id) VALUES(NEW.rowid,NEW.text_content,NEW.id,NEW.message_id);
+      INSERT INTO adit_history_text_fts(rowid,text_content,block_id,message_id) VALUES(NEW.rowid,adit_history_redact(NEW.text_content),NEW.id,NEW.message_id);
     END;
     CREATE TRIGGER IF NOT EXISTS adit_history_blocks_delete AFTER DELETE ON adit_history_blocks BEGIN
       DELETE FROM adit_history_text_fts WHERE rowid=OLD.rowid;
+    END;
+    CREATE TRIGGER IF NOT EXISTS adit_history_blocks_update AFTER UPDATE OF text_content ON adit_history_blocks BEGIN
+      DELETE FROM adit_history_text_fts WHERE rowid=OLD.rowid;
+      INSERT INTO adit_history_text_fts(rowid,text_content,block_id,message_id)
+        SELECT NEW.rowid,adit_history_redact(NEW.text_content),NEW.id,NEW.message_id WHERE NEW.text_content IS NOT NULL;
     END;
     CREATE TABLE IF NOT EXISTS adit_history_relations (
       provider TEXT NOT NULL, session_id TEXT NOT NULL, parent_id TEXT NOT NULL, kind TEXT NOT NULL,
@@ -130,4 +156,5 @@ export function createHistorySchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS adit_history_commit_op_tool ON adit_history_commit_operations(tool_call_id);
   `);
   createAttributionSchema(db);
+  createInspectionSchema(db);
 }

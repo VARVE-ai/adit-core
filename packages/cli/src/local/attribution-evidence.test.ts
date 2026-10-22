@@ -60,6 +60,31 @@ it("handles PowerShell here-strings and excludes old multi-line replacement valu
   expect(text).not.toContain("old expression first");
   expect(text).not.toContain("old expression second");
 });
+it("does not treat request headers or runtime validation scripts as authored file content", () => {
+  expect(
+    extractWritten("exec_command", {
+      cmd: "$encoded=$packageName.Replace('/','%2f'); Invoke-RestMethod -Uri $uri -Headers @{'Cache-Control'='no-cache'}",
+      workdir: "/work",
+    }),
+  ).toEqual([]);
+  const diagnostic =
+    "import { rmSync } from 'node:fs';\nwriteProjectManifest(root, { schemaVersion: 1 });\nrmSync(root, { recursive: true, force: true });";
+  expect(
+    extractWritten(
+      "exec",
+      `text(await tools.exec_command({cmd:${JSON.stringify(diagnostic)},workdir:'/work'}));`,
+    ),
+  ).toEqual([]);
+  // The same source explicitly saved into a file remains legitimate evidence.
+  const saved = extractWritten("exec_command", {
+    cmd: `writeFileSync('diagnostic.ts', ${JSON.stringify(diagnostic)})`,
+  });
+  expect(
+    saved.some((part) =>
+      part.text.includes("rmSync(root, { recursive: true, force: true });"),
+    ),
+  ).toBe(true);
+});
 it("temporarily deduplicates copied calls and credits child work without mutating sessions", () => {
   const sessions = [
     { provider: "claude", id: "a", started_at: 1 },
@@ -88,6 +113,14 @@ it("temporarily deduplicates copied calls and credits child work without mutatin
   expect(groups.representative("claude\0child").id).toBe("a");
   expect(groups.find("claude\0fork")).not.toBe(groups.find("claude\0a"));
   expect(JSON.stringify(sessions)).toBe(before);
+});
+it("uses native continuation identity in analysis while preserving actual forks",()=>{
+ const sessions=[{provider:"codex",id:"native",started_at:1},
+  {provider:"codex",id:"native_page",parent_id:"native",relationship:"continuation",started_at:2},
+  {provider:"codex",id:"fork",parent_id:"native",relationship:"fork",started_at:3}];
+ const groups=analysisIdentities(sessions,[]);
+ expect(groups.representative("codex\0native_page").id).toBe("native");
+ expect(groups.representative("codex\0fork").id).toBe("fork");
 });
 it("requires at least ninety percent token overlap and preserves quoted values", () => {
   expect(

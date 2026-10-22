@@ -3,6 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync,
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { formatRow, marks, printLine, printSection, shortenPaths, strong } from "./cli-style.js";
+import { PR_SKILL } from "./pr-skill.js";
 
 export interface SkillDefinition {
   name: string;
@@ -296,6 +297,7 @@ export const SKILLS: SkillDefinition[] = [
   { name: "adit-history", content: HISTORY_SKILL, summary: "projects, sessions and commits" },
   { name: "adit-reports", content: REPORTS_SKILL, summary: "usage, daily reports and team progress" },
   { name: "adit-memory", content: MEMORY_SKILL, summary: "personal habits and project standards" },
+  { name: "adit-pr", content: PR_SKILL, summary: "local PR AI usage disclosures" },
 ];
 
 export type SkillInstallResult = { installed: string[]; unchanged: string[]; skipped: string[]; errors: string[] };
