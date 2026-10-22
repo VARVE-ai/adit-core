@@ -1,7 +1,8 @@
+import { AgentLabel } from "./agent-label";
+import { WorkspacePicker } from "./workspace-picker";
 import { t, locale, useLanguage, systemMessage } from "./i18n";
 import React, { useEffect, useState, useCallback, useRef, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
-import { createPortal } from "react-dom";
 import {
   Folder,
   FolderPlus,
@@ -28,13 +29,12 @@ import {
   ShieldCheck,
   Loader2,
   Trash2,
-  MoreHorizontal,
   UserRound,
 } from "lucide-react";
 import "./style.css";
 import { AditMark } from "./adit-mark";
 import { OverviewPage } from "./overview";
-import type { CloudSyncSummary } from "./overview-cloud-push";
+import { CloudSyncStatus, type CloudSyncSummary } from "./overview-cloud-push";
 import { CommitsPage } from "./commits";
 import { AchievementsPage } from "./achievements";
 import { ProfileCardsPage } from "./profile-cards";
@@ -226,81 +226,6 @@ function IconButton({
     <button className="icon" title={title} aria-label={title} onClick={onClick}>
       {children}
     </button>
-  );
-}
-function WorkspaceActions({ workspace, onView, onDelete }: {
-  workspace: Workspace;
-  onView: () => void;
-  onDelete: () => void;
-}) {
-  const trigger = useRef<HTMLButtonElement>(null);
-  const menu = useRef<HTMLDivElement>(null);
-  const [position, setPosition] = useState<{ top: number; left: number }>();
-  const menuId = `workspace-actions-${workspace.id}`;
-  const open = () => {
-    const rect = trigger.current?.getBoundingClientRect();
-    setPosition(rect ? {
-      left: Math.max(8, Math.min(rect.right - 176, window.innerWidth - 184)),
-      top: rect.bottom + 54 > window.innerHeight ? rect.top - 54 : rect.bottom + 6,
-    } : { top: 0, left: 0 });
-  };
-  useEffect(() => {
-    if (!position) return;
-    menu.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    const outside = (event: Event) => {
-      const target = event.target as Node;
-      if (!trigger.current?.contains(target) && !menu.current?.contains(target)) setPosition(undefined);
-    };
-    const close = () => setPosition(undefined);
-    const key = (event: KeyboardEvent) => {
-      if (event.key === "Escape" || event.key === "Tab") {
-        if (event.key === "Escape") event.preventDefault();
-        close();
-        trigger.current?.focus();
-      } else if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
-        event.preventDefault();
-        menu.current?.querySelector<HTMLButtonElement>("button")?.focus();
-      }
-    };
-    document.addEventListener("pointerdown", outside);
-    document.addEventListener("focusin", outside);
-    document.addEventListener("keydown", key);
-    window.addEventListener("resize", close);
-    window.addEventListener("scroll", close, true);
-    return () => {
-      document.removeEventListener("pointerdown", outside);
-      document.removeEventListener("focusin", outside);
-      document.removeEventListener("keydown", key);
-      window.removeEventListener("resize", close);
-      window.removeEventListener("scroll", close, true);
-    };
-  }, [position]);
-  return (
-    <div className="workspace-row-actions">
-      <button className="text-action" title={t("查看详情")} onClick={onView}>
-        {t("查看详情")}<ChevronRight size={14} />
-      </button>
-      <button ref={trigger} className="workspace-more" title={t("更多操作")} aria-label={t("更多操作")}
-        aria-haspopup="menu" aria-expanded={!!position} aria-controls={position ? menuId : undefined}
-        onClick={() => position ? setPosition(undefined) : open()}
-        onKeyDown={event => {
-          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-            event.preventDefault();
-            open();
-          }
-        }}>
-        <MoreHorizontal size={17} aria-hidden="true" />
-      </button>
-      {position && createPortal(
-        <div ref={menu} id={menuId} className="workspace-action-menu" role="menu" aria-label={t("操作")} style={position}>
-          <button role="menuitem" className="workspace-delete" onClick={() => {
-            setPosition(undefined);
-            trigger.current?.focus();
-            onDelete();
-          }}><Trash2 size={15} aria-hidden="true" />{t("删除工作目录")}</button>
-        </div>, document.body,
-      )}
-    </div>
   );
 }
 function Modal({
@@ -634,6 +559,7 @@ export function App() {
       <header className="top">
         <a
           className="brand"
+          aria-label="ADIT Local"
           href="/settings/workspaces"
           onClick={(e) => {
             e.preventDefault();
@@ -692,7 +618,9 @@ export function App() {
         <div className="top-right">
           {selected?.started && selected.directoryAvailable !== false && (
             <LocalSyncStatus
+              key={selected.id}
               workspaceId={selected.id}
+              workspaceName={selected.name}
               jobs={state.jobs}
               pending={busy}
               onRefresh={() => void act(async () => {
@@ -700,72 +628,37 @@ export function App() {
               })}
             />
           )}
-          <div className="workspace-picker" title={selected?.path}>
-            <Folder size={16} aria-hidden="true" />
-            <select
-              aria-label={t("当前工作目录")}
-              value={selected?.id || ""}
-              onChange={(e) => {
-                if (e.target.value)
-                  go(
-                    isWorkspacePage &&
-                      state.workspaces.find((w) => w.id === e.target.value)
-                        ?.started
-                      ? `/${isSharing || isShareReview ? "share" : isPr || isPrCreate ? "pr" : isInspection ? "inspection" : isSessions ? "sessions" : isCommits ? "commits" : isAchievements ? "achievements" : isProfileCards ? "profile-cards" : isBadgeExamples ? "badge-examples" : "overview"}/${e.target.value}`
-                      : `/settings/workspaces/${e.target.value}`,
-                  );
-              }}
-            >
-              <option value="">{t("工作目录")}</option>
-              {state.workspaces.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name}
-                </option>
-              ))}
-            </select>
-            {selected && (
-              <span className="path" title={selected.path}>
-                {selected.path}
-              </span>
-            )}
-          </div>
+          {selected && <CloudSyncStatus key={`${selected.id}:${route}`} workspaceName={selected.name}
+            enabled={selected.cloud.enabled} sync={selected.cloudSync} accountState={account?.auth} pending={busy}
+            onSettings={() => go(`/settings/workspaces/${selected.id}`)} onAccount={() => go("/settings/account")}
+            onPush={account?.auth === "valid" && selected.cloud.enabled ? () => void act(async () => {
+              await api(`/workspaces/${selected.id}/sync`, "POST", {});
+            }) : undefined} />}
           <IconButton
             title={dark ? t("浅色主题") : t("深色主题")}
             onClick={() => setDark(!dark)}
           >
             {dark ? <Sun size={16} /> : <Moon size={16} />}
           </IconButton>
-          <div
-            className="language-switch"
-            role="group"
-            aria-label={t("界面语言")}
-          >
+          <button type="button" className="icon language-switch"
+            title={t(language === "en" ? "切换为中文" : "切换为英文")}
+            aria-label={t(language === "en" ? "切换为中文" : "切换为英文")}
+            onClick={() => setLanguage(language === "en" ? "zh" : "en")}>
             <Languages size={16} aria-hidden="true" />
-            <button
-              type="button"
-              lang="en"
-              aria-pressed={language === "en"}
-              onClick={() => setLanguage("en")}
-            >
-              English
-            </button>
-            <button
-              type="button"
-              lang="zh-CN"
-              aria-pressed={language === "zh"}
-              onClick={() => setLanguage("zh")}
-            >
-              中文
-            </button>
-          </div>
+          </button>
+          <WorkspacePicker workspaces={state.workspaces} selectedId={selected?.id}
+            onSelect={(workspaceId) => go(
+              isWorkspacePage && state.workspaces.find(w => w.id === workspaceId)?.started
+                ? `/${isSharing || isShareReview ? "share" : isPr || isPrCreate ? "pr" : isInspection ? "inspection" : isSessions ? "sessions" : isCommits ? "commits" : isAchievements ? "achievements" : isProfileCards ? "profile-cards" : isBadgeExamples ? "badge-examples" : "overview"}/${workspaceId}`
+                : `/settings/workspaces/${workspaceId}`,
+            )} />
         </div>
       </header>
       <div
         className={`layout${isWorkspacePage ? " overview-layout" : ""}${isOverview ? " overview-dashboard" : ""}`}
       >
         {!isWorkspacePage && (
-          <aside>
-            <h1>{t("设置")}</h1>
+          <aside aria-label={t("设置")}>
             {nav.map(([key, name, Icon]) => (
               <button
                 key={key}
@@ -836,9 +729,6 @@ export function App() {
               onAchievements={() => go(`/achievements/${selected.id}`)}
               onInspection={() => go(`/inspection/${selected.id}`)}
               onProfileCards={() => go(`/profile-cards/${selected.id}`)}
-              onCloudAccount={() => go("/settings/account")}
-              cloudAccountState={account?.auth}
-              onCloudSync={account?.auth === "valid" && selected.cloud.enabled ? () => void act(async () => { await api(`/workspaces/${selected.id}/sync`, "POST", {}); }) : undefined}
             />
           ) : (
             <fieldset
@@ -859,133 +749,81 @@ export function App() {
                       {t("添加工作目录")}
                     </button>
                   </div>
-                  <p className="workspace-summary">
+                  <p className="page-description">
                     {t(
                       "管理这台电脑上的工作目录，选择一个目录查看和调整它的设置。",
                     )}
                   </p>
-                  <div className="table-scroll">
-                    <table className="workspace-table">
-                      <colgroup>
-                        <col
-                          style={{ width: language === "en" ? "26%" : "35%" }}
-                        />
-                        <col
-                          style={{ width: language === "en" ? "11%" : "7.5%" }}
-                        />
-                        <col
-                          style={{ width: language === "en" ? "9%" : "7.5%" }}
-                        />
-                        <col
-                          style={{ width: language === "en" ? "22%" : "19%" }}
-                        />
-                        <col
-                          style={{ width: language === "en" ? "12%" : "15%" }}
-                        />
-                        <col
-                          style={{ width: language === "en" ? "20%" : "16%" }}
-                        />
-                      </colgroup>
-                      <thead>
-                        <tr>
-                          <th scope="col">{t("名字 / 路径")}</th>
-                          <th scope="col">{t("仓库")}</th>
-                          <th scope="col">{t("会话")}</th>
-                          <th scope="col">{t("整理状态")}</th>
-                          <th scope="col">{t("云端同步")}</th>
-                          <th scope="col" aria-label={t("操作")} />
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {state.workspaces.map((w) => {
-                          const job = state.jobs.find(
-                            (j) =>
-                              j.workspaceId === w.id && j.kind === "collect",
-                          );
-                          return (
-                            <tr key={w.id}>
-                              <td>
-                                <button
-                                  className="link"
-                                  onClick={() =>
-                                    go(`/settings/workspaces/${w.id}`)
-                                  }
-                                >
-                                  <Folder size={16} />
-                                  {w.name}
-                                </button>
-                                <div className="path" title={w.path}>
-                                  {w.path}
-                                </div>
-                                {w.directoryAvailable === false && <small className="directory-unavailable">{t("目录不可用")}</small>}
-                              </td>
-                              <td>{w.repositories.length}</td>
-                              <td>
-                                {w.started
-                                  ? Object.entries(w.counts)
-                                      .filter(
-                                        ([p]) =>
-                                          w.providers.includes(p) ||
-                                          [
-                                            "claude-ai",
-                                            "chatgpt",
-                                            "gemini-apps",
-                                          ].includes(p),
-                                      )
-                                      .reduce((n, [, v]) => n + v, 0)
-                                  : t("还没有整理")}
-                              </td>
-                              <td>
-                                <Badge
-                                  status={w.started ? "done" : job?.status}
-                                >
-                                  {w.started
-                                    ? t("整理完成")
-                                    : job
-                                      ? undefined
-                                      : t("未整理")}
-                                </Badge>
-                              </td>
-                              <td>
-                                {w.cloud.enabled ? (
-                                  <>
-                                    <span>
-                                      {w.cloud.mode === "manual"
-                                        ? t("手动")
-                                        : t(
-                                            "自动 · 每 {0} 分钟",
-                                            w.cloud.interval,
-                                          )}
-                                    </span>
-                                    <small>{t(w.cloudSync?.status === "done" ? "同步完成" : w.cloudSync?.status === "failed" ? "同步失败" : w.cloudSync?.status === "partial" ? "部分记录待同步" : ["queued", "running"].includes(w.cloudSync?.status || "") ? "正在同步新记录…" : "尚未同步")}</small>
-                                  </>
-                                ) : (
-                                  t("未开启")
-                                )}
-                              </td>
-                              <td>
-                                <WorkspaceActions workspace={w}
-                                  onView={() => go(`/settings/workspaces/${w.id}`)}
-                                  onDelete={() => {
-                                    setDeleteError("");
-                                    setDeletingWorkspace(w);
-                                  }} />
-                              </td>
-                            </tr>
-                          );
-                        })}
-                        {state.workspaces.length === 0 && (
-                          <tr className="workspace-empty-row">
-                            <td colSpan={6}>
-                              <div className="workspace-empty">
-                                <Folder size={28} aria-hidden="true" />
-                                <span>{t("暂无工作目录")}</span>
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
+                  <div className="workspace-list-scroll">
+                    <ul className="workspace-list" aria-label={t("工作目录")}>
+                      {state.workspaces.map((w) => {
+                        const job = state.jobs.find(
+                          (j) => j.workspaceId === w.id && j.kind === "collect",
+                        );
+                        return (
+                          <li className="workspace-list-row" key={w.id}>
+                            <button
+                              className="link workspace-list-name"
+                              title={w.name}
+                              onClick={() => go(`/settings/workspaces/${w.id}`)}
+                            >
+                              <Folder size={16} />
+                              <span>{w.name}</span>
+                            </button>
+                            <span className="path workspace-list-path" title={w.path}>
+                              <bdi dir="ltr">{w.path}</bdi>
+                            </span>
+                            {w.directoryAvailable === false && (
+                              <span className="directory-unavailable">{t("目录不可用")}</span>
+                            )}
+                            <span className="workspace-list-stat">
+                              {w.repositories.length} <span>{t("仓库")}</span>
+                            </span>
+                            <span className="workspace-list-stat">
+                              {w.started ? (
+                                <>
+                                  {Object.entries(w.counts)
+                                    .filter(
+                                      ([p]) => w.providers.includes(p) ||
+                                        ["claude-ai", "chatgpt", "gemini-apps"].includes(p),
+                                    )
+                                    .reduce((n, [, v]) => n + v, 0)}
+                                  {" "}<span>{t("会话")}</span>
+                                </>
+                              ) : t("还没有整理")}
+                            </span>
+                            <Badge status={w.started ? "done" : job?.status}>
+                              {w.started ? t("整理完成") : job ? undefined : t("未整理")}
+                            </Badge>
+                            <span className="workspace-list-cloud">
+                              <span>{t("云端同步")}</span>
+                              {w.cloud.enabled ? (
+                                <>
+                                  <span>
+                                    {w.cloud.mode === "manual"
+                                      ? t("手动")
+                                      : t("自动 · 每 {0} 分钟", w.cloud.interval)}
+                                  </span>
+                                  <span>·</span>
+                                  <span>{t(w.cloudSync?.status === "done" ? "同步完成" : w.cloudSync?.status === "failed" ? "同步失败" : w.cloudSync?.status === "partial" ? "部分记录待同步" : ["queued", "running"].includes(w.cloudSync?.status || "") ? "正在同步新记录…" : "尚未同步")}</span>
+                                </>
+                              ) : <span>{t("未开启")}</span>}
+                            </span>
+                            <div className="workspace-row-actions">
+                              <button className="text-action" onClick={() => go(`/settings/workspaces/${w.id}`)}>
+                                {t("查看详情")}<ChevronRight size={14} />
+                              </button>
+                            </div>
+                          </li>
+                        );
+                      })}
+                      {state.workspaces.length === 0 && (
+                        <li className="workspace-empty">
+                          <Folder size={28} aria-hidden="true" />
+                          <span>{t("暂无工作目录")}</span>
+                        </li>
+                      )}
+                    </ul>
                   </div>
                   <p className="repo-hint">
                     {t("共")} {state.workspaces.length}{" "}
@@ -1015,24 +853,33 @@ export function App() {
                   }
                 />
               )}
+              {route.startsWith("/settings/workspaces/") && selected && (
+                <footer className="workspace-delete-footer">
+                  <button className="workspace-delete" onClick={() => {
+                    setDeleteError("");
+                    setDeletingWorkspace(selected);
+                  }}>
+                    <Trash2 size={15} aria-hidden="true" />
+                    {t("删除工作目录")}
+                  </button>
+                </footer>
+              )}
               {route === "/settings/providers" && (
                 <div className="provider-page">
                   <div className="page-heading">
                     <h2>{t("接入的 Agent")}</h2>
-                    <div className="provider-refresh">
-                      <IconButton
-                        title={t("重新检查")}
-                        onClick={() =>
-                          void act(async () =>
-                            setProviders(await api("/providers")),
-                          )
-                        }
-                      >
-                        <RefreshCw size={15} />
-                      </IconButton>
-                    </div>
+                    <button
+                      onClick={() =>
+                        void act(async () =>
+                          setProviders(await api("/providers")),
+                        )
+                      }
+                    >
+                      <RefreshCw size={14} />
+                      {t("重新检查")}
+                    </button>
                   </div>
-                  <p className="provider-summary">
+                  <p className="page-description">
                     {t(
                       "选择要读取和整理哪些 Agent 的会话记录，并查看它们的记录目录。",
                     )}
@@ -1097,6 +944,7 @@ export function App() {
                   jobs: s.jobs.filter(j => j.workspaceId !== deletingWorkspace.id),
                 }));
                 setDeletingWorkspace(undefined);
+                go("/settings/workspaces", true);
                 await refresh().catch(e => setError(e instanceof Error ? e.message : String(e)));
               } catch (e) {
                 setDeleteError(e instanceof Error ? e.message : String(e));
@@ -1130,17 +978,18 @@ function ConversationImport({
     <section className="provider-homes">
       <h3>{t("导入会话")}</h3>
       <p className="muted">{t("将导出文件中的会话导入指定工作目录。")}</p>
-      <label>
-        {t("来源")}
-        <select value={provider} onChange={(e) => setProvider(e.target.value)}>
+      <div className="field">
+        <label htmlFor="import-provider">{t("来源")}</label>
+        <select id="import-provider" value={provider} onChange={(e) => setProvider(e.target.value)}>
           <option value="claude-ai">Claude.ai</option>
           <option value="chatgpt">ChatGPT</option>
           <option value="gemini-apps">Gemini Apps</option>
         </select>
-      </label>
-      <label>
-        {t("工作目录")}
+      </div>
+      <div className="field">
+        <label htmlFor="import-workspace">{t("工作目录")}</label>
         <select
+          id="import-workspace"
           value={workspaceId}
           onChange={(e) => setWorkspaceId(e.target.value)}
         >
@@ -1151,10 +1000,11 @@ function ConversationImport({
             </option>
           ))}
         </select>
-      </label>
-      <label>
-        {t("导出文件路径")}
+      </div>
+      <div className="field">
+        <label htmlFor="import-path">{t("导出文件路径")}</label>
         <input
+          id="import-path"
           value={path}
           onChange={(e) => setPath(e.target.value)}
           placeholder={
@@ -1163,7 +1013,7 @@ function ConversationImport({
               : t("JSON 导出文件路径")
           }
         />
-      </label>
+      </div>
       <button
         disabled={!workspaceId || !path.trim()}
         onClick={() =>
@@ -1327,6 +1177,9 @@ function WorkspaceEditor({
   useEffect(() => setProviderLimit(6), [form.path]);
   const [token, setToken] = useState("");
   const [gist, setGist] = useState(workspace?.gistConfigured || false);
+  const [gistImporting, setGistImporting] = useState(false);
+  const [gistAccount, setGistAccount] = useState("");
+  const [gistImportError, setGistImportError] = useState("");
   useEffect(() => {
     if (workspace && !editing) setForm(workspace);
   }, [workspace?.version, workspace?.started, workspace?.directoryAvailable, editing]);
@@ -1656,7 +1509,7 @@ function WorkspaceEditor({
                   })
                 }
               />
-              <span className="collection-provider">{showCollectionProgress&&<i className={`collection-agent-dot agent-${p.id}`} aria-hidden="true"/>}{p.name}</span>
+              <AgentLabel className="collection-provider" provider={p.id} name={p.name} />
               {showCollectionProgress?<CollectionRowProgress progress={job.sourceProgress?.[p.id]} unit="sessions" active={progressActive}/>:<span className="muted">
                 {!p.supported
                   ? t("暂未支持")
@@ -1700,7 +1553,28 @@ function WorkspaceEditor({
             <Badge status={gist ? "done" : ""}>
               {gist ? t("已配置") : t("未配置")}
             </Badge>
+            <button className="session-share-local-account" disabled={fresh || gistImporting}
+              onClick={() => {
+                if (gistImporting) return;
+                setGistImporting(true);
+                setGistImportError("");
+                void act(async () => {
+                  try {
+                    const result = await api<{ configured: boolean; account: string }>(`/workspaces/${form.id}/gist-credential`, "POST", {});
+                    setGist(result.configured);
+                    setGistAccount(result.account);
+                    setToken("");
+                  } catch (error) {
+                    setGistImportError(error instanceof Error ? error.message : String(error));
+                  } finally { setGistImporting(false); }
+                });
+              }}>
+              {gistImporting && <Loader2 size={14} className="spin" aria-hidden="true" />}
+              {gistImporting ? t("正在检查 GitHub 账号…") : t("使用本机 GitHub 账号")}
+            </button>
           </div>
+          {gistImportError && <p role="alert" className="error">{systemMessage(gistImportError)}</p>}
+          {gistAccount && <p role="status" className="repo-hint">{t("已连接 GitHub 账号 {0}，分享权限检查通过。", gistAccount)}</p>}
           <div className="input-actions session-share-token">
             <input
               type="password"
@@ -1721,6 +1595,8 @@ function WorkspaceEditor({
                   });
                   setToken("");
                   setGist(true);
+                  setGistAccount("");
+                  setGistImportError("");
                 })
               }
             >
@@ -1968,7 +1844,7 @@ function ProviderRow({
     <section className="provider">
       <div className="provider-details">
         <div className="provider-name-row">
-          <h3>{p.name}</h3>
+          <h3><AgentLabel provider={p.id} name={p.name} /></h3>
           {p.homesSupported && !primaryHomes && (
             <button
               className={`icon provider-config${showHomes ? " expanded" : ""}`}
@@ -2576,12 +2452,12 @@ function Runtime({ state, act }: { state: State; act: Act }) {
           )}
         </p>
         <div className="table-scroll">
-          <table>
+          <table className="settings-table">
             <thead>
               <tr>
                 <th>Skill</th>
-                <th>Claude Code</th>
-                <th>Codex / Agents</th>
+                <th><AgentLabel provider="claude" /></th>
+                <th><AgentLabel provider="codex" /> / Agents</th>
               </tr>
             </thead>
             <tbody>

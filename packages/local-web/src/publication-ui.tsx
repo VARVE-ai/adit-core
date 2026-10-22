@@ -1,3 +1,4 @@
+import { AgentLabel } from "./agent-label";
 import { useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -49,7 +50,7 @@ export function SharedSessionView({ snapshot: s, review = false }: { snapshot: S
   return <article className={`shared-session ${review ? "review" : ""}`}>
     {!review && <div className="shared-brand"><AditMark /> <span>{p("ADIT · 分享的 AI 会话", "ADIT · Shared AI session")}</span></div>}
     <h1>{s.title}</h1>
-    <div className="publication-meta"><span><i className={`session-agent-dot agent-${s.provider}`} />{s.agent}</span>{s.models.map(m => <code key={m}>{m}</code>)}<span>{publicationDate(s.date)}</span><span>{s.promptCount} {p("轮提问", "prompts")}</span><span><GitCommitHorizontal size={13} />{s.commitCount} {p("个提交", "commits")}</span></div>
+    <div className="publication-meta"><span><AgentLabel provider={s.provider} name={s.agent} /></span>{s.models.map(m => <code key={m}>{m}</code>)}<span>{publicationDate(s.date)}</span><span>{s.promptCount} {p("轮提问", "prompts")}</span><span><GitCommitHorizontal size={13} />{s.commitCount} {p("个提交", "commits")}</span></div>
     {!review && <p className="shared-reviewed"><ShieldCheck size={14} />{p("作者分享前检查过内容，本机路径和会话文件名已遮盖", "The author reviewed this session before sharing. Local paths and session filenames have been redacted.")}</p>}
     <div className="shared-timeline">{s.turns.map((t, index) => <section className="shared-turn" key={index}>
       <span className="shared-node"><MessageSquare size={13} /></span>

@@ -196,6 +196,10 @@ const respond = (path: string, input?: any): unknown => {
     if (input) savedWorkspace = { ...savedWorkspace, ...input, version: savedWorkspace.version + 1 };
     return savedWorkspace;
   }
+  if (path === `/workspaces/${savedWorkspace.id}/gist-credential`) {
+    savedWorkspace = { ...savedWorkspace, gistConfigured: true };
+    return { configured: true, account: "test-github-user" };
+  }
   if (path.startsWith("/account")) return accountConnected ? account : { ...account, connected: false, auth: "disconnected", reachable: null };
   if (path === "/providers")
     return [
@@ -277,6 +281,12 @@ const respond = (path: string, input?: any): unknown => {
   if (path === "/workspaces/ws/deletion-preview") return {sharedSessions:1,sharedRepositories:0};
   throw new Error(`Unexpected test request: ${path}`);
 };
+
+async function openHeaderStatus(title: "本机同步" | "云端存储") {
+  const trigger = renderer!.root.findAllByType("button").find(b =>
+    b.props.className === "icon header-status-trigger" && b.props["aria-label"].startsWith(i18n.t(title) + " · "))!;
+  await act(async () => { trigger.props.onClick(); });
+}
 
 beforeAll(async () => {
   const local = {
@@ -366,9 +376,7 @@ function button(label: string) {
 async function toggle() {
   await act(async () => {
     renderer!.root
-      .findByProps({ className: "language-switch" })
-      .findAllByType("button")
-      .find((choice) => !choice.props["aria-pressed"])!
+      .findByProps({ className: "icon language-switch" })
       .props.onClick();
   });
 }
@@ -402,6 +410,36 @@ function expectEnglish() {
 }
 
 describe("language switching across the local workbench", () => {
+  it("uses the local GitHub account only on click and never fills the token input", async () => {
+    const root = await render("/settings/workspaces/ws");
+    const endpoint = "/api/local/workspaces/ws/gist-credential";
+    const before = vi.mocked(fetch).mock.calls.filter(([url]) => url === endpoint).length;
+    expect(root.findByProps({ "aria-label": "GitHub token" }).props.value).toBe("");
+    await act(async () => { button("Use local GitHub account").props.onClick(); });
+    const calls = vi.mocked(fetch).mock.calls.filter(([url]) => url === endpoint);
+    expect(calls).toHaveLength(before + 1);
+    expect(calls.at(-1)?.[1]).toMatchObject({ method: "POST", body: "{}" });
+    expect(root.findByProps({ "aria-label": "GitHub token" }).props.value).toBe("");
+    expect(text(root)).toContain("Connected to GitHub account test-github-user. Sharing permission verified.");
+    await toggle();
+    expect(text(root)).toContain("已连接 GitHub 账号 test-github-user，分享权限检查通过。");
+    const input = root.findByProps({ "aria-label": "GitHub 令牌" });
+    expect(input.props.type).toBe("password");
+    await act(async () => { input.props.onChange({ target: { value: "TEST_MANUAL_TOKEN" } }); });
+    await act(async () => { button("保存令牌").props.onClick(); });
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => url === endpoint).at(-1)?.[1]).toMatchObject({ method: "PUT", body: JSON.stringify({ token: "TEST_MANUAL_TOKEN" }) });
+    expect(root.findByProps({ "aria-label": "GitHub 令牌" }).props.value).toBe("");
+    expect(text(root)).not.toContain("test-github-user");
+  });
+  it("keeps manual entry available after a failed GitHub account check", async () => {
+    const root = await render("/settings/workspaces/ws");
+    vi.mocked(fetch).mockImplementationOnce(async () => ({ ok: false, json: async () => ({ error: "The local GitHub sign-in has expired. Sign in again and retry." }) }) as Response);
+    await act(async () => { button("Use local GitHub account").props.onClick(); });
+    expect(text(root.findByProps({ role: "alert" }))).toContain("sign-in has expired");
+    expect(root.findByProps({ "aria-label": "GitHub token" }).props.value).toBe("");
+    expect(button("Use local GitHub account").props.disabled).toBe(false);
+    expect(text(root)).toContain("Not configured");
+  });
   it("keeps missing Git configuration on the unchecked repository row in both languages", async () => {
     const skipped = `${workspace.path}/unconfigured`;
     savedWorkspace = { ...workspace, repositoryInfo: [
@@ -422,11 +460,14 @@ describe("language switching across the local workbench", () => {
   });
   it("confirms workspace deletion in both languages and updates the list only after success", async () => {
     const root = await render("/settings/workspaces");
+    expect(root.findAllByProps({ className: "workspace-more" })).toHaveLength(0);
+    expect(root.findAllByProps({ className: "workspace-delete" })).toHaveLength(0);
+    await act(async () => { button("View details").props.onClick(); });
+    expect(location.pathname).toBe("/settings/workspaces/ws");
     const requests = () => vi.mocked(fetch).mock.calls.filter(([, options]) => options?.method === "DELETE");
     const before = requests().length;
     const openDelete = async () => {
-      await act(async () => { root.findByProps({ className: "workspace-more" }).props.onClick(); });
-      await act(async () => { root.findByProps({ role: "menuitem" }).props.onClick(); });
+      await act(async () => { root.findByProps({ className: "workspace-delete" }).props.onClick(); });
     };
     await openDelete();
     expect(requests()).toHaveLength(before);
@@ -443,8 +484,10 @@ describe("language switching across the local workbench", () => {
     await act(async () => { root.findByProps({ className: "workspace-delete-confirm" }).props.onClick(); });
     expect(text(root.findByProps({ role: "dialog" }))).toContain("请等待此工作目录整理结束后再删除。");
     expect(empty).toBe(false);
+    expect(location.pathname).toBe("/settings/workspaces/ws");
     await act(async () => { root.findByProps({ className: "workspace-delete-confirm" }).props.onClick(); });
     expect(root.findAllByProps({ role: "dialog" })).toHaveLength(0);
+    expect(location.pathname).toBe("/settings/workspaces");
     expect(text(root)).toContain("暂无工作目录");
     expect(requests().at(-1)?.[1]?.body).toBe(JSON.stringify({ version: workspace.version }));
     await toggle();
@@ -505,10 +548,33 @@ describe("language switching across the local workbench", () => {
     await toggle();expect(button("普通")).toBeDefined();expect(button("聚焦").props['aria-pressed']).toBe(true);
     await act(async()=>{button("普通").props.onClick();});expect(text(root)).toContain("echo hello");
   });
+  it("places icon statuses before the rightmost workspace picker without starting sync on open", async () => {
+    const root = await render("/overview/ws");
+    const right = root.findByProps({ className: "top-right" });
+    const controls = right.findAllByType("button");
+    expect(controls.map(b => b.props["aria-label"] || b.props.title)).toEqual([
+      expect.stringContaining("Local sync ·"), expect.stringContaining("Cloud storage ·"),
+      "Dark theme", "Switch to Chinese", "Current workspace",
+    ]);
+    expect(right.findAllByProps({ role: "region" })).toHaveLength(0);
+    expect(root.findAllByProps({ className: "overview-cloud-quick" })).toHaveLength(0);
+    const writes = () => vi.mocked(fetch).mock.calls.filter(([, options]) => (options as RequestInit)?.method === "POST").length;
+    const before = writes();
+    await openHeaderStatus("本机同步");
+    await openHeaderStatus("云端存储");
+    expect(writes()).toBe(before);
+    const tools = root.findByProps({ className: "overview-tools" });
+    expect(text(tools)).not.toContain("Cloud storage");
+  });
   it("shows real pending counts in both languages and keeps them independent of overview filters",async()=>{
     savedWorkspace={...workspace,cloud:{...workspace.cloud,enabled:true},cloudSync:{pending:{state:"ready",sessions:3,commits:2}}};
     const root=await render("/overview/ws");
+    await openHeaderStatus("云端存储");
     expect(text(root.findByProps({className:"overview-cloud-quick"}))).toBe("3 sessions · 2 commits pendingPush now");
+    const pushes = () => vi.mocked(fetch).mock.calls.filter(([url, options]) => url === "/api/local/workspaces/ws/sync" && (options as RequestInit)?.method === "POST").length;
+    const before = pushes();
+    await act(async () => { button("Push now").props.onClick(); });
+    expect(pushes()).toBe(before + 1);
     await act(async()=>{button(i18n.t("最近 7 天")).props.onClick();});
     expect(text(root.findByProps({className:"overview-cloud-quick"}))).toContain("3 sessions · 2 commits pending");
     await toggle();
@@ -524,6 +590,7 @@ describe("language switching across the local workbench", () => {
   });
   it("links disabled Cloud storage to directory settings instead of displaying fake pending numbers",async()=>{
     const root=await render("/overview/ws");
+    await openHeaderStatus("云端存储");
     expect(text(root.findByProps({className:"overview-cloud-quick"}))).toBe("Cloud storage is offEnable cloud storage");
     await act(async()=>{button("Enable cloud storage").props.onClick();});
     expect(location.pathname).toBe("/settings/workspaces/ws");
@@ -531,10 +598,12 @@ describe("language switching across the local workbench", () => {
   it("links a disconnected account to sign-in and explains an uninitialized history boundary",async()=>{
     savedWorkspace={...workspace,cloud:{...workspace.cloud,enabled:true},cloudSync:{pending:{state:"uninitialized",sessions:null,commits:null}}};
     const root=await render("/overview/ws");
+    await openHeaderStatus("云端存储");
     expect(text(root.findByProps({className:"overview-cloud-quick"}))).toBe("Cloud history not checked yetPush now");
     expect(button("Push now").props.disabled).toBe(false);
     act(()=>renderer!.unmount());renderer=undefined;accountConnected=false;
     const disconnected=await render("/overview/ws");
+    await openHeaderStatus("云端存储");
     expect(text(disconnected.findByProps({className:"overview-cloud-quick"}))).toContain("Connect a cloud account first.");
     await act(async()=>{button("Sign in to Cloud").props.onClick();});
     expect(location.pathname).toBe("/settings/account");
@@ -542,6 +611,7 @@ describe("language switching across the local workbench", () => {
   it("keeps the shared header and local sync action across overview and commits", async () => {
     const root = await render("/overview/ws");
     const header = root.findByType("header");
+    await openHeaderStatus("本机同步");
     const initial = text(header);
     const refreshButton = () => header.findByProps({
       "aria-label": i18n.t("刷新当前工作目录的本地记录"),
@@ -740,15 +810,11 @@ describe("language switching across the local workbench", () => {
   it("selecting English from Chinese updates the screenshot's labels and keeps English selected", async () => {
     i18n.setLanguage("zh");
     const root = await render("/commits/ws");
-    expect(button("中文").props["aria-pressed"]).toBe(true);
-    expect(button("English").props["aria-pressed"]).toBe(false);
+    expect(root.findByProps({ className: "icon language-switch" }).props["aria-label"]).toBe("切换为英文");
     expect(button("全部仓库")).toBeDefined();
 
-    await act(async () => {
-      button("English").props.onClick();
-    });
-    expect(button("English").props["aria-pressed"]).toBe(true);
-    expect(button("中文").props["aria-pressed"]).toBe(false);
+    await toggle();
+    expect(root.findByProps({ className: "icon language-switch" }).props["aria-label"]).toBe("Switch to Chinese");
     for (const label of [
       "Overview",
       "Settings",
@@ -776,19 +842,19 @@ describe("language switching across the local workbench", () => {
     expectEnglish();
     expect(storage.get("adit-language")).toBe("en");
 
-    // Selecting the active option is idempotent; background polling keeps it.
-    await act(async () => {
-      button("English").props.onClick();
-    });
+    // The icon toggles languages; background polling preserves the selection.
+    await toggle();
+    expect(document.documentElement.lang).toBe("zh-CN");
+    await toggle();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(6000);
     });
     expectEnglish();
-    expect(button("English").props["aria-pressed"]).toBe(true);
+    expect(root.findByProps({ className: "icon language-switch" }).props["aria-label"]).toBe("Switch to Chinese");
     act(() => renderer!.unmount());
     await render("/commits/ws");
     expectEnglish();
-    expect(button("English").props["aria-pressed"]).toBe(true);
+    expect(renderer!.root.findByProps({ className: "icon language-switch" }).props["aria-label"]).toBe("Switch to Chinese");
   });
 
   it.each([

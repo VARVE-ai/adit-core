@@ -1,3 +1,4 @@
+import { AgentLabel } from "./agent-label";
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
@@ -348,7 +349,7 @@ export function InspectionPage({
                   </span>
                 </span>
                 <span className="inspection-item-meta">
-                  {agentName(session.provider)} · {date(session.occurredAt)}
+                  <AgentLabel provider={session.provider} /> · {date(session.occurredAt)}
                 </span>
                 <span className="inspection-item-meta inspection-item-rules">
                   <span
@@ -415,11 +416,7 @@ export function InspectionPage({
               <div className="inspection-session-heading">
                 <h2>{selectedSession.title}</h2>
                 <div className="inspection-meta">
-                  <span
-                    className={`inspection-agent ${selectedSession.provider}`}
-                  >
-                    {agentName(selectedSession.provider)}
-                  </span>
+                  <span><AgentLabel provider={selectedSession.provider} /></span>
                   <span>{ic(statusLabels[status])}</span>
                   <span>{ic("当前筛选 · {0} 处", selectedSession.count)}</span>
                 </div>
@@ -657,9 +654,7 @@ function InspectionFindingCard({
         <>
           <h3>{ic("{0}出现在{1}里", label(detail.rule), location(detail))}</h3>
           <div className="inspection-meta">
-            <span className={`inspection-agent ${detail.provider}`}>
-              {agentName(detail.provider)}
-            </span>
+            <span><AgentLabel provider={detail.provider} /></span>
             <span>{date(detail.occurredAt)}</span>
             <span>{detail.turn ? ic("第 {0} 轮", detail.turn) : "—"}</span>
             <span>{location(detail)}</span>

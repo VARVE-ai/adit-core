@@ -1,3 +1,4 @@
+import { AgentLabel } from "./agent-label";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -35,7 +36,6 @@ import type {
 } from "../../core/src/local-history/session-browser";
 import { locale, systemMessage } from "./i18n";
 import { sc } from "./sessions-copy";
-import { agentName } from "./achievement-export";
 import { SessionTurnActions, SessionTurnEditor } from "./session-turn-editor";
 import "./sessions.css";
 import { PlatformIcon } from "./platform-icon";
@@ -104,11 +104,6 @@ const toolIcons = {
 };
 function AgentIcon({ provider }: { provider: string }) {
   return <PlatformIcon platform={provider} size={12} className="session-agent-icon" />;
-}
-function AgentDot({ provider }: { provider: string }) {
-  return (
-    <i className={`session-agent-dot agent-${provider}`} aria-hidden="true" />
-  );
 }
 function Body({ text }: { text: string }) {
   return (
@@ -771,8 +766,7 @@ export function SessionsPage({
               aria-pressed={provider === p.id}
               onClick={() => setProvider(p.id)}
             >
-              <AgentDot provider={p.id} />
-              {p.name}
+              <AgentLabel provider={p.id} name={p.name} />
             </button>
           ))}
         </div>
@@ -910,10 +904,7 @@ export function SessionsPage({
                       </strong>
                     </div>
                     <div className="session-row-meta">
-                      <span>
-                        {list.providers.find((p) => p.id === s.provider)
-                          ?.name || agentName(s.provider)}
-                      </span>
+                      <AgentLabel provider={s.provider} name={list.providers.find((p) => p.id === s.provider)?.name} />
                       <i />{" "}
                       <span>
                         {clock(s.startedAt)}
@@ -996,9 +987,7 @@ export function SessionsPage({
               </div>
               <div className="session-meta">
                 <span>
-                  <AgentDot provider={detail.session.provider} />
-                  {list?.providers.find((p) => p.id === detail.session.provider)
-                    ?.name || agentName(detail.session.provider)}
+                  <AgentLabel provider={detail.session.provider} name={list?.providers.find((p) => p.id === detail.session.provider)?.name} />
                 </span>
                 <span>
                   {date(detail.session.startedAt, true)} –{" "}

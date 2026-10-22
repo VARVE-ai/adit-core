@@ -1,6 +1,9 @@
 // Chinese keys preserve the prototype copy. Only interface text belongs here;
 // native session titles, commit subjects, paths and account names are never keys.
 export const messages = {
+  "本机同步": "Local sync",
+  "重新读取": "Read again",
+  "仅更新本机的会话与提交记录，不会上传到云端。": "Updates sessions and commits on this computer only, without uploading to the cloud.",
   "正在整理": "Organizing",
   "已完成": "Completed",
   "进行中": "In progress",
@@ -91,6 +94,10 @@ export const messages = {
   数据云端: "Cloud account",
   主导航: "Main navigation",
   界面语言: "Interface language",
+  切换为中文: "Switch to Chinese",
+  切换为英文: "Switch to English",
+  "搜索工作目录…": "Search workspaces…",
+  没有匹配的工作目录: "No matching workspaces",
   概览: "Overview",
   会话: "Sessions",
   提交: "Commits",
@@ -199,6 +206,9 @@ export const messages = {
   未配置: "Not configured",
   "GitHub 令牌": "GitHub token",
   保存令牌: "Save token",
+  "使用本机 GitHub 账号": "Use local GitHub account",
+  "正在检查 GitHub 账号…": "Checking GitHub account…",
+  "已连接 GitHub 账号 {0}，分享权限检查通过。": "Connected to GitHub account {0}. Sharing permission verified.",
   云端存储: "Cloud storage",
   "通过云端账号 {0} 存储": "Stored through cloud account {0}",
   云端账号已连接: "Cloud account connected",

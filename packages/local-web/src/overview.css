@@ -148,18 +148,6 @@
 .overview-tools > button:nth-child(2) {
   color: #ae9032;
 }
-.overview-cloud-quick {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  white-space: nowrap;
-}
-.overview-cloud-quick > button {
-  color: hsl(var(--primary-foreground));
-  background: hsl(var(--primary));
-  padding-inline: 9px;
-}
-.overview-cloud-quick > button:disabled { opacity: .55; }
 .overview-badge-row {
   gap: 6px;
 }
