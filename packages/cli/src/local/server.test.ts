@@ -5,6 +5,8 @@ import { join, parse } from "node:path";
 import { request } from "node:http";
 import { startLocalServer } from "./server.js";
 import { BROWSER_SESSION_MAX_AGE } from "./browser-sessions.js";
+import * as githubCredential from "./github-credential.js";
+import { LocalStateError } from "@varveai/adit-core";
 
 let app: Awaited<ReturnType<typeof startLocalServer>>;
 let root: string;
@@ -31,6 +33,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await app?.close();
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
   rmSync(root, { recursive: true, force: true });
 });
@@ -50,6 +53,35 @@ function api(
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
+it("imports a local GitHub account only after an authenticated explicit POST", async () => {
+  const imported = vi.spyOn(githubCredential, "importGitHubCredential").mockResolvedValue({ configured: true, account: "test-user" });
+  const workspace = app.store.saveWorkspace({ path: root, providers: [] });
+  const endpoint = `/workspaces/${workspace.id}/gist-credential`;
+  await api("/state");
+  expect((await api(endpoint)).status).toBe(405);
+  expect((await fetch(app.origin + "/api/local" + endpoint, { method: "POST" })).status).toBe(401);
+  expect((await api("/workspaces/missing/gist-credential", "POST", {})).status).toBe(404);
+  expect(imported).not.toHaveBeenCalled();
+  const result = await api(endpoint, "POST", {});
+  expect(result.status).toBe(200);
+  expect(await result.json()).toEqual({ configured: true, account: "test-user" });
+  expect(imported).toHaveBeenCalledWith(expect.anything(), workspace.id);
+});
+it("prevents concurrent credential changes or deletion while importing and unlocks after failure", async () => {
+  let rejectImport!: (error: Error) => void;
+  const imported = vi.spyOn(githubCredential, "importGitHubCredential").mockImplementation(() => new Promise((_resolve, reject) => { rejectImport = reject; }));
+  const workspace = app.store.saveWorkspace({ path: root, providers: [] });
+  const endpoint = `/workspaces/${workspace.id}/gist-credential`;
+  const pending = api(endpoint, "POST", {});
+  await vi.waitFor(() => expect(imported).toHaveBeenCalledOnce());
+  expect((await api(endpoint, "POST", {})).status).toBe(409);
+  expect((await api(endpoint, "PUT", { token: "TEST_ONLY" })).status).toBe(409);
+  expect((await api(`/workspaces/${workspace.id}`, "DELETE", { version: workspace.version })).status).toBe(409);
+  rejectImport(new LocalStateError("The local GitHub sign-in has expired. Sign in again and retry.", 401));
+  expect((await pending).status).toBe(401);
+  imported.mockResolvedValue({ configured: true, account: "test-user" });
+  expect((await api(endpoint, "POST", {})).status).toBe(200);
+});
 it("checks directory availability on page state and repairs the path without replacing project identity",async()=>{
   const original=join(root,"original"),moved=join(root,"moved");mkdirSync(original);
   const w=app.store.saveWorkspace({path:original,providers:["codex"]});

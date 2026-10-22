@@ -30,6 +30,7 @@ import {
 } from "./collector.js";
 import { LocalAccount } from "./account.js";
 import { LocalSecrets } from "./secrets.js";
+import { importGitHubCredential } from "./github-credential.js";
 import { runtimeStatus } from "./runtime.js";
 import { OverviewService } from "./overview-service.js";
 import { queryCommits } from "./commits.js";
@@ -120,6 +121,7 @@ export async function startLocalServer(
   const account = new LocalAccount(store.directory);
   const cloudSync = new LocalCloudSync(store, collector);
   const secrets = new LocalSecrets(store.directory);
+  const gistCredentialWork = new Set<string>();
   const publications = new PublicationApi(store, analytics.prices, !!options.instance);
   const token = options.token || randomBytes(32).toString("hex");
   const instance = options.instance || randomBytes(16).toString("hex");
@@ -306,7 +308,7 @@ export async function startLocalServer(
           if (match[2] === "sync" && req.method === "GET") return json(res, cloudSync.status(id));
           if (!match[2] && req.method === "GET") return json(res, {...workspace,directoryAvailable:directoryAvailable(workspace.path)});
           if (!match[2] && req.method === "DELETE") {
-            if (publications.busy(id) || achievementWork.has(id)) throw new LocalStateError("Wait for this project's background tasks to finish before deleting it.",409);
+            if (publications.busy(id) || achievementWork.has(id) || gistCredentialWork.has(id)) throw new LocalStateError("Wait for this project's background tasks to finish before deleting it.",409);
             store.db.transaction(() => {
               store.deleteWorkspace(id, input.version, () => {
                 cleanupProjectFiles(store,workspace);
@@ -341,11 +343,15 @@ export async function startLocalServer(
             return json(res, job, 202);
           }
           if (match[2] === "gist-credential") {
-            if (req.method === "PUT")
-              await secrets.save(id, String(input.token || ""));
-            else if (req.method === "DELETE") secrets.clear(id);
-            else throw new LocalStateError("Method not allowed", 405);
-            return json(res, { configured: secrets.configured(id) });
+            if (!["POST", "PUT", "DELETE"].includes(req.method || "")) throw new LocalStateError("Method not allowed", 405);
+            if (gistCredentialWork.has(id)) throw new LocalStateError("GitHub credential setup is already in progress. Please wait.", 409);
+            gistCredentialWork.add(id);
+            try {
+              if (req.method === "POST") return json(res, await importGitHubCredential(secrets, id));
+              if (req.method === "PUT") await secrets.save(id, String(input.token || ""));
+              else secrets.clear(id);
+              return json(res, { configured: secrets.configured(id) });
+            } finally { gistCredentialWork.delete(id); }
           }
         }
         if (route === "/discoveries" && req.method === "POST")
