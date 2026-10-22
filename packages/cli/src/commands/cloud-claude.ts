@@ -34,7 +34,7 @@ import {
   trimRelayEventQueue,
   type InFlightReliableEventBatch,
 } from "./cli-agent/reliable-event-queue.js";
-import { loadInitializedProjectConfig } from "./project-initialization.js";
+import { loadProjectContext } from "./project-context.js";
 import type {
   CliAgentRelayEvent,
   PromptImageAttachment,
@@ -427,7 +427,7 @@ async function drainCommandQueue(input: {
 }
 
 export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<void> {
-  const config = loadInitializedProjectConfig("adit cloud claude");
+  const config = loadProjectContext("adit cloud claude");
   if (!config) return;
 
   const credentials = loadCredentials();
@@ -507,7 +507,7 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
     try {
       // Self-heal only repairs platforms the user connected; a project where
       // Claude Code was never connected is left untouched.
-      const connectedPlatforms = await ensureConnectedPlatformsRecorded(config.projectRoot);
+      const connectedPlatforms = (config.source === "manifest" ? await ensureConnectedPlatformsRecorded(config.projectRoot) : []);
       if (connectedPlatforms.includes("claude-code")) {
         const installedPersistentHooks = await ensurePersistentClaudeHooksInstalled({
           cwd: config.projectRoot,

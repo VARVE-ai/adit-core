@@ -1,22 +1,25 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
-import { existsSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 
 const tempHome = join(tmpdir(), `adit-client-test-${randomBytes(8).toString("hex")}`);
 
-vi.mock("node:os", async () => {
-  const actual = await vi.importActual<typeof import("node:os")>("node:os");
-  return {
-    ...actual,
-    homedir: () => tempHome,
-  };
+vi.mock("../auth/credential-protection.js", () => ({
+  protectCredentialKey: (_id: string, key: Buffer) => ({ scheme: "test", value: key.toString("base64") }),
+  unprotectCredentialKey: (key: { value: string }) => Buffer.from(key.value, "base64"),
+}));
+beforeEach(() => vi.stubEnv("ADIT_LOCAL_DATA_DIR", join(tempHome, ".adit")));
+afterEach(() => {
+  // tempHome is a generated test-owned absolute path under the OS temp directory.
+  rmSync(tempHome, { recursive: true, force: true });
+  vi.unstubAllEnvs();
 });
 
 import { CloudClient } from "./client.js";
 import { CloudAuthError } from "./errors.js";
-import { loadCredentials, saveCredentials, type CloudCredentials } from "../auth/credentials.js";
+import { loadCredentials, saveCredentials, clearCredentials, type CloudCredentials } from "../auth/credentials.js";
 
 function makeCreds(overrides: Partial<CloudCredentials> = {}): CloudCredentials {
   return {
@@ -68,13 +71,7 @@ describe("CloudClient token refresh", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    try {
-      const path = join(tempHome, ".adit", "cloud-credentials.json");
-      if (existsSync(path)) unlinkSync(path);
-      rmSync(join(tempHome, ".adit", "cloud-credentials.refresh.lock"), { force: true });
-    } catch {
-      // best-effort cleanup
-    }
+
   });
 
   it("computes expiresAt when refresh response only returns expiresIn", async () => {
@@ -141,7 +138,9 @@ describe("CloudClient token refresh", () => {
 
   it("reuses credentials refreshed by another process instead of rotating twice", async () => {
     const original = makeCreds();
+    saveCredentials(original);
     const alreadyRefreshed = makeCreds({
+      ...original,
       accessToken: "fresh-access",
       refreshToken: "fresh-refresh",
       expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
@@ -253,6 +252,50 @@ describe("CloudClient token refresh", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  for (const action of ["logout", "replace"] as const) {
+    it(`does not write late refresh results after ${action}`, async () => {
+      const credentials = makeCreds(); saveCredentials(credentials);
+      let finish!: (response: Response) => void;
+      vi.mocked(fetch).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+      const pending = new CloudClient("http://cloud.test", credentials).getFreshCredentials();
+      const rejected = expect(pending).rejects.toThrow("Cloud account changed");
+      clearCredentials();
+      if (action === "replace") saveCredentials(makeCreds({ accessToken: "replacement" }));
+      finish(jsonResponse({ accessToken: "late-access", refreshToken: "late-refresh", expiresIn: 3600 }));
+      await rejected;
+      expect(loadCredentials()?.accessToken ?? null).toBe(action === "replace" ? "replacement" : null);
+      expect(loadCredentials()?.lastAuthFailure).toBeUndefined();
+    });
+  }
+
+  it("serializes concurrent refreshes and rotates only once", async () => {
+    const credentials = makeCreds(); saveCredentials(credentials);
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({ accessToken: "fresh", refreshToken: "rotated", expiresIn: 3600 }));
+    const clients = [new CloudClient("http://cloud.test", { ...credentials }), new CloudClient("http://cloud.test", { ...credentials })];
+    const fresh = await Promise.all(clients.map(client => client.getFreshCredentials()));
+    expect(fresh.map(c => c.accessToken)).toEqual(["fresh", "fresh"]);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("keeps in-memory token failures separate from the saved login", async () => {
+    saveCredentials(makeCreds({ authType: "token", accessToken: "saved" }));
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({ code: "invalid_token" }, 401));
+    const client = new CloudClient("http://cloud.test", makeCreds({ authType: "token", accessToken: "env-token" }));
+    await expect(client.get("/api/test")).rejects.toBeInstanceOf(CloudAuthError);
+    expect(loadCredentials()?.lastAuthFailure).toBeUndefined();
+    expect(loadCredentials()?.accessToken).toBe("saved");
+  });
+
+  it("uses the explicitly selected credential database for refresh", async () => {
+    const other = join(tempHome, "preview"), credentials = makeCreds();
+    saveCredentials(makeCreds({ accessToken: "default-login" }));
+    saveCredentials(credentials, other);
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({ accessToken: "preview-refreshed", refreshToken: "rotated", expiresIn: 3600 }));
+    await new CloudClient("http://cloud.test", credentials, { credentialsDirectory: other }).getFreshCredentials();
+    expect(loadCredentials(other)?.accessToken).toBe("preview-refreshed");
+    expect(loadCredentials()?.accessToken).toBe("default-login");
   });
 
 });

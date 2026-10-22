@@ -35,6 +35,7 @@ vi.mock("../auth/credentials.js", () => ({
 }));
 
 vi.mock("@varveai/adit-core", () => ({
+  localLoginStartupEnabled: vi.fn(() => true),
   getSyncState: vi.fn(),
   // These trigger tests use the repositories supplied by loadConfig.
   readProjectManifest: vi.fn(() => null),
@@ -110,7 +111,7 @@ vi.mock("../http/errors.js", () => ({
 import { triggerAutoSync } from "./auto-sync.js";
 import { loadCloudConfig } from "../config.js";
 import { loadCredentials } from "../auth/credentials.js";
-import { getSyncState } from "@varveai/adit-core";
+import { getSyncState, localLoginStartupEnabled } from "@varveai/adit-core";
 import { countUnsyncedEvents } from "./serializer.js";
 import { hasPendingTokenUsage } from "./token-usage.js";
 
@@ -124,6 +125,7 @@ const PROJECT_ID = "proj-123";
 const SERVER_URL = "https://cloud.example.com";
 
 function setupDefaults() {
+  vi.mocked(localLoginStartupEnabled).mockReturnValue(true);
   mockLoadCloudConfig.mockReturnValue({
     serverUrl: SERVER_URL,
     enabled: true,
@@ -154,6 +156,13 @@ function setupDefaults() {
 }
 
 describe("triggerAutoSync", () => {
+  it("never uploads automatically without explicit login-startup consent, even with credentials and pending events", async () => {
+    vi.mocked(localLoginStartupEnabled).mockReturnValue(false);
+    mockCountUnsyncedEvents.mockReturnValue(100);
+    await triggerAutoSync(fakeDb, PROJECT_ID);
+    expect(runSyncCycleFn).not.toHaveBeenCalled();
+    expect(mockCountUnsyncedEvents).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     setupDefaults();

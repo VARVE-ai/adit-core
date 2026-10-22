@@ -1,0 +1,1164 @@
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import {
+  ArrowLeft,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  CalendarDays,
+  ChevronDown,
+  ChevronRight,
+  Archive,
+  FilePlus,
+  FileText,
+  FolderSearch,
+  GitBranch,
+  GitCommitHorizontal,
+  Globe,
+  MessageSquare,
+  Pencil,
+  Search,
+  Share2,
+  Terminal,
+  Wrench,
+  X,
+} from "lucide-react";
+import type {
+  SessionList,
+  SessionDetail,
+  SessionTurn,
+  SessionEvent,
+  SessionContent,
+  SessionCommit,
+  SessionTurnEdit,
+  TranscriptMode,
+} from "../../core/src/local-history/session-browser";
+import { locale, systemMessage } from "./i18n";
+import { sc } from "./sessions-copy";
+import { agentName } from "./achievement-export";
+import { SessionTurnActions, SessionTurnEditor } from "./session-turn-editor";
+import "./sessions.css";
+
+type Api = <T = any>(
+  path: string,
+  method?: string,
+  body?: unknown,
+  signal?: AbortSignal,
+) => Promise<T>;
+type Selection = { provider: string; id: string };
+const n = (value: number) => value.toLocaleString(locale());
+const date = (at: number | null, time = false) =>
+  at === null
+    ? sc("日期未知")
+    : new Date(at)
+        .toLocaleString(
+          locale(),
+          time
+            ? {
+                month: "short",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              }
+            : { month: "short", day: "numeric" },
+        )
+        .replace(/(\d)([年月日])/g, "$1 $2 ")
+        .replace(/ {2,}/g, " ")
+        .trim();
+const clock = (at: number | null) =>
+  at === null
+    ? "—"
+    : new Date(at).toLocaleTimeString(locale(), {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+const money = (amount: number | null) =>
+  amount === null
+    ? "—"
+    : "$" +
+      new Intl.NumberFormat(locale(), {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 2,
+      }).format(amount / 1e6);
+const compact = (value: number | null) =>
+  value === null
+    ? "—"
+    : new Intl.NumberFormat("en", {
+        notation: "compact",
+        maximumFractionDigits: 1,
+      }).format(value);
+const key = (s: Selection) => `${s.provider}:${s.id}`;
+const toolIcons = {
+  read: FileText,
+  search: Search,
+  edit: Pencil,
+  write: FilePlus,
+  list: FolderSearch,
+  web: Globe,
+  git: GitBranch,
+  terminal: Terminal,
+  plan: FileText,
+  task: GitBranch,
+  tool: Wrench,
+};
+function AgentIcon({ provider }: { provider: string }) {
+  return ["claude", "codex"].includes(provider) ? (
+    <svg className={`session-agent-icon ${provider}`} aria-hidden="true">
+      <use href={`/agent-icons.svg#${provider}`} />
+    </svg>
+  ) : (
+    <Terminal size={12} aria-hidden="true" />
+  );
+}
+function AgentDot({ provider }: { provider: string }) {
+  return (
+    <i className={`session-agent-dot agent-${provider}`} aria-hidden="true" />
+  );
+}
+function Body({ text }: { text: string }) {
+  return (
+    <div className="session-markdown">
+      <Markdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ children, ...props }) => (
+            <a {...props} target="_blank" rel="noreferrer">
+              {children}
+            </a>
+          ),
+          img: ({ alt }) => <span>{alt || sc("附件")}</span>,
+        }}
+      >
+        {text}
+      </Markdown>
+    </div>
+  );
+}
+function Content({
+  eventId,
+  kind,
+  request,
+}: {
+  eventId: string;
+  kind: string;
+  request: <T>(path: string, params?: Record<string, string>) => Promise<T>;
+}) {
+  const [data, setData] = useState<SessionContent>(),
+    [error, setError] = useState(""),
+    [loading, setLoading] = useState(false);
+  const load = async (offset = 0) => {
+    setLoading(true);
+    setError("");
+    try {
+      const d = await request<SessionContent>("content", {
+        eventId,
+        kind,
+        offset: String(offset),
+      });
+      setData((old) => ({
+        ...d,
+        text: offset ? (old?.text || "") + d.text : d.text,
+      }));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    void load();
+  }, [eventId]);
+  return (
+    <div className="session-event-detail">
+      {error && (
+        <p role="alert">
+          {systemMessage(error)}{" "}
+          <button onClick={() => void load(data?.nextOffset || 0)}>
+            {sc("重试")}
+          </button>
+        </p>
+      )}
+      {data && <pre>{data.text}</pre>}
+      {loading && <span>{sc("正在加载…")}</span>}
+      {data?.nextOffset != null && (
+        <button disabled={loading} onClick={() => void load(data.nextOffset!)}>
+          {sc("加载更多内容")}
+        </button>
+      )}
+    </div>
+  );
+}
+function Event({
+  event,
+  request,
+  matched = false,
+}: {
+  event: SessionEvent;
+  request: <T>(path: string, params?: Record<string, string>) => Promise<T>;
+  matched?: boolean;
+}) {
+  const [open, setOpen] = useState(matched);
+  if (event.kind === "reply" && !event.truncated)
+    return (
+      <div
+        className={`session-reply${matched ? " search-event-match" : ""}`}
+        data-event-id={event.id}
+        title={date(event.at, true)}
+      >
+        <Body text={event.text} />
+      </div>
+    );
+  const title =
+    event.kind === "tool"
+      ? event.display?.kind === "plan"
+        ? sc("计划")
+        : event.display?.kind === "task"
+          ? sc("子任务")
+          : event.display?.name || event.name
+      : event.kind === "thinking"
+        ? sc("思考过程")
+        : event.kind === "system"
+          ? sc("上下文")
+          : event.kind === "result"
+            ? sc("工具输出")
+            : event.kind === "reply"
+              ? sc("展开查看完整内容")
+              : sc("附件");
+  const summary = event.display?.text ?? event.text;
+  const command = event.display?.kind === "command";
+  const icon =
+    event.display?.icon ||
+    (event.display?.kind === "plan"
+      ? "plan"
+      : event.display?.kind === "task"
+        ? "task"
+        : command
+          ? "terminal"
+          : "tool");
+  const Icon = toolIcons[icon];
+  return (
+    <details
+      className={`session-operation${matched ? " search-event-match" : ""}`}
+      data-event-id={event.id}
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      <summary title={date(event.at, true)}>
+        <Icon size={12} aria-hidden="true" />
+        {command ? (
+          <code>{summary || title}</code>
+        ) : (
+          <span>
+            {title}
+            {summary && ` · ${summary.replace(/\s+/g, " ").slice(0, 180)}`}
+          </span>
+        )}
+        <ChevronRight size={12} />
+      </summary>
+      {open &&
+        (event.kind === "tool" ? (
+          <div className="session-tool-content">
+            <h5>{sc("工具输入")}</h5>
+            <Content eventId={event.id} kind="tool-input" request={request} />
+            <h5>{sc("工具输出")}</h5>
+            <Content eventId={event.id} kind="tool-output" request={request} />
+          </div>
+        ) : (
+          <Content eventId={event.id} kind={event.kind} request={request} />
+        ))}
+    </details>
+  );
+}
+function CommitGroup({
+  commits,
+  onCommit,
+}: {
+  commits: SessionCommit[];
+  onCommit: (c: SessionCommit) => void;
+}) {
+  return commits.length ? (
+    <div className="session-commits">
+      {commits.map((c) => (
+        <Commit key={c.repository + c.sha} commit={c} onCommit={onCommit} />
+      ))}
+    </div>
+  ) : null;
+}
+function Commit({
+  commit,
+  onCommit,
+}: {
+  commit: SessionCommit;
+  onCommit: (c: SessionCommit) => void;
+}) {
+  return (
+    <details className="session-commit">
+      <summary title={sc("提交信息")}>
+        <GitCommitHorizontal size={14} />
+        <code>{commit.sha.slice(0, 7)}</code>
+        <span>{commit.subject}</span>
+        <small>
+          {commit.repository.split(/[\\/]/).pop()} · {clock(commit.at)}
+        </small>
+      </summary>
+      <div className="session-event-detail">
+        <h5>{sc("提交信息")}</h5>
+        <p>{commit.subject}</p>
+        <p>
+          {sc("仓库")}：{commit.repository}
+        </p>
+        <p>
+          {sc("提交编号")}：<code>{commit.sha}</code>
+        </p>
+        <button onClick={() => onCommit(commit)}>{sc("查看提交")}</button>
+      </div>
+    </details>
+  );
+}
+export function SessionTurnView({
+  turn,
+  mode,
+  request,
+  onCommit,
+  matched,
+  onEdit,
+  onDelete,
+}: {
+  turn: SessionTurn;
+  mode: TranscriptMode;
+  request: <T>(path: string, params?: Record<string, string>) => Promise<T>;
+  onCommit: (c: SessionCommit) => void;
+  matched?: boolean;
+  onEdit?: () => void;
+  onDelete?: () => void;
+}) {
+  const [events, setEvents] = useState(turn.events),
+    [next, setNext] = useState(turn.nextOffset),
+    [previous, setPrevious] = useState(turn.previousOffset),
+    [error, setError] = useState(""),
+    [loading, setLoading] = useState(false),
+    [full, setFull] = useState(false);
+  const usage = turn.usage;
+  const activityRequest = useRef(0);
+  useEffect(() => {
+    activityRequest.current++;
+    setEvents(turn.events); setNext(turn.nextOffset); setPrevious(turn.previousOffset); setError(""); setFull(false); setLoading(false);
+    return () => { activityRequest.current++; };
+  }, [turn]);
+  const load = async (earlier = false) => {
+    const current = ++activityRequest.current;
+    setLoading(true);
+    setError("");
+    try {
+      const d = await request<SessionTurn>("turn", {
+        turnId: turn.id,
+        offset: String(earlier ? previous : next),
+        mode,
+      });
+      if (current !== activityRequest.current) return;
+      setEvents((old) =>
+        earlier ? [...d.events, ...old] : [...old, ...d.events],
+      );
+      if (earlier) setPrevious(d.previousOffset);
+      else setNext(d.nextOffset);
+    } catch (e) {
+      if (current === activityRequest.current) setError(String(e));
+    } finally {
+      if (current === activityRequest.current) setLoading(false);
+    }
+  };
+  const usageTitle = [
+    ...usage.models,
+    ...usage.efforts,
+    sc("输入（不含缓存）") +
+      ": " +
+      (usage.input === null ? "—" : n(usage.input)),
+    sc("输出") + ": " + (usage.output === null ? "—" : n(usage.output)),
+    sc("缓存命中") + ": " + (usage.cache === null ? "—" : n(usage.cache)),
+    sc("写入缓存") +
+      ": " +
+      (usage.cacheWrite === null ? "—" : n(usage.cacheWrite)),
+    sc("{0} 次请求", n(usage.requests)),
+    sc("此次提问及后续响应的累计用量"),
+  ].join(" · ");
+  const renderEvent = (e: SessionEvent) => (
+    <Event
+      key={e.id}
+      event={e}
+      request={request}
+      matched={e.id === turn.matchEventId}
+    />
+  );
+  // Normal mode keeps the collected event order. Only adjacent tool calls share
+  // a group; intermediate replies remain visible and each tool expands separately.
+  const timeline: ReactNode[] = [];
+  let tools: SessionEvent[] = [];
+  let commitsRendered = false;
+  const closingIds = new Set((turn.closingEvents ?? []).map((e) => e.id));
+  const flushTools = () => {
+    if (!tools.length) return;
+    timeline.push(
+      <div className="session-operations" key={`tools-${tools[0].id}`}>
+        <div className="session-operation-count">
+          <Wrench size={12} aria-hidden="true" />
+          {tools.length === 1
+            ? sc("1 次工具调用")
+            : sc("{0} 次工具调用", n(tools.length))}
+        </div>
+        {tools.map(renderEvent)}
+      </div>,
+    );
+    tools = [];
+  };
+  for (const event of events) {
+    if (!commitsRendered && (mode === "focused" || closingIds.has(event.id))) {
+      flushTools();
+      timeline.push(
+        <CommitGroup
+          key="commits"
+          commits={turn.commits}
+          onCommit={onCommit}
+        />,
+      );
+      commitsRendered = true;
+    }
+    if (mode === "normal" && event.kind === "tool") tools.push(event);
+    else {
+      flushTools();
+      timeline.push(renderEvent(event));
+    }
+  }
+  flushTools();
+  const activity = (
+    <>
+      {previous !== null && (
+        <button
+          className="session-more"
+          disabled={loading}
+          onClick={() => void load(true)}
+        >
+          {sc("加载之前的过程")}
+        </button>
+      )}
+      {timeline}
+      {error && <p role="alert">{systemMessage(error)}</p>}
+      {next !== null && (
+        <button
+          className="session-more"
+          disabled={loading}
+          onClick={() => void load()}
+        >
+          {loading ? sc("正在加载…") : error ? sc("重试") : sc("加载更多过程")}
+        </button>
+      )}
+      {!commitsRendered && (
+        <CommitGroup commits={turn.commits} onCommit={onCommit} />
+      )}
+    </>
+  );
+  if (turn.contextOnly)
+    return mode === "focused" ? null : (
+      <div className="session-context-entry">
+        <Body text={turn.prompt} />
+        {activity}
+      </div>
+    );
+  return (
+    <article
+      className={`session-exchange${matched ? " search-match" : ""}`}
+      data-turn-id={turn.id}
+    >
+      <span className="session-prompt-node">
+        <MessageSquare size={11} />
+      </span>
+      <div className="session-question">
+        {onEdit && onDelete && <SessionTurnActions onEdit={onEdit} onDelete={onDelete} />}
+        <Body text={turn.prompt || (turn.imageCount ? sc("图片提问（{0} 张）",turn.imageCount) : "—")} />
+        <span
+          className="session-usage"
+          title={usageTitle}
+          aria-label={sc("模型、思考等级与 Token 用量")}
+        >
+          <code>{usage.models.join(", ") || "—"}</code>
+          {!!usage.efforts.length && (
+            <small>· {usage.efforts.join(", ")}</small>
+          )}
+          <span className="input">
+            <ArrowDownToLine />
+            {compact(usage.input)}
+          </span>
+          <span className="output">
+            <ArrowUpFromLine />
+            {compact(usage.output)}
+          </span>
+          <span className="cache">
+            <Archive />
+            {compact(usage.cache)}
+          </span>
+        </span>
+      </div>
+      {turn.promptTruncated && turn.promptBlockId && (
+        <details onToggle={(e) => setFull(e.currentTarget.open)}>
+          <summary>{sc("展开查看完整内容")}</summary>
+          {full && (
+            <Content
+              eventId={turn.promptBlockId}
+              kind="text"
+              request={request}
+            />
+          )}
+        </details>
+      )}
+      {activity}
+      {mode === "focused" && !events.length && (
+        <p className="session-muted">{sc("该轮尚无最后回复")}</p>
+      )}
+    </article>
+  );
+}
+
+export function SessionsPage({
+  workspace,
+  api,
+  onCommit,
+  onShare,
+  revision,
+}: {
+  workspace: { id: string; name: string };
+  api: Api;
+  onCommit: (commit: SessionCommit) => void;
+  onShare?: (session: Selection) => void;
+  revision?: string;
+}) {
+  const requestedSession = useRef<Selection | undefined>((() => {
+    const query = new URLSearchParams(location.search);
+    return query.get("provider") && query.get("session") ? { provider: query.get("provider")!, id: query.get("session")! } : undefined;
+  })());
+  const [provider, setProvider] = useState("all"),
+    [search, setSearch] = useState(""),
+    [query, setQuery] = useState(""),
+    [only, setOnly] = useState(false),
+    [sort, setSort] = useState("activity");
+  const [mode, setMode] = useState<TranscriptMode>(() =>
+    localStorage.getItem("adit-transcript-mode") === "focused"
+      ? "focused"
+      : "normal",
+  );
+  const [list, setList] = useState<SessionList>(),
+    [selected, setSelected] = useState<Selection | undefined>(requestedSession.current),
+    [detail, setDetail] = useState<SessionDetail>();
+  const [turnAction, setTurnAction] = useState<{ kind: 'edit' | 'delete'; turn: SessionTurn; session: Selection }>();
+  const [listError, setListError] = useState(""),
+    [detailError, setDetailError] = useState(""),
+    [listLoading, setListLoading] = useState(true),
+    [detailLoading, setDetailLoading] = useState(false),
+    [retry, setRetry] = useState(0),
+    [mobileDetail, setMobileDetail] = useState(false);
+  const detailScroll = useRef<HTMLDivElement>(null),
+    listScroll = useRef<HTMLDivElement>(null),
+    requestNumber = useRef(0),
+    detailNumber = useRef(0);
+  useEffect(() => {
+    const timer = setTimeout(() => setQuery(search.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [search]);
+  useEffect(() => {
+    localStorage.setItem("adit-transcript-mode", mode);
+  }, [mode]);
+  const loadList = async (offset = 0, signal?: AbortSignal, preserveSelection = false) => {
+    const current = ++requestNumber.current;
+    setListLoading(true);
+    setListError("");
+    try {
+      const d = await api<SessionList>(
+        "/sessions?" +
+          new URLSearchParams({
+            workspaceId: workspace.id,
+            provider,
+            q: query,
+            commits: only ? "1" : "0",
+            sort,
+            offset: String(offset),
+          }),
+        "GET",
+        undefined,
+        signal,
+      );
+      if (current !== requestNumber.current || signal?.aborted) return;
+      setList((old) => ({
+        ...d,
+        items: offset ? [...(old?.items || []), ...d.items] : d.items,
+      }));
+      if (!offset && !preserveSelection) {
+        const requested = requestedSession.current;
+        requestedSession.current = undefined;
+        setSelected((old) =>
+          requested ? requested : old && d.items.some((s) => key(s) === key(old))
+            ? old
+            : d.items[0]
+              ? { provider: d.items[0].provider, id: d.items[0].id }
+              : undefined,
+        );
+        if (listScroll.current) listScroll.current.scrollTop = 0;
+      }
+    } catch (e) {
+      if (!signal?.aborted && current === requestNumber.current)
+        setListError(String(e));
+    } finally {
+      if (!signal?.aborted && current === requestNumber.current)
+        setListLoading(false);
+    }
+  };
+  useEffect(() => {
+    const c = new AbortController();
+    void loadList(0, c.signal);
+    return () => {
+      c.abort();
+      requestNumber.current++;
+    };
+  }, [workspace.id, provider, query, only, sort, retry, revision]);
+  const request = <T,>(path: string, params: Record<string, string> = {}) =>
+    api<T>(
+      "/sessions/" +
+        path +
+        "?" +
+        new URLSearchParams({
+          workspaceId: workspace.id,
+          provider: selected!.provider,
+          id: selected!.id,
+          ...params,
+        }),
+    );
+  const loadDetail = async (
+    offset?: number,
+    signal?: AbortSignal,
+    prepend = false,
+  ) => {
+    if (!selected) return;
+    const current = ++detailNumber.current;
+    setDetailLoading(true);
+    setDetailError("");
+    try {
+      const d = await api<SessionDetail>(
+        "/sessions/detail?" +
+          new URLSearchParams({
+            workspaceId: workspace.id,
+            ...selected,
+            mode,
+            q: query,
+            ...(offset === undefined ? {} : { offset: String(offset) }),
+          }),
+        "GET",
+        undefined,
+        signal,
+      );
+      if (current !== detailNumber.current || signal?.aborted) return;
+      setDetail((old) =>
+        prepend
+          ? {
+              ...d,
+              nextOffset: old?.nextOffset ?? null,
+              turns: [...d.turns, ...(old?.turns || [])],
+            }
+          : offset !== undefined && old
+            ? {
+                ...d,
+                previousOffset: old.previousOffset,
+                turns: [...old.turns, ...d.turns],
+              }
+            : d,
+      );
+    } catch (e) {
+      if (!signal?.aborted && current === detailNumber.current)
+        setDetailError(String(e));
+    } finally {
+      if (!signal?.aborted && current === detailNumber.current)
+        setDetailLoading(false);
+    }
+  };
+  useEffect(() => {
+    const c = new AbortController();
+    setDetail(undefined);
+    setDetailError("");
+    if (!selected) setDetailLoading(false);
+    if (detailScroll.current) detailScroll.current.scrollTop = 0;
+    void loadDetail(undefined, c.signal);
+    return () => {
+      c.abort();
+      detailNumber.current++;
+    };
+  }, [selected?.provider, selected?.id, mode, query, retry, revision]);
+  useEffect(() => {
+    if (detail?.matchTurnId)
+      (
+        detailScroll.current?.querySelector(".search-event-match") ||
+        detailScroll.current?.querySelector(".search-match")
+      )?.scrollIntoView({ block: "start" });
+  }, [detail?.session.id, detail?.matchTurnId]);
+  const choose = (s: Selection) => {
+    setSelected(s);
+    setMobileDetail(true);
+  };
+  const refreshAfterTurnChange = async () => {
+    setTurnAction(undefined);
+    if (!selected || !detail) return;
+    const current = ++detailNumber.current;
+    setDetailLoading(true); setDetailError("");
+    void loadList(0, undefined, true);
+    try {
+      let offset = detail.previousOffset === null ? 0 : detail.previousOffset + 8;
+      const read = (at: number) => request<SessionDetail>("detail", { mode, offset: String(at) });
+      let result = await read(offset);
+      if (!result.turns.length && result.totalTurns && offset) {
+        offset = Math.floor((result.totalTurns - 1) / 8) * 8;
+        result = await read(offset);
+      }
+      while (result.nextOffset !== null && result.turns.length < detail.turns.length) {
+        const next = await read(result.nextOffset);
+        result = { ...result, turns: [...result.turns, ...next.turns], nextOffset: next.nextOffset };
+      }
+      if (current === detailNumber.current) setDetail(result);
+    } catch (e) { if (current === detailNumber.current) setDetailError(String(e)); }
+    finally { if (current === detailNumber.current) setDetailLoading(false); }
+  };
+  const reset = () => {
+    setSearch("");
+    setQuery("");
+    setProvider("all");
+    setOnly(false);
+  };
+  const [contextOpen, setContextOpen] = useState(false);
+  const [contextLoading, setContextLoading] = useState(false);
+  const loadContext = async () => {
+    if (!detail || detail.contextNextOffset === null) return;
+    const current = detailNumber.current;
+    setContextLoading(true);
+    try {
+      const result = await request<{
+        events: SessionEvent[];
+        nextOffset: number | null;
+      }>("context", { offset: String(detail.contextNextOffset) });
+      if (current === detailNumber.current)
+        setDetail((old) =>
+          old && key(old.session) === key(detail.session)
+            ? {
+                ...old,
+                context: [...old.context, ...result.events],
+                contextNextOffset: result.nextOffset,
+              }
+            : old,
+        );
+    } catch (e) {
+      if (current === detailNumber.current) setDetailError(String(e));
+    } finally {
+      setContextLoading(false);
+    }
+  };
+  let previous = "";
+  return (
+    <section
+      className={`sessions-page${mobileDetail ? " show-detail" : ""}`}
+      aria-label={sc("会话")}
+    >
+      <div className="sessions-toolbar">
+        <div className="sessions-segment session-agent-filters">
+          <button
+            className={provider === "all" ? "on" : ""}
+            aria-pressed={provider === "all"}
+            onClick={() => setProvider("all")}
+          >
+            {sc("全部")}
+          </button>
+          {(list?.providers || []).map((p) => (
+            <button
+              key={p.id}
+              className={provider === p.id ? "on" : ""}
+              aria-pressed={provider === p.id}
+              onClick={() => setProvider(p.id)}
+            >
+              <AgentDot provider={p.id} />
+              {p.name}
+            </button>
+          ))}
+        </div>
+        <label className="sessions-search">
+          <Search size={14} />
+          <input
+            value={search}
+            aria-label={sc("搜索所有 Agent 的提问、回复和命令")}
+            placeholder={sc("搜索所有 Agent 的提问、回复和命令")}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              if (e.target.value) setMode("normal");
+            }}
+          />
+          {search && (
+            <button
+              className="icon"
+              aria-label={sc("清除筛选")}
+              onClick={() => {
+                setSearch("");
+                setQuery("");
+              }}
+            >
+              <X size={12} />
+            </button>
+          )}
+        </label>
+        <div className="sessions-toolbar-right">
+          <div
+            className="sessions-segment"
+            role="group"
+            aria-label={sc("会话内容时间线")}
+          >
+            {(["normal", "focused"] as const).map((m) => (
+              <button
+                key={m}
+                className={mode === m ? "on" : ""}
+                aria-pressed={mode === m}
+                title={
+                  m === "normal"
+                    ? sc("显示提问、回复、计划和工具过程")
+                    : sc("只看每次提问和最后回复")
+                }
+                onClick={() => setMode(m)}
+              >
+                {m === "normal" ? sc("普通") : sc("聚焦")}
+              </button>
+            ))}
+          </div>
+          <label className="sessions-sort">
+            {sc("排序")}
+            <select
+              aria-label={sc("排序")}
+              value={sort}
+              onChange={(e) => setSort(e.target.value)}
+            >
+              <option value="activity">{sc("最近活动")}</option>
+              <option value="started">{sc("最近开始")}</option>
+              <option value="oldest">{sc("最早开始")}</option>
+              <option value="messages">{sc("消息最多")}</option>
+            </select>
+          </label>
+          <button
+            className={`session-commits-filter ${only ? "on" : ""}`}
+            aria-pressed={only}
+            onClick={() => setOnly(!only)}
+          >
+            {sc("只看有提交的")}
+          </button>
+          <span className="sessions-summary">
+            <CalendarDays size={12} />
+            {list?.first
+              ? sc("{0} 至今 · {1} 条消息", date(list.first), n(list.messages))
+              : sc("{0} 条消息", n(list?.messages || 0))}
+          </span>
+        </div>
+      </div>
+      <div className="sessions-work">
+        <div className="sessions-list" ref={listScroll} aria-busy={listLoading}>
+          {listError && (
+            <p role="alert">
+              {systemMessage(listError)}{" "}
+              <button onClick={() => setRetry((r) => r + 1)}>
+                {sc("重试")}
+              </button>
+            </p>
+          )}
+          {!list?.items.length && !listLoading && !listError && (
+            <div className="session-empty">
+              <MessageSquare size={24} />
+              <h3>
+                {query || only || provider !== "all"
+                  ? sc("没有匹配的会话")
+                  : sc("暂无会话")}
+              </h3>
+              <p>
+                {query || only || provider !== "all"
+                  ? sc("试试其他关键词或筛选条件。")
+                  : sc("整理后，这个工作目录的会话会显示在这里。")}
+              </p>
+              {(query || only || provider !== "all") && (
+                <button onClick={reset}>{sc("清除筛选")}</button>
+              )}
+            </div>
+          )}
+          {list?.items.map((s, index) => {
+            const day = date(
+              sort === "activity" ? s.lastActivityAt : s.startedAt,
+            );
+            const heading = day !== previous;
+            previous = day;
+            return (
+              <div
+                key={key(s)}
+                className={`${heading ? "session-date-start" : ""} ${!list.items[index + 1] || day !== date(sort === "activity" ? list.items[index + 1].lastActivityAt : list.items[index + 1].startedAt) ? "session-date-end" : ""}`}
+              >
+                {heading && <div className="session-day">{day}</div>}
+                <div className="session-list-entry">
+                  <span className="session-agent-node">
+                    <AgentIcon provider={s.provider} />
+                  </span>
+                  <button
+                    className={`session-row ${selected && key(selected) === key(s) ? "on" : ""}`}
+                    aria-pressed={!!selected && key(selected) === key(s)}
+                    onClick={() => choose({ provider: s.provider, id: s.id })}
+                  >
+                    <div className="session-row-heading">
+                      {selected && key(selected) === key(s) ? (
+                        <ChevronDown size={14} />
+                      ) : (
+                        <ChevronRight size={14} />
+                      )}
+                      <strong title={s.title}>
+                        {s.title || sc("未命名会话")}
+                      </strong>
+                    </div>
+                    <div className="session-row-meta">
+                      <span>
+                        {list.providers.find((p) => p.id === s.provider)
+                          ?.name || agentName(s.provider)}
+                      </span>
+                      <i />{" "}
+                      <span>
+                        {clock(s.startedAt)}
+                        {selected &&
+                        key(selected) === key(s) &&
+                        s.lastActivityAt !== null &&
+                        s.lastActivityAt !== s.startedAt
+                          ? ` – ${clock(s.lastActivityAt)}`
+                          : ""}
+                      </span>
+                      <i />
+                      <span
+                        className={`session-message-count${s.messages >= 30 ? " hot" : ""}`}
+                      >
+                        {sc("{0} 条消息", n(s.messages))}
+                      </span>
+                      {s.commits > 0 && (
+                        <>
+                          <i />
+                          <span className="session-row-commits">
+                            <GitCommitHorizontal size={12} />
+                            {sc("{0} 个提交", n(s.commits))}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    {s.match && (
+                      <small
+                        className="session-match-snippet"
+                        title={s.match.text}
+                      >
+                        {s.match.text}
+                      </small>
+                    )}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          {listLoading && (
+            <div className="session-muted">{sc("正在加载…")}</div>
+          )}
+          {list?.nextOffset != null && (
+            <button
+              className="session-more"
+              disabled={listLoading}
+              onClick={() => void loadList(list.nextOffset!)}
+            >
+              {sc("加载更多")}
+            </button>
+          )}
+        </div>
+        <div className="session-detail" aria-busy={detailLoading}>
+          <button
+            className="session-back"
+            onClick={() => setMobileDetail(false)}
+          >
+            <ArrowLeft size={14} />
+            {sc("返回会话列表")}
+          </button>
+          {detailError && (
+            <p role="alert">
+              {systemMessage(detailError)}{" "}
+              <button onClick={() => void loadDetail()}>{sc("重试")}</button>
+            </p>
+          )}
+          {!detail && !detailError && (
+            <div className="session-empty">
+              {detailLoading ? sc("正在加载…") : sc("选择一个会话查看内容")}
+            </div>
+          )}
+          {detail && (
+            <>
+              <div className="session-detail-heading">
+                <h2>{detail.session.title || sc("未命名会话")}</h2>
+                <button disabled={!onShare} onClick={() => onShare?.(detail.session)}>
+                  <Share2 size={14} />
+                  {sc("分享")}
+                </button>
+              </div>
+              <div className="session-meta">
+                <span>
+                  <AgentDot provider={detail.session.provider} />
+                  {list?.providers.find((p) => p.id === detail.session.provider)
+                    ?.name || agentName(detail.session.provider)}
+                </span>
+                <span>
+                  {date(detail.session.startedAt, true)} –{" "}
+                  {clock(detail.session.lastActivityAt)}
+                </span>
+                <span>
+                  {sc(
+                    "{0} 次提问 · {1} 条消息",
+                    n(detail.session.prompts),
+                    n(detail.session.messages),
+                  )}
+                </span>
+                <span>
+                  <GitCommitHorizontal size={13} />
+                  {sc("{0} 个提交", n(detail.session.commits))}
+                  {!!detail.repositories?.length && (
+                    <small className="session-repository-counts">
+                      {detail.repositories
+                        .map(
+                          (r) =>
+                            `${r.path.split(/[\\/]/).pop()} ${n(r.commits)}`,
+                        )
+                        .join(" · ")}
+                    </small>
+                  )}
+                </span>
+                <span
+                  title={
+                    detail.unpriced
+                      ? sc(
+                          "{0} 条用量缺少价格或完整字段，未计入折算花费",
+                          detail.unpriced,
+                        )
+                      : undefined
+                  }
+                >
+                  {sc("按 API 价格折算 {0}", money(detail.cost))}
+                  {detail.unpriced > 0 ? " *" : ""}
+                </span>
+                {detail.models.map((model) => (
+                  <code key={model}>{model}</code>
+                ))}
+              </div>
+              <div
+                className="session-events-scroll"
+                ref={detailScroll}
+                role="region"
+                aria-label={sc("会话内容时间线")}
+                tabIndex={0}
+              >
+                <div className="session-conversation">
+                  {detail.children.length > 0 && (
+                    <details className="session-children">
+                      <summary>
+                        {sc("子任务")} · {detail.children.length}
+                      </summary>
+                      {detail.children.map((c) => (
+                        <button key={key(c)} onClick={() => choose(c)}>
+                          <AgentIcon provider={c.provider} />
+                          {c.title || sc("未命名会话")}
+                          <ChevronRight size={12} />
+                        </button>
+                      ))}
+                    </details>
+                  )}
+                  {mode === "normal" &&
+                    (!!detail.context.length ||
+                      detail.turns.some((t) => t.contextOnly)) && (
+                      <details
+                        className="session-context"
+                        onToggle={(e) => setContextOpen(e.currentTarget.open)}
+                      >
+                        <summary>{sc("会话上下文")}</summary>
+                        {contextOpen &&
+                          detail.context.map((e) => (
+                            <Event key={e.id} event={e} request={request} />
+                          ))}
+                        {contextOpen &&
+                          detail.turns
+                            .filter((t) => t.contextOnly)
+                            .map((turn) => (
+                              <SessionTurnView
+                                key={turn.id}
+                                turn={turn}
+                                mode={mode}
+                                request={request}
+                                onCommit={onCommit}
+                              />
+                            ))}
+                        {contextOpen && detail.contextNextOffset !== null && (
+                          <button
+                            className="session-more"
+                            disabled={contextLoading}
+                            onClick={() => void loadContext()}
+                          >
+                            {sc("加载更多过程")}
+                          </button>
+                        )}
+                      </details>
+                    )}
+                  {query && mode === "focused" && (
+                    <button
+                      className="session-more"
+                      onClick={() => setMode("normal")}
+                    >
+                      {sc("在普通模式查看搜索内容")}
+                    </button>
+                  )}
+                  {detail.previousOffset !== null && (
+                    <button
+                      className="session-more"
+                      disabled={detailLoading}
+                      onClick={() =>
+                        void loadDetail(detail.previousOffset!, undefined, true)
+                      }
+                    >
+                      {sc("加载之前的提问")}
+                    </button>
+                  )}
+                  {detail.turns
+                    .filter((turn) => !turn.contextOnly)
+                    .map((turn) => (
+                      <SessionTurnView
+                        key={`${key(detail.session)}:${mode}:${turn.id}`}
+                        turn={turn}
+                        mode={mode}
+                        request={request}
+                        onCommit={onCommit}
+                        matched={detail.matchTurnId === turn.id}
+                        onEdit={() => setTurnAction({ kind: 'edit', turn, session: { provider: detail.session.provider, id: detail.session.id } })}
+                        onDelete={() => setTurnAction({ kind: 'delete', turn, session: { provider: detail.session.provider, id: detail.session.id } })}
+                      />
+                    ))}
+                  <CommitGroup commits={detail.commits} onCommit={onCommit} />
+                  {!detail.totalTurns && <p className="session-empty">{sc("此会话暂无对话内容")}</p>}
+                  {detail.nextOffset !== null && (
+                    <button
+                      className="session-more"
+                      disabled={detailLoading}
+                      onClick={() => void loadDetail(detail.nextOffset!)}
+                    >
+                      {detailLoading ? sc("正在加载…") : sc("加载更多提问")}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+      {turnAction && <SessionTurnEditor key={`${key(turnAction.session)}:${turnAction.turn.id}:${turnAction.kind}`}
+        kind={turnAction.kind} prompt={turnAction.turn.prompt}
+        read={() => api<SessionTurnEdit>("/sessions/turn/edit?" + new URLSearchParams({ workspaceId: workspace.id, ...turnAction.session, turnId: turnAction.turn.id }))}
+        mutate={(method, body) => api("/sessions/turn?" + new URLSearchParams({ workspaceId: workspace.id, ...turnAction.session, turnId: turnAction.turn.id }), method, body)}
+        onClose={() => setTurnAction(undefined)} onDone={() => void refreshAfterTurnChange()} />}
+    </section>
+  );
+}

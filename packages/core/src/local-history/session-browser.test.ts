@@ -1,0 +1,563 @@
+import { afterEach, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { LocalStore } from "../local-state.js";
+import { createHistorySchema } from "./schema.js";
+import { StructuredHistory } from "./structured-store.js";
+import { LocalAnalytics } from "./analytics.js";
+import { LocalSessionBrowser } from "./session-browser.js";
+import type { HistoryMessage } from "./types.js";
+import { parseCursor } from "./cursor.js";
+
+let root: string, store: LocalStore, analytics: LocalAnalytics;
+afterEach(async () => {
+  await analytics?.prices.close();
+  store?.close();
+  if (root) rmSync(root, { recursive: true, force: true });
+});
+function fixture() {
+  root = mkdtempSync(join(tmpdir(), "adit-session-browser-"));
+  store = new LocalStore(join(root, "state"));
+  createHistorySchema(store.db);
+  analytics = new LocalAnalytics(store.db);
+  analytics.prices.install({
+    "test-model": {
+      mode: "chat",
+      input_cost_per_token: 0.000002,
+      output_cost_per_token: 0.000008,
+      cache_read_input_token_cost: 0.0000005,
+      cache_creation_input_token_cost: 0.0000025,
+    },
+  });
+  const w = store.saveWorkspace({
+    path: root,
+    providers: ["claude", "codex"],
+    repositories: [],
+  });
+  const history = new StructuredHistory(store.db),
+    browser = new LocalSessionBrowser(store.db, analytics.prices);
+  return { w, history, browser };
+}
+const m = (
+  key: string,
+  role: string,
+  content: unknown,
+  extra: Partial<HistoryMessage> = {},
+): HistoryMessage => ({
+  key,
+  role,
+  content,
+  raw: {},
+  timestamp: "2026-10-20T10:00:00Z",
+  ...extra,
+});
+it("keeps image-only turns visible in both modes without exposing binary data as text",()=>{
+ const {w,history,browser}=fixture();
+ history.write({id:'images',provider:'codex',cwd:root,messages:[
+  m('p','user',[{type:'input_text',text:'<environment_context>context</environment_context>'},{type:'input_image',image_url:'data:PRIVATE'}]),
+  m('a','assistant','Answer to image'),
+ ]});
+ for(const mode of ['normal','focused'] as const){const result=browser.detail(w,'codex','images',mode);
+  expect(result.turns[0]).toMatchObject({imageCount:1,prompt:'',contextOnly:false});
+  expect(result.turns[0].events.some(e=>e.text==='Answer to image')).toBe(true);
+  expect(JSON.stringify(result)).not.toContain('PRIVATE');}
+});
+it("shows native compaction as context and retains the real answer in focused mode",()=>{
+ const {w,history,browser}=fixture();history.write({id:'compact',provider:'codex',cwd:root,messages:[
+  m('p','user','question'),m('a','assistant','actual answer',{finalReply:true}),
+  m('s','assistant','## Task and Scope',{raw:{metadata:{compaction_output:true},payload:{phase:'final_answer'}}}),
+  m('u','user','<turn_aborted>interrupted</turn_aborted>'),
+ ]});
+ const normal=browser.detail(w,'codex','compact','normal'),focused=browser.detail(w,'codex','compact','focused');
+ expect(normal.turns[0].events.find(e=>e.text==='## Task and Scope')?.kind).toBe('system');
+ expect(focused.turns[0].events.map(e=>e.text)).toEqual(['actual answer']);
+ expect(normal.turns[1].contextOnly).toBe(true);
+});
+
+it("shows native continuation pages once, searches both parts and keeps edit/delete ownership",()=>{
+ const {w,history,browser}=fixture();
+ const rootSession={id:"native",provider:"codex",cwd:root,messages:[m("p","user","first question"),m("a","assistant","first answer")]};
+ const page={id:"native_page",provider:"codex",cwd:root,parentId:"native",relationship:"continuation" as const,
+   messages:[m("p","user","later question"),m("a","assistant","later answer") ,m("p2","user","delete later turn")]};
+ history.write(rootSession);history.write(page);
+ const before=store.db.prepare("SELECT id FROM adit_history_messages ORDER BY id").all();
+ const list=browser.list(w);expect(list.total).toBe(1);expect(list.items[0]).toMatchObject({id:"native",messages:5,prompts:3,title:"first question"});
+ const detail=browser.detail(w,"codex","native");expect(detail.turns.map(t=>t.prompt)).toEqual(["first question","later question","delete later turn"]);
+ expect(detail.turns.map(t=>t.ordinal)).toEqual([1,2,3]);expect(detail.children).toEqual([]);
+ expect(browser.list(w,{query:"later answer"}).items.map(s=>s.id)).toEqual(["native"]);
+ expect(browser.detail(w,"codex","native_page").session.id).toBe("native");
+ expect(store.db.prepare("SELECT id FROM adit_history_messages ORDER BY id").all()).toEqual(before);
+ const draft=browser.editTurn(w,"codex","native",detail.turns[1].id);
+ browser.updateTurn(w,"codex","native",draft.turnId,draft.revision,[{id:draft.blocks[0].id,text:"edited later question"}]);
+ const deletion=browser.editTurn(w,"codex","native",detail.turns[2].id);browser.deleteTurn(w,"codex","native",deletion.turnId,deletion.revision);
+ history.write(rootSession);history.write(page);
+ expect(browser.detail(w,"codex","native").turns.map(t=>t.prompt)).toEqual(["first question","edited later question"]);
+ expect(browser.content(w,"codex","native",detail.turns[1].events[0].id,"reply").text).toBe("later answer");
+ history.write({...page,id:"different-fork",parentId:"native",relationship:"fork"});expect(browser.list(w).total).toBe(2);
+});
+
+it("browses Cursor prompts with real dates and preserves wrappers, edits and deleted turns on recollection", () => {
+  const { w, history, browser } = fixture();
+  w.providers.push("cursor");
+  const text = [
+    { role: "user", message: { content: [{ type: "text", text: "<timestamp>Thursday, Sep 10, 2026, 1:27 PM (UTC+8)</timestamp>\n<user_query>Sep</user_query>" }] } },
+    { role: "assistant", message: { content: "answer" } },
+    { role: "user", message: { content: "<user_query>delete this turn</user_query>" } },
+    { role: "assistant", message: { content: "deleted answer" } },
+  ].map(r => JSON.stringify(r)).join("\n");
+  const original = parseCursor(text, "cursor-session.jsonl", root);
+  history.write(original);
+  const before = browser.detail(w, "cursor", original.id);
+  expect(before.session.title).toBe("Sep");
+  expect(before.session.startedAt).toBe(Date.parse("2026-09-10T05:27:00Z"));
+  for (const mode of ["normal", "focused"] as const)
+    expect(browser.detail(w, "cursor", original.id, mode).turns[0].prompt).toBe("Sep");
+  const draft = browser.editTurn(w, "cursor", original.id, before.turns[0].id);
+  browser.updateTurn(w, "cursor", original.id, draft.turnId, draft.revision, [{ id: draft.blocks[0].id, text: "updated prompt" }]);
+  const second = browser.editTurn(w, "cursor", original.id, before.turns[1].id);
+  browser.deleteTurn(w, "cursor", original.id, second.turnId, second.revision);
+  history.write(original);
+  const after = browser.detail(w, "cursor", original.id);
+  expect(after.turns.map(t => t.prompt)).toEqual(["updated prompt"]);
+  expect(after.session.startedAt).toBe(before.session.startedAt);
+  expect(history.read("cursor", original.id)!.messages[0].content).toEqual([{ type: "text", text: "<timestamp>Thursday, Sep 10, 2026, 1:27 PM (UTC+8)</timestamp>\n<user_query>updated prompt</user_query>" }]);
+});
+
+it("edits complete prompt/reply blocks, updates search, preserves tools/usage and reapplies edits on collection", () => {
+  const { w, history, browser } = fixture();
+  const original = { provider: "claude", id: "editable", cwd: root, messages: [
+    m("u1", "user", "original question"),
+    m("a1", "assistant", [{ type: "text", text: "original answer" }, { type: "text", text: "second block" }], {
+      usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, model: "test-model",
+    }),
+    m("tool", "assistant", [{ type: "tool_use", id: "call", name: "Bash", input: { command: "echo kept" } }]),
+    m("u2", "user", "next question"), m("a2", "assistant", "next reply"),
+  ] };
+  history.write(original);
+  const before = browser.detail(w, "claude", "editable");
+  const draft = browser.editTurn(w, "claude", "editable", before.turns[0].id);
+  expect(draft.blocks.map(b => b.kind)).toEqual(["prompt", "reply", "reply"]);
+  const replacement = "complete revised reply " + "long body\n".repeat(3000);
+  browser.updateTurn(w, "claude", "editable", draft.turnId, draft.revision, draft.blocks.map((b, i) => ({ id: b.id, text: ["revised question", replacement, "revised second block"][i] })));
+  const after = browser.detail(w, "claude", "editable");
+  expect(after.turns[0].prompt).toBe("revised question");
+  expect(after.turns[1]).toEqual(before.turns[1]);
+  expect(after.cost).toBe(before.cost);
+  expect(after.turns[0].usage).toEqual(before.turns[0].usage);
+  expect(browser.list(w, { query: "original answer" }).total).toBe(0);
+  expect(browser.list(w, { query: "revised question" }).items[0].title).toBe("revised question");
+  expect(browser.editTurn(w, "claude", "editable", draft.turnId).blocks[1].text).toBe(replacement);
+  expect(history.read("claude", "editable")!.messages[1].content).toEqual([{ type: "text", text: replacement }, { type: "text", text: "revised second block" }]);
+  history.write({ ...original, messages: [...original.messages, m("a3", "assistant", "newly collected reply")] });
+  expect(browser.editTurn(w, "claude", "editable", draft.turnId).blocks[1].text).toBe(replacement);
+  expect(browser.detail(w, "claude", "editable").turns[0].events.some(e => e.kind === "tool")).toBe(true);
+  expect(original.messages[0].content).toBe("original question");
+});
+
+it("deletes exactly one whole turn including search/tools/usage, keeps other turns and never reimports it", () => {
+  const { w, history, browser } = fixture();
+  const original = { provider: "claude", id: "deletable", cwd: root, messages: [
+    m("u1", "user", "keep first"), m("a1", "assistant", "keep first reply"),
+    m("u2", "user", "remove this question"), m("a2", "assistant", "remove this reply", { usage: { input_tokens: 10, output_tokens: 20 } }),
+    m("tool", "assistant", [{ type: "tool_use", id: "call", name: "Bash", input: { command: "echo remove-command" } }]),
+    m("result", "user", [{ type: "tool_result", tool_use_id: "call", content: "remove output" }]),
+    m("u3", "user", "keep last"), m("a3", "assistant", "keep last reply"),
+  ] };
+  history.write(original);
+  const before = browser.detail(w, "claude", "deletable"), target = before.turns[1];
+  const draft = browser.editTurn(w, "claude", "deletable", target.id);
+  browser.deleteTurn(w, "claude", "deletable", target.id, draft.revision);
+  const after = browser.detail(w, "claude", "deletable");
+  expect(after.totalTurns).toBe(2);
+  expect(after.session.messages).toBe(4);
+  expect(after.session.prompts).toBe(2);
+  expect(after.turns.map(t => [t.id, t.prompt])).toEqual([before.turns[0], before.turns[2]].map(t => [t.id, t.prompt]));
+  expect(after.turns.map(t => t.ordinal)).toEqual([1, 2]);
+  expect(browser.list(w, { query: "remove" }).total).toBe(0);
+  expect(() => browser.content(w, "claude", "deletable", target.events[0].id, "reply")).toThrow("Event not found");
+  expect(store.db.prepare("SELECT count(*) n FROM adit_history_tool_calls WHERE turn_id=?").get(target.id)).toEqual({ n: 0 });
+  expect(store.db.prepare("SELECT count(*) n FROM adit_history_usage_entries WHERE turn_id=?").get(target.id)).toEqual({ n: 0 });
+  history.write(original);
+  expect(browser.detail(w, "claude", "deletable").turns.map(t => t.id)).toEqual(after.turns.map(t => t.id));
+  // An active deleted turn may receive more native replies before the next prompt.
+  const final = browser.editTurn(w, "claude", "deletable", after.turns[1].id);
+  browser.deleteTurn(w, "claude", "deletable", final.turnId, final.revision);
+  history.write({ ...original, messages: [...original.messages, m("later", "assistant", "later reply to deleted turn"), m("u4", "user", "new turn")] });
+  expect(browser.detail(w, "claude", "deletable").turns.map(t => t.prompt)).toEqual(["keep first", "new turn"]);
+  for (const t of browser.detail(w, "claude", "deletable").turns) {
+    const current = browser.editTurn(w, "claude", "deletable", t.id);
+    browser.deleteTurn(w, "claude", "deletable", t.id, current.revision);
+  }
+  expect(browser.detail(w, "claude", "deletable").totalTurns).toBe(0);
+  expect(browser.list(w).items[0].id).toBe("deletable");
+});
+
+it("rejects stale edits, cross-turn blocks and outside-workspace mutations atomically", () => {
+  const { w, history, browser } = fixture();
+  for (const [id, cwd] of [["inside", root], ["outside", root + "-other"]]) history.write({ provider: "claude", id, cwd,
+    messages: [m("u1", "user", "question"), m("a1", "assistant", "answer"), m("u2", "user", "other turn")] });
+  const turns = browser.detail(w, "claude", "inside").turns;
+  const draft = browser.editTurn(w, "claude", "inside", turns[0].id);
+  expect(() => browser.updateTurn(w, "claude", "inside", turns[0].id, draft.revision - 1, [{ id: draft.blocks[0].id, text: "stale" }])).toThrow("conversation changed");
+  expect(() => browser.updateTurn(w, "claude", "inside", turns[0].id, draft.revision, [{ id: draft.blocks[0].id, text: "rollback" }, { id: turns[1].promptBlockId, text: "wrong turn" }])).toThrow("Invalid conversation text");
+  expect(browser.detail(w, "claude", "inside").turns[0].prompt).toBe("question");
+  expect(() => browser.deleteTurn(w, "claude", "outside", turns[0].id, draft.revision)).toThrow("Session not found");
+  expect(() => browser.deleteTurn(w, "claude", "inside", "missing", draft.revision)).toThrow("Turn not found");
+  expect(() => browser.deleteTurn(w, "claude", "inside", turns[0].id, undefined)).toThrow("conversation changed");
+  expect(browser.detail(w, "claude", "inside").totalTurns).toBe(2);
+});
+
+it("queries and paginates native sessions by scope, provider, activity, full text and commands without merging identities", () => {
+  const { w, history, browser } = fixture();
+  history.write({
+    id: "first",
+    provider: "claude",
+    cwd: root,
+    messages: [
+      m("u", "user", "first prompt"),
+      m("a", "assistant", "some detailed answer"),
+    ],
+  });
+  history.write({
+    id: "second",
+    provider: "codex",
+    cwd: root,
+    messages: [
+      m("u", "user", "second prompt"),
+      m("a", "assistant", [
+        {
+          type: "function_call",
+          name: "exec_command",
+          call_id: "call",
+          arguments: JSON.stringify({ cmd: "find needle-command" }),
+        },
+      ]),
+    ],
+  });
+  history.write({
+    id: "child",
+    provider: "claude",
+    cwd: root,
+    parentId: "first",
+    relationship: "subagent",
+    messages: [m("u", "user", "child")],
+  });
+  history.write({
+    id: "fork",
+    provider: "claude",
+    cwd: root,
+    parentId: "first",
+    relationship: "fork",
+    messages: [m("u", "user", "fork")],
+  });
+  history.write({
+    id: "outside",
+    provider: "claude",
+    cwd: root + "-neighbor",
+    messages: [m("u", "user", "some detailed answer")],
+  });
+  expect(browser.list(w).total).toBe(3);
+  expect(browser.list(w, { query: "detailed" }).items.map((s) => s.id)).toEqual(
+    ["first"],
+  );
+  expect(
+    browser.list(w, { query: "needle-command" }).items.map((s) => s.id),
+  ).toEqual(["second"]);
+  expect(browser.list(w, { provider: "codex" }).total).toBe(1);
+  expect(browser.list(w, { onlyCommits: true }).total).toBe(0);
+  expect(browser.list(w, { query: "%" }).total).toBe(0);
+  expect(() => browser.detail(w, "claude", "outside")).toThrow(
+    "Session not found",
+  );
+  expect(
+    browser.detail(w, "claude", "first").children.map((s) => s.id),
+  ).toEqual(["child"]);
+  expect(browser.detail(w, "claude", "child").parent?.id).toBe("first");
+  for (let i = 0; i < 55; i++)
+    history.write({
+      id: "page-" + i,
+      provider: "claude",
+      cwd: root,
+      messages: [m("u", "user", "page prompt")],
+    });
+  const first = browser.list(w),
+    second = browser.list(w, { offset: first.nextOffset! });
+  expect(first.items).toHaveLength(50);
+  expect(second.items).toHaveLength(8);
+  expect(
+    new Set(
+      [...first.items, ...second.items].map((s) => s.provider + ":" + s.id),
+    ).size,
+  ).toBe(58);
+});
+
+it("normal shows intermediate work; focused keeps only final replies and does not promote a pre-tool status to an answer", () => {
+  const { w, history, browser } = fixture();
+  history.write({
+    id: "s",
+    provider: "claude",
+    cwd: root,
+    messages: [
+      m("context", "system", "system instructions"),
+      m("u1", "user", "first question"),
+      m("a1", "assistant", "working on it"),
+      m("tool", "assistant", [
+        {
+          type: "tool_use",
+          id: "call",
+          name: "Bash",
+          input: { command: "echo hello" },
+        },
+      ]),
+      m("result", "user", [
+        { type: "tool_result", tool_use_id: "call", content: "hello" },
+      ]),
+      m("a2", "assistant", "final answer", {
+        model: "test-model",
+        effort: "high",
+        usage: {
+          input_tokens: 100,
+          output_tokens: 50,
+          cache_read_input_tokens: 20,
+          cache_creation_input_tokens: 10,
+        },
+      }),
+      m("u2", "user", "second question"),
+      m("a3", "assistant", "still working"),
+      m("tool2", "assistant", [
+        {
+          type: "tool_use",
+          id: "call2",
+          name: "Bash",
+          input: { command: "echo pending" },
+        },
+      ]),
+    ],
+  });
+  const normal = browser.detail(w, "claude", "s");
+  expect(normal.totalTurns).toBe(2);
+  expect(normal.turns[0].events.map((e) => e.kind)).toEqual([
+    "reply",
+    "tool",
+    "reply",
+  ]);
+  expect(normal.turns[0].openingEvents?.map((e) => e.text)).toEqual([
+    "working on it",
+  ]);
+  expect(normal.turns[0].closingEvents?.map((e) => e.text)).toEqual([
+    "final answer",
+  ]);
+  expect(normal.turns[1].openingEvents?.map((e) => e.text)).toEqual([
+    "still working",
+  ]);
+  expect(normal.turns[1].closingEvents).toEqual([]);
+  expect(normal.turns[0].usage).toMatchObject({
+    input: 100,
+    output: 50,
+    cache: 20,
+    cacheWrite: 10,
+    models: ["test-model"],
+    efforts: ["high"],
+  });
+  expect(normal.cost).toBe(635);
+  expect(normal.context).toHaveLength(1);
+  const focused = browser.detail(w, "claude", "s", "focused");
+  expect(focused.turns[0].events.map((e) => e.text)).toEqual(["final answer"]);
+  expect(focused.turns[1].events).toEqual([]);
+  expect(focused.context).toEqual([]);
+  expect(
+    browser.content(w, "claude", "s", normal.turns[0].events[1].id, "tool")
+      .text,
+  ).toContain("hello");
+});
+
+it("masks transcript secrets, keeps large results lazy, and paginates long conversations", () => {
+  const { w, history, browser } = fixture();
+  const secret =
+    "sk-ant-" +
+    createHash("sha256").update("session-browser-fixture").digest("hex");
+  history.write({
+    id: "s",
+    provider: "claude",
+    cwd: root,
+    messages: [
+      m("u", "user", secret),
+      m("a", "assistant", [
+        {
+          type: "tool_use",
+          id: "call",
+          name: "Bash",
+          input: { command: "read config" },
+        },
+      ]),
+      m("r", "user", [
+        {
+          type: "tool_result",
+          tool_use_id: "call",
+          content: secret + "\n" + "long output\n".repeat(6000),
+        },
+      ]),
+      ...Array.from({ length: 10 }, (_, i) =>
+        m("u" + i, "user", "prompt " + i),
+      ),
+    ],
+  });
+  const detail = browser.detail(w, "claude", "s");
+  expect(detail.turns).toHaveLength(8);
+  expect(detail.nextOffset).toBe(8);
+  expect(browser.detail(w, "claude", "s", "normal", 8).turns).toHaveLength(3);
+  expect(JSON.stringify(detail)).not.toContain(secret);
+  expect(JSON.stringify(detail).length).toBeLessThan(10000);
+  const output = browser.content(
+    w,
+    "claude",
+    "s",
+    detail.turns[0].events[0].id,
+    "tool",
+  );
+  expect(output.text).not.toContain(secret);
+  expect(output.nextOffset).toBe(32000);
+  const rawOutput = browser.content(
+    w,
+    "claude",
+    "s",
+    detail.turns[0].events[0].id,
+    "tool-output",
+  );
+  expect(rawOutput.text).toContain("\nlong output\n");
+  expect(rawOutput.text).not.toContain(secret);
+  expect(rawOutput.nextOffset).toBe(32000);
+  expect(() => browser.content(w, "claude", "s", "unknown", "tool")).toThrow(
+    "Event not found",
+  );
+});
+
+it("renders native script input and result text with actual newlines", () => {
+  const { w, history, browser } = fixture();
+  const script = 'const value = "hello";\ntext(value);';
+  history.write({
+    id: "script",
+    provider: "codex",
+    cwd: root,
+    messages: [
+      m("u", "user", "run this script"),
+      m("call", "assistant", script, {
+        raw: {
+          payload: {
+            type: "custom_tool_call",
+            call_id: "script-call",
+            name: "exec",
+            input: script,
+          },
+        },
+      }),
+      m("result", "tool", "hello\nworld", {
+        raw: {
+          payload: {
+            type: "custom_tool_call_output",
+            call_id: "script-call",
+            output: "hello\nworld",
+          },
+        },
+      }),
+    ],
+  });
+  const event = browser.detail(w, "codex", "script").turns[0].events[0];
+  expect(event.text).toBe(script);
+  expect(
+    browser.content(w, "codex", "script", event.id, "tool-input").text,
+  ).toBe(script);
+  expect(
+    browser.content(w, "codex", "script", event.id, "tool-output").text,
+  ).toBe("hello\nworld");
+});
+
+it("keeps Codex context separate and navigates to a search hit beyond the initial turn and event pages", () => {
+  const { w, history, browser } = fixture();
+  const messages = [
+    m(
+      "ctx",
+      "user",
+      "# AGENTS.md instructions\n<INSTRUCTIONS>project rules</INSTRUCTIONS>\n<environment_context>runtime</environment_context>",
+    ),
+  ];
+  for (let i = 0; i < 10; i++)
+    messages.push(m("p" + i, "user", "question " + i));
+  messages.push(m("opening", "assistant", "opening response"));
+  for (let i = 0; i < 55; i++)
+    messages.push(
+      m(
+        "call" + i,
+        "assistant",
+        JSON.stringify({
+          cmd: "echo " + (i === 51 ? "needle-late-command" : i),
+        }),
+        {
+          raw: {
+            payload: {
+              type: "function_call",
+              call_id: "c" + i,
+              name: "exec_command",
+              arguments: JSON.stringify({
+                cmd: "echo " + (i === 51 ? "needle-late-command" : i),
+              }),
+            },
+          },
+        },
+      ),
+    );
+  messages.push(m("end", "assistant", "final response"));
+  messages.push(
+    m("cleanup", "assistant", "cleanup command", {
+      raw: {
+        payload: {
+          type: "function_call",
+          call_id: "cleanup",
+          name: "exec_command",
+          arguments: JSON.stringify({ cmd: "cleanup" }),
+        },
+      },
+    }),
+  );
+  history.write({ id: "s", provider: "codex", cwd: root, messages });
+  const first = browser.detail(w, "codex", "s");
+  expect(first.turns[0].contextOnly).toBe(true);
+  const longTurn = browser.detail(w, "codex", "s", "normal", 8).turns.at(-1)!;
+  expect(longTurn.nextOffset).toBe(40);
+  expect(longTurn.events.some((e) => e.text === "final response")).toBe(false);
+  expect(longTurn.openingEvents?.map((e) => e.text)).toEqual([
+    "opening response",
+  ]);
+  expect(longTurn.closingEvents?.map((e) => e.text)).toEqual([
+    "final response",
+  ]);
+  const found = browser.detail(
+    w,
+    "codex",
+    "s",
+    "normal",
+    undefined,
+    "needle-late-command",
+  );
+  expect(found.previousOffset).toBe(0);
+  expect(found.matchTurnId).toBeTruthy();
+  const turn = found.turns.find((t) => t.id === found.matchTurnId)!;
+  expect(turn.previousOffset).toBe(0);
+  expect(turn.openingEvents?.map((e) => e.text)).toEqual(["opening response"]);
+  expect(turn.closingEvents?.map((e) => e.text)).toEqual(["final response"]);
+  expect(
+    turn.events.some(
+      (e) =>
+        e.id === turn.matchEventId && e.text.includes("needle-late-command"),
+    ),
+  ).toBe(true);
+  expect(
+    turn.events.filter((e) => e.kind === "reply").map((e) => e.text),
+  ).toEqual(["final response"]);
+  const focused = browser.detail(w, "codex", "s", "focused", 8);
+  expect(focused.turns.at(-1)?.events.map((e) => e.text)).toEqual([
+    "final response",
+  ]);
+});

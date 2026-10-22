@@ -1,0 +1,27 @@
+import { afterEach, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { resolvePrScope, prRepositoryRefs } from "./pr-scope.js";
+import type { LocalWorkspace } from "@varveai/adit-core";
+let root: string;
+afterEach(() => { if (root) rmSync(root, { recursive: true, force: true }); });
+it("uses the exact base..head difference, keeps the exclusion manifest and does not change the checkout", async () => {
+  root = mkdtempSync(join(tmpdir(), "adit-pr-git-"));
+  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("init", "-b", "main"); git("config", "user.name", "Fixture"); git("config", "user.email", "me@example.org"); git("config", "commit.gpgsign", "false");
+  writeFileSync(join(root, "a.txt"), "base"); git("add", "."); git("commit", "-m", "base"); const base = git("rev-parse", "HEAD");
+  git("checkout", "-b", "feature"); writeFileSync(join(root, "a.txt"), "own"); git("commit", "-am", "own change"); const own = git("rev-parse", "HEAD");
+  writeFileSync(join(root, "a.txt"), "other"); git("commit", "-am", "other change", "--author=Other <other@example.org>"); const other = git("rev-parse", "HEAD");
+  const w = { id: "w", path: root, repositories: [root] } as LocalWorkspace;
+  const scope = await resolvePrScope(w, { repository: root, head: "feature", base: "main" });
+  expect(scope.baseSha).toBe(base); expect(scope.commits.map(c => c.sha)).toEqual([own, other]);
+  expect(scope.commits[0].included).toBe(true); expect(scope.commits[1].reason).toBe("other-author");
+  expect(git("branch", "--show-current")).toBe("feature");
+  expect((await prRepositoryRefs(w, root)).refs).toContain("main");
+  expect((await resolvePrScope(w, { repository: root, commits: [own.slice(0, 10), own, other] })).commits).toHaveLength(2);
+  await expect(resolvePrScope(w, { repository: root, commits: [own], head: "feature" })).rejects.toThrow("not both");
+  await expect(resolvePrScope(w, { repository: root, head: "--all", base: "main" })).rejects.toThrow();
+  await expect(resolvePrScope({ ...w, repositories: [] }, { repository: root, head: "feature", base: "main" })).rejects.toThrow("outside");
+});

@@ -6,9 +6,8 @@
  */
 
 import { resolve, join } from "node:path";
-import { homedir } from "node:os";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { getLocalClientId } from "../local-state.js";
 import {
   deriveProjectType,
   findProjectManifestRoot,
@@ -56,28 +55,7 @@ export interface AditConfig {
 
 /** Get or create a persistent client ID */
 function getClientId(): string {
-  const configDir = join(homedir(), ".adit");
-  const idFile = join(configDir, "client-id");
-
-  if (existsSync(idFile)) {
-    return readFileSync(idFile, "utf-8").trim();
-  }
-
-  // Generate deterministic ID from hostname + homedir
-  const id = createHash("sha256")
-    .update(`${homedir()}-${process.pid}-${Date.now()}`)
-    .digest("hex")
-    .substring(0, 16);
-
-  // Persist so every process on this machine gets the same client ID
-  try {
-    mkdirSync(configDir, { recursive: true });
-    writeFileSync(idFile, id, "utf-8");
-  } catch {
-    // Best-effort — if we can't write, the ID still works for this process
-  }
-
-  return id;
+  return getLocalClientId();
 }
 
 /** Extract the project directory name from a root path, regardless of platform separators. */

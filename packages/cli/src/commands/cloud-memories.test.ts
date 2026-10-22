@@ -3,7 +3,7 @@ import { Command } from "commander";
 const mocks = vi.hoisted(() => ({ get: vi.fn(), credentials: vi.fn(), config: vi.fn() }));
 vi.mock("@varveai/adit-cloud", async original => ({ ...await original<typeof import("@varveai/adit-cloud")>(),
   loadCredentials: mocks.credentials, CloudClient: class { get = mocks.get; } }));
-vi.mock("./project-initialization.js", () => ({ loadInitializedProjectConfig: mocks.config }));
+vi.mock("./project-context.js", () => ({ loadProjectContext: mocks.config }));
 import { cloudMemoriesCommand, memoryQueryOptions, registerCloudMemoryCommands } from "./cloud-memories.js";
 
 beforeEach(() => {
@@ -24,7 +24,7 @@ describe("memory CLI", () => {
   it("resolves the local project only for project queries and fails instead of choosing another", () => {
     expect(memoryQueryOptions("show", { scope: "project" }).project).toBe("local-project");
     mocks.config.mockReturnValue(null);
-    expect(() => memoryQueryOptions("show", { scope: "project" })).toThrow(/Initialize/);
+    expect(() => memoryQueryOptions("show", { scope: "project" })).toThrow(/Settings/);
     expect(memoryQueryOptions("show", { scope: "project", project: "explicit" }).project).toBe("explicit");
   });
   it("queries history with exact scope and version without a write request", async () => {

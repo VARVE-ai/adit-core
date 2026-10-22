@@ -9,7 +9,7 @@ vi.mock("@varveai/adit-cloud", async (original) => ({ ...await original<typeof i
   get = mocks.get; post = mocks.post; postForm = mocks.postForm; patch = mocks.patch;
   constructor(_url: string, _credentials: unknown, options: unknown) { mocks.clientOptions(options); }
 } }));
-vi.mock("./project-initialization.js", () => ({ loadInitializedProjectConfig: mocks.config }));
+vi.mock("./project-context.js", () => ({ loadProjectContext: mocks.config }));
 import { CloudApiError, CloudAuthError } from "@varveai/adit-cloud";
 import { cloudTasksCommand, describeFailure, registerCloudTaskCommands, taskDueDate, taskPatchFromOptions } from "./cloud-tasks.js";
 import { marks } from "./cli-style.js";

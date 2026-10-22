@@ -14,7 +14,13 @@ import {
   openDatabase,
   closeDatabase,
   normalizeServerUrl,
+  localLoginStartupEnabled,
+  resolveLocalProject,
+  LocalStore,
 } from "@varveai/adit-core";
+import { startDaemon, daemonStatus } from "../local/daemon.js";
+import { syncKey } from "../local/cloud-projection.js";
+import type { LocalCloudJob } from "../local/cloud-sync.js";
 import { existsSync } from "node:fs";
 import {
   loadCloudConfig,
@@ -83,12 +89,13 @@ function uploadDisclosureRows(): Row[] {
     {
       label: "Uploads",
       value: [
-        "conversation events, sessions and code diffs, automatically (as recorded, not redacted)",
-        "git metadata for linked projects, after each sync",
+        "registered workspaces: prompts, final replies, successful commit events and model/Token usage",
+        "selected local Git commits and locally computed attribution; ordinary tools and full diffs stay local",
+        "uploads follow each workspace's Cloud storage and sync settings; legacy projects retain their existing uploader",
         `project documents only when you run ${strong("adit cloud link")}`,
       ].join("\n"),
     },
-    { label: "Opt out", value: `ADIT_CLOUD_AUTO_SYNC=false, or ${strong("adit cloud logout")}` },
+    { label: "Opt out", value: `disable Cloud storage in Settings, ADIT_CLOUD_AUTO_SYNC=false, or ${strong("adit cloud logout")}` },
   ];
 }
 
@@ -175,7 +182,7 @@ export async function cloudLoginCommand(opts?: {
     printRows([{ label: "Approval", value: joinParts([stateWord("approved"), formatDuration(Date.now() - started)]) }], labels);
     printLine();
     printRows(uploadDisclosureRows(), labels);
-    const done = joinParts([hostname(), `client ${shortId(tokenResponse.clientId, 8)}`, "saved to ~/.adit/cloud-credentials.json"]);
+    const done = joinParts([hostname(), `client ${shortId(tokenResponse.clientId, 8)}`, "saved encrypted in local.sqlite"]);
     if (embedded) printLine(`${marks.ok} logged in ${dim("·")} ${done}`);
     else printEnd(`${marks.ok} Logged in ${dim("·")} ${done}`);
   } catch (error) {
@@ -200,36 +207,33 @@ export async function cloudLogoutCommand(): Promise<void> {
     return;
   }
 
-  try {
-    // Revoke directly: refreshing here would rotate the token before revoking the old value.
-    if (credentials.authType !== "token" && credentials.refreshToken) {
-      try {
-        await fetch(normalizeServerUrl(credentials.serverUrl) + "/api/auth/token/revoke", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ refreshToken: credentials.refreshToken }),
-          signal: AbortSignal.timeout(5000),
-        });
-      } catch {
-        // Remote availability must never prevent local logout.
-      }
-    }
+  clearCredentials(undefined, credentials);
+  // Revoke directly: refreshing here would rotate the token before revoking the old value.
+  if (credentials.authType !== "token" && credentials.refreshToken) {
     try {
-      const config = loadConfig();
-      if (existsSync(config.dbPath)) {
-        const db = openDatabase(config.dbPath);
-        try {
-          const { clearSyncState } = await import("@varveai/adit-core");
-          clearSyncState(db, credentials.serverUrl);
-        } finally {
-          closeDatabase(db);
-        }
-      }
+      await fetch(normalizeServerUrl(credentials.serverUrl) + "/api/auth/token/revoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken: credentials.refreshToken }),
+        signal: AbortSignal.timeout(5000),
+      });
     } catch {
-      // Missing or corrupt projects do not prevent local logout.
+      // Remote availability must never prevent local logout.
     }
-  } finally {
-    clearCredentials();
+  }
+  try {
+    const config = loadConfig();
+    if (existsSync(config.dbPath)) {
+      const db = openDatabase(config.dbPath);
+      try {
+        const { clearSyncState } = await import("@varveai/adit-core");
+        clearSyncState(db, credentials.serverUrl);
+      } finally {
+        closeDatabase(db);
+      }
+    }
+  } catch {
+    // Missing or corrupt projects do not prevent local logout.
   }
   console.log("Logged out. Credentials cleared.");
 }
@@ -240,6 +244,46 @@ export async function cloudLogoutCommand(): Promise<void> {
 export async function cloudSyncCommand(opts?: {
   json?: boolean;
 }): Promise<void> {
+  const daemon = await startDaemon();
+  let project;
+  try { project = resolveLocalProject({ path: process.cwd() }); } catch { /* Legacy command reports project setup errors below. */ }
+  if (project?.source === "registry") {
+    try {
+      const endpoint = `${daemon.url}/api/local/workspaces/${encodeURIComponent(project.projectId)}/sync`;
+      const request = async (method: "GET" | "POST") => {
+        const response = await fetch(endpoint, { method, headers: { authorization: `Bearer ${daemon.token}`, "content-type": "application/json" },
+          ...(method === "POST" ? { body: "{}" } : {}), signal: AbortSignal.timeout(15000) });
+        const value = await response.json() as LocalCloudJob;
+        if (!response.ok) throw new Error(value.error || "Unable to start Cloud sync");
+        return value;
+      };
+      let job = await request("POST");
+      if (!opts?.json) console.log("Collecting new history and syncing to Cloud…");
+      while (["queued", "running"].includes(job.status)) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        job = await request("GET");
+      }
+      if (opts?.json) console.log(JSON.stringify(job));
+      else {
+        console.log(`Cloud sync ${job.status}: ${job.events} events, ${job.commits} commits.`);
+        if (job.error) console.error(job.error);
+        for (const warning of job.warnings ?? []) console.error(warning);
+        if (job.runtimeReportError) console.error(job.runtimeReportError);
+        const notice = job.upgrade ? formatUpgradeNotice(job.upgrade) : null;
+        if (notice) console.error(notice);
+      }
+      if (job.status !== "done") process.exitCode = 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Cloud sync failed";
+      if (opts?.json) console.log(JSON.stringify({ error: message })); else printError("sync", message);
+      process.exitCode = 1;
+    }
+    return;
+  }
+  await legacyCloudSyncCommand(opts);
+}
+
+async function legacyCloudSyncCommand(opts?: { json?: boolean }): Promise<void> {
   const cloudConfig = loadCloudConfig();
   const credentials = loadCredentials();
 
@@ -385,6 +429,46 @@ export async function cloudSyncCommand(opts?: {
 export async function cloudStatusCommand(opts?: {
   json?: boolean;
 }): Promise<void> {
+  let project;
+  try { project = resolveLocalProject({ path: process.cwd() }); } catch { /* Preserve legacy setup diagnostics. */ }
+  if (project?.source === "registry") {
+    const store = new LocalStore();
+    try {
+      const workspace = store.workspace(project.projectId);
+      const credentials = loadCredentials(store.directory);
+      const daemon = await daemonStatus();
+      const accountKey = credentials ? syncKey(credentials.serverUrl, credentials.accountId ?? credentials.clientId) : "disconnected";
+      let sync = store.get<LocalCloudJob | null>(`cloud-job:${accountKey}:${workspace.id}`, null);
+      if (daemon) {
+        const response = await fetch(`${daemon.url}/api/local/workspaces/${encodeURIComponent(workspace.id)}/sync`, {
+          headers: { authorization: `Bearer ${daemon.token}` }, signal: AbortSignal.timeout(15000),
+        });
+        if (!response.ok) throw new Error("Unable to read local sync status");
+        sync = await response.json() as LocalCloudJob;
+      }
+      const status = { projectId: workspace.id, serverUrl: credentials?.serverUrl ?? loadCloudConfig().serverUrl,
+        enabled: workspace.cloud.enabled, loggedIn: !!credentials, backgroundRunning: !!daemon,
+        autoSync: workspace.cloud.enabled && workspace.cloud.mode === "automatic" && localLoginStartupEnabled(store.directory), sync };
+      if (opts?.json) console.log(JSON.stringify(status));
+      else {
+        printTitle("Cloud sync", workspace.name);
+        printRows([
+          { label: "Server", value: status.serverUrl ?? "Not configured" },
+          { label: "Account", value: status.loggedIn ? "Connected" : "Not connected" },
+          { label: "Background service", value: daemon ? "Running" : "Stopped" },
+          { label: "Sync", value: !status.enabled ? "Disabled" : status.autoSync ? "Automatic" : "Manual" },
+          { label: "Last sync", value: sync?.status ? `${sync.status} · ${sync.events} events · ${sync.commits} commits` : "Not synced yet" },
+        ]);
+        if (sync?.error) console.error(sync.error);
+        for (const warning of sync?.warnings ?? []) console.error(warning);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to read Cloud sync status";
+      if (opts?.json) console.log(JSON.stringify({ error: message })); else printError("status", message);
+      process.exitCode = 1;
+    } finally { store.close(); }
+    return;
+  }
   const cloudConfig = loadCloudConfig();
   const credentials = loadCredentials();
   const config = loadInitializedProjectConfig("adit cloud status");
@@ -393,7 +477,7 @@ export async function cloudStatusCommand(opts?: {
   const status: Record<string, unknown> = {
     serverUrl: cloudConfig.serverUrl,
     enabled: cloudConfig.enabled,
-    autoSync: cloudConfig.autoSync,
+    autoSync: cloudConfig.enabled && cloudConfig.autoSync && localLoginStartupEnabled(),
     loggedIn: credentials !== null,
   };
 
@@ -531,8 +615,8 @@ export async function cloudStatusCommand(opts?: {
   if (status.serverOnline === false) {
     rows.push({ label: "Server", value: `${stateWord("offline")} ${dim(`· ${String(status.serverError ?? "")}`)}` });
   }
-  if (!cloudConfig.enabled || !cloudConfig.autoSync) {
-    rows.push({ label: "Auto-sync", value: `off ${dim(!cloudConfig.enabled ? "(ADIT_CLOUD_ENABLED=false)" : "(ADIT_CLOUD_AUTO_SYNC=false)")}` });
+  if (!status.autoSync) {
+    rows.push({ label: "Auto-sync", value: `off ${dim(!cloudConfig.enabled ? "(ADIT_CLOUD_ENABLED=false)" : !cloudConfig.autoSync ? "(ADIT_CLOUD_AUTO_SYNC=false)" : "(enable login startup in local settings)")}` });
   }
 
   rows.push({ label: "Project", value: joinParts([strong(basename(config.projectRoot)), config.projectId]) });
@@ -659,8 +743,8 @@ export async function cloudAuthTokenCommand(
   printRows(disclosure, labels);
   printEnd(
     verified
-      ? `${marks.ok} Logged in with a static token ${dim("· saved to ~/.adit/cloud-credentials.json")}`
-      : `${marks.warn} Token saved but not verified ${dim("· saved to ~/.adit/cloud-credentials.json")}`,
+      ? `${marks.ok} Logged in with a static token ${dim("· saved encrypted in local.sqlite")}`
+      : `${marks.warn} Token saved but not verified ${dim("· saved encrypted in local.sqlite")}`,
   );
 }
 

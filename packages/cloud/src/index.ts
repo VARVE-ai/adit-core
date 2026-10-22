@@ -27,6 +27,8 @@ export {
   loadCredentials,
   saveCredentials,
   clearCredentials,
+  updateCloudAccountMetadata,
+  type CloudAccountMetadata,
   isTokenExpired,
   credentialsFromEnvToken,
   incrementSyncErrors,

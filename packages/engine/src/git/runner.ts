@@ -33,6 +33,8 @@ export async function runGit(
   try {
     const { stdout, stderr } = await execFileAsync("git", args, {
       cwd: opts.cwd,
+      // Also used by the local daemon; Git metadata reads must not flash a console on Windows.
+      windowsHide: true,
       env: { ...process.env, ...opts.env },
       timeout: opts.timeout ?? DEFAULT_TIMEOUT,
       maxBuffer: 10 * 1024 * 1024, // 10MB

@@ -1,27 +1,20 @@
-/**
- * Cloud credential storage.
- *
- * Persists JWT tokens and server-assigned client ID to
- * ~/.adit/cloud-credentials.json with restricted file permissions.
- */
-
-import { join } from "node:path";
-import { homedir } from "node:os";
+/** Cloud login belongs to the selected local.sqlite, never the legacy CLI JSON file. */
+import { localDataDir, normalizeServerUrl } from "@varveai/adit-core";
 import {
-  existsSync,
-  readFileSync,
-  writeFileSync,
-  mkdirSync,
-  unlinkSync,
-  chmodSync,
-  openSync,
-  closeSync,
-  writeSync,
-  statSync,
-} from "node:fs";
-import { normalizeServerUrl } from "@varveai/adit-core";
+  credentialDatabase,
+  readCredential,
+  writeCredential,
+  sameCredential,
+  activeCredentialLock,
+  acquireCredentialLock,
+  releaseCredentialLock,
+} from "./credential-database.js";
 
-export type CloudAuthFailureStage = "refresh" | "request" | "auto-sync" | "status";
+export type CloudAuthFailureStage =
+  | "refresh"
+  | "request"
+  | "auto-sync"
+  | "status";
 
 export interface CloudAuthFailure {
   /** ISO 8601 timestamp when the auth failure was observed */
@@ -37,6 +30,14 @@ export interface CloudAuthFailure {
 }
 
 export interface CloudCredentials {
+  /** Changes on every login; prevents a stale refresh from restoring a logged-out account. */
+  credentialId?: string;
+  accountId?: string;
+  accountName?: string;
+  accountEmail?: string;
+  checkedAt?: string;
+  reachable?: boolean;
+  authStatus?: "valid" | "expired";
   /** Authentication type: "device" (default) or "token" (static JWT) */
   authType?: "device" | "token";
   /** JWT access token (1-hour expiry for device, static for token) */
@@ -59,62 +60,41 @@ export interface CloudCredentials {
   lastAuthFailure?: CloudAuthFailure;
 }
 
-const CREDENTIALS_FILE = "cloud-credentials.json";
-const REFRESH_LOCK_FILE = "cloud-credentials.refresh.lock";
-const REFRESH_LOCK_STALE_MS = 30_000;
-
-function credentialsPath(): string {
-  return join(homedir(), ".adit", CREDENTIALS_FILE);
-}
-
-/** Load stored credentials, or null if not logged in */
-export function loadCredentials(): CloudCredentials | null {
-  const path = credentialsPath();
-  if (!existsSync(path)) return null;
-
-  try {
-    const raw = readFileSync(path, "utf-8");
-    const parsed = JSON.parse(raw) as CloudCredentials;
-    if (!parsed.accessToken) return null;
-    // Token auth only requires accessToken; device auth requires all fields
-    if (parsed.authType !== "token" && (!parsed.refreshToken || !parsed.clientId)) {
-      return null;
-    }
-    return {
-      ...parsed,
-      serverUrl: normalizeServerUrl(parsed.serverUrl),
-    };
-  } catch {
-    return null;
-  }
-}
-
-/** Save credentials to disk with restricted permissions (0600) */
-export function saveCredentials(creds: CloudCredentials): void {
-  const path = credentialsPath();
-  mkdirSync(join(homedir(), ".adit"), { recursive: true });
-  writeFileSync(
-    path,
-    JSON.stringify(
-      { ...creds, serverUrl: normalizeServerUrl(creds.serverUrl) },
-      null,
-      2,
-    ),
-    "utf-8",
+/** Read only the current data directory. Legacy credentials are never imported. */
+export function loadCredentials(
+  directory = localDataDir(),
+): CloudCredentials | null {
+  return credentialDatabase(directory, false, (db) =>
+    readCredential(db, directory),
   );
-  try {
-    chmodSync(path, 0o600);
-  } catch {
-    // chmod may fail on some platforms (Windows) — not critical
-  }
 }
 
-/** Remove stored credentials (logout) */
-export function clearCredentials(): void {
-  const path = credentialsPath();
-  if (existsSync(path)) {
-    unlinkSync(path);
-  }
+/** Tokens are AES-GCM encrypted; the per-database key is protected by the OS. */
+export function saveCredentials(
+  creds: CloudCredentials,
+  directory = localDataDir(),
+): void {
+  credentialDatabase(directory, true, (db) =>
+    writeCredential(db, directory, creds),
+  );
+}
+
+/** A conditional logout cannot remove a newer login made by another process. */
+export function clearCredentials(
+  directory = localDataDir(),
+  expected?: CloudCredentials,
+): void {
+  credentialDatabase(directory, false, (db) =>
+    db
+      .transaction(() => {
+        if (expected) {
+          const current = readCredential(db, directory);
+          if (!current || !sameCredential(current, expected)) return;
+        }
+        db.prepare("DELETE FROM adit_cloud_credentials WHERE id=1").run();
+      })
+      .immediate(),
+  );
 }
 
 /** Check if the access token has expired (with 60s safety margin) */
@@ -128,75 +108,67 @@ export function isTokenExpired(creds: CloudCredentials): boolean {
   return Date.now() >= expiresAt - safetyMarginMs;
 }
 
-function refreshLockPath(): string {
-  return join(homedir(), ".adit", REFRESH_LOCK_FILE);
-}
-
-/**
- * Best-effort locked read-modify-write of the credentials file.
- *
- * Reuses the refresh lock file so counter/diagnostic updates can never
- * interleave with a token refresh — an unlocked write here could save a
- * stale in-memory token set and roll back freshly rotated tokens.
- * If the lock is currently held, the update is skipped: losing one
- * counter increment is preferable to clobbering fresh credentials.
- *
- * The mutate callback receives freshly loaded credentials and returns
- * the updated set, or null to skip writing.
- */
+/** Atomic metadata update, always based on the latest token pair. */
 function tryLockedCredentialsUpdate(
   mutate: (creds: CloudCredentials) => CloudCredentials | null,
+  directory = localDataDir(),
+  expected?: CloudCredentials,
+  alreadyLocked = false,
 ): boolean {
-  const path = refreshLockPath();
-  let fd: number;
   try {
-    mkdirSync(join(homedir(), ".adit"), { recursive: true });
-    try {
-      fd = openSync(path, "wx", 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
-      // Steal only stale locks (holder died mid-refresh); otherwise skip.
-      try {
-        const stat = statSync(path);
-        if (Date.now() - stat.mtimeMs <= REFRESH_LOCK_STALE_MS) return false;
-        unlinkSync(path);
-        fd = openSync(path, "wx", 0o600);
-      } catch {
-        return false;
-      }
-    }
+    return (
+      credentialDatabase(directory, false, (db) =>
+        db
+          .transaction(() => {
+            if (!alreadyLocked && activeCredentialLock(db)) return false;
+            const current = readCredential(db, directory);
+            if (!current || (expected && !sameCredential(current, expected)))
+              return false;
+            const next = mutate(current);
+            if (!next) return false;
+            writeCredential(db, directory, next);
+            return true;
+          })
+          .immediate(),
+      ) ?? false
+    );
   } catch {
     return false;
   }
+}
 
-  try {
-    writeSync(fd, `${process.pid} ${new Date().toISOString()}\n`);
-    const creds = loadCredentials();
-    if (!creds) return false;
-    const next = mutate(creds);
-    if (next) saveCredentials(next);
-    return next !== null;
-  } catch {
-    return false;
-  } finally {
-    try {
-      closeSync(fd);
-    } catch {
-      // best-effort
-    }
-    try {
-      unlinkSync(path);
-    } catch {
-      // best-effort
-    }
-  }
+export type CloudAccountMetadata = Pick<
+  CloudCredentials,
+  | "accountId"
+  | "accountName"
+  | "accountEmail"
+  | "checkedAt"
+  | "reachable"
+  | "authStatus"
+>;
+export function updateCloudAccountMetadata(
+  metadata: CloudAccountMetadata,
+  expected: CloudCredentials,
+  directory = localDataDir(),
+): boolean {
+  return tryLockedCredentialsUpdate(
+    (creds) => ({ ...creds, ...metadata }),
+    directory,
+    expected,
+  );
 }
 
 /** Record the most recent auth failure for diagnostics in `adit cloud status`. */
 export function recordAuthFailure(
   failure: Omit<CloudAuthFailure, "at"> & { at?: string },
+  directory = localDataDir(),
+  expected?: CloudCredentials,
 ): void {
-  tryLockedCredentialsUpdate((creds) => withAuthFailure(creds, failure));
+  tryLockedCredentialsUpdate(
+    (creds) => withAuthFailure(creds, failure),
+    directory,
+    expected,
+  );
 }
 
 /**
@@ -206,10 +178,15 @@ export function recordAuthFailure(
  */
 export function recordAuthFailureUnlocked(
   failure: Omit<CloudAuthFailure, "at"> & { at?: string },
+  directory = localDataDir(),
+  expected?: CloudCredentials,
 ): void {
-  const creds = loadCredentials();
-  if (!creds) return;
-  saveCredentials(withAuthFailure(creds, failure));
+  tryLockedCredentialsUpdate(
+    (creds) => withAuthFailure(creds, failure),
+    directory,
+    expected,
+    true,
+  );
 }
 
 function withAuthFailure(
@@ -226,58 +203,34 @@ function withAuthFailure(
 }
 
 /** Clear the stored auth failure after a successful authenticated request. */
-export function clearAuthFailure(): void {
-  tryLockedCredentialsUpdate((creds) =>
-    creds.lastAuthFailure ? { ...creds, lastAuthFailure: undefined } : null,
+export function clearAuthFailure(
+  directory = localDataDir(),
+  expected?: CloudCredentials,
+): void {
+  tryLockedCredentialsUpdate(
+    (creds) =>
+      creds.lastAuthFailure ? { ...creds, lastAuthFailure: undefined } : null,
+    directory,
+    expected,
   );
 }
 
-/** Run a refresh operation under a local file lock shared across hook processes. */
-export async function withCredentialsRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
-  const fd = await acquireRefreshLock();
-  try {
-    return await fn();
-  } finally {
-    try {
-      closeSync(fd);
-    } catch {
-      // best-effort
-    }
-    try {
-      unlinkSync(refreshLockPath());
-    } catch {
-      // best-effort
-    }
-  }
-}
-
-async function acquireRefreshLock(): Promise<number> {
-  const path = refreshLockPath();
-  mkdirSync(join(homedir(), ".adit"), { recursive: true });
-
-  for (let attempt = 0; attempt < 80; attempt++) {
-    try {
-      const fd = openSync(path, "wx", 0o600);
-      writeSync(fd, `${process.pid} ${new Date().toISOString()}\n`);
-      return fd;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST") throw error;
-
+/** Serialize refresh across CLI, hooks and local web processes in this database. */
+export async function withCredentialsRefreshLock<T>(
+  fn: () => Promise<T>,
+  directory = localDataDir(),
+): Promise<T> {
+  for (let attempt = 0; attempt < 160; attempt++) {
+    const owner = acquireCredentialLock(directory);
+    if (owner) {
       try {
-        const stat = statSync(path);
-        if (Date.now() - stat.mtimeMs > REFRESH_LOCK_STALE_MS) {
-          unlinkSync(path);
-          continue;
-        }
-      } catch {
-        continue;
+        return await fn();
+      } finally {
+        releaseCredentialLock(directory, owner);
       }
-
-      await sleep(Math.min(50 + attempt * 25, 250));
     }
+    await sleep(Math.min(50 + attempt * 25, 250));
   }
-
   throw new Error("Timed out waiting for cloud credential refresh lock");
 }
 
@@ -319,46 +272,61 @@ const CIRCUIT_BREAKER_WINDOW_MS = 60 * 60 * 1000;
  *
  * Returns true if sync is now disabled (threshold reached within window).
  */
-export function incrementSyncErrors(threshold = 5): boolean {
+export function incrementSyncErrors(
+  threshold = 5,
+  directory = localDataDir(),
+  expected?: CloudCredentials,
+): boolean {
   let disabled = false;
 
-  tryLockedCredentialsUpdate((creds) => {
-    const now = new Date().toISOString();
-    let count = creds.syncErrorCount ?? 0;
-    let firstErrorAt = creds.firstSyncErrorAt ?? now;
+  tryLockedCredentialsUpdate(
+    (creds) => {
+      const now = new Date().toISOString();
+      let count = creds.syncErrorCount ?? 0;
+      let firstErrorAt = creds.firstSyncErrorAt ?? now;
 
-    // If the first error is outside the window, reset the counter
-    const elapsed = Date.now() - new Date(firstErrorAt).getTime();
-    if (elapsed > CIRCUIT_BREAKER_WINDOW_MS) {
-      count = 0;
-      firstErrorAt = now;
-    }
+      // If the first error is outside the window, reset the counter
+      const elapsed = Date.now() - new Date(firstErrorAt).getTime();
+      if (elapsed > CIRCUIT_BREAKER_WINDOW_MS) {
+        count = 0;
+        firstErrorAt = now;
+      }
 
-    count += 1;
-    disabled = count >= threshold;
+      count += 1;
+      disabled = count >= threshold;
 
-    return {
-      ...creds,
-      syncErrorCount: count,
-      syncDisabled: disabled,
-      firstSyncErrorAt: firstErrorAt,
-    };
-  });
+      return {
+        ...creds,
+        syncErrorCount: count,
+        syncDisabled: disabled,
+        firstSyncErrorAt: firstErrorAt,
+      };
+    },
+    directory,
+    expected,
+  );
 
   return disabled;
 }
 
 /** Reset sync error counter and re-enable sync. */
-export function clearSyncErrors(): void {
-  tryLockedCredentialsUpdate((creds) => {
-    if (!creds.syncErrorCount && !creds.syncDisabled) return null;
-    return {
-      ...creds,
-      syncErrorCount: 0,
-      syncDisabled: false,
-      firstSyncErrorAt: undefined,
-    };
-  });
+export function clearSyncErrors(
+  directory = localDataDir(),
+  expected?: CloudCredentials,
+): void {
+  tryLockedCredentialsUpdate(
+    (creds) => {
+      if (!creds.syncErrorCount && !creds.syncDisabled) return null;
+      return {
+        ...creds,
+        syncErrorCount: 0,
+        syncDisabled: false,
+        firstSyncErrorAt: undefined,
+      };
+    },
+    directory,
+    expected,
+  );
 }
 
 /**
@@ -368,8 +336,8 @@ export function clearSyncErrors(): void {
  * since the first error), automatically resets the breaker and returns
  * false — giving auto-sync another chance.
  */
-export function isSyncDisabled(): boolean {
-  const creds = loadCredentials();
+export function isSyncDisabled(directory = localDataDir()): boolean {
+  const creds = loadCredentials(directory);
   if (creds?.syncDisabled !== true) return false;
 
   // Auto-reset if the error window has expired
@@ -377,7 +345,7 @@ export function isSyncDisabled(): boolean {
   if (firstErrorAt) {
     const elapsed = Date.now() - new Date(firstErrorAt).getTime();
     if (elapsed > CIRCUIT_BREAKER_WINDOW_MS) {
-      clearSyncErrors();
+      clearSyncErrors(directory, creds);
       return false;
     }
   }

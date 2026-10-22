@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   ensurePersistentCodexHooksInstalled: vi.fn(),
   resolveExecutable: vi.fn(),
   selectCodexExecutable: vi.fn(),
+  resolveLocalProject: vi.fn(),
 }));
 
 vi.mock("@varveai/adit-core", () => ({
@@ -29,6 +30,7 @@ vi.mock("@varveai/adit-core", () => ({
   loadConfig: mocks.loadConfig,
   projectNameFromRoot: mocks.projectNameFromRoot,
   readWorkspaceManifest: mocks.readWorkspaceManifest,
+  resolveLocalProject: mocks.resolveLocalProject,
 }));
 
 vi.mock("@varveai/adit-cloud", () => {
@@ -108,6 +110,7 @@ describe("cloud agent initialization guard", () => {
     vi.clearAllMocks();
     process.exitCode = undefined;
     projectRoot = mkdtempSync(join(tmpdir(), "adit-cloud-uninit-"));
+    mocks.resolveLocalProject.mockImplementation(() => { throw new Error("Project not found. Add its working directory in Settings."); });
     mocks.findGitRoot.mockReturnValue(projectRoot);
     mocks.readWorkspaceManifest.mockReturnValue(null);
     mocks.projectNameFromRoot.mockReturnValue("project");
@@ -159,8 +162,8 @@ describe("cloud agent initialization guard", () => {
     expect(mocks.loadCredentials).not.toHaveBeenCalled();
     expect(mocks.ensurePersistentClaudeHooksInstalled).not.toHaveBeenCalled();
     expect(errorSpy.mock.calls.map((call) => stripVTControlCharacters(String(call[0])))).toEqual([
-      `${stripVTControlCharacters(marks.fail)} claude: ADIT is not initialized in this project`,
-      "  run adit init, then retry adit cloud claude",
+      `${stripVTControlCharacters(marks.fail)} claude: Project not found. Add its working directory in Settings.`,
+      "  open adit server and maintain the working directory in Settings",
     ]);
   });
 
@@ -171,12 +174,13 @@ describe("cloud agent initialization guard", () => {
     expect(mocks.loadCredentials).not.toHaveBeenCalled();
     expect(mocks.ensurePersistentCodexHooksInstalled).not.toHaveBeenCalled();
     expect(errorSpy.mock.calls.map((call) => stripVTControlCharacters(String(call[0])))).toEqual([
-      `${stripVTControlCharacters(marks.fail)} codex: ADIT is not initialized in this project`,
-      "  run adit init, then retry adit cloud codex",
+      `${stripVTControlCharacters(marks.fail)} codex: Project not found. Add its working directory in Settings.`,
+      "  open adit server and maintain the working directory in Settings",
     ]);
   });
 
   it("allows cloud codex from an initialized workspace root without a git repository", async () => {
+    mocks.resolveLocalProject.mockReturnValue({ projectId: "workspace-id", projectRoot, repositories: [], source: "manifest", cloudDeletedAt: null });
     mocks.findGitRoot.mockReturnValue(null);
     mocks.readWorkspaceManifest.mockReturnValue({
       workspaceId: "workspace-id",
@@ -205,7 +209,7 @@ describe("cloud agent initialization guard", () => {
       process.chdir(originalCwd);
     }
 
-    expect(mocks.loadConfig).toHaveBeenCalled();
+    expect(mocks.resolveLocalProject).toHaveBeenCalled();
     expect(mocks.loadCredentials).toHaveBeenCalled();
     expect(mocks.ensurePersistentCodexHooksInstalled).not.toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalledWith("Not logged in. Run 'adit cloud login' first.");

@@ -1,6 +1,6 @@
 import { Command, Option } from "commander";
 import { CloudClient, CloudApiError, loadCredentials, createCloudTask, listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask, type CloudTaskCreate, type CloudTaskDetail, type CloudTaskList, type CloudTaskPatch } from "@varveai/adit-cloud";
-import { loadInitializedProjectConfig } from "./project-initialization.js";
+import { loadProjectContext } from "./project-context.js";
 import { NotLoggedInError, commandWith, describeFailure, reportFailure } from "./cloud-read-output.js";
 import { prepareTaskImages, uploadTaskImages } from "./cloud-task-images.js";
 import {
@@ -60,8 +60,8 @@ export async function cloudTasksCommand(action: "create" | "attach" | "list" | "
     const client = new CloudClient(credentials.serverUrl, credentials, { maxRetries: ["update", "create", "attach"].includes(action) ? 0 : 2 });
     let localProjectId = options.project;
     if ((action === "list" || action === "scopes" || action === "create") && !localProjectId) {
-      const config = loadInitializedProjectConfig(`adit cloud tasks ${action}`);
-      if (!config) throw new Error("Initialize and link the current project before working with its tasks or teams.");
+      const config = loadProjectContext(`adit cloud tasks ${action}`);
+      if (!config) throw new Error("Add this working directory in Settings or provide an explicit project ID.");
       localProjectId = config.projectId;
     }
     let result: unknown;

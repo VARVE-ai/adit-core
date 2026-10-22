@@ -22,7 +22,7 @@
  */
 
 import type Database from "better-sqlite3";
-import { getSyncState, loadConfig } from "@varveai/adit-core";
+import { getSyncState, loadConfig, localLoginStartupEnabled, resolveLocalProject } from "@varveai/adit-core";
 import { loadCloudConfig, DEFAULT_SERVER_URL } from "../config.js";
 import {
   loadCredentials,
@@ -48,7 +48,7 @@ import type { RuntimeReport } from "./runtime-report.js";
  * Event → Session/Diff → Git cycle.
  *
  * Precondition checks (in order):
- * 1. Valid credentials present (client is authenticated)
+ * 1. Explicit login-startup consent and valid credentials present
  * 2. Resolve server URL: env var takes priority, falls back to credentials
  * 3. Auto-sync not explicitly disabled (ADIT_CLOUD_AUTO_SYNC !== "false")
  * 4. Time-based trigger: >syncTimeoutHours since last sync (skips count)
@@ -63,11 +63,18 @@ export async function triggerAutoSync(
   options?: { projectRoot?: string; collectRuntimeReport?: () => Promise<RuntimeReport> },
 ): Promise<void> {
   const cloudConfig = loadCloudConfig();
+  // Registered local workspaces are owned by the daemon's common incremental
+  // executor. Hooks must not upload the legacy database in parallel.
+  try { if (resolveLocalProject({ path: options?.projectRoot }).source === "registry") return; } catch { /* Legacy project validation follows. */ }
+
+  // Automatic uploads require explicit user-login startup consent. A manual
+  // `adit cloud sync` remains independent of this permission.
+  if (!localLoginStartupEnabled()) return;
 
   // 0. Circuit breaker — skip if too many consecutive failures
   if (isSyncDisabled()) return;
 
-  // 1. Check credentials exist — credentials are the implicit opt-in.
+  // 1. Check credentials exist after explicit startup consent.
   //    ADIT_AUTH_TOKEN env var takes priority over stored credentials
   //    (enables CI/CD and headless use without writing credentials first).
   let credentials: CloudCredentials | null = null;
@@ -94,7 +101,7 @@ export async function triggerAutoSync(
     return;
   }
 
-  // 3. Auto-sync is enabled by default when credentials exist.
+  // 3. Explicit environment switches can still pause automatic uploads.
   //    Only skip if explicitly disabled via ADIT_CLOUD_AUTO_SYNC=false
   //    or ADIT_CLOUD_ENABLED=false.
   if (process.env.ADIT_CLOUD_AUTO_SYNC === "false") return;
@@ -164,15 +171,15 @@ export async function triggerAutoSync(
         );
       }
     }
-    clearSyncErrors();
+    clearSyncErrors(undefined, credentials);
   } catch (error) {
     // Track consecutive failures — disable sync after threshold
-    const disabled = incrementSyncErrors();
+    const disabled = incrementSyncErrors(5, undefined, credentials);
     if (error instanceof CloudAuthError) {
       recordAuthFailure({
         stage: "auto-sync",
         message: error.message,
-      });
+      }, undefined, credentials);
     }
 
     // Fail silently — this is fire-and-forget.
