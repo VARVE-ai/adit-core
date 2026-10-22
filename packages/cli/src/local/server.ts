@@ -43,6 +43,7 @@ import { InspectionService } from "./inspection-service.js";
 import { scanHistoryInBackground } from "./collection-scan.js";
 import { PublicationApi } from "./publication-api.js";
 import { LocalCloudSync } from "./cloud-sync.js";
+import { CLI_VERSION } from "../version.js";
 
 async function body(req: IncomingMessage, limit = 65536): Promise<Record<string, unknown>> {
   let data = "";
@@ -139,7 +140,7 @@ export async function startLocalServer(
       const url = new URL(req.url || "/", origin);
       const path = url.pathname;
       if (path === "/health" && req.method === "GET")
-        return json(res, { service: "adit-local", instance, pid: process.pid });
+        return json(res, { service: "adit-local", instance, pid: process.pid, version: CLI_VERSION });
       if (path === "/api/local/session" && req.method === "POST") {
         if (req.headers.origin !== origin)
           throw new LocalStateError("Invalid origin", 403);

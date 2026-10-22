@@ -127,6 +127,18 @@ npm install -g @varveai/adit-cli
 adit --help
 ```
 
+Installation updates the bundled Skills, then starts the local background service
+or restarts an existing instance and verifies its version. It does not open a
+browser or enable login startup. `adit update` follows the same steps and also
+retries incomplete setup when the package is already current. Skill or service
+failures are reported as incomplete setup, not a successful upgrade.
+
+Root installations (including `sudo npm install`) report incomplete setup instead
+of creating Skills or a service under the wrong account. Install from your regular
+account using a writable npm global directory. CI skips user setup; source workspace
+dependency installs only update Skills and do not start a background service.
+If package lifecycle scripts are disabled, run `adit update` to finish setup.
+
 ### Install Script
 
 ```bash
@@ -460,14 +472,15 @@ and report a missing acknowledgement rather than silently lose it.
 
 ## Skills
 
-Three skills are installed automatically by `adit init`, `adit update`, and
+Five skills are installed automatically by `adit init`, `adit update`, and
 published npm installs with lifecycle scripts enabled: `adit-tasks` (the user's
-own tasks), `adit-history` (sessions, commits and read links) and
-`adit-reports` (daily and weekly reports, token usage, team progress). Each is
+own tasks), `adit-history` (sessions, commits and read links),
+`adit-reports` (daily and weekly reports, token usage, team progress),
+`adit-memory` (personal and project memory), and `adit-pr` (PR AI usage disclosures). Each is
 placed in `~/.agents/skills/<name>/SKILL.md` and `~/.claude/skills/<name>/SKILL.md`.
 Already-running AI sessions may need restarting to discover them. Upgrades refresh
 unmodified ADIT-owned copies; custom or unrelated existing skills are not overwritten.
-If lifecycle scripts were disabled, run `adit init` to install the skills.
+If lifecycle scripts were disabled, run `adit update` to install the skills and start the service.
 
 The history and report commands work from any directory; only
 `adit cloud sessions current` reads the local project database, because the

@@ -12,13 +12,19 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { compareVersions, fetchLatestPublishedVersion } from "../update-check.js";
 import { CLI_VERSION } from "../version.js";
-import { installSkillsCommand } from "./skills.js";
 
-export function installUpgradedTaskSkill() {
+export function completeUpgradedInstallation(expectedVersion?: string): boolean {
   try {
-    execFileSync(process.execPath, [resolve(dirname(realpathSync(process.argv[1])), "install-skills.js")], { stdio: "inherit", env: process.env });
-  } catch {
-    console.warn("Task skill installation failed. Run 'adit init' after fixing installation permissions.");
+    const env = { ...process.env };
+    delete env.ADIT_DEFER_INSTALL_SETUP;
+    execFileSync(process.execPath, [resolve(dirname(realpathSync(process.argv[1])), "install-skills.js"),
+      ...(expectedVersion ? ["--expected-version", expectedVersion] : [])], { stdio: "inherit", env });
+    return true;
+  } catch (error) {
+    console.error("ADIT package update finished, but user setup is incomplete. Fix the reported error and run 'adit update' to retry.");
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+    return false;
   }
 }
 
@@ -63,8 +69,8 @@ async function upgradePackageInstall(opts?: { check?: boolean }): Promise<void> 
   const latest = await fetchLatestPublishedVersion();
 
   if (latest && compareVersions(CLI_VERSION, latest) >= 0) {
+    if (!opts?.check && !completeUpgradedInstallation()) return;
     console.log(`Already up to date (v${CLI_VERSION}).`);
-    if (!opts?.check) installSkillsCommand();
     return;
   }
   if (!latest) {
@@ -85,7 +91,7 @@ async function upgradePackageInstall(opts?: { check?: boolean }): Promise<void> 
   console.log(`Running: ${command}`);
   console.log();
   try {
-    execSync(command, { stdio: "inherit", env: process.env });
+    execSync(command, { stdio: "inherit", env: { ...process.env, ADIT_DEFER_INSTALL_SETUP: "1" } });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error();
@@ -97,11 +103,11 @@ async function upgradePackageInstall(opts?: { check?: boolean }): Promise<void> 
     process.exitCode = 1;
     return;
   }
+  if (!completeUpgradedInstallation(latest ?? undefined)) return;
   console.log();
   console.log(
     `Updated successfully: v${CLI_VERSION} -> v${latest ?? "latest"}. Run \`adit --version\` to confirm.`,
   );
-  installUpgradedTaskSkill();
 }
 
 /** Default install location used by install.sh */
@@ -199,8 +205,8 @@ export async function selfUpdateCommand(opts?: {
     // Check version in case local changes were made
     const latestVer = readVersionFromPackageJson(installDir);
     if (latestVer === CLI_VERSION) {
+      if (!opts?.check && !completeUpgradedInstallation()) return;
       console.log(`Already up to date (v${CLI_VERSION}).`);
-      if (!opts?.check) installSkillsCommand();
       return;
     }
   }
@@ -245,14 +251,14 @@ export async function selfUpdateCommand(opts?: {
     console.log("Installing dependencies ...");
     execSync("pnpm install --frozen-lockfile", {
       ...showExecOpts,
-      env: { ...process.env, COREPACK_ENABLE_STRICT: "0" },
+      env: { ...process.env, COREPACK_ENABLE_STRICT: "0", ADIT_DEFER_INSTALL_SETUP: "1" },
     });
   } catch {
     // Retry without frozen lockfile
     try {
       execSync("pnpm install", {
         ...showExecOpts,
-        env: { ...process.env, COREPACK_ENABLE_STRICT: "0" },
+        env: { ...process.env, COREPACK_ENABLE_STRICT: "0", ADIT_DEFER_INSTALL_SETUP: "1" },
       });
     } catch {
       console.error("Failed to install dependencies.");
@@ -272,7 +278,7 @@ export async function selfUpdateCommand(opts?: {
     return;
   }
 
-  installUpgradedTaskSkill();
+  if (!completeUpgradedInstallation()) return;
 
   // Step 4: Report
   const newVer = readVersionFromPackageJson(installDir);
