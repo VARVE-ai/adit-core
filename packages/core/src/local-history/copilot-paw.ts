@@ -5,6 +5,13 @@ import {readSource,readSourceJSON,databaseSnapshot,hasTable} from "./source-io.j
 import {at,array,first,message,session,table,sorted} from "./provider-common.js";
 import {HistoryFormatError,jsonLines,record,string,type HistoryMessage} from "./types.js";
 export const copilotPawProviders=["copilot","qwenpaw"];
+async function copilotTitle(path:string,signal?:AbortSignal):Promise<string>{
+  try {
+    const text=(await readSource(join(dirname(path),"workspace.yaml"),signal)).toString("utf8");
+    // Copilot writes a top-level name scalar for both generated titles and /rename.
+    return /^name: (.*)$/m.exec(text)?.[1].trim() || "";
+  } catch(error){if((error as NodeJS.ErrnoException).code==="ENOENT")return "";throw error;}
+}
 export async function readCopilotPaw(path:string,provider:string,signal?:AbortSignal){
   if(provider === "qwenpaw"){
     const doc=await readSourceJSON(path,signal),entries=at(doc,"agent.memory.content");
@@ -40,5 +47,5 @@ export async function readCopilotPaw(path:string,provider:string,signal?:AbortSi
     trackSource(storePath);
     if((await lstat(storePath)).isFile())storeUsage=databaseSnapshot(storePath,db=>hasTable(db,"assistant_usage_events")?sorted(table(db,"assistant_usage_events",["id","session_id","model","input_tokens","output_tokens","cache_read_tokens","cache_write_tokens","reasoning_tokens","cost","timestamp","created_at","duration_ms","initiator","interaction_id"],["id","session_id"]),"id").filter(row=>row.session_id===id):[]);
   }catch(error){if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;}
-  return [session(provider,id,cwd,messages,{usageEvents:storeUsage.length?storeUsage:usageEvents,transcriptUsageEvents:storeUsage.length?usageEvents:undefined,usageSource:storeUsage.length?"session-store":"transcript"})];
+  return [session(provider,id,cwd,messages,{title:await copilotTitle(path,signal),usageEvents:storeUsage.length?storeUsage:usageEvents,transcriptUsageEvents:storeUsage.length?usageEvents:undefined,usageSource:storeUsage.length?"session-store":"transcript"})];
 }

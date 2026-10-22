@@ -18,6 +18,11 @@ import {
 } from "./types.js";
 import { insideDirectory } from "./sources.js";
 
+function nativeTitle(value: unknown): string {
+  const title = string(value).trim();
+  return /^(New session|Child session) - \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(title) ? "" : title;
+}
+
 function message(
   id: string,
   data: Record<string, unknown>,
@@ -187,6 +192,7 @@ export function readOpenCodeDatabase(
         provider,
         cwd,
         parentId: string(s.parent_id) || undefined,
+        metadata: { title: nativeTitle(s.title) },
         messages: merged,
       });
     }
@@ -267,6 +273,7 @@ export async function readOpenCodeStorage(
       provider,
       cwd,
       parentId: string(data.parentID) || undefined,
+      metadata: { title: nativeTitle(data.title) },
       messages,
     },
   ];

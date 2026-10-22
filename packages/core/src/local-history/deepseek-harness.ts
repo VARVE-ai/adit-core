@@ -113,6 +113,7 @@ export function parseHarness(text: string): HistorySession {
     });
   const messages: { seq: number; message: HistoryMessage }[] = [];
   const responses = new Map<string, Response>();
+  let title = "";
   let model = "",
     turn = 0,
     step = 0,
@@ -155,6 +156,7 @@ export function parseHarness(text: string): HistorySession {
     integer(e.time, "event time");
     const data = record(e.data),
       type = string(e.type);
+    if (type === "session/title" && string(data.title).trim()) title = string(data.title).trim();
     const owned = index >= seed && index > cut;
     const restart = inboxRestart;
     inboxRestart =
@@ -321,6 +323,7 @@ export function parseHarness(text: string): HistorySession {
     id: string(header.id),
     provider: "deepseek-harness",
     cwd: string(header.cwd),
+    metadata: { title },
     parentId: string(header.parentSession) || undefined,
     relationship: header.parentSession
       ? header.origin === "subagent"

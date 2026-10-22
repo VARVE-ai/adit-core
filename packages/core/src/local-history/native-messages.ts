@@ -35,11 +35,19 @@ export async function readNativeMessages(path:string,provider:string,signal?:Abo
   }
   const agent=basename(dirname(dirname(path)));
   if(path.endsWith(".sqlite"))return databaseSnapshot(path,db=>{
+    const columns=(name:string)=>new Set((db.prepare(`PRAGMA table_info(${name})`).all() as {name:string}[]).map(c=>c.name));
+    const windows=columns("session_windows"),nodes=columns("session_nodes");
+    const titles=new Map<unknown,string>();
+    if(windows.has("session_id")&&windows.has("session_key")&&nodes.has("session_key")&&(nodes.has("label")||nodes.has("display_name"))){
+      const names=new Map(table(db,"session_nodes",["session_key","label","display_name"]).map(row=>[row.session_key,string(row.label).trim()||string(row.display_name).trim()]));
+      for(const row of table(db,"session_windows",["session_id","session_key"]))titles.set(row.session_id,names.get(row.session_key)||"");
+    }
     const rows=group(sorted(table(db,"transcript_events",["session_id","seq","event_json","created_at"],["session_id","seq","event_json"]),"session_id","seq"),"session_id");
     return [...rows].map(([id,events])=>{
       signal?.throwIfAborted();
       const result=clawSession(events.map(e=>record(decode(e.event_json))),provider,agent,String(id));
       if(result.metadata?.sessionId!==String(id))throw new HistoryFormatError("OpenClaw database session identity mismatch");
+      result.metadata={...result.metadata,title:titles.get(id)||""};
       return result;
     });
   });

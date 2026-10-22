@@ -53,6 +53,15 @@ const m = (
   timestamp: "2026-10-20T10:00:00Z",
   ...extra,
 });
+it.each(["Native title", "   ", undefined])("uses a native title when present and otherwise the first prompt (%s)", title => {
+  const { w, history, browser } = fixture();
+  history.write({ id: "titled", provider: "claude", cwd: root, metadata: { title }, messages: [m("u", "user", "First question"), m("a", "assistant", "Answer")] });
+  const expected = title?.trim() || "First question";
+  expect(browser.list(w).items[0].title).toBe(expected);
+  expect(browser.detail(w, "claude", "titled").session.title).toBe(expected);
+  expect(browser.list(w, { query: expected }).total).toBe(1);
+  expect(browser.detail(w, "claude", "titled").turns[0].prompt).toBe("First question");
+});
 it("keeps image-only turns visible in both modes without exposing binary data as text",()=>{
  const {w,history,browser}=fixture();
  history.write({id:'images',provider:'codex',cwd:root,messages:[

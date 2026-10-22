@@ -194,7 +194,7 @@ export function readCursorIDE(
         });
       }
       if (messages.length)
-        sessions.push({ id, provider: "cursor-ide", cwd, messages });
+        sessions.push({ id, provider: "cursor-ide", cwd, messages, metadata: { title: string(data.name).trim() } });
       }catch(error){signal?.throwIfAborted();if(!onMemberError)throw error;onMemberError(id,error);}
     }
     return sessions;

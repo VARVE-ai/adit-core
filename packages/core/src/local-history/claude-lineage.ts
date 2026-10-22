@@ -1,6 +1,6 @@
 import {basename,dirname} from "node:path";
 import {readSource,readSourceJSON} from "./source-io.js";
-import {parseClaude} from "./claude.js";
+import {parseClaude,claudeSessionTitle} from "./claude.js";
 import {HistoryFormatError,jsonLines,string,type HistorySession,type HistoryMessage,record} from "./types.js";
 import {message,session,type Row} from "./provider-common.js";
 export const claudeLineageProviders=["claude","qoder","iflow"];
@@ -11,6 +11,7 @@ function subagentParent(path:string):string {
   return "";
 }
 export function claudeBranches(rows:Row[],path:string,provider="claude",metadata:Row={}):HistorySession[]{
+  const title=string(metadata.title).trim() || claudeSessionTitle(rows);
   const cwd=rows.map(r=>string(r.cwd)).find(Boolean) || string(metadata.working_dir);
   const parent=subagentParent(path);
   // Keep parent-scoped child identities stable across flat and nested workflow layouts.
@@ -39,7 +40,7 @@ export function claudeBranches(rows:Row[],path:string,provider="claude",metadata
   const countTurns=(node:Row,seen=new Set<string>()):number=>{const id=string(node.uuid);if(seen.has(id))throw new HistoryFormatError("Claude ancestry cycle");seen.add(id);return (node.type === "user"?1:0)+(children.get(id)||[]).reduce((n,c)=>n+countTurns(c,new Set(seen)),0);};
   const emit=(branch:Row[],id:string,parentId?:string,linear=false)=>{
     const result=parseClaude(branch.map(r=>JSON.stringify({...r,cwd:r.cwd || cwd,sessionId:rootId})).join("\n")+"\n",path,{linear});
-    result.id=id;result.provider=provider;result.metadata={...metadata};
+    result.id=id;result.provider=provider;result.metadata={...metadata,title};
     if(parentId){result.parentId=parentId;result.relationship="fork";}
     else if(parent){result.parentId=parent;result.relationship="subagent";}
     outputs.push(result);

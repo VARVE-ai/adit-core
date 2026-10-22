@@ -10,6 +10,7 @@ export function parseDeepseek(text: string): HistorySession {
     id: string(meta.id),
     cwd: string(meta.workspace),
     provider: "deepseek-tui",
+    metadata: { title: string(meta.title).trim() },
     messages: root.messages.map((value, index) => {
       const m = record(value);
       return {

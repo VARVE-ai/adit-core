@@ -2,7 +2,25 @@ import { basename, dirname } from "node:path";
 import { requireSession } from "./provider-common.js";
 import { HistoryFormatError, jsonLines, record, string, type HistoryMessage, type HistorySession } from "./types.js";
 
-export function parseClaude(text: string, path: string, options: { linear?: boolean } = {}): HistorySession {
+/** Native title events are session metadata, including when the transcript branches. */
+export function claudeSessionTitle(rows: Iterable<Record<string, unknown>>, compatible = false): string {
+  let generated = "", renamed: string | undefined;
+  let custom = "", sessionName = "";
+  for (const row of rows) {
+    if (compatible) sessionName ||= string(row.sessionName).trim();
+    if (row.type === "ai-title" && string(row.aiTitle).trim()) generated = string(row.aiTitle).trim();
+    if (row.type === "custom-title" && string(row.customTitle).trim()) custom = renamed = string(row.customTitle).trim();
+    if (row.type === "system") {
+      const content = string(row.content);
+      const command = /<command-name>\s*\/?rename\s*<\/command-name>/.test(content);
+      if (command) renamed = /<command-args>([\s\S]*?)<\/command-args>/.exec(content)?.[1].trim() || "";
+    }
+  }
+  return compatible ? custom || generated || sessionName || renamed || "" : renamed ?? generated;
+}
+
+export function parseClaude(text: string, path: string, options: { linear?: boolean; compatibleTitles?: boolean } = {}): HistorySession {
+  const rows = jsonLines(text);
   const fileId = basename(path, ".jsonl");
   const isChild =
     fileId.startsWith("agent-") || basename(dirname(path)) === "subagents";
@@ -10,12 +28,13 @@ export function parseClaude(text: string, path: string, options: { linear?: bool
     id: isChild ? fileId : "",
     provider: "claude",
     cwd: "",
+    metadata: { title: claudeSessionTitle(rows, options.compatibleTitles) },
     messages: [],
   };
   const ids = new Map<string, number>();
   const responseGroups = new Map<string, number>();
   const children = new Map<string, Set<string>>();
-  for (const row of jsonLines(text)) {
+  for (const row of rows) {
     session.cwd ||= string(row.cwd);
     if (!session.id) session.id = string(row.sessionId);
     if (isChild && row.sessionId) session.parentId = string(row.sessionId);

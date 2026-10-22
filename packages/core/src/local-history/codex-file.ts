@@ -1,9 +1,10 @@
 import {openSync,readSync,closeSync,fstatSync,lstatSync} from "node:fs";
-import {basename} from "node:path";
+import {basename,dirname,join,resolve} from "node:path";
 import {HistoryFormatError,record,string} from "./types.js";
 import {parseCodexRows,codexContinuationRoot} from "./codex.js";
 import {sourceFiles,insideDirectory} from "./sources.js";
-import {trackSource} from "./source-checkpoints.js";
+import {trackSource,sourceStamp} from "./source-checkpoints.js";
+import {readSource} from "./source-io.js";
 import type Database from "better-sqlite3";
 import {isCompactedReply} from "./message-semantics.js";
 
@@ -78,8 +79,8 @@ export function* codexFileRows(path:string,signal?:AbortSignal):Generator<Record
  }finally{closeSync(fd);}
 }
 export async function readCodexSession(path:string,provider:string,root:string,signal?:AbortSignal){
- let parent="";
- for(const row of codexFileRows(path,signal))if(row.type==="session_meta"){const meta=record(row.payload);parent=string(meta.forked_from_id)||string(record(record(record(meta.source).subagent).thread_spawn).parent_thread_id);break;}
+ let parent="",nativeId="";
+ for(const row of codexFileRows(path,signal))if(row.type==="session_meta"){const meta=record(row.payload);nativeId=string(meta.id);parent=string(meta.forked_from_id)||string(record(record(record(meta.source).subagent).thread_spawn).parent_thread_id);break;}
  let turns:Set<string>|undefined;
  if(parent)for await(const candidate of sourceFiles(provider,root,signal)){
   if(candidate===path||!basename(candidate).includes(parent))continue;
@@ -90,5 +91,34 @@ export async function readCodexSession(path:string,provider:string,root:string,s
   }
   if(match){turns=found;break;}
  }
- const session=parseCodexRows(codexFileRows(path,signal),turns,path);session.provider=provider;return [session];
+ const session=parseCodexRows(codexFileRows(path,signal),turns,path);session.provider=provider;
+ session.metadata={...session.metadata,title:await codexThreadTitle(path,string(session.metadata?.nativeSessionId)||nativeId,signal)};
+ return [session];
+}
+
+const titleIndexes=new Map<string,{stamp:string;titles:Map<string,string>}>();
+/** The native index lives beside sessions/ and archived_sessions/, including custom homes. */
+async function codexThreadTitle(path:string,id:string,signal?:AbortSignal):Promise<string>{
+ for(let dir=dirname(resolve(path));dir!==dirname(dir);dir=dirname(dir)){
+  if(!["sessions","archived_sessions"].includes(basename(dir)))continue;
+  const index=join(dirname(dir),"session_index.jsonl");
+  trackSource(index);signal?.throwIfAborted();
+  const stamp=sourceStamp(index);
+  if(stamp==="missing"){titleIndexes.delete(index);return "";}
+  let cached=titleIndexes.get(index);
+  if(cached?.stamp!==stamp){
+   const text=(await readSource(index,signal)).toString("utf8"),titles=new Map<string,string>();
+   for(const line of text.split("\n")){
+    signal?.throwIfAborted();
+    // A partially written or malformed index entry must not hide other titles.
+    let row:Record<string,unknown>;try{row=record(JSON.parse(line));}catch{continue;}
+    if(string(row.id)&&typeof row.thread_name==="string")titles.set(string(row.id),row.thread_name.trim());
+   }
+   if(sourceStamp(index)!==stamp)throw new HistoryFormatError("Codex title index changed while reading; retry on the next collection");
+   if(titleIndexes.size>=16)titleIndexes.clear();
+   cached={stamp,titles};titleIndexes.set(index,cached);
+  }
+  return cached.titles.get(id)||"";
+ }
+ return "";
 }

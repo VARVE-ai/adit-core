@@ -8,12 +8,23 @@ export function parseProjectJSONL(text: string, provider: string, path: string, 
   const rows = jsonLines(text);
   const session: HistorySession = { id: "", provider, cwd: "", messages: [] };
   const positions = new Map<string, number>();
+  let customTitle = "", generatedTitle = "", sessionName = "";
   let pending: HistoryMessage | undefined;
   const flush = () => {
     if (pending) session.messages.push(pending);
     pending = undefined;
   };
   for (const [line, row] of rows.entries()) {
+    if (provider === "qwen" && row.type === "system" && row.subtype === "custom_title") {
+      const title = record(row.systemPayload);
+      if (title.titleSource === "auto") generatedTitle = string(title.customTitle).trim();
+      else customTitle = string(title.customTitle).trim();
+    }
+    if (provider === "openclaude") {
+      sessionName ||= string(row.sessionName).trim();
+      if (row.type === "custom-title" && string(row.customTitle).trim()) customTitle = string(row.customTitle).trim();
+      if (row.type === "ai-title" && string(row.aiTitle).trim()) generatedTitle = string(row.aiTitle).trim();
+    }
     const id = string(row.sessionId);
     if (id && session.id && id !== session.id)
       throw new HistoryFormatError("Multiple session identities in one project transcript");
@@ -63,6 +74,7 @@ export function parseProjectJSONL(text: string, provider: string, path: string, 
     } else session.messages[prior] = message;
   }
   flush();
+  session.metadata = { title: provider === "commandcode" ? string(metadata.title).trim() : customTitle || generatedTitle || sessionName };
   session.id ||= basename(path, ".jsonl");
   session.cwd ||= provider === "commandcode" ? string(metadata.projectPath) || string(metadata.cwd) : "";
   if (!session.id || !session.cwd) throw new HistoryFormatError("Session identity or workspace evidence is missing");

@@ -70,7 +70,12 @@ export async function readAntigravity(path:string,provider:string,signal?:AbortS
  }
  const cachePath=join(root,"cache","last_conversations.json");
  if(!cwd&&await exists(cachePath)){const cache=await readSourceJSON(cachePath,signal);for(const [workspace,value] of Object.entries(cache))if(value===id||first(record(value),"conversationId","cascadeId")===id){cwd=workspace;break;}}
- const result=session(provider,basename(dirname(path))==="implicit"?`implicit-${id}`:id,cwd,messages,{fidelity,usageEvents});
+ const titlePath=join(root,"conversation_summaries.db");
+ const title=await exists(titlePath)?databaseSnapshot(titlePath,db=>{
+  const row=db.prepare("SELECT title FROM conversation_summaries WHERE conversation_id=?").get(id) as {title:unknown}|undefined;
+  return string(row?.title).trim();
+ }):"";
+ const result=session(provider,basename(dirname(path))==="implicit"?`implicit-${id}`:id,cwd,messages,{title,fidelity,usageEvents});
  if(await exists(sidePath)){const doc=await readSourceJSON(sidePath,signal),parent=first(record(doc.agyReader),"parentCascadeId");if(parent){result.parentId=parent;result.relationship="subagent";}}
  return [result];
 }

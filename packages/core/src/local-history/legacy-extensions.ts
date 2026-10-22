@@ -10,7 +10,7 @@ export async function readLegacyExtension(path:string,provider:string,signal?:Ab
   let dir=dirname(path);while(dir!==parse(dir).root && !basename(dir).startsWith("local_"))dir=dirname(dir);
   const metadata=basename(dir).startsWith("local_")?await optional(`${dir}.json`,signal):{};
   const results=claudeBranches(jsonLines((await readSource(path,signal)).toString("utf8")),path,provider,metadata);
-  for(const result of results)result.metadata={...result.metadata,title:metadata.title};return results;
+  for(const result of results)result.metadata={...result.metadata,title:string(metadata.title).trim() || result.metadata?.title};return results;
  }
  const dir=dirname(path),metadata=await optional(join(dir,provider === "roocode" ? "history_item.json":"task_metadata.json"),signal);
  const text=(await readSource(path,signal)).toString("utf8");let data:unknown;

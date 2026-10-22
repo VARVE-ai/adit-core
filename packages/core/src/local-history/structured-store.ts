@@ -85,7 +85,7 @@ export class StructuredHistory {
       while(prefix>0 && !isPrompt(messages[prefix]))prefix--;
     const prefixTurns=messages.slice(0,prefix).filter(isPrompt).length;
     const times=messages.map(m=>time(m.timestamp)).filter((value):value is number=>value!==null);
-    const title=string(metadata?.title) || null;
+    const title=string(metadata?.title).trim() || null;
     let firstPrompt:string|null=null;
     for(const message of messages)if(isPrompt(message)) {
       firstPrompt=promptSummary(provider,message.content);

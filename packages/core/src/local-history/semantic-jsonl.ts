@@ -81,7 +81,7 @@ export function parseEvener(rows: Row[], path: string, metadata: Row = {},skip=0
     const role = roles[string(row.kind)] || "system";
     messages.push(message(row,messages.length,{key:string(row.stable_turn_id) || String(messages.length),role,content:record(row.message).content ?? row,model:role === "assistant" ? string(row.response_model) || model || undefined : undefined,usage:role === "assistant" && Object.keys(record(row.usage)).length ? record(row.usage) : undefined}));
   }
-  const result = session("evener",header.session_id,header.working_dir,messages,{...metadata,header});
+  const result = session("evener",header.session_id,header.working_dir,messages,{...metadata,title:string(metadata.name).trim(),header});
   const parent = string(metadata.parent_session_id) || string(header.parent_session_id);
   if (parent) {
     result.parentId = parent;

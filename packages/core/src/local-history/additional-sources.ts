@@ -118,7 +118,11 @@ export function additionalSourceFile(provider: string, path: string): boolean {
   if(provider === "qwenpaw")return path.endsWith(".json") && path.split(/[\\/]/).includes("sessions");
   if(["reasonix","workbuddy"].includes(provider))return path.endsWith(".jsonl");
   if(provider === "cortex")return path.endsWith(".json") && !/\.back\./.test(path);
-  if(provider === "codebuddy")return basename(path) === "index.json" && path.split(/[\\/]/).includes("history");
+  if(provider === "codebuddy"){
+    const parts=path.split(/[\\/]/),history=parts.lastIndexOf("history");
+    // history/<workspace>/index.json is the title index, not a transcript manifest.
+    return basename(path)==="index.json" && history>=0 && parts.length-history===4;
+  }
   if(provider === "amp")return /^T-.*\.json$/.test(basename(path));
   if(provider === "gptme")return basename(path) === "conversation.jsonl";
   if(["openclaw","qclaw"].includes(provider))return basename(path) === "openclaw-agent.sqlite" || (basename(dirname(path)) === "sessions" && /\.jsonl(?:\.(?:deleted\..+|reset\..+|full\.bak))?$/.test(path));

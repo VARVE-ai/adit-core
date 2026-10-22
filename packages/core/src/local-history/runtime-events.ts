@@ -1,8 +1,16 @@
 import {basename,dirname,join} from "node:path";
-import {readSource} from "./source-io.js";
+import {readSource,readSourceJSON} from "./source-io.js";
 import {array,decode,first,message,session,type Row} from "./provider-common.js";
 import {jsonLines,record,string,type HistoryMessage} from "./types.js";
 export const runtimeEventProviders=["kimi","kimi-work","muse","poolside"];
+async function kimiTitle(path:string,signal?:AbortSignal):Promise<string>{
+ if(basename(dirname(dirname(path)))==="agents")return "";
+ for(const [file,field] of [["state.json","custom_title"],["metadata.json","title"]]){
+  try {const doc=await readSourceJSON(join(dirname(path),file),signal),title=string(doc[field]).trim();if(title&&title!=="Untitled")return title;}
+  catch(error){if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;}
+ }
+ return "";
+}
 export async function readRuntimeEvents(path:string,provider:string,signal?:AbortSignal){
  let rows=jsonLines((await readSource(path,signal)).toString("utf8"));
  let cwd="",model="",title="";const messages:HistoryMessage[]=[],usageEvents:Row[]=[];
@@ -12,7 +20,7 @@ export async function readRuntimeEvents(path:string,provider:string,signal?:Abor
   for(const row of rows){
    const payload=record(row.payload),facts=record(payload.record),kind=string(row.payload_type),event=record(payload.event);
    cwd ||= string(facts.workspace_root) || string(facts.cwd);model=string(facts.model_id)||model;
-   if(kind === "session.name.changed")title=string(payload.new_name);
+   if(kind === "session.name.changed" && payload.source!=="automatic" && string(payload.new_name).trim())title=string(payload.new_name).trim();
    const timed={...row,timestamp:typeof row.recorded_at === "number"?row.recorded_at/1000:undefined};
    if(kind === "runtime.user_intent.accepted")emit(timed,"user",record(payload.intent).prompt);
    if(kind !== "runtime.session")continue;
@@ -62,5 +70,5 @@ export async function readRuntimeEvents(path:string,provider:string,signal?:Abor
  flush();
  const dir=dirname(path),agentLayout=basename(dirname(dir)) === "agents";
  const id=agentLayout?`${basename(dirname(dirname(dirname(dir))))}:${basename(dir)}:${basename(dirname(dirname(dir)))}`:`${basename(dirname(dir))}:${basename(dir)}`;
- return [session(provider,id,cwd,messages,{usageEvents})];
+ return [session(provider,id,cwd,messages,{title:await kimiTitle(path,signal),usageEvents})];
 }

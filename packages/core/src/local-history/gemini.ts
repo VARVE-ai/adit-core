@@ -11,7 +11,7 @@ export function parseGemini(text: string, cwd: string): HistorySession {
   if (!Array.isArray(root.messages)) {
     const records: Record<string, unknown>[] = [];
     const positions = new Map<string, number>();
-    let sessionId = "";
+    let sessionId = "", summary = "";
     for (const row of jsonLines(text)) {
       if (row.sessionId) {
         if (sessionId && sessionId !== row.sessionId)
@@ -19,7 +19,10 @@ export function parseGemini(text: string, cwd: string): HistorySession {
             "Multiple Gemini session identities in one source",
           );
         sessionId = string(row.sessionId);
+        if (typeof row.summary === "string") summary = row.summary;
       }
+      const update = record(row.$set);
+      if (typeof update.summary === "string") summary = update.summary;
       if (row.type !== "user" && row.type !== "gemini") continue;
       const id = string(row.id),
         existing = id ? positions.get(id) : undefined;
@@ -29,7 +32,7 @@ export function parseGemini(text: string, cwd: string): HistorySession {
         records.push(row);
       }
     }
-    root = { sessionId, messages: records };
+    root = { sessionId, summary, messages: records };
   }
   const messages: HistoryMessage[] = [];
   let previousInput = 0,
@@ -70,6 +73,7 @@ export function parseGemini(text: string, cwd: string): HistorySession {
     id: string(root.sessionId),
     provider: "gemini",
     cwd,
+    metadata: { title: string(root.summary).trim() },
     messages,
   });
 }

@@ -9,7 +9,8 @@ export async function readProjectRecords(path:string,provider:string,signal?:Abo
     const doc=await readSourceJSON(path,signal);
     let history=doc.history;
     if(!Array.isArray(history))history=jsonLines((await readSource(path.replace(/\.json$/,".history.jsonl"),signal)).toString("utf8"));
-    return [session(provider,doc.session_id,doc.working_directory || doc.git_root,array(history).map((row,i)=>message({...row,timestamp:row.user_sent_time},i)),{title:doc.title,gitBranch:doc.git_branch})];
+    const title=string(doc.title).trim();
+    return [session(provider,doc.session_id,doc.working_directory || doc.git_root,array(history).map((row,i)=>message({...row,timestamp:row.user_sent_time},i)),{title:title.startsWith("Chat for session:")?"":title,gitBranch:doc.git_branch})];
   }
   if(provider === "codebuddy"){
     const index=await readSourceJSON(path,signal);
@@ -22,7 +23,9 @@ export async function readProjectRecords(path:string,provider:string,signal?:Abo
       if(row.role === "user")cwd ||= /Workspace Folder:\s*([^<\r\n]+)/.exec(text)?.[1]?.trim() || "";
       messages.push(message({...row,timestamp:row.createdAt},messages.length,{key:string(ref.id),model:first(extra,"modelId","modelName") || undefined,content:inner,raw:{...row,extra}}));
     }
-    return [session(provider,`${basename(dirname(dirname(path)))}:${basename(dirname(path))}`,cwd,messages)];
+    const workspaceIndex=await optional(join(dirname(dirname(path)),"index.json"),signal);
+    const title=string(array(workspaceIndex.conversations).find(row=>row.id===basename(dirname(path)))?.name).trim();
+    return [session(provider,`${basename(dirname(dirname(path)))}:${basename(dirname(path))}`,cwd,messages,{title})];
   }
   const rows=jsonLines((await readSource(path,signal)).toString("utf8"));
   if(provider === "reasonix"){

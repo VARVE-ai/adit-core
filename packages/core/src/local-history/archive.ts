@@ -27,9 +27,9 @@ import {discoverHistory} from "./discovery.js";
 import {ScanProgressTracker, type SourceProgressListener, type SourceScanProgress} from "./scan-progress.js";
 export type {SourceScanProgress,SourceProgressListener} from "./scan-progress.js";
 
-const PARSER_VERSION = 5;
-// Parser fixes invalidate only the affected provider's file and session checkpoints.
-const parserVersion = (provider: string) => ["codex", "traex", "augure-code"].includes(provider) ? 7 : provider === "cursor" ? 6 : PARSER_VERSION;
+const PARSER_VERSION = 6;
+// Recollect existing archives once for native titles and blank-title normalization.
+const parserVersion = (provider: string) => ["codex", "traex", "augure-code"].includes(provider) ? 8 : PARSER_VERSION;
 export interface ScanSource {
   id: string;
   paths: string[];
@@ -317,7 +317,7 @@ export class LocalHistory {
                     session = parseClaude(text, path);
                     break;
                   case "icodemate":
-                    session = parseClaude(text, path);
+                    session = parseClaude(text, path, {compatibleTitles:true});
                     session.provider = source.id;
                     break;
                   case "zencoder":
@@ -441,8 +441,14 @@ export class LocalHistory {
       const current = other
         ? this.session(session.provider, session.id)
         : undefined;
-      // Copies of the same source may coexist; never let an older copy erase a newer transcript.
-      if (current && !isDeepStrictEqual(JSON.parse(JSON.stringify(current)),JSON.parse(JSON.stringify(applyTranscriptEdits(this.db,session)))))
+      // Titles may change independently of identical transcript copies. All other
+      // evidence must still agree, so an older copy cannot erase a newer transcript.
+      const comparable=(value:HistorySession)=>{
+        const copy=JSON.parse(JSON.stringify(value)) as HistorySession;
+        if(copy.metadata){delete copy.metadata.title;if(!Object.keys(copy.metadata).length)delete copy.metadata;}
+        return copy;
+      };
+      if (current && !isDeepStrictEqual(comparable(current),comparable(applyTranscriptEdits(this.db,session))))
         throw new Error(
           "Conflicting copies of the same session; existing archive retained",
         );

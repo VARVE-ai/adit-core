@@ -186,7 +186,7 @@ describe("independent provider readers", () => {
     const session = f.archive.session("cursor", "s")!;
     new StructuredHistory(f.db).write({ ...session, messages: session.messages.map(m => ({ ...m, timestamp: undefined })) });
     f.db.prepare("UPDATE adit_history_sessions SET first_prompt=? WHERE provider='cursor'").run(content);
-    f.db.exec("UPDATE adit_history_sources SET parser_version=5; UPDATE adit_history_file_checkpoints SET parser_version=5;");
+    f.db.exec("UPDATE adit_history_sources SET parser_version=5 WHERE provider='cursor'; UPDATE adit_history_file_checkpoints SET parser_version=5 WHERE provider='cursor';");
     const refreshed = await new LocalHistory(f.db).scan(f.workspace, sources);
     expect(refreshed.errors).toEqual([]);
     expect(refreshed.updated).toBe(1);

@@ -22,7 +22,7 @@ export async function readReviewEvents(path:string,provider:string,signal?:Abort
   const indexed=new Map<string,number>(),inactive=new Set<string>();
   for(const row of rows){
    const kind=string(row.kind),event=record(at(row,"event.agentEvent"));
-   if(kind === "SessionTitleSetEvent")title=string(row.title);
+   if(kind === "SessionTitleSetEvent")title=string(row.name ?? row.title);
    if(["UserMessagesDroppedFromHistory","UserMessagesFailedInHistory"].includes(kind)&&Array.isArray(row.userMessageIds))for(const value of row.userMessageIds)inactive.add(String(value));
    if(kind === "UserMessagesCommittedToHistory"&&Array.isArray(row.userMessageIds))for(const value of row.userMessageIds)inactive.delete(String(value));
    let role="",content:unknown,key="";

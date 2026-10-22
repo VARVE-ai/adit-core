@@ -80,6 +80,7 @@ export async function readPi(
     }
   }
   let model = "";
+  let title = "";
   const ancestors = new Map<string, string>();
   const positions = new Map<string, number>();
   for (const row of records) {
@@ -87,6 +88,7 @@ export async function readPi(
     const id = string(row.id),
       parent = ancestors.get(string(row.parentId));
     if (row.type === "model_change") model = string(row.modelId) || model;
+    if (row.type === "session_info" && typeof row.name === "string") title = row.name.trim();
     if (row.type === "child_usage_attributed" && provider === "prime-agent") {
       const target = positions.get(string(row.targetId));
       if (target !== undefined)
@@ -128,5 +130,8 @@ export async function readPi(
       if (id) ancestors.set(id, id);
     } else if (id) ancestors.set(id, parent || "");
   }
+  // OhMyPi rewrites its leading title slot; it outranks append-only renames.
+  const slot = records[0]?.type === "title" ? string(records[0].title).trim() : "";
+  session.metadata = { title: slot || title || string(header.title).trim() };
   return [session];
 }

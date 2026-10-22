@@ -43,7 +43,7 @@ export function readDatabaseProvider(path: string, provider: string, signal?: Ab
     }
     const hermes = ["hermes", "augure-desktop"].includes(provider);
     const goose = provider === "goose";
-    const fields = ["id", "name", "title", "working_dir", "parent_session_id", "model", "model_config_json", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "accumulated_input_tokens", "accumulated_output_tokens", "accumulated_cache_read_tokens", "accumulated_cache_write_tokens", "prompt_tokens", "completion_tokens"];
+    const fields = ["id", "name", "title", ...(goose ? ["description"] : []), "working_dir", "parent_session_id", "model", "model_config_json", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "accumulated_input_tokens", "accumulated_output_tokens", "accumulated_cache_read_tokens", "accumulated_cache_write_tokens", "prompt_tokens", "completion_tokens"];
     const messageFields = hermes
       ? ["id", "session_id", "role", "content", "tool_calls", "tool_call_id", "timestamp", "reasoning", "reasoning_content", "reasoning_details", "finish_reason", "codex_reasoning_items", "codex_message_items"]
       : goose ? ["id", "message_id", "session_id", "role", "content_json", "metadata_json", "timestamp", "created_timestamp"]
@@ -60,7 +60,7 @@ export function readDatabaseProvider(path: string, provider: string, signal?: Ab
         content: goose ? decode(m.content_json, []) : hermes ? { content: m.content, tool_calls: decode(m.tool_calls, []), tool_call_id: m.tool_call_id, reasoning: m.reasoning, reasoning_content: m.reasoning_content, reasoning_details: m.reasoning_details, codex_reasoning_items: decode(m.codex_reasoning_items, []), codex_message_items: decode(m.codex_message_items, []) } : decode(m.parts, []),
         model: string(m.model) || string(row.model) || first(decode(row.model_config_json), "model_name", "model") || undefined,
         timestamp: timestamp(provider === "crush" && typeof m.created_at === "number" ? m.created_at * 1000 : m.timestamp ?? m.created_timestamp ?? m.created_at),
-      })), { title: row.title ?? row.name, usage: Object.fromEntries(Object.entries(row).filter(([k]) => /tokens$/.test(k))) });
+      })), { title: goose ? string(row.name).trim() || string(row.description).trim() : row.title ?? row.name, usage: Object.fromEntries(Object.entries(row).filter(([k]) => /tokens$/.test(k))) });
       if (hermes && string(row.parent_session_id)) result.metadata!.continuationOf = row.parent_session_id;
       if (goose && string(row.parent_session_id)) { result.parentId = string(row.parent_session_id); result.relationship = "subagent"; }
       if (provider === "crush" && string(row.parent_session_id)) { result.parentId = string(row.parent_session_id); result.relationship = "subagent"; }
