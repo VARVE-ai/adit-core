@@ -282,7 +282,7 @@ const respond = (path: string, input?: any): unknown => {
   throw new Error(`Unexpected test request: ${path}`);
 };
 
-async function openHeaderStatus(title: "本机同步" | "云端存储") {
+async function openHeaderStatus(title: "本地采集" | "云端存储") {
   const trigger = renderer!.root.findAllByType("button").find(b =>
     b.props.className === "icon header-status-trigger" && b.props["aria-label"].startsWith(i18n.t(title) + " · "))!;
   await act(async () => { trigger.props.onClick(); });
@@ -553,14 +553,14 @@ describe("language switching across the local workbench", () => {
     const right = root.findByProps({ className: "top-right" });
     const controls = right.findAllByType("button");
     expect(controls.map(b => b.props["aria-label"] || b.props.title)).toEqual([
-      expect.stringContaining("Local sync ·"), expect.stringContaining("Cloud storage ·"),
+      expect.stringContaining("Local collection ·"), expect.stringContaining("Cloud storage ·"),
       "Dark theme", "Switch to Chinese", "Current workspace",
     ]);
     expect(right.findAllByProps({ role: "region" })).toHaveLength(0);
     expect(root.findAllByProps({ className: "overview-cloud-quick" })).toHaveLength(0);
     const writes = () => vi.mocked(fetch).mock.calls.filter(([, options]) => (options as RequestInit)?.method === "POST").length;
     const before = writes();
-    await openHeaderStatus("本机同步");
+    await openHeaderStatus("本地采集");
     await openHeaderStatus("云端存储");
     expect(writes()).toBe(before);
     const tools = root.findByProps({ className: "overview-tools" });
@@ -608,31 +608,31 @@ describe("language switching across the local workbench", () => {
     await act(async()=>{button("Sign in to Cloud").props.onClick();});
     expect(location.pathname).toBe("/settings/account");
   });
-  it("keeps the shared header and local sync action across overview and commits", async () => {
+  it("keeps the shared header and local collection action across overview and commits", async () => {
     const root = await render("/overview/ws");
     const header = root.findByType("header");
-    await openHeaderStatus("本机同步");
+    await openHeaderStatus("本地采集");
     const initial = text(header);
     const refreshButton = () => header.findByProps({
-      "aria-label": i18n.t("刷新当前工作目录的本地记录"),
+      "aria-label": i18n.t("重新采集当前工作目录的本地记录"),
     });
     await act(async () => { button("Commits").props.onClick(); });
     expect(root.findByType("header")).toBe(header);
     expect(header.props.className).toBe("top");
     expect(text(header)).toBe(initial);
     await act(async () => { refreshButton().props.onClick(); });
-    expect(text(header)).toContain(i18n.t("本地整理中"));
+    expect(text(header)).toContain(i18n.t("本地采集中"));
     expect(refreshButton().props.disabled).toBe(true);
     await act(async () => { button("Overview").props.onClick(); });
     expect(root.findByType("header")).toBe(header);
-    expect(text(header)).toContain(i18n.t("本地整理中"));
+    expect(text(header)).toContain(i18n.t("本地采集中"));
     expect(refreshButton().props.disabled).toBe(true);
     jobs = [{ ...jobs[0], status: "done" }];
     await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
-    expect(text(header)).toContain(i18n.t("本地已同步"));
+    expect(text(header)).toContain(i18n.t("本地采集完成"));
     expect(refreshButton().props.disabled).toBe(false);
     await toggle();
-    expect(text(header)).toContain("本地已同步");
+    expect(text(header)).toContain("本地采集完成");
   });
   it("requires login startup for automatic sync and pauses the saved directory when unchecked", async () => {
     const root = await render("/settings/workspaces/ws");

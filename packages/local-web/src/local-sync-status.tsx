@@ -38,26 +38,26 @@ export function LocalSyncStatus({
     : "—";
 
   const summary = active
-    ? t("本地整理中")
-    : latest?.status === "done" ? t("本地已同步")
-    : latest?.status === "failed" ? t("同步失败")
-    : latest ? t("本地记录部分更新") : t("尚无本地同步记录");
+    ? t("本地采集中")
+    : latest?.status === "done" ? t("本地采集完成")
+    : latest?.status === "failed" ? t("采集失败")
+    : latest ? t("本地采集部分完成") : t("尚无本地采集记录");
   return (
-    <HeaderStatusPopover title={t("本机同步")} workspaceName={workspaceName}
-      label={`${t("本机同步")} · ${summary}`} icon={<Monitor size={16} />}
+    <HeaderStatusPopover title={t("本地采集")} workspaceName={workspaceName}
+      label={`${t("本地采集")} · ${summary}`} icon={<Monitor size={16} />}
       status={active ? "working" : latest?.status === "done" ? "done" : latest ? "warning" : undefined}>
       <p role="status" className="header-status-summary">{summary}</p>
-      <p className="muted">{t("上次同步")} {finishedAt}</p>
+      <p className="muted">{t("上次采集")} {finishedAt}</p>
       {latest?.error && <p className="error">{systemMessage(latest.error)}</p>}
       <p className="muted">{t("仅更新本机的会话与提交记录，不会上传到云端。")}</p>
       <div className="header-status-actions">
         <button
           disabled={pending || active}
           onClick={onRefresh}
-          title={t("重新读取当前工作目录的会话与提交记录")}
-          aria-label={t("刷新当前工作目录的本地记录")}
+          title={t("重新采集当前工作目录的会话与提交记录")}
+          aria-label={t("重新采集当前工作目录的本地记录")}
         >
-          <RefreshCw size={14} className={active || pending ? "spin" : ""} />{t("重新读取")}
+          <RefreshCw size={14} className={active || pending ? "spin" : ""} />{t("重新采集")}
         </button>
       </div>
     </HeaderStatusPopover>

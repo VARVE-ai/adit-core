@@ -19,9 +19,9 @@ function render() {
   const action = vi.fn();
   act(() => {
     renderer = create(React.createElement(HeaderStatusPopover, {
-      title: "Local sync", label: "Local sync · Updated", workspaceName: "Adit",
+      title: "Local collection", label: "Local collection · Updated", workspaceName: "Adit",
       icon: React.createElement("span"), status: "done",
-      children: React.createElement("button", { onClick: action }, "Read again"),
+      children: React.createElement("button", { onClick: action }, "Collect again"),
     }), { createNodeMock: element => ({
       getBoundingClientRect: () => ({ left: 300 }),
       contains: () => false,

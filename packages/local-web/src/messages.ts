@@ -1,8 +1,8 @@
 // Chinese keys preserve the prototype copy. Only interface text belongs here;
 // native session titles, commit subjects, paths and account names are never keys.
 export const messages = {
-  "本机同步": "Local sync",
-  "重新读取": "Read again",
+  "本地采集": "Local collection",
+  "重新采集": "Collect again",
   "仅更新本机的会话与提交记录，不会上传到云端。": "Updates sessions and commits on this computer only, without uploading to the cloud.",
   "正在整理": "Organizing",
   "已完成": "Completed",
@@ -352,14 +352,15 @@ export const messages = {
     "This feature is not available yet; this is a prototype entry point",
   "其他 {0} 个模型": "{0} other models",
   "{0} 月 {1} 日": "{0}/{1}",
-  本地整理中: "Organizing locally",
-  本地已同步: "Synced locally",
-  本地记录部分更新: "Local records partially updated",
-  尚无本地同步记录: "No local sync yet",
+  本地采集中: "Collecting locally",
+  本地采集完成: "Local collection complete",
+  本地采集部分完成: "Local collection partially complete",
+  尚无本地采集记录: "No local collection yet",
   上次同步: "Last sync",
-  重新读取当前工作目录的会话与提交记录:
-    "Read this workspace's session and commit records again",
-  刷新当前工作目录的本地记录: "Refresh local records for this workspace",
+  采集失败: "Collection failed",
+  重新采集当前工作目录的会话与提交记录:
+    "Collect this workspace's session and commit records again",
+  重新采集当前工作目录的本地记录: "Collect local records for this workspace again",
   刷新: "Refresh",
   "正在更新…": "Updating…",
   重试: "Retry",
