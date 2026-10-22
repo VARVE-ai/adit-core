@@ -263,6 +263,48 @@ describe("Core-owned local history", () => {
       parseClaude(text, join(f.source, "subagents", "agent-one.jsonl")),
     ).toMatchObject({ id: "agent-one", parentId: "parent" });
   });
+  it("collects nested Claude subagents and interrupted message chains without conflicts or inflated counts", async () => {
+    const f = fixture(), source = join(f.root, "claude");
+    const nested = join(source, "parent", "subagents", "workflows", "wf-one");
+    mkdirSync(nested, { recursive: true });
+    const user = (uuid: string, parentUuid?: string) => ({
+      type: "user", uuid, parentUuid, sessionId: "parent", cwd: f.workspace,
+      message: { content: uuid },
+    });
+    const assistant = (uuid: string, parentUuid: string) => ({
+      type: "assistant", uuid, parentUuid, sessionId: "parent", cwd: f.workspace,
+      message: { content: uuid, usage: { output_tokens: 3 } },
+    });
+    writeFileSync(join(source, "parent.jsonl"), lines(
+      user("u"), assistant("a", "u"),
+      { type: "system", uuid: "system", parentUuid: "a" },
+      user("next", "system"), assistant("reply", "next"),
+    ));
+    writeFileSync(join(nested, "agent-one.jsonl"), lines(
+      user("u"), { type: "attachment", uuid: "attachment", parentUuid: "u" },
+      assistant("a", "attachment"),
+    ));
+    writeFileSync(join(source, "parent", "subagents", "agent-two.jsonl"), lines(
+      user("u"), assistant("a", "u"),
+    ));
+    const sources = [{ id: "claude", paths: [source] }];
+    const collected = await f.archive.scan(f.workspace, sources, { sourceProgress: () => {} });
+    expect(collected.errors).toEqual([]);
+    expect(collected.counts).toEqual({ claude: 1 });
+    expect(collected.sourceProgress?.[f.workspace].claude).toEqual({ completed: 1, total: 1, status: "done" });
+    expect(f.archive.session("claude", "parent")?.messages.map(m => m.key)).toEqual(["u", "a", "next", "reply"]);
+    for (const name of ["agent-one", "agent-two"]) {
+      const child = f.archive.session("claude", `parent:${name}`);
+      expect(child).toMatchObject({ parentId: "parent", relationship: "subagent" });
+      expect(child?.messages.map(m => m.key)).toEqual(["u", "a"]);
+      expect(child?.messages[1].usage).toEqual({ output_tokens: 3 });
+    }
+    expect(f.store.db.prepare("SELECT count(*) n FROM adit_history_sessions WHERE provider='claude'").get()).toEqual({ n: 3 });
+    const repeated = await new LocalHistory(f.store.db).scan(f.workspace, sources);
+    expect(repeated.errors).toEqual([]);
+    expect(repeated.updated).toBe(0);
+    expect(repeated.counts).toEqual({ claude: 1 });
+  });
   it("reads DeepSeek TUI and Gemini without inventing missing usage", () => {
     const f = fixture();
     expect(

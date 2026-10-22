@@ -19,6 +19,8 @@
     "@types/react": "^18.3.28",
     "@types/react-dom": "^18.3.0",
     "@types/react-test-renderer": "18.3.1",
+    "@varveai/adit-cli": "workspace:*",
+    "@varveai/adit-core": "workspace:*",
     "react-test-renderer": "18.3.1",
     "typescript": "^5.7.2",
     "vite": "^6.4.0"

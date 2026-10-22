@@ -4,9 +4,17 @@ import {parseClaude} from "./parsers.js";
 import {HistoryFormatError,jsonLines,string,type HistorySession,type HistoryMessage,record} from "./types.js";
 import {message,session,type Row} from "./provider-common.js";
 export const claudeLineageProviders=["claude","qoder","iflow"];
+function subagentParent(path:string):string {
+  for(let directory=dirname(path);directory!==dirname(directory);directory=dirname(directory)){
+    if(basename(directory)==="subagents")return basename(dirname(directory));
+  }
+  return "";
+}
 export function claudeBranches(rows:Row[],path:string,provider="claude",metadata:Row={}):HistorySession[]{
   const cwd=rows.map(r=>string(r.cwd)).find(Boolean) || string(metadata.working_dir);
-  const rootId=rows.map(r=>string(r.sessionId)).find(Boolean) || basename(path,".jsonl");
+  const parent=subagentParent(path);
+  // Keep parent-scoped child identities stable across flat and nested workflow layouts.
+  const rootId=parent ? `${parent}:${basename(path,".jsonl")}` : rows.map(r=>string(r.sessionId)).find(Boolean) || basename(path,".jsonl");
   const nodes:Row[]=[],aliases=new Map<string,string>(),responses=new Map<string,string>();
   for(const row of rows){
     if(!["user","assistant"].includes(string(row.type)))continue;
@@ -29,6 +37,13 @@ export function claudeBranches(rows:Row[],path:string,provider="claude",metadata
   if(nodes.length && !roots.length)throw new HistoryFormatError("Claude ancestry cycle");
   const outputs:HistorySession[]=[],globalVisited=new Set<string>();
   const countTurns=(node:Row,seen=new Set<string>()):number=>{const id=string(node.uuid);if(seen.has(id))throw new HistoryFormatError("Claude ancestry cycle");seen.add(id);return (node.type === "user"?1:0)+(children.get(id)||[]).reduce((n,c)=>n+countTurns(c,new Set(seen)),0);};
+  const emit=(branch:Row[],id:string,parentId?:string,linear=false)=>{
+    const result=parseClaude(branch.map(r=>JSON.stringify({...r,cwd:r.cwd || cwd,sessionId:rootId})).join("\n")+"\n",path,{linear});
+    result.id=id;result.provider=provider;result.metadata={...metadata};
+    if(parentId){result.parentId=parentId;result.relationship="fork";}
+    else if(parent){result.parentId=parent;result.relationship="subagent";}
+    outputs.push(result);
+  };
   const walk=(start:Row,id:string,parentId?:string)=>{
     const branch:Row[]=[],visited=new Set<string>();let node:Row|undefined=start;
     while(node){const key=string(node.uuid);if(visited.has(key))throw new HistoryFormatError("Claude ancestry cycle");visited.add(key);globalVisited.add(key);branch.push(node);
@@ -36,14 +51,13 @@ export function claudeBranches(rows:Row[],path:string,provider="claude",metadata
       if(kids.length>1 && countTurns(kids[0])>3){for(const child of kids.slice(1))walk(child,`${rootId}-${child.uuid}`,id);node=kids[0];}
       else node=kids.at(-1);
     }
-    const result=parseClaude(branch.map(r=>JSON.stringify({...r,cwd:r.cwd || cwd,sessionId:rootId})).join("\n")+"\n",path);
-    result.id=id;result.provider=provider;result.metadata={...metadata};
-    if(parentId){result.parentId=parentId;result.relationship="fork";}
-    else if(basename(dirname(path)) === "subagents"){result.id=`${basename(dirname(dirname(path)))}:${basename(path,".jsonl")}`;result.parentId=basename(dirname(dirname(path)));result.relationship="subagent";}
-    outputs.push(result);
+    emit(branch,id,parentId);
   };
   for(const node of nodes)countTurns(node);
-  for(let i=0;i<roots.length;i++)walk(roots[i],i===0?rootId:`${rootId}-${roots[i].uuid}`,i===0?undefined:rootId);
+  // System/attachment records can bridge messages but are absent from this graph.
+  // An incomplete chain is not evidence of a fork: retain all messages in file order.
+  if(nodes.length && (roots.length!==1 || nodes.some(n=>string(n.parentUuid) && !byId.has(string(n.parentUuid)))))emit(nodes,rootId,undefined,true);
+  else if(roots.length)walk(roots[0],rootId);
   return outputs;
 }
 export async function readClaudeLineage(path:string,provider:string,signal?:AbortSignal){

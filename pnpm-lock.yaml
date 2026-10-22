@@ -170,6 +170,12 @@ importers:
       '@types/react-test-renderer':
         specifier: 18.3.1
         version: 18.3.1
+      '@varveai/adit-cli':
+        specifier: workspace:*
+        version: link:../cli
+      '@varveai/adit-core':
+        specifier: workspace:*
+        version: link:../core
       react-test-renderer:
         specifier: 18.3.1
         version: 18.3.1(react@18.3.1)

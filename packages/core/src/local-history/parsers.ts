@@ -169,7 +169,7 @@ export function parseCodexRows(rows:Iterable<Record<string,unknown>>, parentTurn
   return requireSession(session);
 }
 
-export function parseClaude(text: string, path: string): HistorySession {
+export function parseClaude(text: string, path: string, options: { linear?: boolean } = {}): HistorySession {
   const fileId = basename(path, ".jsonl");
   const isChild =
     fileId.startsWith("agent-") || basename(dirname(path)) === "subagents";
@@ -190,7 +190,8 @@ export function parseClaude(text: string, path: string): HistorySession {
     const payload = record(row.message);
     const key = string(row.uuid) || `line:${session.messages.length}`;
     const parentKey = string(row.parentUuid);
-    if (parentKey) {
+    // The lineage reader may explicitly retain an incomplete graph in file order.
+    if (parentKey && !options.linear) {
       const branches = children.get(parentKey) ?? new Set<string>();
       branches.add(key);
       children.set(parentKey, branches);
