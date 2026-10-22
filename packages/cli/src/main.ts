@@ -11,6 +11,7 @@ import { Command, Option } from "commander";
 import { localLoginStartupEnabled } from "@varveai/adit-core";
 import { serveCommand, startDaemon, stopDaemon, daemonStatus } from "./local/daemon.js";
 import { registerPrCommand } from "./commands/pr.js";
+import { registerHistoryCommands } from "./commands/history.js";
 import { initCommand } from "./commands/init.js";
 import { listCommand } from "./commands/list.js";
 import { showCommand } from "./commands/show.js";
@@ -81,6 +82,7 @@ export function createProgram(): Command {
   program.configureOutput({ outputError: (text, write) => write(formatParseError(text)) });
   configureTopLevelHelp(program);
   registerPrCommand(program);
+  registerHistoryCommands(program);
 
   program.command("server").alias("serve").description("Open the local web UI, starting the background service if needed")
     .option("--port <port>", "Local port for a new daemon")
@@ -539,6 +541,7 @@ Commands:
   timeline|list [options]    Show local timeline entries
   show <id>                  Show full event details
   search [options] <query>   Search timeline events
+  history                    Search collected local sessions and commits across Agents
 
   snapshot                   Show event diffs and environment snapshots
   cloud                      Sync and connect with adit-cloud
