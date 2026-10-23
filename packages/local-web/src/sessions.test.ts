@@ -117,6 +117,8 @@ it("normal keeps every reply in order and groups only consecutive tools, with ea
         group.findAllByProps({ className: "session-operation" }).length,
     ),
   ).toEqual([1, 1, 2]);
+  expect(groups.every(group => group.type === "details" && !group.props.open)).toBe(true);
+  expect(renderer.root.findAllByProps({ className: "session-tool-node" })).toHaveLength(3);
   expect(
     renderer.root
       .findAllByProps({ className: "session-operation" })
@@ -128,6 +130,8 @@ it("normal keeps every reply in order and groups only consecutive tools, with ea
   expect(
     renderer.root.findAllByProps({ className: "session-commit" }),
   ).toHaveLength(1);
+  act(() => groups[2].props.onToggle({ currentTarget: { open: true } }));
+  expect(groups[2].props.open).toBe(true);
   await act(async () =>
     renderer.root
       .findByProps({ "data-event-id": "tool3" })
@@ -141,6 +145,8 @@ it("normal keeps every reply in order and groups only consecutive tools, with ea
     ...middle.map((e) => e.id),
     "final",
   ]);
+  act(() => groups[2].props.onToggle({ currentTarget: { open: false } }));
+  expect(groups[2].props.open).toBe(false);
 });
 
 it("pages normal activity in its original order without injecting replies from other pages", async () => {
@@ -202,6 +208,24 @@ it("keeps intermediate reply search hits visible and expands only the matched to
   expect(
     renderer.root.findByProps({ "data-event-id": "tool3" }).props.open,
   ).toBe(false);
+  expect(renderer.root.findAllByProps({ className: "session-operations" }).map(group => group.props.open)).toEqual([false, false, true]);
+});
+
+it("shows each associated commit as its own timeline node and retains the detail action", () => {
+  const commits = [turn().commits[0], { ...turn().commits[0], sha: "123456789", subject: "Second change" }];
+  const onCommit = vi.fn();
+  act(() => {
+    renderer = create(React.createElement(SessionTurnView, {
+      turn: turn({ commits }), mode: "normal", request, onCommit,
+    }));
+  });
+  const entries = renderer.root.findAllByProps({ className: "session-commit" });
+  expect(entries).toHaveLength(2);
+  expect(entries.every(entry => entry.type === "details" && !entry.props.open)).toBe(true);
+  expect(entries.map(entry => entry.findByProps({ className: "session-commit-node" }).type)).toEqual(["span", "span"]);
+  expect(entries.map(entry => entry.findByType("summary").findByType("code").children.join(""))).toEqual(["abcdef1", "1234567"]);
+  act(() => entries[1].findByType("button").props.onClick());
+  expect(onCommit).toHaveBeenCalledWith(commits[1]);
 });
 
 it("keeps focused mode to the final reply and commits, and never invents a final reply for an unfinished turn", () => {
@@ -247,4 +271,38 @@ it("keeps normal replies before trailing cleanup tools and renders consecutive t
   expect(
     renderer.root.findAllByProps({ className: "session-commit" }),
   ).toHaveLength(1);
+});
+
+it("does not label a reply on the next page as unfinished", () => {
+  render(turn({ events: [], hasMoreEvents: true }), "focused");
+  expect(JSON.stringify(renderer.toJSON())).not.toContain("No final reply for this prompt yet");
+});
+
+it("collapses prompts and replies independently and preserves Markdown when expanded", () => {
+  const markdown = "**Summary**\n\n| Name | Value |\n| --- | --- |\n| Item | 1 |\n\n```js\nconst value = 1;\n```";
+  render(turn({ prompt: markdown, events: [{ ...final, text: markdown }] }));
+  const messages = () => renderer.root.findAllByProps({ className: "session-message" });
+  expect(messages()).toHaveLength(2);
+  expect(messages().every(m => !m.props.open)).toBe(true);
+  expect(renderer.root.findAllByType("table")).toHaveLength(0);
+  expect(renderer.root.findAllByProps({ className: "session-reply-node" })).toHaveLength(1);
+  for (const index of [0, 1]) {
+    act(() => messages()[index].props.onToggle({ currentTarget: { open: true } }));
+    expect(messages()[index].findAllByType("table")).toHaveLength(1);
+    expect(messages()[index].findAllByType("pre")).toHaveLength(1);
+    expect(messages()[index].findAllByType("strong")).toHaveLength(1);
+    expect(messages()[1 - index].props.open).toBe(false);
+    act(() => messages()[index].props.onToggle({ currentTarget: { open: false } }));
+    expect(messages()[index].findAllByType("table")).toHaveLength(0);
+  }
+});
+
+it("loads truncated reply content only when expanded and retains Markdown rendering", async () => {
+  const api = vi.fn(async () => ({ text: "**Full response**", nextOffset: null }));
+  render(turn({ events: [{ ...final, truncated: true }] }), "normal", api);
+  expect(api).not.toHaveBeenCalled();
+  const reply = renderer.root.findByProps({ "data-event-id": "final" });
+  await act(async () => reply.findByType("details").props.onToggle({ currentTarget: { open: true } }));
+  expect(api).toHaveBeenCalledWith("content", { eventId: "final", kind: "reply", offset: "0" });
+  expect(reply.findByType("strong").children).toEqual(["Full response"]);
 });

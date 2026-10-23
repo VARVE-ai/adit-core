@@ -1,5 +1,5 @@
 import { AgentLabel } from "./agent-label";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -7,7 +7,6 @@ import {
   ArrowDownToLine,
   ArrowUpFromLine,
   CalendarDays,
-  ChevronDown,
   ChevronRight,
   Archive,
   FilePlus,
@@ -17,6 +16,7 @@ import {
   GitCommitHorizontal,
   Globe,
   MessageSquare,
+  Sparkles,
   Pencil,
   Search,
   Share2,
@@ -46,7 +46,7 @@ type Api = <T = any>(
   body?: unknown,
   signal?: AbortSignal,
 ) => Promise<T>;
-type Selection = { provider: string; id: string };
+type Selection = { provider: string; id: string; day?: string | null };
 const n = (value: number) => value.toLocaleString(locale());
 const date = (at: number | null, time = false) =>
   at === null
@@ -66,12 +66,13 @@ const date = (at: number | null, time = false) =>
         .replace(/(\d)([年月日])/g, "$1 $2 ")
         .replace(/ {2,}/g, " ")
         .trim();
-const clock = (at: number | null) =>
+const clock = (at: number | null, compact = false) =>
   at === null
     ? "—"
     : new Date(at).toLocaleTimeString(locale(), {
         hour: "2-digit",
         minute: "2-digit",
+        ...(compact ? { hourCycle: "h23" as const } : {}),
       });
 const money = (amount: number | null) =>
   amount === null
@@ -89,6 +90,7 @@ const compact = (value: number | null) =>
         maximumFractionDigits: 1,
       }).format(value);
 const key = (s: Selection) => `${s.provider}:${s.id}`;
+const rowKey = (s: Selection) => JSON.stringify([s.provider, s.id, s.day ?? null]);
 const toolIcons = {
   read: FileText,
   search: Search,
@@ -128,10 +130,12 @@ function Content({
   eventId,
   kind,
   request,
+  markdown = false,
 }: {
   eventId: string;
   kind: string;
   request: <T>(path: string, params?: Record<string, string>) => Promise<T>;
+  markdown?: boolean;
 }) {
   const [data, setData] = useState<SessionContent>(),
     [error, setError] = useState(""),
@@ -168,7 +172,7 @@ function Content({
           </button>
         </p>
       )}
-      {data && <pre>{data.text}</pre>}
+      {data && (markdown ? <Body text={data.text} /> : <pre>{data.text}</pre>)}
       {loading && <span>{sc("正在加载…")}</span>}
       {data?.nextOffset != null && (
         <button disabled={loading} onClick={() => void load(data.nextOffset!)}>
@@ -178,6 +182,60 @@ function Content({
     </div>
   );
 }
+function Message({ text, matched = false, metadata, children }: {
+  text: string; matched?: boolean; metadata?: ReactNode; children?: ReactNode;
+}) {
+  const [open, setOpen] = useState(matched);
+  useEffect(() => { if (matched) setOpen(true); }, [matched]);
+  return <details className="session-message" open={open} onToggle={e => setOpen(e.currentTarget.open)}>
+    <summary>
+      <span className="session-message-preview">{text.replace(/\s+/g, " ") || "—"}</span>
+      {metadata}
+      <ChevronRight size={12} aria-hidden="true" />
+    </summary>
+    {open && <div className="session-message-body">{children ?? <Body text={text} />}</div>}
+  </details>;
+}
+/** Intersection is scoped to the detail pane; one request per visible cursor. */
+function AutoLoad({ cursor, loading, error, load }: {
+  cursor: number | null; loading: boolean; error?: string; load: () => Promise<void>;
+}) {
+  const sentinel = useRef<HTMLDivElement>(null);
+  const pending = useRef(false);
+  useEffect(() => {
+    if (cursor === null || loading || error || !sentinel.current) return;
+    let active = true;
+    const observer = new IntersectionObserver(entries => {
+      if (!active || pending.current || !entries.some(e => e.isIntersecting)) return;
+      pending.current = true;
+      void load().finally(() => { pending.current = false; });
+    }, { root: sentinel.current.closest(".session-events-scroll"), rootMargin: "0px 0px 120px 0px" });
+    observer.observe(sentinel.current);
+    return () => { active = false; observer.disconnect(); };
+  }, [cursor, loading, error, load]);
+  return cursor === null ? null : <div ref={sentinel} className="session-detail-sentinel">
+    {loading && <span className="session-muted">{sc("正在加载…")}</span>}
+  </div>;
+}
+
+export function mergeSessionTurns(first: SessionTurn[], later: SessionTurn[]): SessionTurn[] {
+  const merged = new Map(first.map(turn => [turn.id, turn]));
+  const events = (a: SessionEvent[] = [], b: SessionEvent[] = []) => [...new Map([...a, ...b].map(e => [e.id,e])).values()];
+  for (const turn of later) {
+    const old = merged.get(turn.id);
+    merged.set(turn.id, old ? { ...turn,
+      promptVisible: old.promptVisible !== false || turn.promptVisible !== false,
+      events: events(old.events,turn.events), openingEvents: events(old.openingEvents,turn.openingEvents),
+      closingEvents: events(old.closingEvents,turn.closingEvents), matchEventId: old.matchEventId ?? turn.matchEventId,
+    } : turn);
+  }
+  return [...merged.values()];
+}
+
+function ReplyNode() {
+  return <span className="session-reply-node" title={sc("Agent 回复")}><Sparkles size={11} aria-hidden="true" /></span>;
+}
+
 function Event({
   event,
   request,
@@ -188,14 +246,17 @@ function Event({
   matched?: boolean;
 }) {
   const [open, setOpen] = useState(matched);
-  if (event.kind === "reply" && !event.truncated)
+  if (event.kind === "reply")
     return (
       <div
         className={`session-reply${matched ? " search-event-match" : ""}`}
         data-event-id={event.id}
         title={date(event.at, true)}
       >
-        <Body text={event.text} />
+        <ReplyNode />
+        <Message text={event.text} matched={matched}>
+          {event.truncated ? <Content eventId={event.id} kind="reply" request={request} markdown /> : undefined}
+        </Message>
       </div>
     );
   const title =
@@ -211,9 +272,7 @@ function Event({
           ? sc("上下文")
           : event.kind === "result"
             ? sc("工具输出")
-            : event.kind === "reply"
-              ? sc("展开查看完整内容")
-              : sc("附件");
+            : sc("附件");
   const summary = event.display?.text ?? event.text;
   const command = event.display?.kind === "command";
   const icon =
@@ -259,6 +318,25 @@ function Event({
     </details>
   );
 }
+function ToolGroup({ events, request, matchEventId }: {
+  events: SessionEvent[];
+  request: <T>(path: string, params?: Record<string, string>) => Promise<T>;
+  matchEventId: string | null;
+}) {
+  const matched = events.some(event => event.id === matchEventId);
+  const [open, setOpen] = useState(matched);
+  useEffect(() => { if (matched) setOpen(true); }, [matched]);
+  return <details className="session-operations" open={open} onToggle={e => setOpen(e.currentTarget.open)}>
+    <summary className="session-operation-count">
+      <span className="session-tool-node"><Wrench size={11} aria-hidden="true" /></span>
+      <span>{events.length === 1 ? sc("1 次工具调用") : sc("{0} 次工具调用", n(events.length))}</span>
+      <ChevronRight size={12} aria-hidden="true" />
+    </summary>
+    <div className="session-operations-body">
+      {events.map(event => <Event key={event.id} event={event} request={request} matched={event.id === matchEventId} />)}
+    </div>
+  </details>;
+}
 function CommitGroup({
   commits,
   onCommit,
@@ -284,12 +362,13 @@ function Commit({
   return (
     <details className="session-commit">
       <summary title={sc("提交信息")}>
-        <GitCommitHorizontal size={14} />
+        <span className="session-commit-node"><GitCommitHorizontal size={11} aria-hidden="true" /></span>
         <code>{commit.sha.slice(0, 7)}</code>
         <span>{commit.subject}</span>
         <small>
           {commit.repository.split(/[\\/]/).pop()} · {clock(commit.at)}
         </small>
+        <ChevronRight size={12} aria-hidden="true" />
       </summary>
       <div className="session-event-detail">
         <h5>{sc("提交信息")}</h5>
@@ -326,13 +405,12 @@ export function SessionTurnView({
     [next, setNext] = useState(turn.nextOffset),
     [previous, setPrevious] = useState(turn.previousOffset),
     [error, setError] = useState(""),
-    [loading, setLoading] = useState(false),
-    [full, setFull] = useState(false);
+    [loading, setLoading] = useState(false);
   const usage = turn.usage;
   const activityRequest = useRef(0);
   useEffect(() => {
     activityRequest.current++;
-    setEvents(turn.events); setNext(turn.nextOffset); setPrevious(turn.previousOffset); setError(""); setFull(false); setLoading(false);
+    setEvents(turn.events); setNext(turn.nextOffset); setPrevious(turn.previousOffset); setError(""); setLoading(false);
     return () => { activityRequest.current++; };
   }, [turn]);
   const load = async (earlier = false) => {
@@ -380,7 +458,7 @@ export function SessionTurnView({
     />
   );
   // Normal mode keeps the collected event order. Only adjacent tool calls share
-  // a group; intermediate replies remain visible and each tool expands separately.
+  // a collapsible group; intermediate replies stay separate timeline entries.
   const timeline: ReactNode[] = [];
   let tools: SessionEvent[] = [];
   let commitsRendered = false;
@@ -388,15 +466,7 @@ export function SessionTurnView({
   const flushTools = () => {
     if (!tools.length) return;
     timeline.push(
-      <div className="session-operations" key={`tools-${tools[0].id}`}>
-        <div className="session-operation-count">
-          <Wrench size={12} aria-hidden="true" />
-          {tools.length === 1
-            ? sc("1 次工具调用")
-            : sc("{0} 次工具调用", n(tools.length))}
-        </div>
-        {tools.map(renderEvent)}
-      </div>,
+      <ToolGroup key={`tools-${tools[0].id}`} events={tools} request={request} matchEventId={turn.matchEventId} />,
     );
     tools = [];
   };
@@ -449,7 +519,7 @@ export function SessionTurnView({
   if (turn.contextOnly)
     return mode === "focused" ? null : (
       <div className="session-context-entry">
-        <Body text={turn.prompt} />
+        {turn.promptVisible !== false && <Message text={turn.prompt} />}
         {activity}
       </div>
     );
@@ -458,12 +528,14 @@ export function SessionTurnView({
       className={`session-exchange${matched ? " search-match" : ""}`}
       data-turn-id={turn.id}
     >
+      {turn.promptVisible !== false && <>
       <span className="session-prompt-node">
         <MessageSquare size={11} />
       </span>
       <div className="session-question">
         {onEdit && onDelete && <SessionTurnActions onEdit={onEdit} onDelete={onDelete} />}
-        <Body text={turn.prompt || (turn.imageCount ? sc("图片提问（{0} 张）",turn.imageCount) : "—")} />
+        <Message text={turn.prompt || (turn.imageCount ? sc("图片提问（{0} 张）",turn.imageCount) : "—")}
+          matched={matched && !turn.matchEventId} metadata={
         <span
           className="session-usage"
           title={usageTitle}
@@ -486,21 +558,15 @@ export function SessionTurnView({
             {compact(usage.cache)}
           </span>
         </span>
+          }>
+          {turn.promptTruncated && turn.promptBlockId
+            ? <Content eventId={turn.promptBlockId} kind="text" request={request} markdown />
+            : undefined}
+        </Message>
       </div>
-      {turn.promptTruncated && turn.promptBlockId && (
-        <details onToggle={(e) => setFull(e.currentTarget.open)}>
-          <summary>{sc("展开查看完整内容")}</summary>
-          {full && (
-            <Content
-              eventId={turn.promptBlockId}
-              kind="text"
-              request={request}
-            />
-          )}
-        </details>
-      )}
+      </>}
       {activity}
-      {mode === "focused" && !events.length && (
+      {mode === "focused" && !events.length && !turn.hasMoreEvents && (
         <p className="session-muted">{sc("该轮尚无最后回复")}</p>
       )}
     </article>
@@ -547,8 +613,12 @@ export function SessionsPage({
     [mobileDetail, setMobileDetail] = useState(!!requestedSession.current);
   const detailScroll = useRef<HTMLDivElement>(null),
     listScroll = useRef<HTMLDivElement>(null),
+    loadMoreSentinel = useRef<HTMLDivElement>(null),
+    listInFlight = useRef(false),
     requestNumber = useRef(0),
-    detailNumber = useRef(0);
+    detailNumber = useRef(0),
+    detailInFlight = useRef(false),
+    prependScroll = useRef<{ height: number; top: number } | null>(null);
   useEffect(() => {
     const timer = setTimeout(() => setQuery(search.trim()), 250);
     return () => clearTimeout(timer);
@@ -556,7 +626,9 @@ export function SessionsPage({
   useEffect(() => {
     localStorage.setItem("adit-transcript-mode", mode);
   }, [mode]);
-  const loadList = async (offset = 0, signal?: AbortSignal, preserveSelection = false) => {
+  const loadList = useCallback(async (offset = 0, signal?: AbortSignal, preserveSelection = false) => {
+    if (offset && listInFlight.current) return;
+    listInFlight.current = true;
     const current = ++requestNumber.current;
     setListLoading(true);
     setListError("");
@@ -569,6 +641,7 @@ export function SessionsPage({
             q: query,
             commits: only ? "1" : "0",
             sort,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
             offset: String(offset),
           }),
         "GET",
@@ -584,10 +657,10 @@ export function SessionsPage({
         const requested = requestedSession.current;
         requestedSession.current = undefined;
         setSelected((old) =>
-          requested ? requested : old && d.items.some((s) => key(s) === key(old))
+          requested ? { ...requested, day: d.items.find((s) => key(s) === key(requested))?.day } : old && d.items.some((s) => rowKey(s) === rowKey(old))
             ? old
             : d.items[0]
-              ? { provider: d.items[0].provider, id: d.items[0].id }
+              ? { provider: d.items[0].provider, id: d.items[0].id, day: d.items[0].day }
               : undefined,
         );
         if (listScroll.current) listScroll.current.scrollTop = 0;
@@ -596,10 +669,12 @@ export function SessionsPage({
       if (!signal?.aborted && current === requestNumber.current)
         setListError(String(e));
     } finally {
-      if (!signal?.aborted && current === requestNumber.current)
-        setListLoading(false);
+      if (current === requestNumber.current) {
+        listInFlight.current = false;
+        if (!signal?.aborted) setListLoading(false);
+      }
     }
-  };
+  }, [api, workspace.id, provider, query, only, sort]);
   useEffect(() => {
     const c = new AbortController();
     void loadList(0, c.signal);
@@ -607,7 +682,17 @@ export function SessionsPage({
       c.abort();
       requestNumber.current++;
     };
-  }, [workspace.id, provider, query, only, sort, retry, revision]);
+  }, [loadList, retry, revision]);
+  useEffect(() => {
+    if (listLoading || listError || list?.nextOffset == null || !loadMoreSentinel.current) return;
+    let active = true;
+    const offset = list.nextOffset;
+    const observer = new IntersectionObserver(entries => {
+      if (active && entries.some(entry => entry.isIntersecting)) void loadList(offset);
+    }, { root: listScroll.current, rootMargin: "0px 0px 120px 0px" });
+    observer.observe(loadMoreSentinel.current);
+    return () => { active = false; observer.disconnect(); };
+  }, [list?.nextOffset, listLoading, listError, loadList]);
   const request = <T,>(path: string, params: Record<string, string> = {}) =>
     api<T>(
       "/sessions/" +
@@ -620,12 +705,13 @@ export function SessionsPage({
           ...params,
         }),
     );
-  const loadDetail = async (
+  const loadDetail = useCallback(async (
     offset?: number,
     signal?: AbortSignal,
     prepend = false,
   ) => {
-    if (!selected) return;
+    if (!selected || (offset !== undefined && detailInFlight.current)) return;
+    detailInFlight.current = true;
     const current = ++detailNumber.current;
     setDetailLoading(true);
     setDetailError("");
@@ -634,7 +720,8 @@ export function SessionsPage({
         "/sessions/detail?" +
           new URLSearchParams({
             workspaceId: workspace.id,
-            ...selected,
+            provider: selected.provider,
+            id: selected.id,
             mode,
             q: query,
             ...(!query && requestedTurn.current && selected.provider === requestedSession.current?.provider && selected.id === requestedSession.current?.id
@@ -646,18 +733,26 @@ export function SessionsPage({
         signal,
       );
       if (current !== detailNumber.current || signal?.aborted) return;
+      if (prepend && detailScroll.current) prependScroll.current = {
+        height: detailScroll.current.scrollHeight, top: detailScroll.current.scrollTop,
+      };
       setDetail((old) =>
         prepend
           ? {
               ...d,
               nextOffset: old?.nextOffset ?? null,
-              turns: [...d.turns, ...(old?.turns || [])],
+              context: old?.context ?? d.context,
+              contextNextOffset: old ? old.contextNextOffset : d.contextNextOffset,
+              turns: mergeSessionTurns(d.turns, old?.turns || []),
             }
           : offset !== undefined && old
             ? {
                 ...d,
                 previousOffset: old.previousOffset,
-                turns: [...old.turns, ...d.turns],
+                pageOffset: old.pageOffset,
+                context: old.context,
+                contextNextOffset: old.contextNextOffset,
+                turns: mergeSessionTurns(old.turns, d.turns),
               }
             : d,
       );
@@ -665,14 +760,23 @@ export function SessionsPage({
       if (!signal?.aborted && current === detailNumber.current)
         setDetailError(String(e));
     } finally {
-      if (!signal?.aborted && current === detailNumber.current)
-        setDetailLoading(false);
+      if (current === detailNumber.current) {
+        detailInFlight.current = false;
+        if (!signal?.aborted) setDetailLoading(false);
+      }
     }
-  };
+  }, [api, workspace.id, selected?.provider, selected?.id, mode, query]);
+  useLayoutEffect(() => {
+    const previous = prependScroll.current;
+    if (previous && detailScroll.current) detailScroll.current.scrollTop = previous.top + detailScroll.current.scrollHeight - previous.height;
+    prependScroll.current = null;
+  }, [detail]);
   useEffect(() => {
     const c = new AbortController();
     setDetail(undefined);
     setDetailError("");
+    detailInFlight.current = false;
+    prependScroll.current = null;
     if (!selected) setDetailLoading(false);
     if (detailScroll.current) detailScroll.current.scrollTop = 0;
     void loadDetail(undefined, c.signal);
@@ -680,7 +784,7 @@ export function SessionsPage({
       c.abort();
       detailNumber.current++;
     };
-  }, [selected?.provider, selected?.id, mode, query, retry, revision]);
+  }, [loadDetail, retry, revision]);
   useEffect(() => {
     if (detail?.matchTurnId)
       (
@@ -697,23 +801,25 @@ export function SessionsPage({
     setTurnAction(undefined);
     if (!selected || !detail) return;
     const current = ++detailNumber.current;
+    detailInFlight.current = true;
     setDetailLoading(true); setDetailError("");
     void loadList(0, undefined, true);
     try {
-      let offset = detail.previousOffset === null ? 0 : detail.previousOffset + 8;
+      let offset = detail.pageOffset;
+      const end = detail.nextOffset ?? detail.totalEntries;
       const read = (at: number) => request<SessionDetail>("detail", { mode, offset: String(at) });
       let result = await read(offset);
-      if (!result.turns.length && result.totalTurns && offset) {
-        offset = Math.floor((result.totalTurns - 1) / 8) * 8;
+      if (!result.turns.length && result.totalEntries && offset) {
+        offset = Math.floor((result.totalEntries - 1) / 50) * 50;
         result = await read(offset);
       }
-      while (result.nextOffset !== null && result.turns.length < detail.turns.length) {
+      while (result.nextOffset !== null && result.nextOffset < end) {
         const next = await read(result.nextOffset);
-        result = { ...result, turns: [...result.turns, ...next.turns], nextOffset: next.nextOffset };
+        result = { ...result, turns: mergeSessionTurns(result.turns, next.turns), nextOffset: next.nextOffset };
       }
       if (current === detailNumber.current) setDetail(result);
     } catch (e) { if (current === detailNumber.current) setDetailError(String(e)); }
-    finally { if (current === detailNumber.current) setDetailLoading(false); }
+    finally { if (current === detailNumber.current) { detailInFlight.current = false; setDetailLoading(false); } }
   };
   const reset = () => {
     setSearch("");
@@ -877,15 +983,14 @@ export function SessionsPage({
             </div>
           )}
           {list?.items.map((s, index) => {
-            const day = date(
-              sort === "activity" ? s.lastActivityAt : s.startedAt,
-            );
-            const heading = day !== previous;
-            previous = day;
+            const day = s.day ? date(new Date(`${s.day}T12:00:00`).getTime()) : sc("日期未知");
+            const heading = (s.day ?? "unknown") !== previous;
+            previous = s.day ?? "unknown";
+            const isSelected = !!selected && rowKey(selected) === rowKey(s);
             return (
               <div
-                key={key(s)}
-                className={`${heading ? "session-date-start" : ""} ${!list.items[index + 1] || day !== date(sort === "activity" ? list.items[index + 1].lastActivityAt : list.items[index + 1].startedAt) ? "session-date-end" : ""}`}
+                key={rowKey(s)}
+                className={`${heading ? "session-date-start" : ""} ${!list.items[index + 1] || s.day !== list.items[index + 1].day ? "session-date-end" : ""}`}
               >
                 {heading && <div className="session-day">{day}</div>}
                 <div className="session-list-entry">
@@ -893,56 +998,27 @@ export function SessionsPage({
                     <AgentIcon provider={s.provider} />
                   </span>
                   <button
-                    className={`session-row ${selected && key(selected) === key(s) ? "on" : ""}`}
-                    aria-pressed={!!selected && key(selected) === key(s)}
-                    onClick={() => choose({ provider: s.provider, id: s.id })}
+                    className={`session-row ${isSelected ? "on" : ""}`}
+                    aria-pressed={isSelected}
+                    onClick={() => choose({ provider: s.provider, id: s.id, day: s.day })}
                   >
                     <div className="session-row-heading">
-                      {selected && key(selected) === key(s) ? (
-                        <ChevronDown size={14} />
-                      ) : (
-                        <ChevronRight size={14} />
-                      )}
-                      <strong title={s.title}>
+                      <strong title={s.match ? `${s.title}\n${s.match.text}` : s.title}>
                         {s.title || sc("未命名会话")}
                       </strong>
-                    </div>
-                    <div className="session-row-meta">
-                      <AgentLabel provider={s.provider} name={list.providers.find((p) => p.id === s.provider)?.name} />
-                      <i />{" "}
-                      <span>
-                        {clock(s.startedAt)}
-                        {selected &&
-                        key(selected) === key(s) &&
-                        s.lastActivityAt !== null &&
-                        s.lastActivityAt !== s.startedAt
-                          ? ` – ${clock(s.lastActivityAt)}`
-                          : ""}
-                      </span>
-                      <i />
-                      <span
-                        className={`session-message-count${s.messages >= 30 ? " hot" : ""}`}
-                      >
-                        {sc("{0} 条消息", n(s.messages))}
-                      </span>
-                      {s.commits > 0 && (
-                        <>
-                          <i />
-                          <span className="session-row-commits">
-                            <GitCommitHorizontal size={12} />
-                            {sc("{0} 个提交", n(s.commits))}
-                          </span>
-                        </>
+                      {s.dayCount > 1 && s.dayIndex !== null && (
+                        <span className="session-day-badge">{sc("第 {0}/{1} 天", s.dayIndex, s.dayCount)}</span>
                       )}
                     </div>
-                    {s.match && (
-                      <small
-                        className="session-match-snippet"
-                        title={s.match.text}
-                      >
-                        {s.match.text}
-                      </small>
-                    )}
+                    <div className="session-row-meta">
+                      <span>{clock(s.startedAt, true)}–{clock(s.lastActivityAt, true)}</span>
+                      <span>{sc("{0} 次提问", n(s.prompts))}</span>
+                      <span title={s.unpriced
+                        ? sc("{0} 条用量缺少价格或完整字段，未计入折算花费", s.unpriced)
+                        : sc("按 API 价格折算 {0}", money(s.cost))}>
+                        {sc("价格 {0}", money(s.cost))}{s.unpriced > 0 && s.cost !== null ? "*" : ""}
+                      </span>
+                    </div>
                   </button>
                 </div>
               </div>
@@ -951,15 +1027,7 @@ export function SessionsPage({
           {listLoading && (
             <div className="session-muted">{sc("正在加载…")}</div>
           )}
-          {list?.nextOffset != null && (
-            <button
-              className="session-more"
-              disabled={listLoading}
-              onClick={() => void loadList(list.nextOffset!)}
-            >
-              {sc("加载更多")}
-            </button>
-          )}
+          <div ref={loadMoreSentinel} className="session-list-sentinel" aria-hidden="true" />
         </div>
         <div className="session-detail" aria-busy={detailLoading}>
           <button
@@ -1081,15 +1149,7 @@ export function SessionsPage({
                                 onCommit={onCommit}
                               />
                             ))}
-                        {contextOpen && detail.contextNextOffset !== null && (
-                          <button
-                            className="session-more"
-                            disabled={contextLoading}
-                            onClick={() => void loadContext()}
-                          >
-                            {sc("加载更多过程")}
-                          </button>
-                        )}
+                        {contextOpen && <AutoLoad cursor={detail.contextNextOffset} loading={contextLoading} error={detailError} load={loadContext} />}
                       </details>
                     )}
                   {query && mode === "focused" && (
@@ -1100,17 +1160,8 @@ export function SessionsPage({
                       {sc("在普通模式查看搜索内容")}
                     </button>
                   )}
-                  {detail.previousOffset !== null && (
-                    <button
-                      className="session-more"
-                      disabled={detailLoading}
-                      onClick={() =>
-                        void loadDetail(detail.previousOffset!, undefined, true)
-                      }
-                    >
-                      {sc("加载之前的提问")}
-                    </button>
-                  )}
+                  <AutoLoad cursor={detail.previousOffset} loading={detailLoading} error={detailError}
+                    load={() => loadDetail(detail.previousOffset!, undefined, true)} />
                   {detail.turns
                     .filter((turn) => !turn.contextOnly)
                     .map((turn) => (
@@ -1127,15 +1178,8 @@ export function SessionsPage({
                     ))}
                   <CommitGroup commits={detail.commits} onCommit={onCommit} />
                   {!detail.totalTurns && <p className="session-empty">{sc("此会话暂无对话内容")}</p>}
-                  {detail.nextOffset !== null && (
-                    <button
-                      className="session-more"
-                      disabled={detailLoading}
-                      onClick={() => void loadDetail(detail.nextOffset!)}
-                    >
-                      {detailLoading ? sc("正在加载…") : sc("加载更多提问")}
-                    </button>
-                  )}
+                  <AutoLoad cursor={detail.nextOffset} loading={detailLoading} error={detailError}
+                    load={() => loadDetail(detail.nextOffset!)} />
                 </div>
               </div>
             </>
@@ -1144,8 +1188,8 @@ export function SessionsPage({
       </div>
       {turnAction && <SessionTurnEditor key={`${key(turnAction.session)}:${turnAction.turn.id}:${turnAction.kind}`}
         kind={turnAction.kind} prompt={turnAction.turn.prompt}
-        read={() => api<SessionTurnEdit>("/sessions/turn/edit?" + new URLSearchParams({ workspaceId: workspace.id, ...turnAction.session, turnId: turnAction.turn.id }))}
-        mutate={(method, body) => api("/sessions/turn?" + new URLSearchParams({ workspaceId: workspace.id, ...turnAction.session, turnId: turnAction.turn.id }), method, body)}
+        read={() => api<SessionTurnEdit>("/sessions/turn/edit?" + new URLSearchParams({ workspaceId: workspace.id, provider: turnAction.session.provider, id: turnAction.session.id, turnId: turnAction.turn.id }))}
+        mutate={(method, body) => api("/sessions/turn?" + new URLSearchParams({ workspaceId: workspace.id, provider: turnAction.session.provider, id: turnAction.session.id, turnId: turnAction.turn.id }), method, body)}
         onClose={() => setTurnAction(undefined)} onDone={() => void refreshAfterTurnChange()} />}
     </section>
   );

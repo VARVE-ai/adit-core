@@ -82,7 +82,8 @@ it("previews one real turn on either side, masks excerpts and opens the exact pa
   const opened = browser.detail(w, "codex", "nearby", "focused", undefined, "", target.id);
   expect(opened.matchTurnId).toBe(target.id);
   expect(opened.turns.some(t => t.id === target.id)).toBe(true);
-  expect(opened.previousOffset).not.toBeNull();
+  expect(opened.pageOffset).toBe(0);
+  expect(opened.previousOffset).toBeNull();
   const last = browser.detail(w, "codex", "nearby", "normal", 8).turns.at(-1)!;
   expect(browser.preview(w, "codex", "nearby", last.id).turns.map(t => t.prompt)).toEqual(["question 13", "question 14"]);
   expect(browser.preview(w, "codex", "nearby", last.id).turns.at(-1)?.reply).toBeNull();
@@ -458,9 +459,9 @@ it("masks transcript secrets, keeps large results lazy, and paginates long conve
     ],
   });
   const detail = browser.detail(w, "claude", "s");
-  expect(detail.turns).toHaveLength(8);
-  expect(detail.nextOffset).toBe(8);
-  expect(browser.detail(w, "claude", "s", "normal", 8).turns).toHaveLength(3);
+  expect(detail.turns).toHaveLength(11);
+  expect(detail.totalEntries).toBe(12);
+  expect(detail.nextOffset).toBeNull();
   expect(JSON.stringify(detail)).not.toContain(secret);
   expect(JSON.stringify(detail).length).toBeLessThan(10000);
   const output = browser.content(
@@ -577,7 +578,7 @@ it("keeps Codex context separate and navigates to a search hit beyond the initia
   history.write({ id: "s", provider: "codex", cwd: root, messages });
   const first = browser.detail(w, "codex", "s");
   expect(first.turns[0].contextOnly).toBe(true);
-  const longTurn = browser.detail(w, "codex", "s", "normal", 8).turns.at(-1)!;
+  const longTurn = browser.turn(w, "codex", "s", first.turns.at(-1)!.id, "normal");
   expect(longTurn.nextOffset).toBe(40);
   expect(longTurn.events.some((e) => e.text === "final response")).toBe(false);
   expect(longTurn.openingEvents?.map((e) => e.text)).toEqual([
@@ -597,8 +598,9 @@ it("keeps Codex context separate and navigates to a search hit beyond the initia
   expect(found.previousOffset).toBe(0);
   expect(found.matchTurnId).toBeTruthy();
   const turn = found.turns.find((t) => t.id === found.matchTurnId)!;
-  expect(turn.previousOffset).toBe(0);
-  expect(turn.openingEvents?.map((e) => e.text)).toEqual(["opening response"]);
+  expect(turn.previousOffset).toBeNull();
+  expect(turn.promptVisible).toBe(false);
+  expect(turn.openingEvents).toEqual([]);
   expect(turn.closingEvents?.map((e) => e.text)).toEqual(["final response"]);
   expect(
     turn.events.some(
@@ -613,4 +615,120 @@ it("keeps Codex context separate and navigates to a search hit beyond the initia
   expect(focused.turns.at(-1)?.events.map((e) => e.text)).toEqual([
     "final response",
   ]);
+});
+
+it("splits logical conversations by viewer-local day and prices canonical usage on its actual day", () => {
+  const { w, history, browser } = fixture();
+  const reply = (key: string, timestamp: string, model = "test-model") => m(key, "assistant", key, {
+    timestamp, model, usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+  });
+  history.write({ id: "days", provider: "claude", cwd: root, messages: [
+    m("p1", "user", "before midnight", { timestamp: "2026-10-20T15:55:00Z" }),
+    reply("a1", "2026-10-20T15:59:00Z"),
+    reply("a2", "2026-10-20T16:02:00Z"),
+  ] });
+  history.write({ id: "page", provider: "claude", cwd: root, parentId: "days", relationship: "continuation", messages: [
+    m("p2", "user", "next day", { timestamp: "2026-10-20T16:05:00Z" }),
+    reply("a3", "2026-10-20T16:08:00Z"),
+    reply("missing", "2026-10-20T16:09:00Z", "unknown-model"),
+    reply("duplicate", "2026-10-20T16:10:00Z"),
+  ] });
+  store.db.prepare("UPDATE adit_history_usage_entries SET ledger_role='superseded' WHERE message_id IN (SELECT id FROM adit_history_messages WHERE source_key='duplicate')").run();
+  const list = browser.list(w, { timezone: "Asia/Shanghai" });
+  expect(list.total).toBe(2);
+  expect(list.items.map(s => [s.dayIndex, s.dayCount])).toEqual([[2, 2], [1, 2]]);
+  expect(list.messages).toBe(7);
+  expect(list.providers[0].count).toBe(1);
+  expect(list.items.map(s => ({ id: s.id, day: s.day, prompts: s.prompts, cost: s.cost, unpriced: s.unpriced }))).toEqual([
+    { id: "days", day: "2026-10-21", prompts: 1, cost: 1200, unpriced: 1 },
+    { id: "days", day: "2026-10-20", prompts: 1, cost: 600, unpriced: 0 },
+  ]);
+  expect(list.items[0].startedAt).toBe(Date.parse("2026-10-20T16:02:00Z"));
+  expect(list.items[0].lastActivityAt).toBe(Date.parse("2026-10-20T16:10:00Z"));
+  expect(browser.list(w, { timezone: "UTC" }).items).toHaveLength(1);
+  expect(browser.list(w, { timezone: "Asia/Shanghai", query: "next day" }).items).toHaveLength(2);
+  expect(browser.list(w, { provider: "codex" }).items).toHaveLength(0);
+  expect(() => browser.list(w, { timezone: "invalid/zone" })).toThrow("Invalid timezone");
+});
+
+it("pages 50 day rows without repeating or losing days of one conversation", () => {
+  const { w, history, browser } = fixture();
+  history.write({ id: "long", provider: "claude", cwd: root, messages: Array.from({ length: 105 }, (_, i) =>
+    m(`p${i}`, "user", `question ${i}`, { timestamp: new Date(Date.UTC(2026, 0, i + 1, 12)).toISOString() })) });
+  const first = browser.list(w, { timezone: "UTC" });
+  const second = browser.list(w, { timezone: "UTC", offset: first.nextOffset! });
+  const third = browser.list(w, { timezone: "UTC", offset: second.nextOffset! });
+  expect([first.items.length, second.items.length, third.items.length]).toEqual([50, 50, 5]);
+  expect(third.nextOffset).toBeNull();
+  expect(first.total).toBe(105);
+  const rows = [...first.items, ...second.items, ...third.items];
+  expect(new Set(rows.map(s => `${s.provider}:${s.id}:${s.day}`)).size).toBe(105);
+  expect(rows.every(s => s.prompts === 1 && s.cost === null)).toBe(true);
+  expect(rows.every((s, i) => s.dayCount === 105 && s.dayIndex === 105 - i)).toBe(true);
+  expect(browser.list(w, { timezone: "UTC", sort: "oldest", limit: 1 }).items[0].dayIndex).toBe(1);
+});
+
+it("keeps undated messages separate and counts no new prompt for a reply-only day", () => {
+  const { w, history, browser } = fixture();
+  history.write({ id: "mixed", provider: "claude", cwd: root, messages: [
+    m("p", "user", "question", { timestamp: "2026-10-20T12:00:00Z" }),
+    m("a", "assistant", "late reply", { timestamp: "2026-10-23T12:00:00Z" }),
+    m("undated", "assistant", "unknown time", { timestamp: undefined }),
+  ] });
+  const rows = browser.list(w, { timezone: "UTC" }).items;
+  expect(rows.map(s => [s.dayIndex, s.dayCount])).toEqual([[2, 2], [1, 2], [null, 2]]);
+  expect(rows.map(s => [s.day, s.prompts, s.messages, s.cost])).toEqual([
+    ["2026-10-23", 0, 1, null], ["2026-10-20", 1, 1, null], [null, 0, 1, null],
+  ]);
+});
+
+it.each(["normal", "focused"] as const)("pages exactly 50 timeline entries across turn boundaries in %s mode", mode => {
+  const { w, history, browser } = fixture();
+  history.write({ id: "pages", provider: "claude", cwd: root, messages: Array.from({ length: 53 }, (_, i) => [
+    m(`p${i}`, "user", `question ${i}`), m(`a${i}`, "assistant", `reply ${i}`),
+  ]).flat() });
+  const first = browser.detail(w, "claude", "pages", mode);
+  const second = browser.detail(w, "claude", "pages", mode, first.nextOffset!);
+  const third = browser.detail(w, "claude", "pages", mode, second.nextOffset!);
+  const entries = (page: typeof first) => page.turns.flatMap(t => [...(t.promptVisible ? [t.id] : []), ...t.events.map(e => e.id)]);
+  expect([entries(first).length, entries(second).length, entries(third).length]).toEqual([50, 50, 6]);
+  expect([first.pageOffset, second.pageOffset, third.pageOffset]).toEqual([0, 50, 100]);
+  expect(third.nextOffset).toBeNull();
+  expect(new Set([...entries(first), ...entries(second), ...entries(third)]).size).toBe(106);
+  expect(entries(browser.detail(w, "claude", "pages", mode, third.previousOffset!))).toEqual(entries(second));
+  const target = third.turns[0].id;
+  const located = browser.detail(w, "claude", "pages", mode, undefined, "", target);
+  expect(located.pageOffset).toBe(100);
+  expect(located.previousOffset).toBe(50);
+  expect(located.matchTurnId).toBe(target);
+  expect(entries(located)).toEqual(entries(third));
+});
+
+it("splits a long turn without repeating its prompt, skipping events or sending future reply bodies", () => {
+  const { w, history, browser } = fixture();
+  history.write({ id: "long-turn", provider: "claude", cwd: root, messages: [m("p", "user", "question"),
+    ...Array.from({ length: 104 }, (_, i) => m(`a${i}`, "assistant", `reply ${i}`)),
+  ] });
+  const first = browser.detail(w, "claude", "long-turn");
+  const second = browser.detail(w, "claude", "long-turn", "normal", first.nextOffset!);
+  const third = browser.detail(w, "claude", "long-turn", "normal", second.nextOffset!);
+  expect([first,second,third].map(p => p.turns[0].events.length)).toEqual([49,50,5]);
+  expect([first,second,third].map(p => p.turns[0].promptVisible)).toEqual([true,false,false]);
+  expect(first.turns[0].closingEvents).toEqual([]);
+  expect(third.turns[0].closingEvents?.[0].text).toBe("reply 103");
+  expect(new Set([first,second,third].flatMap(p => p.turns[0].events.map(e => e.id))).size).toBe(104);
+  expect([first,second,third].every(p => p.turns[0].nextOffset === null)).toBe(true);
+  const found = browser.detail(w, "claude", "long-turn", "normal", undefined, "reply 73");
+  expect(found.pageOffset).toBe(50);
+  expect(found.turns[0].events.some(e => e.id === found.turns[0].matchEventId)).toBe(true);
+});
+
+it("marks a reply pending pagination when the page ends at its prompt", () => {
+  const { w, history, browser } = fixture();
+  history.write({ id: "boundary", provider: "claude", cwd: root, messages: [
+    ...Array.from({ length: 50 }, (_, i) => m(`p${i}`, "user", `question ${i}`)), m("a", "assistant", "final reply"),
+  ] });
+  const first = browser.detail(w, "claude", "boundary", "focused");
+  expect(first.turns.at(-1)).toMatchObject({ events: [], hasMoreEvents: true });
+  expect(browser.detail(w, "claude", "boundary", "focused", 50).turns[0]).toMatchObject({ promptVisible: false, hasMoreEvents: false });
 });

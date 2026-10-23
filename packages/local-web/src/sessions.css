@@ -157,8 +157,8 @@
   display: flex;
 }
 .sessions-list {
-  width: 29.17%;
-  min-width: 280px;
+  width: 35.004%;
+  min-width: 336px;
   border-right: 1px solid hsl(var(--border));
   padding: 8px 16px 16px;
   overflow: auto;
@@ -226,13 +226,13 @@
   z-index: 1;
 }
 .session-row {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 10px;
   width: 100%;
-  min-height: 52px;
+  min-height: 40px;
   padding: 6px 8px;
   border: 0;
   background: none;
@@ -240,6 +240,8 @@
   border-radius: 6px;
   margin: 0;
 }
+.session-list-sentinel { height: 1px; }
+.session-row:hover { background: hsl(var(--muted)); }
 .session-row.on {
   background: hsl(var(--muted));
 }
@@ -270,6 +272,18 @@
   color: hsl(var(--muted-foreground));
   white-space: nowrap;
   overflow: hidden;
+}
+.session-day-badge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 4px;
+  background: hsl(var(--muted) / 0.5);
+  color: hsl(var(--muted-foreground));
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 18px;
+  white-space: nowrap;
 }
 .session-row-meta > * {
   flex-shrink: 0;
@@ -375,20 +389,21 @@
   scrollbar-gutter: stable;
 }
 .session-conversation {
+  --session-node-offset: -38px;
   position: relative;
   border-top: 1px solid hsl(var(--border) / 0.6);
   padding: 12px 0 0 32px;
 }
 .session-exchange {
   position: relative;
-  padding: 10px 8px 18px;
+  padding: 10px 8px 0;
 }
 .session-exchange:before {
   content: "";
   position: absolute;
   left: -21px;
   top: 24px;
-  bottom: -14px;
+  bottom: -22px;
   width: 2px;
   background: hsl(var(--border));
 }
@@ -494,13 +509,39 @@
 .session-turn-dialog > footer .danger { background: hsl(var(--danger)); border-color: hsl(var(--danger)); color: white; }
 .session-turn-editor-error { color: hsl(var(--danger)); margin-top: 16px; }
 .session-turn-editor-error > button { display: block; margin-top: 8px; }
-.session-question > .session-markdown {
-  display: inline;
+.session-question .session-message-preview {
   font-weight: 500;
 }
-.session-question > .session-markdown > p:last-child {
-  display: inline;
+.session-message > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 23px;
+  list-style: none;
+  cursor: pointer;
+  border-radius: 4px;
 }
+.session-message > summary::-webkit-details-marker { display: none; }
+.session-message > summary:hover { background: hsl(var(--muted) / 0.5); }
+.session-message > summary:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+.session-message-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-message > summary > svg { flex-shrink: 0; color: hsl(var(--muted-foreground)); }
+.session-message[open] > summary > svg { transform: rotate(90deg); }
+.session-message > summary > .session-usage {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 50%;
+  overflow: hidden;
+  margin-inline-start: 0;
+}
+.session-message-body { padding-top: 8px; }
 .session-usage {
   display: inline-flex;
   align-items: center;
@@ -628,20 +669,26 @@
   color: hsl(var(--muted-foreground));
 }
 .session-operations {
-  border-left: 2px solid hsl(var(--border));
-  padding: 2px 0 2px 12px;
-  margin-top: 8px;
+  position: relative;
+  margin-top: 10px;
 }
 .session-operation-count {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 26px;
-  padding: 3px 4px;
+  min-height: 23px;
+  list-style: none;
+  cursor: pointer;
+  border-radius: 4px;
   color: hsl(var(--muted-foreground));
   font-size: 12px;
-  line-height: 20px;
+  line-height: 23px;
 }
+.session-operation-count::-webkit-details-marker { display: none; }
+.session-operation-count > span:not(.session-tool-node) { flex: 1; }
+.session-operation-count:hover { background: hsl(var(--muted) / 0.5); }
+.session-operations[open] > summary > svg:last-child { transform: rotate(90deg); }
+.session-operations-body { margin-top: 8px; padding-left: 12px; border-left: 2px solid hsl(var(--border)); }
 .session-operation {
   font-size: 12px;
   color: hsl(var(--foreground));
@@ -699,13 +746,21 @@
   color: hsl(var(--foreground));
 }
 .session-commits {
-  margin-top: 8px;
-  padding: 6px 8px;
-  border: 1px solid hsl(var(--border) / 0.7);
-  border-radius: 8px;
-  background: hsl(var(--muted) / 0.3);
+  position: relative;
+}
+.session-conversation > .session-commits { padding: 0 8px; }
+.session-conversation > .session-commits:before {
+  content: "";
+  position: absolute;
+  left: -21px;
+  top: 12px;
+  bottom: 12px;
+  width: 2px;
+  background: hsl(var(--border));
 }
 .session-commit {
+  position: relative;
+  margin-top: 10px;
   width: 100%;
   border: 0;
   background: transparent;
@@ -715,38 +770,29 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px;
+  padding: 0;
   border-radius: 4px;
-  min-height: 36px;
+  min-height: 23px;
   cursor: pointer;
   list-style: none;
 }
-.session-commit > summary > svg:first-child {
-  color: #059669;
-  border: 2px solid #6ee7b7;
-  background: #ecfdf5;
-  border-radius: 50%;
-  width: 20px;
-  height: 20px;
-  padding: 3px;
-  flex-shrink: 0;
-}
+.session-commit > summary::-webkit-details-marker { display: none; }
+.session-commit[open] > summary > svg:last-child { transform: rotate(90deg); }
+.session-commit > summary > svg:last-child { flex-shrink: 0; color: hsl(var(--muted-foreground)); }
 .session-commit > summary > code {
   color: hsl(var(--muted-foreground));
   font-size: 11px;
   width: 56px;
   flex-shrink: 0;
 }
-.dark .session-commit > summary > svg:first-child {
+.dark .session-commit-node {
   color: #34d399;
   border-color: #34d39980;
-  background: #064e3b66;
 }
-.session-commit > summary > span {
+.session-commit > summary > span:not(.session-commit-node) {
   flex: 1;
   min-width: 0;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   text-align: left;
@@ -758,14 +804,11 @@
   flex-shrink: 0;
   margin: 0;
 }
-.session-commit + .session-commit {
-  border-top: 1px solid hsl(var(--border) / 0.6);
-}
 .session-commit > summary:hover {
   background: hsl(var(--muted));
 }
 .session-commit > .session-event-detail {
-  padding: 0 10px 10px;
+  padding: 8px 0 0;
   overflow-wrap: anywhere;
 }
 .session-commit h5 {
@@ -895,8 +938,8 @@
     max-width: 56%;
   }
   .sessions-list {
-    width: 35%;
-    min-width: 250px;
+    width: 42%;
+    min-width: 300px;
     padding-inline: 10px;
   }
   .session-row-commits {
@@ -961,12 +1004,14 @@
     line-height: 22px;
   }
   .session-conversation {
+    --session-node-offset: -34px;
     padding-left: 28px;
   }
   .session-prompt-node {
     left: -26px;
   }
-  .session-exchange:before {
+  .session-exchange:before,
+  .session-conversation > .session-commits:before {
     left: -17px;
   }
   .session-events-scroll {
@@ -974,3 +1019,24 @@
     padding-inline: 14px;
   }
 }
+
+.session-detail-sentinel { min-height: 1px; }
+.session-reply { position: relative; }
+.session-reply-node, .session-tool-node, .session-commit-node {
+  position: absolute;
+  left: var(--session-node-offset);
+  top: 1px;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid;
+  border-radius: 50%;
+  background: hsl(var(--background));
+  z-index: 1;
+}
+.session-reply-node { color: #8b5cf6; border-color: #c4b5fd; }
+.session-tool-node { color: hsl(var(--muted-foreground)); border-color: hsl(var(--border)); }
+.session-commit-node { color: #059669; border-color: #6ee7b7; }
+.dark .session-reply-node { color: #c4b5fd; border-color: #8b5cf6; }
