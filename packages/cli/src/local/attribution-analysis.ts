@@ -20,12 +20,11 @@ import {
   jsonTextValue,
   wordTokens,
   tokenOverlap,
-  literals,
-  decodeEscapes,
 } from "./attribution-evidence.js";
 import { saveAttributionSummaries, type AttributionLine, type AttributionCandidate } from "./attribution-summaries.js";
+import { commandOf, submissionCandidates } from "./submission-evidence.js";
 const execute = promisify(execFile);
-export const ATTRIBUTION_VERSION = 4;
+export const ATTRIBUTION_VERSION = 5;
 const digest = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 type Row = Record<string, any>;
@@ -174,7 +173,7 @@ function inputSnapshot(store: LocalStore, w: LocalWorkspace) {
     const calls = (
       db
         .prepare(
-          `SELECT t.* FROM adit_history_tool_calls t WHERE NOT EXISTS (SELECT 1 FROM adit_history_tool_results r WHERE r.tool_call_id=t.id AND (r.status IN ('error','failed') OR r.exit_code<>0))`,
+          `SELECT t.*,m.ordinal message_ordinal FROM adit_history_tool_calls t JOIN adit_history_messages m ON m.id=t.message_id`,
         )
         .all() as Row[]
     ).filter((c) => keys.has(key(c.provider, c.session_id))).map(c=> {
@@ -318,91 +317,6 @@ function samePath(a: string, b: string): boolean {
   };
   return normalize(a) === normalize(b);
 }
-function commandOf(call: Row): string {
-  if (call.command_text) return call.command_text;
-  try {
-    const input = JSON.parse(call.input_json || "null");
-    return typeof input === "string"
-      ? input
-      : (input?.code ?? input?.script ?? input?.command ?? input?.cmd ?? "");
-  } catch {
-    return "";
-  }
-}
-function submissionCommands(command: string, depth = 0): string[] {
-  if (depth > 3) return [command];
-  // Codex exec wraps shell bodies in JS string literals; some native records
-  // also escape that entire script. Decode only the wrapper and command fields,
-  // never execute scripts or treat arbitrary strings (e.g. search terms) as commands.
-  const source = /\b(?:cmd|command|script|code)(?:\\["'])?\s*:\s*\\["']/.test(command)
-    ? decodeEscapes(command)
-    : command;
-  const embedded = literals(source).flatMap((literal) =>
-    /\b(?:cmd|command|script|code)["']?\s*:\s*$/.test(source.slice(0, literal.start))
-      ? submissionCommands(literal.text, depth + 1)
-      : [],
-  );
-  return embedded.length ? embedded : [source];
-}
-function commitCommand(command: string): boolean {
-  return submissionCommands(command).some((body) =>
-    !/^\s*(?:rg|grep|cat|Get-Content)\b/i.test(body) &&
-    /\bgit(?:[\s'",\[\]-]|\\["'])[^\n]{0,200}?\bcommit\b/.test(body),
-  );
-}
-function subjects(command: string, output: string): string[] {
-  command = submissionCommands(command).join("\n");
-  const values: string[] = [];
-  for (const m of output.matchAll(/^\[[^\]\r\n]+ [a-f0-9]{7,64}\]\s+(.+)$/gm))
-    values.push(m[1].trim());
-  for (const m of command.matchAll(
-    /\bgit\b[^\n]*?\bcommit\b[^\n]*?(?:-m|--message)(?:[=\s]+)("(?:\\.|[^"\\])*"|'[^']*')/g,
-  )) {
-    const lit = literals(m[1])[0];
-    if (lit) values.push(lit.text.split("\n")[0]);
-  }
-  if (/\bcommit\b[^\n]*-F\s+-/.test(command)) {
-    const m = /<<\s*['"]?(\w+)['"]?\s*\n([^\n]+)/.exec(command);
-    if (m) values.push(m[2].trim());
-  }
-  // Native script APIs frequently execute ['git', 'commit', '-m', subject].
-  const tokens = literals(command).map((s) => s.text);
-  for (let i = 0; i < tokens.length - 3; i++)
-    if (
-      tokens[i] === "git" &&
-      tokens[i + 1] === "commit" &&
-      ["-m", "--message"].includes(tokens[i + 2])
-    )
-      values.push(tokens[i + 3].split("\n")[0]);
-  return [...new Set(values.filter(Boolean))];
-}
-
-function nativeOutput(text: string): string {
-  const unpack = (value: any): string =>
-    typeof value === "string"
-      ? value
-      : Array.isArray(value)
-        ? value.map(unpack).join("\n")
-        : value && typeof value === "object"
-          ? ["output", "stdout", "text", "content"]
-              .filter((k) => k in value)
-              .map((k) => unpack(value[k]))
-              .join("\n")
-          : "";
-  try {
-    return unpack(JSON.parse(text)) || text;
-  } catch {}
-  return text
-    .split("\n")
-    .map((line) => {
-      try {
-        return unpack(JSON.parse(line)) || line;
-      } catch {
-        return line.replace(/\\n/g, "\n").replace(/\\r/g, "\r");
-      }
-    })
-    .join("\n");
-}
 
 async function backupEvidence(
   snapshot: ReturnType<typeof inputSnapshot>,
@@ -516,8 +430,8 @@ export async function analyzeAttribution(
   createAttributionSchema(store.db);
   const db = store.db;
   options.signal?.throwIfAborted();
-  // Detect new SHAs before loading transcripts or backups. Changed sessions and
-  // algorithm versions do not silently rewrite previously saved attribution.
+  // New SHAs and explicit rechecks recompute code provenance. Late submission
+  // evidence may fill an empty link without rewriting saved line attribution.
   const { previous, analyzed, pending } = db.transaction(() => {
     const previous = savedRun(store, w.id);
     const commits = collectedCommits(store, w);
@@ -549,13 +463,93 @@ export async function analyzeAttribution(
       pending: commits.some((c) => !analyzed.has(key(c.repository, c.sha))),
     };
   })();
-  if (!options.force && previous && !pending)
-    return { id: previous.id, cached: true };
   const snapshot = inputSnapshot(store, w),
     identities = analysisIdentities(snapshot.sessions, snapshot.calls);
   const targets = snapshot.commits.filter(
     (c) => !analyzed.has(key(c.repository, c.sha)),
   );
+  const operations = submissionCandidates(snapshot.calls, snapshot.results).map(e => {
+    const session = snapshot.sessions.find(s => s.provider === e.call.provider && s.id === e.call.session_id)!;
+    return { ...e, group: identities.find(key(e.call.provider, e.call.session_id)),
+      repository: e.batch ? null : repositoryFor(w, e.cwd || e.call.working_directory || session.scope_cwd, e.command, session.original_root) };
+  });
+  const matchSubmission = (commit: Row) => {
+    const at = commit.committed_at ?? commit.authored_at;
+    const compatible = operations.filter(
+      (o) => !o.repository || o.repository === commit.repository,
+    );
+    let method: string | null = "hash";
+    let matches = compatible.filter((o) =>
+      o.hashes.some(
+        (hash) =>
+          commit.sha.startsWith(hash) &&
+          snapshot.commits.filter(
+            (c) =>
+              c.repository === commit.repository && c.sha.startsWith(hash),
+          ).length === 1,
+      ),
+    );
+    let matchedSha: string | null = null;
+    if (!matches.length) {
+      method = "subject_time";
+      matches = compatible.filter(
+        (o) =>
+          o.repository === commit.repository &&
+          o.subjects.includes(commit.subject) &&
+          o.call.occurred_at !== null &&
+          at !== null &&
+          Math.abs(o.call.occurred_at - at) <= 15 * 60 * 1000,
+      );
+    }
+    if (!matches.length) {
+      method = "rewritten_subject";
+      matches = compatible.filter(
+        (o) =>
+          o.repository === commit.repository &&
+          o.subjects.includes(commit.subject) &&
+          o.hashes.length &&
+          o.hashes.every(
+            (h) =>
+              !snapshot.commits.some(
+                (c) =>
+                  c.repository === commit.repository && c.sha.startsWith(h),
+              ),
+          ) &&
+          snapshot.commits.filter(
+            (c) =>
+              c.repository === commit.repository &&
+              c.subject === commit.subject,
+          ).length === 1,
+      );
+    }
+    const groups = new Set(matches.map((o) => o.group));
+    const operation =
+      groups.size === 1
+        ? matches.sort(
+            (a, b) =>
+              (a.call.occurred_at ?? Infinity) -
+              (b.call.occurred_at ?? Infinity),
+          )[0]
+        : undefined;
+    if (operation)
+      matchedSha =
+        operation.hashes.find((h) => commit.sha.startsWith(h)) ??
+        operation.hashes[0] ??
+        null;
+    else method = null;
+    return { operation, method, matchedSha };
+  };
+  // Repair only missing submission links. Existing code provenance and valid submitters
+  // remain stable, even when late poll results arrive on a subsequent collection.
+  const repairs = previous && !options.force ? (db.prepare(
+    "SELECT repository,sha FROM adit_attribution_commits WHERE run_id=? AND submit_session_id IS NULL"
+  ).all(previous.id) as Row[]).flatMap(saved => {
+    const commit = snapshot.commits.find(c => c.repository === saved.repository && c.sha === saved.sha && analyzed.has(key(c.repository,c.sha)));
+    if (!commit) return [];
+    const match = matchSubmission(commit);
+    return match.operation ? [{commit, ...match}] : [];
+  }) : [];
+  if (!options.force && previous && !pending && !repairs.length) return {id: previous.id, cached: true};
   const evidence: Evidence[] = [];
   const unique = new Set<string>();
   let missingTime = 0;
@@ -589,7 +583,9 @@ export async function analyzeAttribution(
       });
     }
   };
-  for (const call of snapshot.calls) {
+  const failedCalls = new Set(snapshot.results.filter(r => ["error", "failed"].includes(r.status) || r.exit_code != null && r.exit_code !== 0).map(r => r.tool_call_id));
+  for (const call of targets.length ? snapshot.calls : []) {
+    if (failedCalls.has(call.id)) continue;
     options.signal?.throwIfAborted();
     const session = snapshot.sessions.find(
       (s) => s.provider === call.provider && s.id === call.session_id,
@@ -629,7 +625,7 @@ export async function analyzeAttribution(
       );
     }
   }
-  const backups = await backupEvidence(snapshot, w, add),
+  const backups = targets.length ? await backupEvidence(snapshot, w, add) : {missing: previous?.missing_backup_count || 0, manifest: []},
     fingerprint = digest([snapshot.fingerprint, backups.manifest]);
   const run = randomUUID();
   db.prepare(
@@ -644,8 +640,8 @@ export async function analyzeAttribution(
     fingerprint,
     "running",
     Date.now(),
-    targets.length,
-    missingTime,
+    targets.length + repairs.length,
+    targets.length ? missingTime : previous?.missing_time_count || 0,
     backups.missing,
   );
   const exact = new Map<string, Evidence[]>(),
@@ -674,32 +670,6 @@ export async function analyzeAttribution(
     }
     texts.set(e.text, list);
   }
-  const completedCalls = new Set(snapshot.results.map((r) => r.tool_call_id));
-  const operations = snapshot.calls
-    .filter((c) => completedCalls.has(c.id) && commitCommand(commandOf(c)))
-    .map((call) => {
-      const output = snapshot.results
-        .filter((r) => r.tool_call_id === call.id)
-        .map((r) => nativeOutput(r.content_text || ""))
-        .join("\n");
-      const session = snapshot.sessions.find(
-        (s) => s.provider === call.provider && s.id === call.session_id,
-      )!;
-      return {
-        call,
-        group: identities.find(key(call.provider, call.session_id)),
-        repository: repositoryFor(
-          w,
-          call.working_directory || session.scope_cwd,
-          commandOf(call),
-          session.original_root,
-        ),
-        hashes: [...output.matchAll(/^\[[^\]\r\n]+ ([a-f0-9]{7,64})\]/gm)].map(
-          (m) => m[1],
-        ),
-        subjects: subjects(commandOf(call), output),
-      };
-    });
   const evidenceById = new Map(evidence.map((e) => [digest([run, e.id]), e]));
   try {
     let completed = 0;
@@ -929,68 +899,7 @@ export async function analyzeAttribution(
           });
         }
       }
-      const compatible = operations.filter(
-        (o) => !o.repository || o.repository === commit.repository,
-      );
-      let method: string | null = "hash";
-      let matches = compatible.filter((o) =>
-        o.hashes.some(
-          (hash) =>
-            commit.sha.startsWith(hash) &&
-            snapshot.commits.filter(
-              (c) =>
-                c.repository === commit.repository && c.sha.startsWith(hash),
-            ).length === 1,
-        ),
-      );
-      let matchedSha: string | null = null;
-      if (!matches.length) {
-        method = "subject_time";
-        matches = compatible.filter(
-          (o) =>
-            o.repository === commit.repository &&
-            o.subjects.includes(commit.subject) &&
-            o.call.occurred_at !== null &&
-            at !== null &&
-            Math.abs(o.call.occurred_at - at) <= 15 * 60 * 1000,
-        );
-      }
-      if (!matches.length) {
-        method = "rewritten_subject";
-        matches = compatible.filter(
-          (o) =>
-            o.repository === commit.repository &&
-            o.subjects.includes(commit.subject) &&
-            o.hashes.length &&
-            o.hashes.every(
-              (h) =>
-                !snapshot.commits.some(
-                  (c) =>
-                    c.repository === commit.repository && c.sha.startsWith(h),
-                ),
-            ) &&
-            snapshot.commits.filter(
-              (c) =>
-                c.repository === commit.repository &&
-                c.subject === commit.subject,
-            ).length === 1,
-        );
-      }
-      const groups = new Set(matches.map((o) => o.group));
-      const operation =
-        groups.size === 1
-          ? matches.sort(
-              (a, b) =>
-                (a.call.occurred_at ?? Infinity) -
-                (b.call.occurred_at ?? Infinity),
-            )[0]
-          : undefined;
-      if (operation)
-        matchedSha =
-          operation.hashes.find((h) => commit.sha.startsWith(h)) ??
-          operation.hashes[0] ??
-          null;
-      else method = null;
+      const { operation, method, matchedSha } = matchSubmission(commit);
       db.transaction(() => {
         saveAttributionSummaries(db, run, commit.repository, commit.sha, attributionRows, candidatesRows, evidenceById);
         db.prepare(
@@ -1052,6 +961,13 @@ export async function analyzeAttribution(
             `UPDATE adit_attribution_${table} SET run_id=? WHERE run_id=?`,
           ).run(run, previous.id);
       }
+      for (const {commit, operation, method, matchedSha} of repairs) {
+        const call = operation!.call;
+        db.prepare(`UPDATE adit_attribution_commits SET submit_provider=?,submit_session_id=?,submit_turn_id=?,submit_tool_call_id=?,match_method=?,matched_sha=?
+          WHERE run_id=? AND repository=? AND sha=? AND submit_session_id IS NULL`)
+          .run(call.provider,call.session_id,call.turn_id,call.id,method,matchedSha,run,commit.repository,commit.sha);
+      }
+      db.prepare("UPDATE adit_attribution_runs SET completed_count=completed_count+? WHERE id=?").run(repairs.length,run);
       db.prepare(
         "UPDATE adit_attribution_runs SET status='done',finished_at=? WHERE id=?",
       ).run(Date.now(), run);

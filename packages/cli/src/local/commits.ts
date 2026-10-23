@@ -4,6 +4,7 @@ import {
   type LocalStore,
   type LocalWorkspace,
 } from "@varveai/adit-core";
+import { submissionExecutions, submissionCommand } from "./submission-evidence.js";
 import { attributionStatus } from "./commit-sources.js";
 type Row = Record<string, any>;
 
@@ -45,6 +46,19 @@ function readCommits(store: Pick<LocalStore, "db">, w: LocalWorkspace, options: 
     "SELECT content_text FROM adit_history_tool_results WHERE tool_call_id=? ORDER BY event_index",
   );
   const outputsByCall = new Map<string, string[]>();
+  const executionsBySession = new Map<string, ReturnType<typeof submissionExecutions>>();
+  const executionOutput = (provider: string, session: string, call: string) => {
+    const key = JSON.stringify([provider,session]);
+    let executions = executionsBySession.get(key);
+    if (!executions) {
+      const calls = db.prepare(`SELECT t.*,m.ordinal message_ordinal FROM adit_history_tool_calls t JOIN adit_history_messages m ON m.id=t.message_id WHERE t.provider=? AND t.session_id=?`).all(provider,session) as Row[];
+      const outputs = db.prepare("SELECT * FROM adit_history_tool_results WHERE provider=? AND session_id=?").all(provider,session) as Row[];
+      executions = submissionExecutions(calls, outputs);
+      executionsBySession.set(key, executions);
+    }
+    const execution = executions.get(call);
+    return execution && !execution.failed && !execution.ambiguous ? execution.output : "";
+  };
   const from = `FROM adit_local_commits c LEFT JOIN adit_attribution_commits a ON a.repository=c.repository AND a.sha=c.sha AND a.run_id=@run
     WHERE c.repository IN (SELECT value FROM json_each(@repositories)) AND ${NON_MERGE_COMMIT_SQL}
       AND (@sha IS NULL OR c.sha LIKE @sha) AND (@repository IS NULL OR c.repository=@repository)
@@ -75,11 +89,12 @@ function readCommits(store: Pick<LocalStore, "db">, w: LocalWorkspace, options: 
             outputsByCall.set(c.submit_tool_call_id, outputs);
           }
           branch = branchFromCommitOutput(outputs, c.sha);
+          if (!branch) branch = branchFromCommitOutput([executionOutput(c.submit_provider,c.submit_session_id,c.submit_tool_call_id)], c.sha);
         }
         const record = c.submit_session_id
           ? (db
               .prepare(
-                `SELECT s.title,s.first_prompt,t.command_text,t.occurred_at,turn.ordinal,(SELECT group_concat(b.text_content,' ') FROM adit_history_blocks b WHERE b.message_id=turn.prompt_message_id) prompt FROM adit_history_sessions s LEFT JOIN adit_history_tool_calls t ON t.id=? LEFT JOIN adit_history_turns turn ON turn.id=? WHERE s.provider=? AND s.id=?`,
+                `SELECT s.title,s.first_prompt,t.command_text,t.input_json,t.tool_name,t.occurred_at,turn.ordinal,(SELECT group_concat(b.text_content,' ') FROM adit_history_blocks b WHERE b.message_id=turn.prompt_message_id) prompt FROM adit_history_sessions s LEFT JOIN adit_history_tool_calls t ON t.id=? LEFT JOIN adit_history_turns turn ON turn.id=? WHERE s.provider=? AND s.id=?`,
               )
               .get(
                 c.submit_tool_call_id,
@@ -121,7 +136,7 @@ function readCommits(store: Pick<LocalStore, "db">, w: LocalWorkspace, options: 
                 ),
                 ordinal: record.ordinal,
                 at: record.occurred_at,
-                command: redactOverview(record.command_text || ""),
+                command: redactOverview(submissionCommand(record)),
                 prompt: redactOverview(record.prompt || ""),
                 method: c.match_method,
                 matchedSha: c.matched_sha,

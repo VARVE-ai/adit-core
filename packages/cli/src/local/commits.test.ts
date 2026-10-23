@@ -993,3 +993,36 @@ it("analyzes only newly collected SHAs and atomically carries forward historical
   expect(store.db.prepare("SELECT count(*) n FROM adit_attribution_turns").get()).toEqual({ n: 2 });
 
 });
+
+it("repairs cached missing submissions from late async results without changing code provenance or native history", async () => {
+  const {sha,now,workspace,history}=fixture();
+  const script=`text(await tools.exec_command({cmd:"git commit -m \\"fixture\\"",workdir:${JSON.stringify(root)}}));`;
+  const messages: any[]=[
+    {key:"u",role:"user",timestamp:new Date(now-2000).toISOString(),content:"Commit the changes",raw:{}},
+    {key:"start",role:"assistant",timestamp:new Date(now-1000).toISOString(),content:null,raw:{payload:{type:"custom_tool_call",call_id:"start",name:"exec",input:script}}},
+    {key:"running",role:"tool",timestamp:new Date(now).toISOString(),content:null,raw:{payload:{type:"custom_tool_call_output",call_id:"start",output:JSON.stringify({session_id:7711,output:""})}}},
+  ];
+  history.write({provider:"codex",id:"async-submitter",cwd:root,messages});
+  await analyzeAttribution(store,workspace);
+  expect(queryCommits(store,workspace).commits[0].record).toBeNull();
+  const sourceBefore=await queryCommitSources(store,workspace,root,sha);
+  messages.push(
+    {key:"u2",role:"user",timestamp:new Date(now+1000).toISOString(),content:"Check completion",raw:{}},
+    {key:"poll",role:"assistant",timestamp:new Date(now+2000).toISOString(),content:null,raw:{payload:{type:"custom_tool_call",call_id:"poll",name:"exec",input:'text(await tools.write_stdin({session_id:7711,chars:""}));'}}},
+    {key:"done",role:"tool",timestamp:new Date(now+3000).toISOString(),content:null,raw:{payload:{type:"custom_tool_call_output",call_id:"poll",output:JSON.stringify({exit_code:0,output:`[feature/fixture ${sha.slice(0,7)}] fixture`})}}},
+  );
+  history.write({provider:"codex",id:"async-submitter",cwd:root,messages});
+  const native=JSON.stringify(history.read("codex","async-submitter"));
+  // Automatic repair uses collected execution evidence, not a full Git/content reanalysis.
+  renameSync(join(root,".git"),join(root,"git-unavailable"));
+  try { expect((await analyzeAttribution(store,workspace)).cached).toBe(false); }
+  finally { renameSync(join(root,"git-unavailable"),join(root,".git")); }
+  expect(queryCommits(store,workspace).commits[0]).toMatchObject({branch:"feature/fixture",record:{sessionId:"async-submitter",ordinal:1,prompt:"Commit the changes",method:"hash",command:'git commit -m "fixture"'}});
+  const sourceAfter=await queryCommitSources(store,workspace,root,sha);
+  for(const key of ["eligible","matched","unknown","sources"] as const) expect(sourceAfter[key]).toEqual(sourceBefore[key]);
+  expect(JSON.stringify(history.read("codex","async-submitter"))).toBe(native);
+  const changes=store.db.prepare("SELECT total_changes() n").get();
+  expect((await analyzeAttribution(store,workspace)).cached).toBe(true);
+  expect(store.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+  expect(store.db.pragma("foreign_key_check")).toEqual([]);
+});

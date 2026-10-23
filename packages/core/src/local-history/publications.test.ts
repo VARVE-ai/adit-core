@@ -300,3 +300,32 @@ it("paginates saved results without duplicates when a newer result is inserted",
   expect(new Set(ids)).toEqual(new Set(records.map(r => r.id))); expect(next.nextCursor).toBe(null);
   expect(() => pr.list(w, 0, "invalid")).toThrow("cursor");
 });
+
+it("labels submission status separately from code lines in new and saved descriptions", () => {
+  const {w}=fixture(); w.repositories=[root];
+  const db=store.db, a="a".repeat(40), b="b".repeat(40);
+  db.prepare("INSERT INTO adit_attribution_runs(id,workspace_id,algorithm_version,input_fingerprint,status,started_at) VALUES ('run',?,4,'x','done',1)").run(w.id);
+  db.prepare("INSERT INTO adit_attribution_commits VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run("run",root,a,"claude","original-session-12345",null,null,"hash",a,2,0,2,0,0,0,0);
+  db.prepare("INSERT INTO adit_attribution_commits VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run("run",root,b,null,null,null,null,null,null,2,0,2,0,0,0,0);
+  const scope:PrScope={repository:root,kind:"commits",head:null,base:null,headSha:null,baseSha:null,mergeBase:null,author:"me@example.org",digest:"labels",commits:[
+    {sha:a,subject:"first",included:true,reason:null},{sha:b,subject:"second",included:true,reason:null},
+  ]};
+  const pr=new LocalPrDescriptions(db);
+  for(const language of ["en","zh"] as const) {
+    const result=pr.generate(w,scope,{sessions:false,language});
+    const zh=language==="zh";
+    expect(result.markdown).toContain(zh ? "| 提交 | 提交会话 | 已匹配代码行 | 来源不明代码行 |" : "| Commit | Submitting conversation | Matched code lines | Untraced code lines |");
+    expect(result.markdown).toContain(`| aaaaaaa first | ${zh?"已找到":"Found"} | 2 of 2 | 0 |`);
+    expect(result.markdown).toContain(`| bbbbbbb second | ${zh?"未找到提交会话":"No submitting conversation found"} | 2 of 2 | 0 |`);
+    expect(result.markdown).not.toContain("original-session-12345");
+    const legacy=`Custom template text\n\n${zh ? "| 提交 | 匹配到会话内容 | 来源不明 |" : "| Commit | Matched session content | Not traced |"}\n| --- | ---: | ---: |\n| aaaaaaa first | 2 of 2 | 0 |\n| bbbbbbb second \\| part | 2 of 2 | 0 |\n| ${zh?"合计":"Total"} | 4 of 4 | 0 |\n\nSaved prompt and share link must stay unchanged.`;
+    const saved={...result,markdown:legacy};
+    db.prepare("UPDATE adit_pr_descriptions SET snapshot_json=?,markdown=? WHERE id=?").run(JSON.stringify(saved),legacy,result.id);
+    const updated=pr.read(w,result.id);
+    expect(updated.markdown).toContain(`| bbbbbbb second \\| part | ${zh?"未找到提交会话":"No submitting conversation found"} | 2 of 2 | 0 |`);
+    expect(updated.markdown).toContain("Custom template text");
+    expect(updated.markdown).toContain("Saved prompt and share link must stay unchanged.");
+    expect(updated.summary).toEqual(result.summary);
+    expect(JSON.parse((db.prepare("SELECT snapshot_json FROM adit_pr_descriptions WHERE id=?").get(result.id) as {snapshot_json:string}).snapshot_json)).toEqual(saved);
+  }
+});

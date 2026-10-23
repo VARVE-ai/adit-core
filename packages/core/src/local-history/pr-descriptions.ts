@@ -36,7 +36,9 @@ export class LocalPrDescriptions {
   read(w: LocalWorkspace, id: string): PrDescription {
     const r = this.db.prepare("SELECT snapshot_json FROM adit_pr_descriptions WHERE id=? AND workspace_id=? AND status='ready'").get(id, w.id) as Row | undefined;
     if (!r) throw new LocalStateError("PR description not found", 404);
-    return JSON.parse(r.snapshot_json);
+    const result: PrDescription = JSON.parse(r.snapshot_json);
+    // Presentation-only upgrade of saved descriptions; attribution stays at generation time.
+    return { ...result, markdown: clarifyPrMarkdown(result) };
   }
   generate(w: LocalWorkspace, scope: PrScope, input: Partial<PrOptions>, template?: { path: string; text: string; digest: string }, descriptionId = randomUUID()): PrDescription {
     // Read one consistent analysis snapshot; let collection write while rendering.
@@ -188,14 +190,14 @@ export function renderPrMarkdown(r: PrDescription, prompts: { number: number; te
     out.push(say(`The associated conversations contain ${s.prompts === null ? "an unknown number of" : n(s.prompts)} prompts and ${duration} in total. These whole-session totals may include work outside the selected commit range.`, `关联完整会话合计 ${s.prompts === null ? "未知" : n(s.prompts)} 次提问、${duration}。这些完整会话统计可能包含本次提交范围以外的工作。`));
   }
   if (r.options.sessions || (r.options.lines && r.options.detail !== "brief")) {
-    const headers = [say("Commit", "提交"), ...(r.options.sessions ? [say("Conversation", "会话")] : []), ...(r.options.lines ? [say("Matched session content", "匹配到会话内容"), say("Not traced", "来源不明")] : [])];
+    const headers = [say("Commit", "提交"), say("Submitting conversation", "提交会话"), ...(r.options.lines ? [say("Matched code lines", "已匹配代码行"), say("Untraced code lines", "来源不明代码行")] : [])];
     const table = ["| " + headers.join(" | ") + " |", "| " + headers.map((_, index) => r.options.lines && index >= headers.length - 2 ? "---:" : "---").join(" | ") + " |"];
     for (const c of r.commits.filter(c => c.included)) {
       const other = c.writers.filter(w => w.number !== c.submitter?.number);
       const conversation = c.submitter ? `#${c.submitter.number}` : say(c.analysis === "pending" ? "Analysis pending" : "No submitting conversation found", c.analysis === "pending" ? "尚未分析" : "没找到提交会话");
-      table.push("| " + [c.sha.slice(0, 7) + " " + md(c.subject), ...(r.options.sessions ? [conversation + (other.length ? `; ${say("content", "代码来源")}: ${other.map(w => "#" + w.number).join(", ")}` : "")] : []), ...(r.options.lines ? [c.lines ? `${n(c.lines.certain + c.lines.likely + c.lines.possible)} of ${n(c.lines.eligible)}` : "—", c.lines ? n(c.lines.unknown) : "—"] : [])].join(" | ") + " |");
+      table.push("| " + [c.sha.slice(0, 7) + " " + md(c.subject), r.options.sessions ? conversation + (other.length ? `; ${say("content", "代码来源")}: ${other.map(w => "#" + w.number).join(", ")}` : "") : submissionLabel(c, zh), ...(r.options.lines ? [c.lines ? `${n(c.lines.certain + c.lines.likely + c.lines.possible)} of ${n(c.lines.eligible)}` : "—", c.lines ? n(c.lines.unknown) : "—"] : [])].join(" | ") + " |");
     }
-    table.push("| " + [say("Total", "合计"), ...(r.options.sessions ? [`${n(s.sessions)} ${say("conversations", "个会话")}`] : []), ...(r.options.lines ? [l ? `${n(l.certain + l.likely + l.possible)} of ${n(l.eligible)} (${percentage(l.certain + l.likely + l.possible)})` : "—", l ? `${n(l.unknown)} (${percentage(l.unknown)})` : "—"] : [])].join(" | ") + " |");
+    table.push("| " + [say("Total", "合计"), r.options.sessions ? `${n(s.sessions)} ${say("conversations", "个会话")}` : say(`${n(s.commits - s.unmatched - s.pending)} matched`, `${n(s.commits - s.unmatched - s.pending)} 个已找到`), ...(r.options.lines ? [l ? `${n(l.certain + l.likely + l.possible)} of ${n(l.eligible)} (${percentage(l.certain + l.likely + l.possible)})` : "—", l ? `${n(l.unknown)} (${percentage(l.unknown)})` : "—"] : [])].join(" | ") + " |");
     out.push(table.join("\n"));
   }
   if (r.options.sessions) out.push(r.sessions.map(s => `#${s.number} ${md(s.agent)} · ${s.date === null ? "—" : new Date(s.date).toISOString().slice(0, 10)} · ${s.prompts ?? "—"} ${say("prompts", "次提问")} · ${s.models.map(md).join(", ") || say("model unknown", "模型未知")}`).join("  \n"));
@@ -212,4 +214,34 @@ export function renderPrMarkdown(r: PrDescription, prompts: { number: number; te
   }
   if (r.options.aditLabel) out.push(zh ? "_AI 使用声明 · 由 ADIT 生成_" : "_AI usage disclosure · by ADIT_");
   return out.filter(Boolean).join("\n\n");
+}
+
+
+function submissionLabel(commit: PrCommit, zh: boolean) {
+  return commit.analysis === "pending" ? (zh ? "尚未分析" : "Analysis pending")
+    : commit.submitter ? (zh ? "已找到" : "Found") : (zh ? "未找到提交会话" : "No submitting conversation found");
+}
+
+function clarifyPrMarkdown(result: PrDescription): string {
+  const zh = result.options.language === "zh";
+  let inLegacyTable = false;
+  return result.markdown.split("\n").map(line => {
+    const legacy = line.startsWith("| Commit |") && line.includes("| Matched session content |") || line.startsWith("| 提交 |") && line.includes("| 匹配到会话内容 |");
+    if (legacy) {
+      inLegacyTable = !line.includes("| Conversation |") && !line.includes("| 会话 |");
+      line = line.replace("| Matched session content |", "| Matched code lines |").replace("| Not traced |", "| Untraced code lines |")
+        .replace("| 匹配到会话内容 |", "| 已匹配代码行 |").replace("| 来源不明 |", "| 来源不明代码行 |")
+        .replace("| Conversation |", "| Submitting conversation |").replace("| 会话 |", "| 提交会话 |");
+      if (inLegacyTable) line = line.replace(zh ? "| 提交 |" : "| Commit |", zh ? "| 提交 | 提交会话 |" : "| Commit | Submitting conversation |");
+      return line;
+    }
+    if (!line.startsWith("|")) { inLegacyTable = false; return line; }
+    if (!inLegacyTable) return line;
+    const separator = (/^\|(?:\\.|[^|\\])*\|/.exec(line)?.[0].length ?? 0) - 1;
+    if (separator < 0) return line;
+    const commit = result.commits.find(c => c.included && line.startsWith("| " + c.sha.slice(0,7) + " "));
+    const value = commit ? submissionLabel(commit, zh) : /^\|\s*:?-+/.test(line) ? "---"
+      : zh ? `${result.summary.commits - result.summary.unmatched - result.summary.pending} 个已找到` : `${result.summary.commits - result.summary.unmatched - result.summary.pending} matched`;
+    return line.slice(0,separator + 1) + " " + value + " |" + line.slice(separator + 1);
+  }).join("\n");
 }
