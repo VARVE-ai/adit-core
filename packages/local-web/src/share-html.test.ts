@@ -1,6 +1,10 @@
 import { expect, it } from "vitest";
 import type { ShareSnapshot } from "../../core/src/local-history/sharing-types";
 import { renderShareHtml } from "./share-html";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { SharedSessionView } from "./publication-ui";
+import { SharedSessionTimeline } from "./shared-session-timeline";
 
 const snapshot: ShareSnapshot = {
   schemaVersion: 1, title: "Reviewed conversation", agent: "Codex", provider: "codex", models: ["test-model"],
@@ -11,13 +15,20 @@ const snapshot: ShareSnapshot = {
     commits: [{ sha: "abcdef123", subject: "fix: example", repository: "example", files: 2, additions: 4, deletions: 1 }],
   }],
 };
-it("exports the preview layout as standalone HTML with rich replies and native disclosures", () => {
+it("exports the same expanded timeline as the local preview, without collapse controls", () => {
   const html = renderShareHtml(snapshot);
   expect(html).toMatch(/^<!doctype html>/);
   expect(html).toContain('<strong>Fixed</strong>');
-  expect(html).toContain('class="shared-timeline"');
-  expect(html).toContain('class="shared-commit"');
-  expect(html).toContain('<details class="shared-operations">');
+  expect(html).toContain('class="session-conversation shared-session-conversation"');
+  expect(html).toContain('class="session-reply-node"');
+  expect(html).toContain('class="session-tool-node"');
+  expect(html).toContain('class="session-commit-node"');
+  expect(html).not.toMatch(/<(?:details|summary|button)\b/);
+  expect(html).not.toContain('lucide-chevron');
+  const local = renderToStaticMarkup(createElement(SharedSessionView, { snapshot })).replaceAll('href="/agent-icons.svg#', 'href="#');
+  expect(html).toContain(local);
+  const timeline = renderToStaticMarkup(createElement(SharedSessionTimeline, { snapshot }));
+  expect(renderToStaticMarkup(createElement(SharedSessionView, { snapshot, review: true }))).toContain(timeline);
   expect(html).toContain('git status --short');
   expect(html).toContain('<symbol id="codex"');
   expect(html).toContain('href="#codex"');
@@ -47,4 +58,17 @@ it("supports command-only and unknown metadata without inserting excluded dialog
   expect(html).not.toContain("Explain the change");
   expect(html).not.toContain("Cost:");
   expect(html).not.toContain("NaN");
+});
+
+it("renders full reply text, thinking and tool output instead of optional summaries", () => {
+  const html = renderShareHtml({ ...snapshot, turns: [{ ...snapshot.turns[0], events: [
+    { kind: "reply", text: "Full reply body", summary: "Short preview" },
+    { kind: "thinking", text: "Full reasoning" },
+    { kind: "output", text: "Full tool output\nlast line" },
+  ] }] });
+  expect(html).toContain("Full reply body");
+  expect(html).not.toContain("Short preview");
+  expect(html).toContain("Full reasoning");
+  expect(html).toContain("Full tool output\nlast line");
+  expect(html).not.toMatch(/<(?:details|summary)\b/);
 });

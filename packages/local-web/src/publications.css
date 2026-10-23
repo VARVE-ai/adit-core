@@ -41,6 +41,17 @@
 .shared-reviewed{display:flex;align-items:center;gap:6px;color:hsl(var(--muted-foreground));font-size:12px;margin:12px 0 16px}
 .shared-timeline{margin-top:20px;padding-top:22px;border-top:1px solid hsl(var(--border))}
 .shared-session-conversation{margin-top:20px}
+.shared-session-conversation .session-exchange{margin:0;border:0}
+.shared-message{min-width:0}
+.shared-message-with-usage{display:grid;grid-template-columns:minmax(0,1fr) fit-content(45%);align-items:start;gap:12px}
+.shared-message-with-usage>.session-usage{margin:3px 0 0;max-width:100%;min-width:0;overflow:hidden;flex-wrap:nowrap}
+.shared-session-conversation pre{max-height:none}
+.shared-session-conversation .session-event-detail{padding-top:0}
+.shared-session-conversation .session-markdown table{width:100%;text-align:left;white-space:nowrap;font-size:12px;line-height:normal}
+.shared-session-conversation .session-markdown :is(th,td){font-size:12px}
+.shared-session-conversation .session-markdown th{font-weight:400;color:hsl(var(--muted-foreground));background:hsl(var(--muted)/.4)}
+.shared-session-conversation .session-markdown td:first-child{min-width:220px}
+.shared-session-conversation .session-markdown tbody tr:hover{background:hsl(var(--muted)/.3)}
 .shared-turn{position:relative;padding:0 0 28px 40px}.shared-turn:before{content:"";position:absolute;left:10px;top:15px;bottom:0;border-left:2px solid hsl(var(--border))}
 .shared-node{position:absolute;left:1px;top:1px;width:20px;height:20px;border:2px solid #93c5fd;border-radius:50%;background:hsl(var(--background));display:flex;align-items:center;justify-content:center;color:#60a5fa}
 .shared-prompt{white-space:pre-wrap;line-height:1.9;overflow-wrap:anywhere}.shared-usage{display:inline-flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:10px;line-height:17px;padding:0 5px;background:hsl(var(--muted)/.5);border:1px solid hsl(var(--border));border-radius:3px;margin-left:8px;vertical-align:middle;font-family:ui-monospace,monospace}.shared-usage>span{display:inline-flex;gap:3px;align-items:center;color:#0891b2}.shared-usage>span:first-of-type{color:#10b981}.shared-usage>span:nth-of-type(2){color:#a855f7}
