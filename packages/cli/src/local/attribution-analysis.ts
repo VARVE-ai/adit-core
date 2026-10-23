@@ -21,6 +21,7 @@ import {
   wordTokens,
   tokenOverlap,
   literals,
+  decodeEscapes,
 } from "./attribution-evidence.js";
 import { saveAttributionSummaries, type AttributionLine, type AttributionCandidate } from "./attribution-summaries.js";
 const execute = promisify(execFile);
@@ -328,13 +329,29 @@ function commandOf(call: Row): string {
     return "";
   }
 }
+function submissionCommands(command: string, depth = 0): string[] {
+  if (depth > 3) return [command];
+  // Codex exec wraps shell bodies in JS string literals; some native records
+  // also escape that entire script. Decode only the wrapper and command fields,
+  // never execute scripts or treat arbitrary strings (e.g. search terms) as commands.
+  const source = /\b(?:cmd|command|script|code)(?:\\["'])?\s*:\s*\\["']/.test(command)
+    ? decodeEscapes(command)
+    : command;
+  const embedded = literals(source).flatMap((literal) =>
+    /\b(?:cmd|command|script|code)["']?\s*:\s*$/.test(source.slice(0, literal.start))
+      ? submissionCommands(literal.text, depth + 1)
+      : [],
+  );
+  return embedded.length ? embedded : [source];
+}
 function commitCommand(command: string): boolean {
-  return (
-    !/^\s*(?:rg|grep|cat|Get-Content)\b/i.test(command) &&
-    /\bgit(?:[\s'",\[\]-]|\\["'])[^\n]{0,200}?\bcommit\b/.test(command)
+  return submissionCommands(command).some((body) =>
+    !/^\s*(?:rg|grep|cat|Get-Content)\b/i.test(body) &&
+    /\bgit(?:[\s'",\[\]-]|\\["'])[^\n]{0,200}?\bcommit\b/.test(body),
   );
 }
 function subjects(command: string, output: string): string[] {
+  command = submissionCommands(command).join("\n");
   const values: string[] = [];
   for (const m of output.matchAll(/^\[[^\]\r\n]+ [a-f0-9]{7,64}\]\s+(.+)$/gm))
     values.push(m[1].trim());

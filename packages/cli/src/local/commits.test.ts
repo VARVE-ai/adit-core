@@ -516,6 +516,37 @@ it("saves weaker submission bases for quiet commits and rewritten hashes instead
   });
   expect(queryCommits(store, workspace).commits[0].branch).toBeNull();
 });
+it.each([
+  { escaped: false, quiet: false, search: false },
+  { escaped: true, quiet: false, search: false },
+  { escaped: true, quiet: true, search: false },
+  { escaped: true, quiet: false, search: true },
+])("recognizes wrapped multiline commit commands without treating searches as submissions: %j", async ({ escaped, quiet, search }) => {
+  const { sha, now, workspace, history } = fixture();
+  const command = search ? 'rg "git commit" history.log' : [
+    "git diff --check",
+    ...Array.from({ length: 20 }, (_, i) => `Write-Output 'preflight check ${i}'`),
+    'git commit -m "fixture"',
+  ].join("\n");
+  const script = `text(await tools.exec_command({cmd:${JSON.stringify(command)},workdir:${JSON.stringify(root)}}));\n`;
+  const input = escaped ? JSON.stringify(script).slice(1, -1) : script;
+  history.write({
+    provider: "codex", id: "wrapped-submitter", cwd: root,
+    messages: [
+      { key: "u", role: "user", timestamp: new Date(now - 2000).toISOString(), content: "commit changes", raw: {} },
+      { key: "c", role: "assistant", timestamp: new Date(now - 1000).toISOString(), content: null,
+        raw: { payload: { type: "custom_tool_call", call_id: "wrapped-commit", name: "exec", input } } },
+      { key: "r", role: "tool", timestamp: new Date(now).toISOString(), content: null,
+        raw: { payload: { type: "custom_tool_call_output", call_id: "wrapped-commit",
+          output: "Script completed\nOutput:\n\n" + JSON.stringify({ exit_code: 0,
+            output: quiet ? "" : `Staged source scan passed.\n[feature/fixture ${sha.slice(0, 7)}] fixture\n` }) } } },
+    ],
+  });
+  await analyzeAttribution(store, workspace);
+  const record = queryCommits(store, workspace).commits[0].record;
+  if (search) expect(record).toBeNull();
+  else expect(record).toMatchObject({ provider: "codex", sessionId: "wrapped-submitter", method: quiet ? "subject_time" : "hash" });
+});
 it("extracts the matching commit's recorded branch without guessing from other commits or detached HEAD", () => {
   const sha = "a".repeat(40);
   expect(
