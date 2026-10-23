@@ -26,12 +26,13 @@ export async function copyPublication(text: string) {
   try { field.select(); if (!document.execCommand("copy")) throw new Error("Clipboard unavailable"); }
   finally { field.remove(); }
 }
-export function PublicationCopy({ text, label }: { text?: string; label: string }) {
+export function PublicationCopy({ text, getText, label, iconOnly = false }: { text?: string; getText?: () => Promise<string>; label: string; iconOnly?: boolean }) {
   const [state, setState] = useState("idle");
   const revision = useRef(0), timer = useRef<ReturnType<typeof setTimeout>>();
   useEffect(() => { revision.current++; setState("idle"); return () => { revision.current++; clearTimeout(timer.current); }; }, [text]);
-  return <button disabled={!text || state === "copying"} onClick={async () => { const current = revision.current; setState("copying"); try { await copyPublication(text!); if (current === revision.current) setState("done"); } catch { if (current === revision.current) setState("failed"); } timer.current = setTimeout(() => { if (current === revision.current) setState("idle"); }, 2500); }}>
-    {state === "done" ? <Check size={14} /> : <Copy size={14} />}<span aria-live="polite">{state === "copying" ? p("复制中…", "Copying…") : state === "done" ? p("已复制", "Copied") : state === "failed" ? p("复制失败，请重试", "Copy failed. Try again") : label}</span>
+  const statusLabel = state === "copying" ? p("复制中…", "Copying…") : state === "done" ? p("已复制", "Copied") : state === "failed" ? p("复制失败，请重试", "Copy failed. Try again") : label;
+  return <button className={iconOnly ? "publication-copy-icon" : undefined} title={iconOnly ? statusLabel : undefined} aria-label={iconOnly ? statusLabel : undefined} data-copy-state={state} disabled={(!text && !getText) || state === "copying"} onClick={async () => { const current = revision.current; setState("copying"); try { await copyPublication(getText ? await getText() : text!); if (current === revision.current) setState("done"); } catch { if (current === revision.current) setState("failed"); } timer.current = setTimeout(() => { if (current === revision.current) setState("idle"); }, 2500); }}>
+    {state === "done" ? <Check size={14} /> : <Copy size={14} />}<span className={iconOnly ? "publication-copy-label-hidden" : undefined} aria-live="polite">{statusLabel}</span>
   </button>;
 }
 export function PublicationError({ error }: { error: string }) {

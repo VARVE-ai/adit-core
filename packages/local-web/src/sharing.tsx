@@ -1,12 +1,12 @@
 import { AgentLabel } from "./agent-label";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ListLoadMore, usePagedList, type ListPage } from "./paged-list";
 import { ArrowLeft, ChevronDown, ChevronRight, ExternalLink, Link, Loader2, LockKeyhole, Share2 } from "lucide-react";
 import { type ShareDraft, type ShareItem, type ShareOptions } from "../../core/src/local-history/sharing-types";
 import { p, number, publicationDate, PublicationAgent, PublicationCopy, PublicationError, SharedSessionView, type PublicationApi } from "./publication-ui";
 
 type Detail = ShareDraft & { remoteUrl?: string; viewerUrl?: string };
 export function SharingPage({ workspace, api, review, onNavigate }: { workspace: { id: string }; api: PublicationApi; review: boolean; onNavigate: (path: string) => void }) {
-  const [list, setList] = useState<{ total: number; items: ShareItem[]; nextOffset: number | null; nextCursor?: string | null }>();
   const [detail, setDetail] = useState<Detail>(), [error, setError] = useState(""), [busy, setBusy] = useState(false), [loading, setLoading] = useState(true);
   const [title, setTitle] = useState(""), [options, setOptions] = useState<ShareOptions>(), [nameInput, setNameInput] = useState("");
   const update = useRef(0), start = useRef(false), idempotency = useRef(crypto.randomUUID()), publishing = useRef(false);
@@ -15,11 +15,13 @@ export function SharingPage({ workspace, api, review, onNavigate }: { workspace:
   const endpoint = (path: string) => path + (path.includes("?") ? "&" : "?") + new URLSearchParams({ workspaceId: workspace.id });
   const accept = (d: Detail) => { setDetail(d); setTitle(d.snapshot.title); setOptions(d.options); };
   const choose = async (id: string) => { const request = ++update.current; setLoading(true); setError(""); try { const d = await api<Detail>(endpoint(`/shares/${id}`)); if (request === update.current) setDetail(d); } catch (e) { if (request === update.current) setError(String(e)); } finally { if (request === update.current) setLoading(false); } };
-  const loadList = async (offset = 0) => {
-    const d = await api<NonNullable<typeof list>>(endpoint(`/shares?offset=${offset}${offset && list?.nextCursor ? `&cursor=${list.nextCursor}` : ""}`));
-    setList(old => ({ ...d, items: offset ? [...(old?.items || []), ...d.items] : d.items }));
-    if (!offset) { const id = query.get("id") || d.items[0]?.id; if (id) await choose(id); else setLoading(false); }
-  };
+  const request = useCallback((offset: number, cursor: string | undefined, signal: AbortSignal) =>
+    api<ListPage<ShareItem>>(`/shares?${new URLSearchParams({ workspaceId: workspace.id, offset: String(offset), limit: "50", ...(cursor ? { cursor } : {}) })}`, "GET", undefined, signal), [api, workspace.id]);
+  const pagination = usePagedList<ShareItem, ListPage<ShareItem>>({ request, itemKey: item => item.id, enabled: !review,
+    onFirstPage: d => { const id = query.get("id") || d.items[0]?.id; if (id) void choose(id); else setLoading(false); },
+  });
+  const list = pagination.data;
+  useEffect(() => { if (pagination.error && !list) setLoading(false); }, [pagination.error, list]);
   const loadInitial = async () => {
       setLoading(true); setError("");
       try {
@@ -27,11 +29,11 @@ export function SharingPage({ workspace, api, review, onNavigate }: { workspace:
           const id = query.get("draft");
           const d = id ? await api<Detail>(endpoint(`/share-drafts/${id}`)) : await api<Detail>(endpoint("/share-drafts"), "POST", { provider: query.get("provider"), sessionId: query.get("session") });
           accept(d); history.replaceState(null, "", `/share-review/${workspace.id}?draft=${d.id}`); setLoading(false);
-        } else await loadList();
+        }
       } catch (e) { setError(String(e)); setLoading(false); }
   };
   useEffect(() => {
-    if (start.current) return; start.current = true;
+    if (!review || start.current) return; start.current = true;
     void loadInitial();
   }, []);
   const changed = !!detail && !!options && (title !== detail.snapshot.title || JSON.stringify(options) !== JSON.stringify(detail.options));
@@ -53,20 +55,30 @@ export function SharingPage({ workspace, api, review, onNavigate }: { workspace:
     catch (e) { setError(String(e)); try { setDetail(await api<Detail>(endpoint(`/share-drafts/${detail.id}`))); } catch { /* Preserve preview during connectivity failure. */ } }
     finally { publishing.current = false; setBusy(false); }
   };
-  const caption = detail?.remoteUrl ? `### ${p("AI 协作记录", "AI collaboration record")}\n\n${p(
+  const caption = (detail: Detail) => `### ${p("AI 协作记录", "AI collaboration record")}\n\n${p(
     `分享一段使用 ${detail.snapshot.agent} 的开发会话，共 ${detail.snapshot.promptCount} 轮提问，关联 ${detail.snapshot.commitCount} 个提交。`,
     `Sharing a development session with ${detail.snapshot.agent}: ${detail.snapshot.promptCount} prompt${detail.snapshot.promptCount === 1 ? "" : "s"} and ${detail.snapshot.commitCount} linked commit${detail.snapshot.commitCount === 1 ? "" : "s"}.`,
-  )}\n\n[${(detail.snapshot.title.trim() || p("未命名会话", "Untitled session")).replace(/\r?\n/g, " ").replace(/([\\\[\]])/g, "\\$1")}](${detail.viewerUrl || detail.remoteUrl})` : undefined;
+  )}\n\n[${(detail.snapshot.title.trim() || p("未命名会话", "Untitled session")).replace(/\r?\n/g, " ").replace(/([\\\[\]])/g, "\\$1")}](${detail.viewerUrl || detail.remoteUrl})`;
   return <section className={`publication-page ${review ? "share-review-page" : "share-library-page"}`}>
-    <div className="publication-toolbar">{review ? <><button onClick={() => onNavigate(`/sessions/${workspace.id}${detail ? `?${new URLSearchParams({ provider: detail.provider, session: detail.sessionId })}` : ""}`)}><ArrowLeft size={14} />{p("返回会话", "Back to sessions")}</button><span className="publication-toolbar-title"><Share2 size={14} />{p("分享这个会话", "Share this session")}</span><span className="publication-truncate publication-muted">{detail?.snapshot.title}</span><span className="publication-toolbar-right publication-muted"><LockKeyhole size={13} />{p("这一页只有你能看到，生成链接之前不会上传任何内容", "Only you can see this page. Nothing is uploaded before you publish.")}</span></> : <><span>{p("已分享的会话", "Shared sessions")} <span className="publication-muted">{list?.total ?? "—"}</span></span><div className="publication-toolbar-right"><PublicationCopy text={caption} label={p("复制分享文案", "Copy share text")} /><button className="primary" onClick={() => onNavigate(`/sessions/${workspace.id}`)}><Share2 size={14} />{p("去分享", "Share a session")}</button></div></>}</div>
+    <div className="publication-toolbar">{review ? <><button onClick={() => onNavigate(`/sessions/${workspace.id}${detail ? `?${new URLSearchParams({ provider: detail.provider, session: detail.sessionId })}` : ""}`)}><ArrowLeft size={14} />{p("返回会话", "Back to sessions")}</button><span className="publication-toolbar-title"><Share2 size={14} />{p("分享这个会话", "Share this session")}</span><span className="publication-truncate publication-muted">{detail?.snapshot.title}</span><span className="publication-toolbar-right publication-muted"><LockKeyhole size={13} />{p("这一页只有你能看到，生成链接之前不会上传任何内容", "Only you can see this page. Nothing is uploaded before you publish.")}</span></> : <><span>{p("已分享的会话", "Shared sessions")} <span className="publication-muted">{list?.total ?? "—"}</span></span><div className="publication-toolbar-right"><button className="primary" onClick={() => onNavigate(`/sessions/${workspace.id}`)}><Share2 size={14} />{p("去分享", "Share a session")}</button></div></>}</div>
     <PublicationError error={error} />
     {review && error && !detail && <div className="publication-retry"><button disabled={loading} onClick={() => void loadInitial()}>{p("重新检查预览", "Refresh preview")}</button></div>}
     {review && error && detail && ["ready", "failed"].includes(detail.status) && <div className="publication-retry"><button disabled={loading} onClick={() => setRetryPreview(n => n + 1)}>{p("重新检查预览", "Refresh preview")}</button></div>}
     <div className="publication-work">
-      {!review && <aside className="publication-list share-list">{list?.items.map((s, index) => <div key={s.id}>
+      {!review && <aside ref={pagination.scrollRef} className="publication-list share-list" aria-busy={pagination.loading}>{list?.items.map((s, index) => <div key={s.id}>
         {(index === 0 || new Date(s.published_at!).toDateString() !== new Date(list.items[index - 1].published_at!).toDateString()) && <div className="publication-day">{publicationDate(s.published_at)} {p("分享", "shared")}</div>}
-        <div className="publication-list-entry"><span className="publication-list-node"><PublicationAgent provider={s.provider} /></span><div role="button" tabIndex={0} className={`publication-choice ${detail?.id === s.id ? "on" : ""}`} onClick={() => void choose(s.id)} onKeyDown={e => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); void choose(s.id); } }}><strong>{detail?.id === s.id ? <ChevronDown size={14} /> : <ChevronRight size={14} />}{s.title}</strong><small><AgentLabel provider={s.provider} /> · {p("分享于", "Shared")} {publicationDate(s.published_at, true)} · <span className="publication-success">{p("已分享", "Shared")}</span></small><small className="publication-link"><Link size={12} /><a href={s.viewer_url || s.remote_url || undefined} title={s.viewer_url || s.remote_url || undefined} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>{p("打开分享链接", "Open share link")}</a></small><small>{s.prompt_count} {p("轮提问", "prompts")} · {s.commit_count} {p("个提交", "commits")}</small></div></div>
-      </div>)}{list?.nextOffset != null && <button onClick={() => void loadList(list.nextOffset!).catch(e => setError(String(e)))}>{p("加载更多", "Load more")}</button>}{list?.total === 0 && <div className="publication-empty">{p("还没有分享过会话", "No shared sessions yet")}</div>}</aside>}
+        <div className="publication-list-entry"><span className="publication-list-node"><PublicationAgent provider={s.provider} /></span><div role="button" tabIndex={0} className={`publication-choice ${detail?.id === s.id ? "on" : ""}`} onClick={() => void choose(s.id)} onKeyDown={e => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); void choose(s.id); } }}>
+          <div className="share-list-heading">
+            <strong>{detail?.id === s.id ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<span title={s.title}>{s.title}</span></strong>
+            <div className="share-list-actions" onClick={e => e.stopPropagation()}>
+              <PublicationCopy iconOnly text={detail?.id === s.id && detail.remoteUrl ? caption(detail) : undefined} getText={detail?.id !== s.id && (s.viewer_url || s.remote_url) ? async () => caption(await api<Detail>(endpoint(`/shares/${s.id}`))) : undefined} label={p("复制分享文案", "Copy share text")} />
+            </div>
+          </div>
+          <small><AgentLabel provider={s.provider} /> · {p("分享于", "Shared")} {publicationDate(s.published_at, true)} · <span className="publication-success">{p("已分享", "Shared")}</span></small>
+          <small className="publication-link"><Link size={12} /><a href={s.viewer_url || s.remote_url || undefined} title={s.viewer_url || s.remote_url || undefined} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>{p("打开分享链接", "Open share link")}</a></small>
+          <small>{s.prompt_count} {p("轮提问", "prompts")} · {s.commit_count} {p("个提交", "commits")}</small>
+          </div></div>
+      </div>)}<ListLoadMore pagination={pagination} />{list?.total === 0 && <div className="publication-empty">{p("还没有分享过会话", "No shared sessions yet")}</div>}</aside>}
       <div className="publication-preview" aria-busy={loading}>{review && detail && <div className="share-review-heading"><b>{p("公开后别人看到的内容", "What others will see")}</b><span className="publication-success">{p("已遮盖", "Redacted")} {number(Object.values(detail.redactions).reduce((n, v) => n + v, 0))} {p("处", "locations")}</span><span className="publication-muted">{detail.excludedCategories} {p("类内容不分享", "content types excluded")}</span>{loading && <Loader2 className="spin" size={14} />}</div>}
         {detail ? <><SharedSessionView snapshot={detail.snapshot} review={review} />{review && detail.memoryActions > 0 && <p className="publication-muted share-memory-note"><LockKeyhole size={13} />{p(`写入个人记忆的 ${detail.memoryActions} 次操作已去掉，不会出现在分享页里`, `${detail.memoryActions} personal memory writes were removed and will not appear in the shared page.`)}</p>}{!review && detail.remoteUrl && <a className="share-open-gist" href={detail.viewerUrl || detail.remoteUrl} target="_blank" rel="noreferrer"><ExternalLink size={13} />{p("打开分享链接", "Open share link")}</a>}</> : <div className="publication-empty">{review ? loading ? <><Loader2 className="spin" />{p("正在检查分享内容…", "Checking share content…")}</> : p("内容检查失败，请重试", "Content check failed. Please try again.") : loading ? <Loader2 className="spin" /> : p("选择一个分享查看内容", "Select a shared session")}</div>}
       </div>

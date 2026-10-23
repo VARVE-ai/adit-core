@@ -254,8 +254,14 @@ const respond = (path: string, input?: any): unknown => {
       events: path.includes("mode=focused")?[{id:"reply",kind:"reply",text:"Final response",at:null}]:[{id:"tool",kind:"tool",name:"Bash",text:"echo hello",at:null},{id:"reply",kind:"reply",text:"Final response",at:null}],
     }],
   };
-  if (path.startsWith("/commits?"))
-    return { repositories: [workspace.path], commits, analysis };
+  if (path.startsWith("/commits?")) {
+    const params = new URLSearchParams(path.split("?")[1]);
+    const filtered = commits.filter(c => (!params.get("repository") || c.repository === params.get("repository"))
+      && (params.get("filter") === "linked" ? !!c.record : params.get("filter") === "unlinked" ? c.analyzed && !c.record : true)
+      && `${c.subject} ${c.sha}`.toLowerCase().includes((params.get("q") || "").toLowerCase()));
+    return { repositories: [workspace.path], commits: filtered, analysis, total: filtered.length, nextOffset: null,
+      summary: { total: commits.length, linked: commits.filter(c => c.record).length, first: Math.min(...commits.map(c => c.authoredAt)) } };
+  }
   if (path.startsWith("/commits/sources?"))
     return {
       analysis,

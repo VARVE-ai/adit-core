@@ -1,0 +1,4 @@
+.list-load-more { min-height: 1px; text-align: center; color: hsl(var(--muted-foreground)); font-size: 12px; }
+.list-load-more:has(> *) { padding: 12px 0; }
+.list-load-more > span { display: flex; justify-content: center; align-items: center; gap: 6px; }
+.list-load-more button { margin-top: 8px; }
