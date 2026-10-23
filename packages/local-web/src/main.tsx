@@ -108,7 +108,7 @@ type Schedule = {
   version: number;
   nextAt?: string;
 };
-type LoginStartup = { enabled: boolean; supported: boolean; version: number };
+type LoginStartup = { enabled: boolean; supported: boolean; version: number; error?: string };
 type State = {
   workspaces: Workspace[];
   schedule: Schedule;
@@ -1140,6 +1140,9 @@ function WorkspaceEditor({
   const sync = state.workspaces.find(w => w.id === workspace?.id)?.cloudSync;
   const syncing = sync?.status === "queued" || sync?.status === "running";
   const [startupBusy, setStartupBusy] = useState(false);
+  const [startupPrompt, setStartupPrompt] = useState(false);
+  const [startupConsent, setStartupConsent] = useState(false);
+  const [startupError, setStartupError] = useState("");
   const startup = state.startup ?? {
     enabled: false,
     supported: false,
@@ -1151,21 +1154,19 @@ function WorkspaceEditor({
       setCloudDraft((draft) => draft ? { ...draft, mode: "manual" } : null);
     }
   }, [startup.enabled, startup.version]);
-  const changeStartup = async (enabled: boolean) => {
+  const enableStartupForSync = async () => {
+    if (!startupConsent || startupBusy || !startup.supported) return;
     setStartupBusy(true);
+    setStartupError("");
     try {
       await act(async () => {
-        await api("/startup", "PATCH", { enabled, version: startup.version });
-        if (!enabled) {
-          // The global change also pauses saved settings for this directory.
-          const current = form.id
-            ? await api<Workspace>(`/workspaces/${form.id}`)
-            : undefined;
-          setForm((f) => ({
-            ...f,
-            version: current?.version ?? f.version,
-            cloud: { ...f.cloud, mode: "manual" },
-          }));
+        try {
+          const saved = await api<LoginStartup>("/startup", "PATCH", { enabled: true, version: startup.version });
+          if (!saved.enabled) throw new Error(saved.error || "Login startup registration failed");
+          changeCloud({ ...cloudForm, mode: "automatic" });
+          setStartupPrompt(false);
+        } catch (error) {
+          setStartupError(error instanceof Error ? error.message : String(error));
         }
       });
     } finally {
@@ -1558,12 +1559,17 @@ function WorkspaceEditor({
           )}
         </div>
       </section>
+      <details className="workspace-disclosure">
+          <summary>
+            <span className="workspace-disclosure-action">
+              <span>{t("分享与云端设置")}</span>
+              <ChevronRight size={14} aria-hidden="true" />
+            </span>
+          </summary>
       <section className="workspace-setting workspace-sharing">
         <h3>{t("会话分享")}</h3>
         <div className="workspace-options">
-          <p className="repo-hint">
-            {t("配置 GitHub 令牌，用于将本工作目录的会话发布为 GitHub Gist。")}
-          </p>
+          <p className="repo-hint">{t("配置 GitHub 令牌，用于将本工作目录的会话发布为 GitHub Gist。")}</p>
           <div className="session-share-status">
             <span>{t("状态")}</span>
             <Badge status={gist ? "done" : ""}>
@@ -1688,24 +1694,6 @@ function WorkspaceEditor({
             <span>{sync?.nextAt ? new Date(sync.nextAt).toLocaleString() : t("未安排")}</span>
           </div>
           {cloudEditing && <div id="cloud-settings" className="cloud-settings">
-            <div className="field">
-              <label className="startup-option">
-                <input
-                  type="checkbox"
-                  checked={startup.enabled}
-                  disabled={startupBusy || !startup.supported || syncing || cloudSaving}
-                  onChange={(event) => void changeStartup(event.target.checked)}
-                />
-                <span>{t("登录电脑后自动启动")}</span>
-              </label>
-            </div>
-            <p className="repo-hint">
-              {startup.supported
-                ? t(
-                    "此选项对本机所有目录立即生效。勾选后才可自动同步；取消勾选会暂停所有目录的自动同步，仍可手动同步。",
-                  )
-                : t("当前系统不支持登录后自动启动，可使用手动同步。")}
-            </p>
             <fieldset disabled={syncing || cloudSaving}>
               <div className="field">
                 <span>{t("同步方式")}</span>
@@ -1718,14 +1706,15 @@ function WorkspaceEditor({
                       <input
                         type="radio"
                         name="cloud-mode"
-                        disabled={
-                          mode === "automatic" &&
-                          (!startup.enabled || startupBusy)
-                        }
+                        disabled={startupBusy}
                         checked={cloudForm.mode === mode}
-                        onChange={() =>
-                          changeCloud({ ...cloudForm, mode })
-                        }
+                        onChange={() => {
+                          if (mode === "automatic" && !startup.enabled) {
+                            setStartupConsent(false);
+                            setStartupError("");
+                            setStartupPrompt(true);
+                          } else changeCloud({ ...cloudForm, mode });
+                        }}
                       />
                       {mode === "manual" ? t("手动同步") : t("自动同步新记录")}
                     </label>
@@ -1780,6 +1769,26 @@ function WorkspaceEditor({
           </p>}
         </div>
       </section>
+      </details>
+      {startupPrompt && <Modal title={t("开启自动同步")} onClose={() => { if (!startupBusy) setStartupPrompt(false); }}>
+        <p>{t("自动同步需要登录电脑后自动启动 ADIT。此设置对本机所有工作目录生效。")}</p>
+        <div className="field">
+          <label className="startup-option">
+            <input type="checkbox" checked={startupConsent} disabled={startupBusy || !startup.supported}
+              onChange={event => setStartupConsent(event.target.checked)} />
+            <span>{t("登录电脑后自动启动")}</span>
+          </label>
+        </div>
+        {!startup.supported && <p className="repo-hint">{t("当前系统不支持登录后自动启动，可使用手动同步。")}</p>}
+        {startupError && <p role="alert" className="error">{systemMessage(startupError)}</p>}
+        <footer>
+          <button disabled={startupBusy} onClick={() => setStartupPrompt(false)}>{t("取消")}</button>
+          <button className="primary" disabled={startupBusy || !startupConsent || !startup.supported}
+            onClick={() => void enableStartupForSync()}>
+            {startupBusy && <Loader2 size={14} className="spin" />}{t("开启并继续")}
+          </button>
+        </footer>
+      </Modal>}
       <p className="workspace-local-note">
         <ShieldCheck size={14} aria-hidden="true" />
         {savedCloud.enabled
@@ -2310,6 +2319,16 @@ function Account({
 }
 function Runtime({ state, act }: { state: State; act: Act }) {
   const [runtime, setRuntime] = useState<any>();
+  const [startupBusy, setStartupBusy] = useState(false);
+  const startup = state.startup ?? { enabled: false, supported: false, version: 0 };
+  const changeStartup = async (enabled: boolean) => {
+    setStartupBusy(true);
+    try {
+      await act(async () => {
+        await api("/startup", "PATCH", { enabled, version: startup.version });
+      });
+    } finally { setStartupBusy(false); }
+  };
   useEffect(() => {
     void api("/runtime").then(setRuntime);
   }, []);
@@ -2373,6 +2392,20 @@ function Runtime({ state, act }: { state: State; act: Act }) {
             {runtime?.checkedAt ? time(runtime.checkedAt) : t("检测中")}
           </span>
         </div>
+      </section>
+      <section>
+        <h3>{t("启动设置")}</h3>
+        <div className="field">
+          <label className="startup-option">
+            <input type="checkbox" checked={startup.enabled} disabled={startupBusy || !startup.supported}
+              onChange={event => void changeStartup(event.target.checked)} />
+            <span>{t("登录电脑后自动启动")}</span>
+          </label>
+        </div>
+        <p className="repo-hint">{startup.supported
+          ? t("此选项对本机所有目录立即生效。勾选后才可自动同步；取消勾选会暂停所有目录的自动同步，仍可手动同步。")
+          : t("当前系统不支持登录后自动启动，可使用手动同步。")}</p>
+        {startup.error && <p role="alert" className="error">{systemMessage(startup.error)}</p>}
       </section>
       <section>
         <h3>

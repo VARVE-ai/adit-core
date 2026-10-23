@@ -81,6 +81,8 @@ export async function startLocalServer(
   const store = new LocalStore(options.directory);
   const deletionCheckpoint = new DeletionCheckpoint(store.db);
   const startup = new LoginStartup(store, options.startupRegistration);
+  // Isolated in-process servers have no OS side effects unless a registration is supplied.
+  if (options.instance || options.startupRegistration) await startup.initialize();
   const attributionService=options.instance?new AttributionService(store.directory):undefined;
   let achievements: LocalAchievements;
   let achievementService: AchievementService | undefined;

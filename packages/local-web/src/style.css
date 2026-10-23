@@ -682,6 +682,47 @@ footer {
 .workspace-cloud {
   border-top: 1px solid hsl(var(--border));
 }
+.workspace-disclosure > .workspace-sharing {
+  border-top: 0;
+}
+.workspace-disclosure > summary {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  cursor: pointer;
+  list-style: none;
+  line-height: 20px;
+  /* Center the 32px trigger on the preceding section's existing divider. */
+  margin-top: -16px;
+  padding: 0;
+}
+.workspace-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+.workspace-disclosure-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 6px 20px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--background));
+}
+.workspace-disclosure > summary:hover .workspace-disclosure-action {
+  color: hsl(var(--foreground));
+  background: hsl(var(--muted));
+}
+.workspace-disclosure[open] > summary svg {
+  transform: rotate(-90deg);
+}
+.workspace-disclosure-action > svg {
+  flex-shrink: 0;
+  transform: rotate(90deg);
+}
 .workspace-sharing .repo-hint {
   margin: 0;
   line-height: 20px;

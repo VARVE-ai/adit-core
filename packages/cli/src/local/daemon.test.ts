@@ -23,6 +23,11 @@ it("keeps one detached instance and resumes collection after restart without a b
   const data = join(root, "data"),
     workspace = join(root, "workspace"),
     source = join(root, "source");
+  // This lifecycle fixture exercises an explicitly disabled global preference.
+  // Never create a login entry in the developer's actual OS Startup directory.
+  const initialSettings = new LocalStore(data);
+  initialSettings.set("login-startup", { enabled: false, version: 1 });
+  initialSettings.close();
   mkdirSync(join(workspace,".git"),{recursive:true});
   mkdirSync(source);
   const env = {
