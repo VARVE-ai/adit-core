@@ -621,7 +621,104 @@ function harness() {
   });
   return { rows, event };
 }
+// Reduced from local v3/v4 logs; identities, paths and message text are synthetic.
+// User messages are direct, while the other message envelopes are nested.
+function recordedHarness(version: 3 | 4) {
+  const rows: Record<string, unknown>[] = [
+    { type: "session", version, id: "recorded-harness", cwd: "/workspace" },
+  ];
+  const event = (type: string, data: unknown, surfaceOp?: string) => {
+    rows.push({ type, seq: rows.length - 1, time: 1800000000000 + rows.length, data,
+      ...(surfaceOp ? { surfaceOp } : {}) });
+  };
+  const message = (role: string, text: string, source: Record<string, unknown>) =>
+    ({ id: `${role}-message`, role, content: [{ type: "text", text }], source });
+  event("turn/start", { turn: 1 });
+  event("step/start", { turn: 1, step: 1 });
+  event("system/message", { turn: 1, step: 1,
+    message: message("system", "System instructions", { kind: "system" }) }, "append");
+  event("user/message", message("user", "Inspect the project", { kind: "user" }), "append");
+  if (version === 4) event("developer/message", { turn: 1, step: 1, headerSeq: 0,
+    message: message("developer", "Updated tool instructions", { kind: "developer" }) }, "append");
+  event("request/header", { turn: 1, step: 1, header: { config: { model: "example-model" } } });
+  event("assistant/message", { turn: 1, step: 1, message: {
+    id: "assistant-call", role: "assistant", source: { kind: "model", model: "example-model" },
+    content: [{ type: "text", text: "Inspecting" },
+      { type: "tool-call", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
+  } }, "append");
+  event("tool/call", { turn: 1, step: 1, callId: "call-1", name: "bash", arguments: { command: "pwd" } });
+  const job = { jobId: "job-1", owner: "agent-1", kind: "bash", label: "pwd",
+    startedAt: 1800000000010, toolCall: { callId: "call-1", rootCallId: "call-1" } };
+  if (version === 4) {
+    event("job/registered", job);
+    event("job/settled", { ...job, finishedAt: 1800000000011, status: "completed",
+      cause: "completed", producerReported: true, detail: "Command completed" });
+  }
+  event("tool/result", { turn: 1, step: 1, message: {
+    ...message("tool", "/workspace", { kind: "tool", callId: "call-1" }),
+    ...(version === 4 ? { toolCallId: "call-1", isError: false } : {}),
+  } }, "append");
+  event("step/end", { turn: 1, step: 1 });
+  event("step/start", { turn: 1, step: 2 });
+  event("assistant/message", { turn: 1, step: 2,
+    message: message("assistant", "Inspection complete", { kind: "model", model: "example-model" }),
+    usage: { inputTokens: 21, outputTokens: 5 } }, "append");
+  event("step/end", { turn: 1, step: 2 });
+  event("turn/end", { turn: 1 });
+  return rows;
+}
 describe("DeepSeek Harness event reconstruction", () => {
+  it.each([3, 4] as const)("reads real-format v%s message envelopes and keeps tool results without duplicate job messages", (version) => {
+    const rows = recordedHarness(version);
+    const text = lines(...rows);
+    const parsed = parseHarness(text);
+    expect(parsed.messages.map(m => m.role)).toEqual([
+      "system", "user", ...(version === 4 ? ["developer"] : []), "assistant", "tool", "assistant",
+    ]);
+    expect(parsed.messages.map(m => (m.content as { text?: string }[])[0].text)).toEqual([
+      "System instructions", "Inspect the project", ...(version === 4 ? ["Updated tool instructions"] : []),
+      "Inspecting", "/workspace", "Inspection complete",
+    ]);
+    expect(parsed.messages.at(-1)).toMatchObject({ model: "example-model", usage: { outputTokens: 5 } });
+    expect(parseHarness(decodeHarness(zstdCompressSync(Buffer.from(text)), true))).toEqual(parsed);
+    // Native logs also concatenate compressed frames; keep the same envelopes.
+    const bytes = Buffer.from(text), midpoint = Math.floor(bytes.length / 2);
+    const frames = Buffer.concat([
+      zstdCompressSync(bytes.subarray(0, midpoint)),
+      zstdCompressSync(bytes.subarray(midpoint)),
+    ]);
+    expect(parseHarness(decodeHarness(frames, true))).toEqual(parsed);
+  });
+  it.each(["system", "developer"])("still rejects missing nested %s content", (role) => {
+    const rows = recordedHarness(4);
+    const row = rows.find(r => r.type === `${role}/message`)!;
+    row.data = { turn: 1, step: 1, message: { role }, content: [{ type: "text", text: "wrong location" }] };
+    expect(() => parseHarness(lines(...rows))).toThrow(/message content is missing/);
+  });
+  it("retries a failed compressed v4 source and checkpoints the complete session", async () => {
+    const f = fixture("deepseek-harness");
+    const rows = recordedHarness(4);
+    rows[0].cwd = f.workspace;
+    const path = join(f.source, "session.v4.jsonl.zstd");
+    const broken = structuredClone(rows);
+    broken.find(r => r.type === "system/message")!.data = { message: {} };
+    writeFileSync(path, zstdCompressSync(Buffer.from(lines(...broken))));
+    expect((await f.archive.scan(f.workspace, f.sources)).errors).toEqual([
+      "deepseek-harness: DeepSeek message content is missing",
+    ]);
+    expect(f.archive.session("deepseek-harness", "recorded-harness")).toBeUndefined();
+    writeFileSync(path, zstdCompressSync(Buffer.from(lines(...rows))));
+    const result = await f.archive.scan(f.workspace, f.sources, { sourceProgress: () => {} });
+    expect(result.errors).toEqual([]);
+    expect(result.counts["deepseek-harness"]).toBe(1);
+    expect(result.sourceProgress?.[f.workspace]?.["deepseek-harness"]).toEqual({
+      completed: 1, total: 1, status: "done",
+    });
+    expect(f.archive.session("deepseek-harness", "recorded-harness")?.messages).toHaveLength(6);
+    const repeated = await f.archive.scan(f.workspace, f.sources);
+    expect(repeated.errors).toEqual([]);
+    expect(repeated.updated).toBe(0);
+  });
   it("replaces streamed drafts with final content and final usage", () => {
     const { rows, event } = harness();
     expect(parseHarness(lines(...rows)).messages[1]).toMatchObject({

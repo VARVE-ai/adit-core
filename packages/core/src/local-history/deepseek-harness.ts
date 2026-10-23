@@ -14,6 +14,10 @@ const controls = new Set(
     " ",
   ),
 );
+// v4 job lifecycle records refer to tool calls; their content is already kept
+// through tool/call and tool/result, rather than added again as chat messages.
+controls.add("job/registered");
+controls.add("job/settled");
 
 function integer(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
@@ -239,10 +243,9 @@ export function parseHarness(text: string): HistorySession {
         continue;
       }
       if (!owned) continue;
-      const m =
-        type === "assistant/message" || type === "tool/result"
-          ? record(data.message)
-          : data;
+      // Only user/message carries its envelope directly in data. System and
+      // developer messages use data.message, just like assistant/tool messages.
+      const m = type === "user/message" ? data : record(data.message);
       if (!Array.isArray(m.content))
         throw new HistoryFormatError("DeepSeek message content is missing");
       const msg: HistoryMessage = {
