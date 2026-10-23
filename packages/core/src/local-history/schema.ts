@@ -47,6 +47,14 @@ export function createHistorySchema(db: Database.Database): void {
       PRIMARY KEY(provider,session_id),
       FOREIGN KEY(provider,session_id) REFERENCES adit_history_sessions(provider,id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS adit_history_jsonl_cursors (
+      provider TEXT NOT NULL,path TEXT NOT NULL,scope TEXT NOT NULL,parser_version INTEGER NOT NULL,
+      session_id TEXT NOT NULL,byte_offset INTEGER NOT NULL,prefix_hash TEXT NOT NULL,file_identity TEXT NOT NULL,state_json TEXT NOT NULL,
+      PRIMARY KEY(provider,path,scope),
+      FOREIGN KEY(provider,path,scope) REFERENCES adit_history_file_checkpoints(provider,path,scope) ON DELETE CASCADE,
+      FOREIGN KEY(provider,session_id) REFERENCES adit_history_sessions(provider,id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS adit_history_cursor_session ON adit_history_jsonl_cursors(provider,session_id);
     CREATE TABLE IF NOT EXISTS adit_history_messages (
       id TEXT PRIMARY KEY, provider TEXT NOT NULL, session_id TEXT NOT NULL,
       source_key TEXT NOT NULL, ordinal INTEGER NOT NULL, role TEXT NOT NULL,

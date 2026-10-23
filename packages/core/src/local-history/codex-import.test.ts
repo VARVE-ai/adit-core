@@ -26,6 +26,7 @@ it.each(["fresh", "upgrade", "upgrade with local edits"])("excludes page events 
   const root = mkdtempSync(join(tmpdir(), "adit-codex-context-"));
   roots.push(root);
   const path = join(root, "rollout-desktop.jsonl");
+  const pathKey = process.platform === "win32" ? path.toLowerCase() : path;
   const rows = [
     message("user", pageText, true),
     message("user", "First question"),
@@ -51,9 +52,9 @@ it.each(["fresh", "upgrade", "upgrade with local edits"])("excludes page events 
       };
       new StructuredHistory(db).write(legacy);
       db.prepare("INSERT INTO adit_history_sources VALUES (?,?,?,?,?)").run(
-        "codex", `${path}#desktop`, "desktop", createHash("sha256").update(JSON.stringify(legacy)).digest("hex"), 6,
+        "codex", `${pathKey}#desktop`, "desktop", createHash("sha256").update(JSON.stringify(legacy)).digest("hex"), 6,
       );
-      new SourceCheckpoints(db).save("codex", path, JSON.stringify([root, [root]]), 6, [[path, sourceStamp(path)]], [["codex", "desktop"]]);
+      new SourceCheckpoints(db).save("codex", pathKey, JSON.stringify([root, [root]]), 6, [[path, sourceStamp(path)]], [["codex", "desktop"]]);
       expect(db.prepare("SELECT first_prompt,user_prompt_count FROM adit_history_sessions").get())
         .toEqual({ first_prompt: pageText, user_prompt_count: 4 });
     }
@@ -73,7 +74,7 @@ it.each(["fresh", "upgrade", "upgrade with local edits"])("excludes page events 
     });
     expect(db.prepare("SELECT count(*) n FROM adit_history_turns").get()).toEqual({ n: edited ? 1 : 2 });
     expect(db.prepare("SELECT count(*) n FROM adit_history_messages WHERE raw_json LIKE '%additional_content.codex_apps_open_page%'").get()).toEqual({ n: 0 });
-    expect(db.prepare("SELECT parser_version FROM adit_history_sources").get()).toEqual({ parser_version: 8 });
+    expect(db.prepare("SELECT parser_version FROM adit_history_sources").get()).toEqual({ parser_version: 9 });
     expect(await new LocalHistory(db).scan(root, sources)).toMatchObject({ errors: [], updated: 0 });
     expect(readFileSync(path, "utf8")).toBe(text);
   } finally { db.close(); }

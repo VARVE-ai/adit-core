@@ -1,5 +1,6 @@
 import { basename, dirname } from "node:path";
 import { requireSession } from "./provider-common.js";
+import {claudeUserMessage} from "./native-user-content.js";
 import { HistoryFormatError, jsonLines, record, string, type HistoryMessage, type HistorySession } from "./types.js";
 
 /** Native title events are session metadata, including when the transcript branches. */
@@ -84,5 +85,10 @@ export function parseClaude(text: string, path: string, options: { linear?: bool
       ids.set(key, existing);
     }
   }
+  session.messages=session.messages.map(claudeUserMessage).filter((m):m is HistoryMessage=>m!==null);
+  const first=rows.find(r=>r.type==="user" && !r.isMeta && !r.isCompactSummary);
+  const entrypoint=rows.map(r=>string(r.entrypoint)).find(Boolean),kind=rows.map(r=>string(r.sessionKind)).find(Boolean);
+  if(entrypoint==="sdk-cli" && !kind && first?.turnOrigin==="sdk" && record(first.origin).kind!=="human")
+    session.metadata={...session.metadata,nativeSessionKind:"subagent"};
   return requireSession(session);
 }

@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { HistoryFormatError, record, string, type HistoryMessage, type HistorySession } from "./types.js";
 import { timestamp } from "./source-io.js";
+import {collectedUsage} from "./collection-usage.js";
 
 export type Row = Record<string, unknown>;
 export function array(value: unknown): Row[] { return Array.isArray(value) ? value.map(record) : []; }
@@ -39,6 +40,10 @@ export function table(db: Database.Database, name: string, fields: string[], req
 }
 export function session(provider: string, id: unknown, cwd: unknown, messages: HistoryMessage[], metadata: Row = {}): HistorySession {
   if (!string(id)) throw new HistoryFormatError("Session identity is missing");
+  if(metadata.usage===undefined) {
+    const usage=collectedUsage(provider,metadata);
+    if(usage?.length)metadata={...metadata,usage};
+  }
   return { provider, id: string(id), cwd: string(cwd), messages, metadata };
 }
 export function sorted(rows: Row[], ...fields: string[]): Row[] {

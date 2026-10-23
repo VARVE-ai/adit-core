@@ -2,6 +2,7 @@ import {basename,dirname,join} from "node:path";
 import {readSource,readSourceJSON} from "./source-io.js";
 import {array,decode,first,message,session,type Row} from "./provider-common.js";
 import {jsonLines,record,string,type HistoryMessage} from "./types.js";
+import {kimiUsage} from "./collection-usage.js";
 export const runtimeEventProviders=["kimi","kimi-work","muse","poolside"];
 async function kimiTitle(path:string,signal?:AbortSignal):Promise<string>{
  if(basename(dirname(dirname(path)))==="agents")return "";
@@ -37,6 +38,7 @@ export async function readRuntimeEvents(path:string,provider:string,signal?:Abor
   return [result];
  }
  if(provider === "poolside"){
+  const inferenceModels=new Map<string,string>();
   for(const row of rows){
    const kind=string(row.type);
    if(kind === "session.start"){const start=record(row.session_start);cwd=string(start.workspace) || (Array.isArray(start.working_directories)?string(start.working_directories[0]):"");if(start.prompt)emit(row,"user",start.prompt);}
@@ -46,7 +48,11 @@ export async function readRuntimeEvents(path:string,provider:string,signal?:Abor
    else if(kind === "tool_call.parsed")emit(row,"assistant",row.tool_call_parsed);
    else if(kind === "tool_call.result")emit(row,"tool",row.tool_call_result);
    else if(kind === "tool_call.inference.start")model=first(row,"tool_call_inference_start.model")||model;
-   else if(kind === "tool_call.inference.end")usageEvents.push(row);
+   else if(kind === "tool_call.inference.start") {
+    model=first(row,"tool_call_inference_start.chat_completion_request.model")||model;
+    if(row.step_id)inferenceModels.set(string(row.step_id),model);
+   }
+   else if(kind === "tool_call.inference.end")usageEvents.push({...row,collectedModel:inferenceModels.get(string(row.step_id))||model});
   }
   return [session(provider,basename(path,".ndjson").replace(/^trajectory-/,""),cwd,messages,{usageEvents})];
  }
@@ -60,11 +66,24 @@ export async function readRuntimeEvents(path:string,provider:string,signal?:Abor
   else if(["ContentPart","ToolCall"].includes(type))pending.push(row);
   else if(type === "ToolResult"){flush();emit(row,"tool",payload);}
   else if(type === "TurnEnd")flush();
-  else if(type === "StatusUpdate" || type === "usage.record")usageEvents.push(row);
+  else if(type === "StatusUpdate" || type === "usage.record") {
+   usageEvents.push(row);
+   if(type==="usage.record") {
+    flush();model=string(row.model)||model;
+    const usage=kimiUsage(row.usage);
+    for(let i=messages.length-1;usage&&i>=0;i--) {
+     if(messages[i].role==="user")break;
+     if(messages[i].role==="assistant"){if(!messages[i].usage){messages[i].usage=usage;messages[i].model=model||undefined;}break;}
+    }
+   }
+  }
   else if(type === "context.append_loop_event"){
    if(["content.part","tool.call"].includes(string(event.type)))pending.push(row);
    else if(event.type === "tool.result"){flush();emit(row,"tool",event);}
-   else if(event.type === "step.end")flush();
+   else if(event.type === "step.end") {
+    flush();const usage=kimiUsage(event.usage),last=messages.at(-1);
+    if(usage&&last?.role==="assistant"&&!last.usage){last.usage=usage;last.model=string(event.model)||model||undefined;}
+   }
   }
  }
  flush();

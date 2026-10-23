@@ -27,6 +27,7 @@ export async function discoverHistory(db:Database.Database,workspace:string,sour
     DO UPDATE SET version=excluded.version,manifest_json=excluded.manifest_json,metadata_json=excluded.metadata_json`);
   const assigned=db.prepare("SELECT workspace FROM adit_history_assignments WHERE provider=? AND session_id=?");
   for(const source of sources) {
+    const version=["codex","traex","augure-code"].includes(source.id)?2:VERSION;
     options.signal?.throwIfAborted();options.beforeSource?.(source.id);
     for(const root of source.paths) {
       try {
@@ -37,14 +38,14 @@ export async function discoverHistory(db:Database.Database,workspace:string,sour
           // Only Cursor resolves encoded paths against the requested workspace.
           const scope=JSON.stringify([resolve(root),source.id==="cursor"?resolve(workspace):""]);
           try {
-            const old=get.get(source.id,pathKey,scope,VERSION) as {manifest_json:string;metadata_json:string}|undefined;
+            const old=get.get(source.id,pathKey,scope,version) as {manifest_json:string;metadata_json:string}|undefined;
             let metadata:MetadataResult;
             if(old&&(JSON.parse(old.manifest_json) as [string,string][]).every(([file,stamp])=>sourceStamp(file)===stamp)) {
               metadata=JSON.parse(old.metadata_json);result.cached=(result.cached||0)+1;
             } else {
               const captured=await trackSourceReads(path,()=>readSessionMetadata(path,source.id,root,workspace,options.signal));
               metadata=captured.value;
-              if(captured.stable)put.run(source.id,pathKey,scope,VERSION,JSON.stringify(captured.manifest),JSON.stringify(metadata));
+              if(captured.stable)put.run(source.id,pathKey,scope,version,JSON.stringify(captured.manifest),JSON.stringify(metadata));
               else metadata={...metadata,pending:true};
             }
             for(const s of metadata.sessions)if(s.id)sessions.set(`${source.id}:${s.id}`,{...s,provider:source.id});

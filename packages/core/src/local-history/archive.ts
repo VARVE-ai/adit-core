@@ -21,15 +21,17 @@ import { sidecarProviders, readSidecarSession } from "./sidecar-sessions.js";
 import { parseZencoder } from "./zencoder.js";
 import { additionalProviders, readAdditionalSource } from "./additional-sources.js";
 import { readConversationExport } from "./export-import.js";
-import {readCodexSession,refreshCodexContinuations,refreshCodexContexts} from "./codex-file.js";
+import {readCodexSession,refreshCodexContinuations,refreshCodexContexts,refreshCodexSources} from "./codex-file.js";
 import {SourceCheckpoints, trackSourceReads} from "./source-checkpoints.js";
+import {collectIncrementalJSONL} from "./incremental-jsonl.js";
 import {discoverHistory} from "./discovery.js";
 import {ScanProgressTracker, type SourceProgressListener, type SourceScanProgress} from "./scan-progress.js";
 export type {SourceScanProgress,SourceProgressListener} from "./scan-progress.js";
 
 const PARSER_VERSION = 6;
 // Recollect existing archives once for native titles and blank-title normalization.
-const parserVersion = (provider: string) => ["codex", "traex", "augure-code"].includes(provider) ? 8 : PARSER_VERSION;
+const parserVersion = (provider: string) => ["codex", "traex", "augure-code"].includes(provider) ? 9 :
+  ["claude","cowork","qoder","icodemate","opencode","kilo","mimocode","copilot","vscode-copilot","positron","roocode","kilo-legacy","junie","muse","poolside","visualstudio-copilot","kimi","kimi-work"].includes(provider)?7:PARSER_VERSION;
 export interface ScanSource {
   id: string;
   paths: string[];
@@ -48,7 +50,7 @@ export interface ScanResult {
 export class LocalHistory {
   constructor(readonly db: Database.Database, options: {discovery?:boolean} = {}) {
     createHistorySchema(db);
-    if(!options.discovery){refreshCodexContinuations(db);new StructuredHistory(db).refreshCodexPromptSummaries();}
+    if(!options.discovery){refreshCodexSources(db);refreshCodexContinuations(db);new StructuredHistory(db).refreshCodexPromptSummaries();}
   }
 
   counts(workspace: string, providers?: string[]): Record<string, number> {
@@ -113,6 +115,7 @@ export class LocalHistory {
     } = {},
   ): Promise<ScanResult> {
     if(options.preview)return discoverHistory(this.db,workspace,sources,options);
+    refreshCodexSources(this.db);
     const result: ScanResult = {
       counts: {},
       errors: [],
@@ -168,6 +171,7 @@ export class LocalHistory {
               const references: [string, string][] = [];
               const writes: (() => void)[] = [];
               let retry = false;
+              let commitCursor:(()=>void)|undefined;
               const captured = await trackSourceReads(path, async () => {
               if (
                 (["codex","traex","augure-code","opencode", "kilo", "mimocode", "icodemate", "cursor-ide", ...piProviders, ...sidecarProviders, ...additionalProviders].includes(
@@ -175,7 +179,7 @@ export class LocalHistory {
                 ) && !(source.id === "icodemate" && path.endsWith(".jsonl")))
               ) {
                 const failedMembers=new Set<string>();
-                const snapshots = ["codex","traex","augure-code"].includes(source.id)
+                const collected=await collectIncrementalJSONL(this.db,source.id,path,scopeKey,version,async()=>["codex","traex","augure-code"].includes(source.id)
                   ? await readCodexSession(path,source.id,root,options.signal)
                   : additionalProviders.includes(source.id)
                   ? await readAdditionalSource(path, source.id, options.signal)
@@ -201,7 +205,8 @@ export class LocalHistory {
                           source.id,
                           scopes,
                           options.signal,
-                        );
+                        ),options.signal);
+                const snapshots=collected.sessions;commitCursor=collected.commit;
                 // A container/sidecar can change without the primary file changing.
                 // Check each logical session, using its own stable checkpoint.
                 for (const session of snapshots) {
@@ -365,7 +370,7 @@ export class LocalHistory {
               if(!captured.stable)throw new Error("Source changed while reading; retry on the next collection");
               if (!options.preview) this.db.transaction(()=>{
                 for(const write of writes)write();
-                if(!retry)checkpoints.save(source.id, pathKey, scopeKey, version, captured.manifest, references);
+                if(!retry){checkpoints.save(source.id, pathKey, scopeKey, version, captured.manifest, references);commitCursor?.();}
               })();
               detail?.processed(references);
             } catch (error) {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalStore, LocalHistory, projectRepositories } from "@varveai/adit-core";
@@ -33,6 +33,24 @@ function write(extra=false){history.write({id:"native",provider:"codex",cwd:root
   ...(extra?[{key:"p2",role:"user",content:"next question",timestamp:at(6),raw:{}},{key:"f2",role:"assistant",content:"next answer",timestamp:at(7),raw:{payload:{phase:"final"}}}]:[]),
 ]});}
 function project(b=baseline){const w=workspace();return new CloudProjection(store,w,"scope",structuredClone(b));}
+it("excludes native approval reviews from pending counts and uploads after archive cleanup",async()=>{
+ write();
+ const path=join(root,"rollout-review.jsonl");
+ const text=JSON.stringify({type:"session_meta",payload:{id:"review",cwd:root,source:{subagent:{other:"guardian"}}}})+"\n";
+ writeFileSync(path,text);
+ history.write({id:"review",provider:"codex",cwd:root,messages:[
+  {key:"p",role:"user",content:"internal review",timestamp:at(1),raw:{}},
+  {key:"a",role:"assistant",content:"allow",timestamp:at(2),finalReply:true,raw:{},model:"codex-auto-review"},
+ ]});
+ store.db.prepare("INSERT INTO adit_history_sources VALUES (?,?,?,?,8)").run("codex",`${path}#review`,"review","old");
+ const p=project();expect(cloudPending(store,p.workspace,p.scope,baseline).sessions).toBe(2);
+ const archive=new LocalHistory(store.db);
+ expect(cloudPending(store,p.workspace,p.scope,baseline).sessions).toBe(1);
+ const sessions=new CloudProjection(store,p.workspace,p.scope,baseline).sessions();
+ expect(sessions.map(s=>s.source.id)).toEqual(["native"]);
+ expect(await archive.scan(root,[{id:"codex",paths:[root]}])).toMatchObject({errors:[],updated:0});
+ expect(new CloudProjection(store,p.workspace,p.scope,baseline).sessions().map(s=>s.source.id)).toEqual(["native"]);
+});
 it("uses native completion instead of compaction and never uploads interruption control messages",()=>{
  history.write({id:'native',provider:'codex',cwd:root,messages:[
   {key:'p',role:'user',content:'question',raw:{},timestamp:at(1)},
