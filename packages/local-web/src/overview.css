@@ -11,14 +11,7 @@
   max-width: none;
 }
 .overview-dashboard {
-  --background: 240 9% 98%;
-  --foreground: 240 6% 16%;
-  --muted: 240 6% 93%;
-  --muted-foreground: 240 4% 46%;
-  --border: 240 6% 85%;
-  --primary: 240 6% 18%;
-  --primary-foreground: 0 0% 100%;
-  --overview-panel: #fff;
+  --overview-panel: hsl(var(--background));
   --overview-blue: #5084db;
   --overview-agent-claude: #c65d06;
   --overview-agent-codex: #2563eb;
@@ -29,14 +22,6 @@
   background: hsl(var(--background));
 }
 .dark .overview-dashboard {
-  --background: 240 5% 9%;
-  --foreground: 240 5% 91%;
-  --muted: 240 5% 16%;
-  --muted-foreground: 240 4% 58%;
-  --border: 240 5% 21%;
-  --primary: 240 6% 90%;
-  --primary-foreground: 240 5% 14%;
-  --overview-panel: #1b1b1e;
   --overview-blue: #6596f5;
   --overview-agent-claude: #f59e0b;
   --overview-agent-codex: #60a5fa;
@@ -48,12 +33,12 @@
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-rows: 28px 24px 76px minmax(148px, 1.38fr) minmax(
+  grid-template-rows: 46px 24px 76px minmax(148px, 1.38fr) minmax(
       156px,
       1.38fr
     ) minmax(116px, 1fr);
   gap: 10px;
-  padding: 12px;
+  padding: 0 12px 12px;
   font-size: 12px;
   background: hsl(var(--background));
 }
@@ -79,6 +64,11 @@
 }
 .overview-toolbar {
   position: relative;
+  min-height: 46px;
+  flex-shrink: 0;
+  margin-inline: -12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid hsl(var(--border));
 }
 .overview-feedback {
   position: absolute;
@@ -158,18 +148,6 @@
 .overview-tools > button:nth-child(2) {
   color: #ae9032;
 }
-.overview-cloud-quick {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  white-space: nowrap;
-}
-.overview-cloud-quick > button {
-  color: hsl(var(--primary-foreground));
-  background: hsl(var(--primary));
-  padding-inline: 9px;
-}
-.overview-cloud-quick > button:disabled { opacity: .55; }
 .overview-badge-row {
   gap: 6px;
 }
@@ -757,8 +735,8 @@
 @media (min-width: 1100px) and (max-height: 780px) {
   .overview-page {
     gap: 9px;
-    padding: 10px 12px;
-    grid-template-rows: 28px 22px 68px minmax(145px, 1.38fr) minmax(
+    padding: 0 12px 10px;
+    grid-template-rows: 46px 22px 68px minmax(145px, 1.38fr) minmax(
         152px,
         1.38fr
       ) minmax(116px, 1fr);

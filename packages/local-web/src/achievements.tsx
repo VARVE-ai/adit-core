@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { AgentLabel } from "./agent-label";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Award, Download, LockKeyhole, RefreshCw } from "lucide-react";
 import type {
   AchievementItem,
@@ -366,7 +367,7 @@ export function AchievementsPage({
                       ? ac("暂无记录")
                       : achievementDescription(item)}
                     {item.evidence[0]?.provider && (
-                      <> · {agentName(item.evidence[0].provider)}</>
+                      <> · <AgentLabel provider={item.evidence[0].provider} /></>
                     )}
                   </p>
                   {item.key === "streak" && (
@@ -480,7 +481,11 @@ export function AchievementsPage({
                         }
                       />
                       <span>{label}</span>
-                      <small title={hint}>{hint}</small>
+                      <small title={hint}>{key === "showAgent" && item.evidence.length
+                        ? [...new Set(item.evidence.map((e) => e.provider))].map((provider, index) => (
+                            <Fragment key={provider || "unknown"}>{index > 0 && ", "}<AgentLabel provider={provider || ""} /></Fragment>
+                          ))
+                        : hint}</small>
                     </label>
                   ))}
                   {item.options.showPrompt && item.evidence[0]?.prompt && (

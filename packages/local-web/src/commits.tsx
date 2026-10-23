@@ -1,3 +1,4 @@
+import { AgentLabel } from "./agent-label";
 import { t, locale, systemMessage } from "./i18n";
 import React, { useEffect, useState } from "react";
 import {
@@ -301,9 +302,7 @@ export function CommitsPage({
                           {t("提交：")}{" "}
                           {c.record ? (
                             <>
-                              <b className={"agent-" + c.record.provider}>
-                                {agents[c.record.provider] || c.record.provider}
-                              </b>{" "}
+                              <b><AgentLabel provider={c.record.provider} name={agents[c.record.provider]} /></b>{" "}
                               · {c.record.title}
                             </>
                           ) : c.analyzed ? (
@@ -368,10 +367,7 @@ export function CommitsPage({
                 {current.record ? (
                   <>
                     <div className="commit-session">
-                      <b className={"agent-" + current.record.provider}>
-                        {agents[current.record.provider] ||
-                          current.record.provider}
-                      </b>
+                      <b><AgentLabel provider={current.record.provider} name={agents[current.record.provider]} /></b>
                       <strong>{current.record.title}</strong>
                     </div>
                     <p className="commit-note">
@@ -459,9 +455,7 @@ export function CommitsPage({
                         key={s.provider + s.sessionId}
                       >
                         <div className="commit-session">
-                          <b className={"agent-" + s.provider}>
-                            {agents[s.provider] || s.provider}
-                          </b>
+                          <b><AgentLabel provider={s.provider} name={agents[s.provider]} /></b>
                           <strong className="commit-line-total">
                             {s.certain + s.likely + s.possible} {t("行")}
                           </strong>
@@ -500,7 +494,7 @@ export function CommitsPage({
                             <summary>{t("也写过这些内容")}</summary>
                             {s.alternatives.map((a) => (
                               <p key={a.provider + a.sessionId}>
-                                {agents[a.provider] || a.provider} · {a.title}
+                                <AgentLabel provider={a.provider} name={agents[a.provider]} /> · {a.title}
                                 <br />
                                 <small>
                                   {t("候选会话，不重复计入匹配行数")}

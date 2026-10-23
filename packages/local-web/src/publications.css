@@ -6,7 +6,7 @@
 .pr-create-form section,.share-settings section{padding:0;border:0;margin:0}
 .shared-turn{border:0;margin:0}
 .shared-operations summary small{display:inline!important}.shared-operation summary{display:flex;align-items:baseline;gap:8px;color:hsl(var(--foreground));font-size:12px}.shared-operation summary svg{align-self:flex-start;margin-top:4px;flex-shrink:0}.shared-operation summary code{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}.shared-operation.command pre:before{content:none!important}
-.publication-toolbar{min-height:46px;display:flex;align-items:center;gap:10px;padding:8px 20px;border-bottom:1px solid hsl(var(--border));flex-shrink:0}
+.publication-toolbar{min-height:46px;display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid hsl(var(--border));flex-shrink:0}
 .publication-toolbar button{font-size:12px;min-height:28px;padding:4px 12px;white-space:nowrap}
 .publication-toolbar-title{display:flex;align-items:center;gap:5px;white-space:nowrap}
 .publication-toolbar-right{margin-left:auto;display:flex;align-items:center;gap:12px;flex-shrink:0}

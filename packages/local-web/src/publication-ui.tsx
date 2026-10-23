@@ -1,3 +1,4 @@
+import { AgentLabel } from "./agent-label";
 import { useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -8,6 +9,7 @@ import { AditMark } from "./adit-mark";
 import type { ShareSnapshot, SharedCommit } from "../../core/src/local-history/sharing-types";
 import "./publications.css";
 import "./sessions.css";
+import { PlatformIcon } from "./platform-icon";
 export type PublicationApi = <T = any>(path: string, method?: string, body?: unknown, signal?: AbortSignal) => Promise<T>;
 export const p = (zh: string, en: string) => getLanguage() === "zh" ? zh : en;
 export const number = (v: number) => v.toLocaleString(locale());
@@ -36,7 +38,8 @@ export function PublicationError({ error }: { error: string }) {
   return error ? <p className="publication-error" role="alert">{publicationError(systemMessage(error.replace(/^Error:\s*/, "")))}</p> : null;
 }
 export function PublicationAgent({ provider }: { provider: string }) {
-  return ["claude", "codex"].includes(provider) ? <svg className={`session-agent-icon ${provider}`} aria-hidden="true"><use href={`/agent-icons.svg#${provider}`} /></svg> : <Terminal size={13} />;
+  const compact = ["claude", "codex"].includes(provider);
+  return <PlatformIcon platform={provider} size={compact ? 12 : 13} className={compact ? "session-agent-icon" : undefined} />;
 }
 export function SharedCommitRow({ commit: c }: { commit: SharedCommit }) {
   return <div className="shared-commit"><GitCommitHorizontal size={17} /><code>{c.sha.slice(0, 7)}</code><span>{c.subject}</span><small>{c.repository} · {c.files} {p("个文件", "files")}</small>{c.additions !== null && <em>+{c.additions} −{c.deletions ?? 0}</em>}</div>;
@@ -47,7 +50,7 @@ export function SharedSessionView({ snapshot: s, review = false }: { snapshot: S
   return <article className={`shared-session ${review ? "review" : ""}`}>
     {!review && <div className="shared-brand"><AditMark /> <span>{p("ADIT · 分享的 AI 会话", "ADIT · Shared AI session")}</span></div>}
     <h1>{s.title}</h1>
-    <div className="publication-meta"><span><i className={`session-agent-dot agent-${s.provider}`} />{s.agent}</span>{s.models.map(m => <code key={m}>{m}</code>)}<span>{publicationDate(s.date)}</span><span>{s.promptCount} {p("轮提问", "prompts")}</span><span><GitCommitHorizontal size={13} />{s.commitCount} {p("个提交", "commits")}</span></div>
+    <div className="publication-meta"><span><AgentLabel provider={s.provider} name={s.agent} /></span>{s.models.map(m => <code key={m}>{m}</code>)}<span>{publicationDate(s.date)}</span><span>{s.promptCount} {p("轮提问", "prompts")}</span><span><GitCommitHorizontal size={13} />{s.commitCount} {p("个提交", "commits")}</span></div>
     {!review && <p className="shared-reviewed"><ShieldCheck size={14} />{p("作者分享前检查过内容，本机路径和会话文件名已遮盖", "The author reviewed this session before sharing. Local paths and session filenames have been redacted.")}</p>}
     <div className="shared-timeline">{s.turns.map((t, index) => <section className="shared-turn" key={index}>
       <span className="shared-node"><MessageSquare size={13} /></span>

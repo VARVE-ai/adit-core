@@ -1,4 +1,10 @@
-import { installSkillsCommand } from "./commands/skills.js";
+import { completeInstallation } from "./installation.js";
 
-const result = installSkillsCommand();
-if (result.errors.length) console.warn("CLI installed, but skill installation was incomplete. Run 'adit init' to retry after fixing the reported paths.");
+const versionOption = process.argv.indexOf("--expected-version");
+completeInstallation({
+  skillsOnly: process.argv.includes("--skills-only"),
+  expectedVersion: versionOption < 0 ? undefined : process.argv[versionOption + 1],
+}).catch((error: unknown) => {
+  console.error(`ADIT setup incomplete: ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
+});

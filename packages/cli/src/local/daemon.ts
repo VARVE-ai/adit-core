@@ -18,6 +18,7 @@ interface Instance {
   url: string;
   token: string;
   instance: string;
+  version?: string;
 }
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function readInstance(): Instance | null {
@@ -35,9 +36,9 @@ export async function daemonStatus(): Promise<Instance | null> {
   try {
     const health = (await fetch(`${info.url}/health`, {
       signal: AbortSignal.timeout(1500),
-    }).then((r) => r.json())) as { service: string; instance: string };
+    }).then((r) => r.json())) as { service: string; instance: string; version?: string };
     return health.service === "adit-local" && health.instance === info.instance
-      ? info
+      ? { ...info, version: health.version }
       : null;
   } catch {
     return null;
@@ -130,11 +131,14 @@ export async function startDaemon(port?: number): Promise<Instance> {
     process.execPath,
     [worker, ...(port ? [String(port)] : [])],
     {
+      // Keep Windows from locking the caller's project or npm installation directory.
+      cwd: dir,
       detached: true,
       windowsHide: true,
       stdio: ["ignore", log, log],
       env: {
         ...process.env,
+        ADIT_LOCAL_DATA_DIR: dir,
         ADIT_CLI_ENTRY: process.env.ADIT_CLI_ENTRY ||
           (process.argv[1] && basename(process.argv[1]) === "index.js"
             ? resolve(process.argv[1]) : fileURLToPath(new URL("../index.js", import.meta.url))),

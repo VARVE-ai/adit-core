@@ -1,3 +1,4 @@
+import { AgentLabel } from "./agent-label";
 import { t, locale, systemMessage } from "./i18n";
 import {
   number,
@@ -18,14 +19,11 @@ import {
   X,
   Award,
   ShieldCheck,
-  Sun,
-  Orbit,
-  Sparkles,
 } from "lucide-react";
 import type { OverviewData } from "../../core/src/local-history/analytics";
 import "./overview.css";
 import { dailyCostWindow, costAxisMaximum } from "./overview-chart-data";
-import { OverviewCloudPush, type CloudSyncSummary } from "./overview-cloud-push";
+import { type CloudSyncSummary } from "./overview-cloud-push";
 
 type Workspace = {
   id: string;
@@ -154,9 +152,6 @@ export function OverviewPage({
   onAchievements,
   onInspection,
   onProfileCards,
-  onCloudSync,
-  onCloudAccount,
-  cloudAccountState,
 }: {
   workspace: Workspace;
   jobs: Job[];
@@ -165,9 +160,6 @@ export function OverviewPage({
   onAchievements?: () => void;
   onInspection?: () => void;
   onProfileCards?: () => void;
-  onCloudSync?: () => void;
-  onCloudAccount: () => void;
-  cloudAccountState?: string;
 }) {
   const [range, setRange] = useState("all"),
     [provider, setProvider] = useState("all"),
@@ -252,16 +244,7 @@ export function OverviewPage({
       ]),
     );
   const agent = (id: string) => (
-    <span className="overview-agent" style={{ color: colors.get(id) || palette[0] }}>
-      {id === "claude" ? (
-        <Sun />
-      ) : id === "codex" ? (
-        <Orbit />
-      ) : (
-        <Sparkles />
-      )}
-      {names.get(id) || id}
-    </span>
+    <AgentLabel provider={id} name={names.get(id) || id} className="overview-agent" iconSize={11} />
   );
   if (!workspace.started)
     return (
@@ -325,12 +308,6 @@ export function OverviewPage({
               onClick={() => setRange(v)}
             >
               {l}
-              {v === "all" && data?.scope.first && (
-                <small>
-                  · {start}
-                  {t("起")}
-                </small>
-              )}
             </button>
           ))}
         </div>
@@ -377,8 +354,6 @@ export function OverviewPage({
             <ShieldCheck size={12} />
             {t("查看体检结果")}{!!workspace.inspection?.pending && <span>{workspace.inspection.pending}</span>} <ChevronRight size={12} />
           </button>
-          <OverviewCloudPush enabled={workspace.cloud.enabled} sync={workspace.cloudSync} accountState={cloudAccountState}
-            onPush={onCloudSync} onSettings={onSettings} onAccount={onCloudAccount} />
         </div>
       </div>
       <div className="overview-badge-row">
@@ -405,7 +380,11 @@ export function OverviewPage({
             title={`${label}: ${value}${label === "commits in AI sessions" ? t("；已确认关联，其他提交仍可能未完成分析") : ""}`}
           >
             <span>{label}</span>
-            <strong>{value}</strong>
+            <strong>{label === "AI agents" && value !== "—"
+              ? data?.agents.filter((a) => provider === "all" || provider === a.id).map((a, index) => (
+                  <React.Fragment key={a.id}>{index > 0 && " · "}{agent(a.id)}</React.Fragment>
+                ))
+              : value}</strong>
           </span>
         ))}
         <div className="overview-badge-actions">
@@ -673,12 +652,9 @@ export function OverviewPage({
               className="overview-provider-costs"
               title={`${t("价格更新时间：{0}", date(data?.costs.prices.fetchedAt ?? null, zone))} · ${t("已计价")} ${number(data?.usage.priced)} ${t("· 未计价")} ${number(data?.usage.unpriced)} · ${t("费用为已计价请求之和，不是订阅费或实付账单。缺失消息用量 {0} 条；子任务用量尚未合并，避免重复。{1}", data?.coverage.missingUsage || 0, systemMessage(data?.costs.prices.error || ""))}`}
             >
-              {[...providerCosts]
-                .map(
-                  ([id, value]) =>
-                    `${names.get(id) || id} ${money(value, value >= 1e6 ? 0 : 2)}`,
-                )
-                .join(" · ") || t("按当前公开 API 价格折算")}
+              {providerCosts.size ? [...providerCosts].map(([id, value], index) => (
+                <React.Fragment key={id}>{index > 0 && " · "}{agent(id)} {money(value, value >= 1e6 ? 0 : 2)}</React.Fragment>
+              )) : t("按当前公开 API 价格折算")}
             </span>
           </Heading>
           <div className="overview-models">
