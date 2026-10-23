@@ -118,3 +118,37 @@ it("authenticates session browsing and enforces workspace boundaries for all det
     ).toBe(404);
   expect((await get("/content", { eventId: "missing" })).status).toBe(404);
 });
+
+it("passes the browser timezone to daily session grouping and rejects invalid zones", async () => {
+  root = mkdtempSync(join(tmpdir(), "adit-session-day-api-"));
+  app = await startLocalServer({ directory: join(root, "state") });
+  const w = app.store.saveWorkspace({ path: root, providers: ["claude"], repositories: [] });
+  new StructuredHistory(app.store.db).write({ provider: "claude", id: "midnight", cwd: w.path, messages: [
+    { key: "p", role: "user", content: "question", timestamp: "2026-10-20T15:59:00Z", raw: {} },
+    { key: "a", role: "assistant", content: "answer", timestamp: "2026-10-20T16:01:00Z", raw: {} },
+  ] });
+  const get = (timezone: string) => fetch(app!.origin + "/api/local/sessions?" + new URLSearchParams({ workspaceId: w.id, timezone }), {
+    headers: { authorization: "Bearer " + app!.token },
+  });
+  const local = await (await get("Asia/Shanghai")).json() as any;
+  expect(local.items.map((s: any) => [s.day, s.prompts])).toEqual([["2026-10-21", 0], ["2026-10-20", 1]]);
+  expect((await (await get("UTC")).json() as any).total).toBe(1);
+  expect((await get("invalid/zone")).status).toBe(400);
+});
+
+it("serves 50 detail entries per page including a prompt only once", async () => {
+  root = mkdtempSync(join(tmpdir(), "adit-session-detail-api-"));
+  app = await startLocalServer({ directory: join(root, "state") });
+  const w = app.store.saveWorkspace({ path: root, providers: ["claude"], repositories: [] });
+  new StructuredHistory(app.store.db).write({ provider: "claude", id: "long", cwd: w.path, messages: [
+    { key: "p", role: "user", content: "question", raw: {} },
+    ...Array.from({ length: 103 }, (_, i) => ({ key: `a${i}`, role: "assistant", content: `reply ${i}`, raw: {} })),
+  ] });
+  const get = async (offset: number) => (await fetch(app!.origin + "/api/local/sessions/detail?" + new URLSearchParams({
+    workspaceId: w.id, provider: "claude", id: "long", offset: String(offset),
+  }), { headers: { authorization: "Bearer " + app!.token } })).json() as Promise<any>;
+  const first = await get(0), second = await get(first.nextOffset), last = await get(second.nextOffset);
+  expect([first, second, last].map(p => p.turns[0].events.length)).toEqual([49,50,4]);
+  expect([first, second, last].map(p => p.turns[0].promptVisible)).toEqual([true,false,false]);
+  expect(last.nextOffset).toBeNull();
+});

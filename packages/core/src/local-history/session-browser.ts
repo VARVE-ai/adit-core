@@ -18,6 +18,8 @@ import {
 } from "./session-tool-display.js";
 
 type Row = Record<string, any>;
+type EventIndex = { projected: Row[]; closingRows: Row[] };
+const DETAIL_PAGE_SIZE = 50;
 export type TranscriptMode = "normal" | "focused";
 export type SessionItem = {
   provider: string;
@@ -31,12 +33,21 @@ export type SessionItem = {
   match?: { turnId: string | null; text: string; eventId: string };
 };
 export type SessionList = {
-  items: SessionItem[];
+  items: SessionDayItem[];
   total: number;
   messages: number;
   first: number | null;
   providers: { id: string; name: string; count: number }[];
   nextOffset: number | null;
+};
+/** One logical conversation per viewer-local day. Times, messages, prompts and cost are daily. */
+export type SessionDayItem = SessionItem & {
+  day: string | null;
+  /** Chronological active-day position; undated records have no day index. */
+  dayIndex: number | null;
+  dayCount: number;
+  cost: number | null;
+  unpriced: number;
 };
 export type SessionCommit = {
   repository: string;
@@ -64,6 +75,9 @@ export type SessionUsage = {
   efforts: string[];
 };
 export type SessionTurn = {
+  /** False when this page continues a turn whose prompt is on an earlier page. */
+  promptVisible?: boolean;
+  hasMoreEvents?: boolean;
   id: string;
   ordinal: number;
   prompt: string;
@@ -83,6 +97,8 @@ export type SessionTurn = {
   matchEventId: string | null;
 };
 export type SessionDetail = {
+  pageOffset: number;
+  totalEntries: number;
   session: SessionItem;
   models: string[];
   cost: number | null;
@@ -198,8 +214,21 @@ export class LocalSessionBrowser {
       limit?: number;
       from?: number;
       to?: number;
+      timezone?: string;
     } = {},
   ): SessionList {
+    let dayFormat: Intl.DateTimeFormat;
+    try {
+      dayFormat = new Intl.DateTimeFormat("en-CA", {
+        timeZone: options.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+        year: "numeric", month: "2-digit", day: "2-digit",
+      });
+    } catch {
+      throw new LocalStateError("Invalid timezone");
+    }
+    this.db.function("session_day", { deterministic: true }, (at: number | null) =>
+      at === null ? null : dayFormat.format(at),
+    );
     return this.db.transaction(() => {
       const scope = JSON.stringify(
         this.scope(w).filter((s) => !s.parent_id || s.relationship === "fork" || s.relationship === "continuation"),
@@ -241,7 +270,14 @@ export class LocalSessionBrowser {
         filtered AS (SELECT s.* FROM visible s WHERE (@provider='all' OR s.provider=@provider) AND (@only=0 OR s.commits>0)
           AND (@from IS NULL OR s.last_activity_at>=@from) AND (@to IS NULL OR s.started_at<=@to)
           AND (@query='' OR ${historyTextMatch("s.title")} OR ${historyTextMatch("s.first_prompt")}
-            OR EXISTS(SELECT 1 FROM matched m WHERE m.provider=s.provider AND m.id=s.id)))`;
+            OR EXISTS(SELECT 1 FROM matched m WHERE m.provider=s.provider AND m.id=s.id))),
+        daily AS (SELECT f.provider,f.id,f.title,f.first_prompt,f.commits,
+          session_day(m.occurred_at) day,min(m.occurred_at) started_at,max(m.occurred_at) last_activity_at,
+          count(m.id) message_count,count(t.id) user_prompt_count
+          FROM filtered f JOIN scope q ON q.provider=f.provider AND q.conversation_id=f.id
+          LEFT JOIN adit_history_messages m ON m.provider=q.provider AND m.session_id=q.id
+          LEFT JOIN adit_history_turns t ON t.prompt_message_id=m.id
+          GROUP BY f.provider,f.id,day HAVING count(m.id)>0 OR max(f.message_count)=0)`;
       const params = {
         scope,
         run: this.run(w),
@@ -258,7 +294,7 @@ export class LocalSessionBrowser {
       const summary = this.db
         .prepare(
           cte +
-            " SELECT count(*) total,coalesce(sum(message_count),0) messages,min(started_at) first FROM filtered",
+            " SELECT count(*) total,coalesce(sum(message_count),0) messages,min(started_at) first FROM daily",
         )
         .get(params) as Row;
       const names = new Map(sourceDefinitions().map((p) => [p.id, p.name]));
@@ -287,10 +323,30 @@ export class LocalSessionBrowser {
         this.db
           .prepare(
             cte +
-              ` SELECT * FROM filtered ORDER BY ${sort},provider,id LIMIT @limit OFFSET @offset`,
+              ` SELECT *,count(day) OVER (PARTITION BY provider,id) day_count,
+                CASE WHEN day IS NOT NULL THEN count(day) OVER (PARTITION BY provider,id ORDER BY day
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) END day_index
+                FROM daily ORDER BY ${sort},provider,id,day LIMIT @limit OFFSET @offset`,
           )
           .all({ ...params, offset, limit }) as Row[]
-      ).map(item);
+      ).map((row): SessionDayItem => ({ ...item(row), day: row.day, dayIndex: row.day_index, dayCount: row.day_count, cost: null, unpriced: 0 }));
+      // Price only the requested page; canonical usage prevents duplicate native observations.
+      const page = JSON.stringify(items.map(s => ({ provider: s.provider, id: s.id, day: s.day })));
+      const usage = this.db.prepare(`WITH scope AS (
+        SELECT json_extract(value,'$.provider') provider,json_extract(value,'$.id') id,
+          json_extract(value,'$.conversation_id') conversation_id FROM json_each(@scope))
+        SELECT u.*,q.conversation_id,session_day(u.occurred_at) day FROM scope q
+        JOIN adit_history_usage_entries u ON u.provider=q.provider AND u.session_id=q.id
+        WHERE u.ledger_role='canonical' AND EXISTS (SELECT 1 FROM json_each(@page) p
+          WHERE json_extract(p.value,'$.provider')=q.provider AND json_extract(p.value,'$.id')=q.conversation_id
+          AND json_extract(p.value,'$.day') IS session_day(u.occurred_at))`).all({ scope, page }) as (Row & CostUsage)[];
+      const byDay = new Map(items.map(s => [JSON.stringify([s.provider,s.id,s.day]),s]));
+      for (const u of usage) {
+        const row = byDay.get(JSON.stringify([u.provider,u.conversation_id,u.day]))!;
+        const cost = this.prices?.estimate(u) ?? null;
+        if (cost === null) row.unpriced++;
+        else row.cost = (row.cost ?? 0) + cost;
+      }
       if (query)
         for (const s of items)
           s.match = this.findMatch(s.provider, s.id, query) || undefined;
@@ -358,15 +414,32 @@ export class LocalSessionBrowser {
         sum(user_prompt_count) user_prompt_count FROM adit_history_sessions WHERE provider=? AND id IN (SELECT value FROM json_each(?))`)
         .get(provider,JSON.stringify(ids)) as Row;
       const allTurns=this.turnRows(provider,id).map((t,index):Row=>({...t,ordinal:index+1}));
+      const indexed = allTurns.map(t => ({ turn: t, index: this.eventIndex(t.provider,t.session_id,t.id,mode,t.prompt_message_id) }));
+      let totalEntries = 0;
+      const windows = indexed.map(entry => {
+        const start = totalEntries;
+        totalEntries += 1 + entry.index.projected.length;
+        return { ...entry, start, end: totalEntries };
+      });
       const match = this.findMatch(provider, id, query);
       if (targetTurnId && !allTurns.some(t => t.id === targetTurnId))
         throw new LocalStateError("Turn not found", 404);
       const selectedTurnId = targetTurnId || match?.turnId;
       if (offset === undefined && selectedTurnId) {
-        const found = allTurns.find(t=>t.id===selectedTurnId);
-        if (found) offset = Math.floor((found.ordinal - 1) / 8) * 8;
+        const found = windows.find(entry => entry.turn.id === selectedTurnId);
+        if (found) {
+          const event = found.index.projected.findIndex(e => e.id === (targetTurnId ? undefined : match?.eventId));
+          offset = Math.floor((found.start + (event >= 0 ? event + 1 : 0)) / DETAIL_PAGE_SIZE) * DETAIL_PAGE_SIZE;
+        }
       }
       offset = offsetOf(offset);
+      const pageEnd = offset + DETAIL_PAGE_SIZE;
+      const turns = windows.filter(entry => entry.end > offset! && entry.start < pageEnd).map(entry => {
+        const eventOffset = Math.max(0, offset! - entry.start - 1);
+        const limit = Math.max(0, Math.min(entry.end, pageEnd) - Math.max(offset!, entry.start + 1));
+        return { ...this.readTurn(entry.turn,mode,eventOffset,commits,match?.turnId === entry.turn.id ? match?.eventId : undefined,
+          { limit, index: entry.index }), promptVisible: entry.start >= offset!, hasMoreEvents: entry.end > pageEnd };
+      });
       const usage = this.db
         .prepare(
           "SELECT * FROM adit_history_usage_entries WHERE provider=? AND session_id IN (SELECT value FROM json_each(?)) AND ledger_role='canonical'",
@@ -375,7 +448,6 @@ export class LocalSessionBrowser {
       const costs = this.prices ? usage.map((u) => this.prices!.estimate(u)) : [],
         priced = costs.filter((v): v is number => v !== null);
       const total = allTurns.length;
-      const turns = allTurns.slice(offset,offset+8);
       const allowed = new Set(
         this.scope(w)
           .filter((a) => a.provider === provider)
@@ -392,7 +464,7 @@ export class LocalSessionBrowser {
         .map((c) =>
           item({ ...c, commits: this.commits(w, provider, c.id).length }),
         );
-      const context = this.events(provider, ids[0], null, mode, 0);
+      const context = this.events(provider, ids[0], null, mode, 0, "", undefined, 50);
       return {
         session: item({ ...s, ...totals, commits: commits.length }),
         models: [
@@ -406,18 +478,11 @@ export class LocalSessionBrowser {
             commits: commits.filter((c) => c.repository === path).length,
           }),
         ),
-        turns: turns.map((t) =>
-          this.readTurn(
-            t,
-            mode,
-            0,
-            commits,
-            match?.turnId === t.id ? match?.eventId : undefined,
-          ),
-        ),
+        turns,
+        pageOffset: offset,
+        totalEntries,
         totalTurns: total,
-        nextOffset:
-          offset + turns.length < total ? offset + turns.length : null,
+        nextOffset: pageEnd < totalEntries ? pageEnd : null,
         children,
         parent:
           s.parent_id && allowed.has(s.parent_id)
@@ -426,7 +491,7 @@ export class LocalSessionBrowser {
         commits: commits.filter((c) => !c.turnId),
         context: context.events,
         contextNextOffset: context.nextOffset,
-        previousOffset: offset > 0 ? Math.max(0, offset - 8) : null,
+        previousOffset: offset > 0 ? Math.max(0, offset - DETAIL_PAGE_SIZE) : null,
         matchTurnId: selectedTurnId || null,
       };
     })();
@@ -589,6 +654,7 @@ export class LocalSessionBrowser {
     offset: number,
     commits: SessionCommit[],
     matchEventId?: string,
+    page?: { limit: number; index: EventIndex },
   ): SessionTurn {
     const { prompt, imageCount, contextOnly, displayed } = this.readPrompt(turn);
     const usageRows = this.db
@@ -632,20 +698,17 @@ export class LocalSessionBrowser {
         mode,
         offset,
         turn.prompt_message_id,
-        matchEventId,
+        page ? undefined : matchEventId,
+        page?.limit,
+        page?.index,
       ),
+      ...(page ? { nextOffset: null, previousOffset: null } : {}),
       commits: commits.filter((c) => c.turnId === turn.id),
     };
   }
-  private events(
-    provider: string,
-    id: string,
-    turnId: string | null,
-    mode: TranscriptMode,
-    offset: number,
-    promptId = "",
-    seekId?: string,
-  ) {
+  private eventIndex(
+    provider: string, id: string, turnId: string | null, mode: TranscriptMode, promptId = "",
+  ): EventIndex {
     // Bodies stay out of the event index; large inputs and results are read only on expansion.
     const segmentIds=JSON.stringify(turnId===null?conversationSegments(this.db,provider,id):[id]);
     const index = this.db
@@ -751,6 +814,13 @@ export class LocalSessionBrowser {
         (a, b) => a.ordinal - b.ordinal || a.block_index - b.block_index,
       );
     }
+    return { projected, closingRows };
+  }
+  private events(
+    provider: string, id: string, turnId: string | null, mode: TranscriptMode, offset: number,
+    promptId = "", seekId?: string, limit = 40, index?: EventIndex,
+  ) {
+    const { projected, closingRows } = index ?? this.eventIndex(provider,id,turnId,mode,promptId);
     if (seekId) {
       const index = projected.findIndex((e) => e.id === seekId);
       if (index >= 0) offset = Math.floor(index / 40) * 40;
@@ -806,7 +876,9 @@ export class LocalSessionBrowser {
         truncated: text.length > 16000,
       };
     };
-    const events = projected.slice(offset, offset + 40).map(hydrate);
+    const pageRows = projected.slice(offset, offset + limit);
+    const events = pageRows.map(hydrate);
+    const edgeRows = index ? pageRows : projected;
     const closingIds = new Set(closingRows.map((r) => r.id));
     const openingMessage = projected.find(
       (r) => r.type === "reply",
@@ -815,7 +887,7 @@ export class LocalSessionBrowser {
       events,
       openingEvents:
         mode === "normal" && openingMessage
-          ? projected
+          ? edgeRows
               .filter(
                 (r) =>
                   r.type === "reply" &&
@@ -826,7 +898,7 @@ export class LocalSessionBrowser {
           : [],
       closingEvents:
         mode === "normal"
-          ? projected
+          ? edgeRows
               .filter((r) => r.type === "reply" && closingIds.has(r.id))
               .map(hydrate)
           : [],
@@ -839,7 +911,7 @@ export class LocalSessionBrowser {
   }
   context(w: LocalWorkspace, provider: string, id: string, offset = 0) {
     this.session(w, provider, id);
-    return this.events(provider, id, null, "normal", offsetOf(offset));
+    return this.events(provider, id, null, "normal", offsetOf(offset), "", undefined, 50);
   }
   content(
     w: LocalWorkspace,
