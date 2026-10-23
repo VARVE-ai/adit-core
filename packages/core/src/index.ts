@@ -142,9 +142,10 @@ export { recordAgentRuntime, readAgentRuntimeVersions } from "./config/runtime-a
 export * from "./local-state.js";
 export * from "./local-projects.js";
 export * from "./project-resolution.js";
+export * from "./local-registration.js";
 export { analyticsSessions } from "./local-history/analytics-scope.js";
 export { promptText } from "./local-history/prompt-summary.js";
-export { createAttributionSchema } from './local-history/attribution-schema.js';
+export { createAttributionSchema, ATTRIBUTION_RESULT_TABLES } from './local-history/attribution-schema.js';
 export { NON_MERGE_COMMIT_SQL } from './local-history/commit-policy.js';
 export { insideDirectory } from "./local-history/sources.js";
 export { redactOverview } from "./local-history/analytics.js";

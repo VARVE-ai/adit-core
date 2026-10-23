@@ -1,12 +1,4 @@
-import {
-  computeLocalRepositoryId,
-  isRootRepositoryPath,
-  readProjectManifest,
-  withProjectInitLock,
-  writeProjectManifest,
-  type ProjectManifest,
-  type ProjectManifestRepository,
-} from "@varveai/adit-core";
+import { LocalStore, resolveLocalProject, type ProjectManifest } from "@varveai/adit-core";
 import type { CloudClient } from "./http/client.js";
 import { CloudApiError } from "./http/errors.js";
 
@@ -32,7 +24,7 @@ interface ProjectDeletionPolicyResponse {
 export class CloudProjectDeletedError extends Error {
   constructor(public readonly deletedAt: string | null) {
     super(
-      "This project identity was deleted from ADIT Cloud. Run 'adit init' to create a new project identity before linking again.",
+      "This project identity was deleted from ADIT Cloud. Review the project in Settings before linking again.",
     );
     this.name = "CloudProjectDeletedError";
   }
@@ -62,60 +54,22 @@ export async function applyProjectDeletionPolicy(
   projectRoot: string,
   policy: ProjectDeletionPolicy,
 ): Promise<ProjectManifest> {
-  return withProjectInitLock(projectRoot, async () => {
-    const manifest = readProjectManifest(projectRoot);
-    if (!manifest) {
-      throw new Error("Project manifest does not exist.");
+  const project=resolveLocalProject({path:projectRoot});
+  if(project.projectId!==policy.localProjectId)throw new Error("Cloud deletion policy does not match the registered project.");
+  const store=new LocalStore();
+  try{return store.db.transaction(()=>{
+    const w=store.workspace(project.projectId);
+    const repositoryPolicies={...w.repositoryPolicies};
+    for(const deleted of policy.deletedRepositories) {
+      const identity=store.db.prepare("SELECT repository_id FROM adit_local_project_repositories WHERE workspace_id=? AND relative_path=?").get(w.id,deleted.relativePath) as {repository_id:string}|undefined;
+      if(identity?.repository_id!==deleted.localRepositoryId)continue;
+      repositoryPolicies[deleted.relativePath]={...repositoryPolicies[deleted.relativePath],cloudDeletedAt:deleted.deletedAt,cloudDeletionOperationId:deleted.deletionOperationId};
     }
-    if (manifest.projectId !== policy.localProjectId) {
-      throw new Error("Cloud deletion policy does not match the local project manifest.");
+    const deletedAt=w.cloudDeletedAt??(policy.projectDeleted?policy.deletedAt??new Date().toISOString():undefined);
+    if(JSON.stringify(repositoryPolicies)!==JSON.stringify(w.repositoryPolicies??{})||deletedAt!==w.cloudDeletedAt){
+      store.db.prepare("UPDATE adit_local_workspaces SET data=? WHERE id=?").run(JSON.stringify({...w,repositoryPolicies,cloudDeletedAt:deletedAt,version:w.version+1,updatedAt:new Date().toISOString()}),w.id);
     }
-
-    let changed = false;
-    const repositories = manifest.repositories.map((entry) => {
-      const deletion = findRepositoryDeletion(manifest, entry, policy.deletedRepositories);
-      if (!deletion || entry.cloudDeletedAt) return entry;
-      changed = true;
-      return {
-        ...entry,
-        cloudDeletedAt: deletion.deletedAt,
-        cloudDeletionOperationId: deletion.deletionOperationId,
-      };
-    });
-
-    const nextProjectDeletedAt = manifest.cloudDeletedAt ?? (
-      policy.projectDeleted ? policy.deletedAt ?? new Date().toISOString() : undefined
-    );
-    const nextOperationId = manifest.cloudDeletionOperationId ?? (
-      policy.projectDeleted ? policy.deletionOperationId ?? undefined : undefined
-    );
-    if (
-      nextProjectDeletedAt !== manifest.cloudDeletedAt ||
-      nextOperationId !== manifest.cloudDeletionOperationId
-    ) {
-      changed = true;
-    }
-    if (!changed) return manifest;
-
-    const next: ProjectManifest = {
-      ...manifest,
-      repositories,
-      ...(nextProjectDeletedAt ? { cloudDeletedAt: nextProjectDeletedAt } : {}),
-      ...(nextOperationId ? { cloudDeletionOperationId: nextOperationId } : {}),
-      updatedAt: new Date().toISOString(),
-    };
-    writeProjectManifest(projectRoot, next);
-    return next;
-  });
-}
-
-function findRepositoryDeletion(
-  manifest: ProjectManifest,
-  entry: ProjectManifestRepository,
-  deletions: DeletedRepositoryPolicy[],
-): DeletedRepositoryPolicy | undefined {
-  const localRepositoryId = isRootRepositoryPath(entry.relativePath)
-    ? manifest.projectId
-    : entry.repositoryId ?? computeLocalRepositoryId(manifest.projectId, entry.relativePath);
-  return deletions.find((deletion) => deletion.localRepositoryId === localRepositoryId);
+    return {schemaVersion:3,projectId:w.id,createdAt:w.updatedAt,updatedAt:w.updatedAt,cloudDeletedAt:deletedAt,
+      repositories:project.repositories.map(r=>({relativePath:r.relativePath,repositoryId:r.localRepositoryId,...repositoryPolicies[r.relativePath]}))} as ProjectManifest;
+  }).immediate();}finally{store.close();}
 }

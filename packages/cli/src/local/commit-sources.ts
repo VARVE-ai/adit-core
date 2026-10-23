@@ -78,7 +78,7 @@ function readCommitSources(
     };
   const groups = db
     .prepare(
-      `SELECT l.provider,l.session_id,s.title,s.first_prompt,sum(l.tier='certain') certain,sum(l.tier='likely') likely,sum(l.tier='possible') possible FROM adit_attribution_lines l LEFT JOIN adit_history_sessions s ON s.provider=l.provider AND s.id=l.session_id WHERE l.run_id=? AND l.repository=? AND l.sha=? AND l.provider IS NOT NULL GROUP BY l.provider,l.session_id ORDER BY count(*) DESC,l.provider,l.session_id`,
+      `SELECT l.provider,l.session_id,s.title,s.first_prompt,sum(l.certain_lines) certain,sum(l.likely_lines) likely,sum(l.possible_lines) possible FROM adit_attribution_writers l LEFT JOIN adit_history_sessions s ON s.provider=l.provider AND s.id=l.session_id WHERE l.run_id=? AND l.repository=? AND l.sha=? AND l.provider IS NOT NULL GROUP BY l.provider,l.session_id ORDER BY sum(l.certain_lines+l.likely_lines+l.possible_lines) DESC,l.provider,l.session_id`,
     )
     .all(analysis.runId, repository, sha) as Row[];
   const sources = groups.map((s) => ({
@@ -90,13 +90,13 @@ function readCommitSources(
     possible: s.possible,
     files: db
       .prepare(
-        "SELECT file_path path,count(*) lines FROM adit_attribution_lines WHERE run_id=? AND repository=? AND sha=? AND provider=? AND session_id=? GROUP BY file_path ORDER BY lines DESC,file_path",
+        "SELECT file_path path,sum(certain_lines+likely_lines+possible_lines) lines FROM adit_attribution_writers WHERE run_id=? AND repository=? AND sha=? AND provider=? AND session_id=? GROUP BY file_path ORDER BY lines DESC,file_path",
       )
       .all(analysis.runId, repository, sha, s.provider, s.session_id),
     alternatives: (
       db
         .prepare(
-          `SELECT DISTINCT c.provider,c.session_id,s.title,s.first_prompt FROM adit_attribution_candidates c JOIN adit_attribution_lines l ON l.id=c.line_id LEFT JOIN adit_history_sessions s ON s.provider=c.provider AND s.id=c.session_id WHERE l.run_id=? AND l.repository=? AND l.sha=? AND l.provider=? AND l.session_id=? AND c.selected=0`,
+          `SELECT DISTINCT c.provider,c.session_id,s.title,s.first_prompt FROM adit_attribution_alternatives c LEFT JOIN adit_history_sessions s ON s.provider=c.provider AND s.id=c.session_id WHERE c.run_id=? AND c.repository=? AND c.sha=? AND c.writer_provider=? AND c.writer_session_id=? ORDER BY c.provider,c.session_id`,
         )
         .all(analysis.runId, repository, sha, s.provider, s.session_id) as Row[]
     ).map((a) => ({

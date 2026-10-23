@@ -35,7 +35,7 @@ it("retains completed turns on append, reconciles usage groups and rebuilds only
   expect(db.prepare("SELECT ledger_role FROM adit_history_usage_entries").get()).toEqual({ledger_role:"canonical"});
   expect(db.prepare("SELECT count(*) n FROM adit_history_turns").get()).toEqual({n:1});
 });
-it("stores queryable messages, token columns, tools, evidence and Chinese FTS without a session JSON blob",()=>{
+it("stores queryable messages, token columns, tools and original Chinese text without search copies",()=>{
   const {db,store}=fixture(),session=sample();db.transaction(()=>store.write(session))();
   expect((db.prepare("PRAGMA table_info(adit_history_sessions)").all() as {name:string}[]).some(c=>c.name==="data")).toBe(false);
   expect(db.prepare("SELECT title,message_count,user_prompt_count,started_at FROM adit_history_sessions").get()).toMatchObject({title:"Native title",message_count:4,user_prompt_count:1,started_at:Date.parse("2026-10-19T00:00:00Z")});
@@ -44,7 +44,8 @@ it("stores queryable messages, token columns, tools, evidence and Chinese FTS wi
   expect(db.prepare("SELECT tool_name,file_path FROM adit_history_tool_calls").get()).toEqual({tool_name:"Write",file_path:"/work/a.ts"});
   expect(db.prepare("SELECT content_text,tool_call_id FROM adit_history_tool_results").get()).toMatchObject({content_text:"saved",tool_call_id:expect.any(String)});
   expect(db.prepare("SELECT content_text FROM adit_history_edit_evidence").get()).toEqual({content_text:"export const answer = 42;"});
-  expect(db.prepare("SELECT count(*) AS n FROM adit_history_text_fts WHERE adit_history_text_fts MATCH ?").get('"历史记录"')).toEqual({n:1});
+  expect(db.prepare("SELECT count(*) AS n FROM adit_history_blocks WHERE text_content LIKE ?").get('%历史记录%')).toEqual({n:1});
+  expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'adit_history_text_fts%'").all()).toEqual([]);
   expect(JSON.parse(JSON.stringify(store.read("claude","s")))).toEqual(JSON.parse(JSON.stringify(session)));
 });
 it("keeps missing and zero usage distinct, normalizes inclusive input, and does not add reasoning twice",()=>{
@@ -75,13 +76,13 @@ it("replaces derived rows atomically, removes stale search entries and cascades 
   expect(()=>db.transaction(()=>{store.write({...session,messages:[]});throw new Error("rollback");})()).toThrow("rollback");
   expect(db.prepare("SELECT count(*) AS n FROM adit_history_blocks").get()).toEqual(before);
   db.transaction(()=>store.write({...session,messages:[{key:"new",role:"user",content:"replacement",raw:{}}]}))();
-  expect(db.prepare("SELECT count(*) AS n FROM adit_history_text_fts WHERE adit_history_text_fts MATCH ?").get('"历史记录"')).toEqual({n:0});
+  expect(db.prepare("SELECT count(*) AS n FROM adit_history_blocks WHERE text_content LIKE ?").get('%历史记录%')).toEqual({n:0});
   expect(db.prepare("SELECT count(*) AS n FROM adit_history_usage_entries").get()).toEqual({n:0});
   expect(db.prepare("SELECT count(*) AS n FROM adit_history_edit_evidence").get()).toEqual({n:0});
   db.prepare("DELETE FROM adit_history_sessions").run();
   for(const table of ["messages","blocks","turns","work_intervals","tool_calls","tool_results","usage_observations","usage_entries"])
     expect(db.prepare(`SELECT count(*) AS n FROM adit_history_${table}`).get()).toEqual({n:0});
-  expect(db.prepare("SELECT count(*) AS n FROM adit_history_text_fts").get()).toEqual({n:0});
+  expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'adit_history_text_fts%'").all()).toEqual([]);
 });
 it("caps evidenced work gaps at five minutes and leaves missing timestamps unknown",()=>{
   const {db,store}=fixture();const session=sample();session.messages=session.messages.slice(0,2);store.write(session);

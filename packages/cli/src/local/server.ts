@@ -1,3 +1,4 @@
+import { registerWorkspace, workspaceGitStatus } from "@varveai/adit-core";
 import {
   createServer,
   type IncomingMessage,
@@ -13,7 +14,6 @@ import {
   LocalStateError,
   canonicalDirectory,
   directoryAvailable,
-  relocatedRepositories,
   resolveLocalProject,
   LocalAnalytics,
   LocalAchievements,
@@ -35,7 +35,6 @@ import { OverviewService } from "./overview-service.js";
 import { queryCommits } from "./commits.js";
 import { queryCommitSources } from "./commit-sources.js";
 import { AttributionService } from './attribution-service.js';
-import { BrowserSessions, BROWSER_SESSION_MAX_AGE } from './browser-sessions.js';
 import { LoginStartup, type StartupRegistration } from "./login-startup.js";
 import { AchievementService } from "./achievement-service.js";
 import { readmePreview } from "./readme-preview.js";
@@ -43,6 +42,7 @@ import { InspectionService } from "./inspection-service.js";
 import { scanHistoryInBackground } from "./collection-scan.js";
 import { PublicationApi } from "./publication-api.js";
 import { LocalCloudSync } from "./cloud-sync.js";
+import { DeletionCheckpoint } from "./deletion-checkpoint.js";
 
 async function body(req: IncomingMessage, limit = 65536): Promise<Record<string, unknown>> {
   let data = "";
@@ -66,19 +66,6 @@ function equal(a: string, b: string): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
-function validateRepositories(root: string, value: unknown): void {
-  if (
-    !Array.isArray(value) ||
-    value.some(
-      (p) =>
-        typeof p !== "string" ||
-        !inside(root, canonicalDirectory(p)) ||
-        !existsSync(join(p, ".git")),
-    )
-  ) {
-    throw new LocalStateError("Select Git repositories inside the workspace");
-  }
-}
 
 export async function startLocalServer(
   options: {
@@ -90,6 +77,7 @@ export async function startLocalServer(
   } = {},
 ) {
   const store = new LocalStore(options.directory);
+  const deletionCheckpoint = new DeletionCheckpoint(store.db);
   const startup = new LoginStartup(store, options.startupRegistration);
   const attributionService=options.instance?new AttributionService(store.directory):undefined;
   let achievements: LocalAchievements;
@@ -122,7 +110,6 @@ export async function startLocalServer(
   const publications = new PublicationApi(store, analytics.prices, !!options.instance);
   const token = options.token || randomBytes(32).toString("hex");
   const instance = options.instance || randomBytes(16).toString("hex");
-  const sessions = new BrowserSessions(store);
   let origin = "";
   const json = (res: ServerResponse, value: unknown, status = 200) => {
     res.writeHead(status, {
@@ -140,37 +127,32 @@ export async function startLocalServer(
       const path = url.pathname;
       if (path === "/health" && req.method === "GET")
         return json(res, { service: "adit-local", instance, pid: process.pid });
-      if (path === "/api/local/session" && req.method === "POST") {
-        if (req.headers.origin !== origin)
-          throw new LocalStateError("Invalid origin", 403);
-        const input = await body(req);
-        if (!equal(String(input.token || ""), token))
-          throw new LocalStateError("Open this page using adit serve", 401);
-        const session = sessions.issue();
-        res.setHeader(
-          "set-cookie",
-          `adit_local=${session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${BROWSER_SESSION_MAX_AGE}`,
-        );
-        return json(res, { ok: true });
-      }
       if (path.startsWith("/api/")) {
+        // Local pages need no login or cookie. Keep requests intentional and
+        // same-origin so another website cannot read or change local history.
+        if (req.headers.origin && req.headers.origin !== origin)
+          throw new LocalStateError("Invalid origin", 403);
+        const fetchSite = req.headers["sec-fetch-site"];
+        if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none")
+          throw new LocalStateError("Invalid request origin", 403);
         const bearer = req.headers.authorization?.replace(/^Bearer /, "") || "";
         const isCli = equal(bearer, token);
-        const cookie = /(?:^|;\s*)adit_local=([a-f0-9]+)/.exec(
-          req.headers.cookie || "",
-        )?.[1];
-        if (!isCli && !sessions.valid(cookie))
-          throw new LocalStateError("Open this page using adit serve", 401);
-        if (!isCli && req.headers.origin && req.headers.origin !== origin)
-          throw new LocalStateError("Invalid origin", 403);
+        if (req.headers.authorization && !isCli)
+          throw new LocalStateError("Invalid local service token", 401);
+        if (!isCli && req.headers["x-adit-local"] !== "1")
+          throw new LocalStateError("Invalid local request", 403);
         if (
           !isCli &&
           req.method !== "GET" &&
-          (req.headers.origin !== origin || req.headers["x-adit-local"] !== "1")
+          req.headers.origin !== origin
         )
           throw new LocalStateError("Invalid request origin", 403);
         const input = req.method === "GET" ? {} : await body(req, path === "/api/local/sessions/turn" && req.method === "PATCH" ? 2_097_152 : 65536);
         const route = path.replace("/api/local", "");
+        // Older cached pages may still exchange a launch token. No credential
+        // is needed or issued; let them finish loading until their next refresh.
+        if (route === "/session" && req.method === "POST")
+          return json(res, { ok: true });
         const publicationResponse = await publications.route(req.method || "GET", route, url, input);
         if (publicationResponse) return json(res, publicationResponse.value, publicationResponse.status);
         if (route.startsWith("/inspection")) {
@@ -266,6 +248,7 @@ export async function startLocalServer(
             workspaces: store.workspaces().map((w) => ({
               ...w,
               directoryAvailable: directoryAvailable(w.path),
+              git: workspaceGitStatus(w.path),
               counts: collector.snapshot(w),
               repositoryInfo: collector.repositoryInfo(w),
               gistConfigured: secrets.configured(w.id),
@@ -280,20 +263,14 @@ export async function startLocalServer(
             startup: startup.status(),
           });
         }
+        if (route === "/projects/git" && req.method === "GET") return json(res,workspaceGitStatus(url.searchParams.get("path") || ""));
         if (route === "/projects/resolve" && req.method === "GET")
           return json(res,resolveLocalProject({path:url.searchParams.get("path") || undefined,workspaceId:url.searchParams.get("workspaceId") || undefined,directory:store.directory,requireRepository:url.searchParams.get("repository")==="1"}));
         if (route === "/startup" && req.method === "PATCH")
           return json(res, await startup.save(input));
         if (route === "/workspaces" && req.method === "POST") {
           startup.assertCloudMode(input);
-          await collector.validateProviders(
-            Array.isArray(input.providers) ? input.providers : [],
-          );
-          validateRepositories(
-            canonicalDirectory(String(input.path || "")),
-            input.repositories ?? [],
-          );
-          return json(res, store.saveWorkspace(input), 201);
+          return json(res, registerWorkspace(store, input), 201);
         }
         const match =
           /^\/workspaces\/([^/]+)(?:\/(collect|gist-credential|sync|deletion-preview))?$/.exec(route);
@@ -306,12 +283,12 @@ export async function startLocalServer(
           if (!match[2] && req.method === "GET") return json(res, {...workspace,directoryAvailable:directoryAvailable(workspace.path)});
           if (!match[2] && req.method === "DELETE") {
             if (publications.busy(id) || achievementWork.has(id)) throw new LocalStateError("Wait for this project's background tasks to finish before deleting it.",409);
-            store.db.transaction(() => {
+            deletionCheckpoint.run(() => {
               store.deleteWorkspace(id, input.version, () => {
                 cleanupProjectFiles(store,workspace);
                 secrets.clear(id);
               });
-            }).immediate();
+            });
             publications.forget(id);
             cloudSync.forget(id);
             collector.schedule();
@@ -319,17 +296,7 @@ export async function startLocalServer(
           }
           if (!match[2] && req.method === "PATCH") {
             startup.assertCloudMode({ cloud: input.cloud ?? workspace.cloud });
-            await collector.validateProviders(
-              Array.isArray(input.providers)
-                ? input.providers
-                : workspace.providers,
-            );
-            const root = canonicalDirectory(
-              String(input.path ?? workspace.path),
-            );
-            const selected = relocatedRepositories(workspace,root,Array.isArray(input.repositories) ? input.repositories as string[] : workspace.repositories);
-            validateRepositories(root, selected);
-            const saved = store.saveWorkspace({...input,repositories:selected}, id);
+            const saved = registerWorkspace(store, input, id);
             collector.schedule();
             if (saved.started) void evaluateAchievements(saved).catch(()=>{});
             return json(res, {...saved,directoryAvailable:true});
@@ -349,6 +316,8 @@ export async function startLocalServer(
         }
         if (route === "/discoveries" && req.method === "POST")
           return json(res, collector.discover(String(input.path || "")), 202);
+        if (/^\/jobs\/[^/]+$/.test(route) && req.method === "GET")
+          return json(res, collector.job(decodeURIComponent(route.slice(6))));
         if (route === "/imports" && req.method === "POST") {
           const workspace=store.workspace(String(input.workspaceId || ""));
           if (typeof input.path !== "string" || !input.path.trim()) throw new LocalStateError("Select an export file");
@@ -505,6 +474,7 @@ export async function startLocalServer(
       await inspectionService.close();
       await collector.close();
       await achievementService?.close();
+      await deletionCheckpoint.close();
       await new Promise<void>((r) => {
         server.close(() => r());
         // A partial request or an in-flight browser poll must not keep the

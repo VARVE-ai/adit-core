@@ -9,7 +9,7 @@ import {
 import {
   loadCredentials,
   saveCredentials,
-  clearCredentials,
+  logoutCredentials,
   requestDeviceCode,
   pollForToken,
   DEFAULT_SERVER_URL,
@@ -67,6 +67,10 @@ export class LocalAccount {
       throw new LocalStateError("Disconnect the current server before changing servers", 409);
     this.rememberServer(serverUrl);
     return serverUrl;
+  }
+  private generation(value?:string):string {
+    const store=new LocalStore(this.directory);
+    try{if(value)store.set("cloud-login-generation",value);return store.get("cloud-login-generation","");}finally{store.close();}
   }
   private controller?: AbortController;
   private tokenAttempt?: symbol;
@@ -146,6 +150,7 @@ export class LocalAccount {
       throw new LocalStateError("A login is already in progress", 409);
     if (this.attempt?.status === "pending") return this.attempt;
     const serverUrl = this.loginServer(server);
+    const generation=randomUUID();this.generation(generation);
     const attempt = (this.attempt = {
       id: randomUUID(),
       status: "pending",
@@ -192,6 +197,7 @@ export class LocalAccount {
       )
         .then((tokens) => {
           if (this.attempt !== attempt || attempt.status !== "pending") return;
+          if(this.generation()!==generation){attempt.status="cancelled";return;}
           saveCredentials(
             {
               accessToken: tokens.accessToken,
@@ -207,6 +213,7 @@ export class LocalAccount {
               authStatus: "valid",
             },
             this.directory,
+            generation,
           );
           attempt.status = "done";
         })
@@ -240,6 +247,7 @@ export class LocalAccount {
     if (this.tokenAttempt || this.attempt?.status === "pending")
       throw new LocalStateError("A login is already in progress", 409);
     const serverUrl = this.loginServer(server);
+    const generation=randomUUID();this.generation(generation);
     const existing = loadCredentials(this.directory);
     const attempt = (this.tokenAttempt = Symbol());
     const credentials = {
@@ -275,6 +283,7 @@ export class LocalAccount {
         );
       }
       if (
+        this.generation() !== generation ||
         this.tokenAttempt !== attempt ||
         (loadCredentials(this.directory)?.credentialId ?? null) !==
           (existing?.credentialId ?? null)
@@ -302,6 +311,7 @@ export class LocalAccount {
           authStatus: "valid",
         },
         this.directory,
+        generation,
       );
       this.attempt = undefined;
       return this.status();
@@ -316,9 +326,7 @@ export class LocalAccount {
   }
   async logout() {
     this.cancel();
-    const c = loadCredentials(this.directory);
-    if (c) this.rememberServer(c.serverUrl);
-    if (c) clearCredentials(this.directory, c);
+    const c = logoutCredentials(this.directory);
     if (c?.refreshToken && c.authType !== "token") {
       await fetch(`${normalizeServerUrl(c.serverUrl)}/api/auth/token/revoke`, {
         method: "POST",

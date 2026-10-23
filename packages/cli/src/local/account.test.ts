@@ -294,3 +294,11 @@ it("does not write a late check result to a replacement account", async () => {
   expect(loadCredentials()?.accountEmail).toBeUndefined();
   expect(loadCredentials()?.checkedAt).toBeUndefined();
 });
+
+it("a logout from another account service invalidates pending device login without touching project data",async()=>{
+ let finish!:(value:any)=>void;vi.mocked(pollForToken).mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
+ const first=new LocalAccount(directory);await first.login();
+ vi.stubGlobal("fetch",vi.fn().mockResolvedValue({ok:true}));await new LocalAccount(directory).logout();
+ finish({...credentials(),user:{id:"late",name:"Late account"}});await new Promise(resolve=>setTimeout(resolve,0));
+ expect(loadCredentials(directory)).toBeNull();expect(first.status().attempt?.status).toBe("cancelled");
+});

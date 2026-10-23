@@ -6,6 +6,7 @@ import { dirname, join, resolve, isAbsolute, basename, relative } from "node:pat
 import {
   LocalStore,
   createAttributionSchema,
+  ATTRIBUTION_RESULT_TABLES,
   NON_MERGE_COMMIT_SQL,
   insideDirectory,
   analyticsSessions,
@@ -21,6 +22,7 @@ import {
   tokenOverlap,
   literals,
 } from "./attribution-evidence.js";
+import { saveAttributionSummaries, type AttributionLine, type AttributionCandidate } from "./attribution-summaries.js";
 const execute = promisify(execFile);
 export const ATTRIBUTION_VERSION = 4;
 const digest = (value: unknown) =>
@@ -682,7 +684,6 @@ export async function analyzeAttribution(
       };
     });
   const evidenceById = new Map(evidence.map((e) => [digest([run, e.id]), e]));
-  const savedEvidence = new Set<string>();
   try {
     let completed = 0;
     for (const commit of targets) {
@@ -781,8 +782,8 @@ export async function analyzeAttribution(
           support.set(k, (support.get(k) || 0) + 1);
         }
       }
-      const attributionRows: Row[] = [];
-      const candidatesRows: Row[] = [];
+      const attributionRows: (AttributionLine & Row)[] = [];
+      const candidatesRows: (AttributionCandidate & Row)[] = [];
       const totals = {
         eligible: 0,
         excluded: 0,
@@ -974,64 +975,7 @@ export async function analyzeAttribution(
           null;
       else method = null;
       db.transaction(() => {
-        // Persist only evidence referenced by this batch, including alternatives.
-        // Do not store another full transcript-derived index for every new SHA.
-        const insertEvidence = db.prepare(
-          "INSERT INTO adit_attribution_evidence VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        );
-        for (const row of [...attributionRows, ...candidatesRows]) {
-          const id = row.evidence as string | null;
-          if (!id || savedEvidence.has(id)) continue;
-          const e = evidenceById.get(id)!;
-          insertEvidence.run(
-            id,
-            run,
-            e.provider,
-            e.sessionId,
-            e.turnId,
-            e.toolId,
-            e.kind,
-            e.sourcePath,
-            e.filePath,
-            e.at,
-            e.text,
-            digest(e.text),
-          );
-          savedEvidence.add(id);
-        }
-        const insert = db.prepare(
-          "INSERT INTO adit_attribution_lines VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        );
-        for (const l of attributionRows)
-          insert.run(
-            l.id,
-            run,
-            commit.repository,
-            commit.sha,
-            l.path,
-            l.number,
-            l.hunk,
-            l.hash,
-            l.tier,
-            l.provider,
-            l.session,
-            l.evidence,
-            l.method,
-            l.score,
-          );
-        const candidate = db.prepare(
-          "INSERT INTO adit_attribution_candidates VALUES (?,?,?,?,?,?,?)",
-        );
-        for (const c of candidatesRows)
-          candidate.run(
-            c.line,
-            c.provider,
-            c.session,
-            c.evidence,
-            c.support,
-            c.at,
-            c.selected,
-          );
+        saveAttributionSummaries(db, run, commit.repository, commit.sha, attributionRows, candidatesRows, evidenceById);
         db.prepare(
           "INSERT INTO adit_attribution_commits VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         ).run(
@@ -1077,16 +1021,16 @@ export async function analyzeAttribution(
         // Replace only explicitly rechecked commits at publication time. A failed
         // recheck leaves the previous complete snapshot readable and untouched.
         for (const target of options.recheck || []) {
-          for (const table of ["lines", "commits"])
+          for (const table of ATTRIBUTION_RESULT_TABLES)
             db.prepare(
               `DELETE FROM adit_attribution_${table} WHERE run_id=? AND repository=? AND sha=?`,
             ).run(previous.id, target.repository, target.sha);
         }
         // Publish a complete readable snapshot without re-matching old commits.
-        // Stable line/evidence IDs preserve candidates and original-session links.
+        // Carry writer counts, alternatives and original-session/turn links together.
         // Previously seen SHAs stay cached even when a branch/repository is hidden;
         // readers still restrict results to the currently collected repository set.
-        for (const table of ["commits", "lines", "evidence"])
+        for (const table of ATTRIBUTION_RESULT_TABLES)
           db.prepare(
             `UPDATE adit_attribution_${table} SET run_id=? WHERE run_id=?`,
           ).run(run, previous.id);

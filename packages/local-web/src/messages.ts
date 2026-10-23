@@ -106,7 +106,7 @@ export const messages = {
   关闭提示: "Dismiss notification",
   无法连接本地服务: "Cannot connect to the local service",
   正在连接: "Connecting",
-  "请通过 adit serve 打开此页面。": "Open this page using adit serve.",
+  "请确认本地服务已启动，然后刷新页面。可运行 adit server 启动服务。": "Make sure the local service is running, then refresh this page. Run adit server to start it.",
   添加工作目录: "Add workspace",
   "管理这台电脑上的工作目录，选择一个目录查看和调整它的设置。":
     "Manage workspaces on this computer. Select a directory to view and adjust its settings.",

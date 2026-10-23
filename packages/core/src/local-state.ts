@@ -23,6 +23,9 @@ export interface LocalWorkspace {
   repositories: string[];
   cloud: { enabled: boolean; mode: "manual" | "automatic"; interval: number };
   updatedAt: string;
+  identityAdopted?: boolean;
+  cloudDeletedAt?: string;
+  repositoryPolicies?: Record<string, { syncEnabled?: boolean; cloudDeletedAt?: string; cloudDeletionOperationId?: string }>;
 }
 export interface LocalProvider {
   id: string;
@@ -224,8 +227,8 @@ export class LocalStore {
             409,
           );
         const path = canonicalDirectory(String(input.path ?? old?.path ?? ""));
-        const manifest = readProjectManifest(path);
-        const legacyProjectId = !manifest ? savedLegacyProjectId(path) : undefined;
+        const manifest = old?.identityAdopted && pathKey(old.path) === pathKey(path) ? null : readProjectManifest(path);
+        const legacyProjectId = !old?.identityAdopted && !manifest ? savedLegacyProjectId(path) : undefined;
         if (manifest?.mergedIntoProjectId)
           throw new LocalStateError("This directory belongs to its parent ADIT project. Register the parent directory.", 409);
         if (old && (manifest?.projectId ?? legacyProjectId) && (manifest?.projectId ?? legacyProjectId) !== old.id)
@@ -269,6 +272,11 @@ export class LocalStore {
             interval: interval(cloud.interval, [5, 15, 30, 60]),
           },
           updatedAt: new Date().toISOString(),
+          identityAdopted: true,
+          cloudDeletedAt: old?.cloudDeletedAt ?? manifest?.cloudDeletedAt,
+          repositoryPolicies: old?.repositoryPolicies ?? (manifest ? Object.fromEntries(manifest.repositories.map(r => [r.relativePath, {
+            syncEnabled: r.syncEnabled, cloudDeletedAt: r.cloudDeletedAt, cloudDeletionOperationId: r.cloudDeletionOperationId,
+          }])) : {}),
         };
         if (workspace.cloud.mode === "automatic" && !this.get("login-startup", { enabled: false }).enabled)
           throw new LocalStateError('Enable "Start automatically when you sign in" before automatic cloud sync', 409);

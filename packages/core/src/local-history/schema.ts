@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { createAttributionSchema } from './attribution-schema.js';
 import { createInspectionSchema, registerHistoryRedaction } from './inspection-schema.js';
+import { removeHistorySearchIndex } from './history-search.js';
 
 /** Fresh development schema. Older JSON archives must be explicitly reset, never migrated here. */
 export function createHistorySchema(db: Database.Database): void {
@@ -66,22 +67,6 @@ export function createHistorySchema(db: Database.Database): void {
       block_index INTEGER NOT NULL, kind TEXT NOT NULL, text_content TEXT, data_json TEXT,
       UNIQUE(message_id,block_index)
     );
-    CREATE VIRTUAL TABLE IF NOT EXISTS adit_history_text_fts USING fts5(
-      text_content, block_id UNINDEXED, message_id UNINDEXED, tokenize='trigram'
-    );
-    DROP TRIGGER IF EXISTS adit_history_blocks_insert;
-    CREATE TRIGGER adit_history_blocks_insert AFTER INSERT ON adit_history_blocks
-    WHEN NEW.text_content IS NOT NULL BEGIN
-      INSERT INTO adit_history_text_fts(rowid,text_content,block_id,message_id) VALUES(NEW.rowid,adit_history_redact(NEW.text_content),NEW.id,NEW.message_id);
-    END;
-    CREATE TRIGGER IF NOT EXISTS adit_history_blocks_delete AFTER DELETE ON adit_history_blocks BEGIN
-      DELETE FROM adit_history_text_fts WHERE rowid=OLD.rowid;
-    END;
-    CREATE TRIGGER IF NOT EXISTS adit_history_blocks_update AFTER UPDATE OF text_content ON adit_history_blocks BEGIN
-      DELETE FROM adit_history_text_fts WHERE rowid=OLD.rowid;
-      INSERT INTO adit_history_text_fts(rowid,text_content,block_id,message_id)
-        SELECT NEW.rowid,adit_history_redact(NEW.text_content),NEW.id,NEW.message_id WHERE NEW.text_content IS NOT NULL;
-    END;
     CREATE TABLE IF NOT EXISTS adit_history_relations (
       provider TEXT NOT NULL, session_id TEXT NOT NULL, parent_id TEXT NOT NULL, kind TEXT NOT NULL,
       PRIMARY KEY(provider,session_id),
@@ -157,4 +142,5 @@ export function createHistorySchema(db: Database.Database): void {
   `);
   createAttributionSchema(db);
   createInspectionSchema(db);
+  removeHistorySearchIndex(db);
 }

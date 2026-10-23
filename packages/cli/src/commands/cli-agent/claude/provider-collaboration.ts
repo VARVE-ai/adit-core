@@ -1,3 +1,4 @@
+import { projectRuntimeDirectory, resolveLocalProject } from "@varveai/adit-core";
 import type { PermissionResult, SDKAssistantMessage, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type {
   AppendSessionContextInput,
@@ -36,7 +37,7 @@ export class ClaudeProviderCollaboration {
   }) {
     this.run = new ClaudeCollaborationRun(input.emitEvent);
     this.context = new ProviderSessionContext(
-      () => new ClaudeSessionContextStore(input.dataDir ?? input.cwd),
+      () => new ClaudeSessionContextStore(input.dataDir ?? projectRuntimeDirectory(resolveLocalProject({path:input.cwd}).projectId)),
       formatClaudeSessionContext,
       input.emitEvent,
       input.debug,

@@ -33,6 +33,7 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), "adit-collection-worker-"));
   const source = join(root, "source");
   mkdirSync(source);
+  mkdirSync(join(root,".git"));
   const store = new LocalStore(join(root, "state"));
   const history = new LocalHistory(store.db);
   const workspace = store.saveWorkspace({
@@ -90,7 +91,7 @@ const scan = (
 
 it("shares one worker scan across projects and uses identical incremental processing for manual and automatic triggers", async () => {
   const {root,store,history,request,file}=fixture();
-  const one=join(root,"one"),two=join(root,"two");mkdirSync(one);mkdirSync(two);
+  const one=join(root,"one"),two=join(root,"two");mkdirSync(join(one,".git"),{recursive:true});mkdirSync(join(two,".git"),{recursive:true});
   const workspaces=[one,two].map(path=>store.saveWorkspace({path,providers:["codex"],repositories:[]}));
   for(const workspace of workspaces)store.markStarted(workspace.id);
   const rows=(id:string,cwd:string)=>JSON.stringify({type:"session_meta",payload:{id,cwd}})+"\n"+

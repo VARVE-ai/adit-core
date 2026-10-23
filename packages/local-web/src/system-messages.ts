@@ -1,6 +1,8 @@
 // Local service messages can come from saved jobs as well as new requests.
 // Translate these known messages at display time, keeping paths and details intact.
 export const systemMessages: Record<string, string> = {
+  "未检测到 Git 仓库，无法创建项目或开始整理。请选择包含 Git 仓库的目录。": "No Git repository found. Select a directory containing a Git repository to create the project or start organizing.",
+  "正在检查 Git 仓库…": "Checking Git repositories…",
   "本地历史包含多个项目身份，请恢复原项目配置。": "Saved ADIT history contains multiple project identities. Restore the original project configuration.",
   "无法读取已保存的 ADIT 项目身份，请检查本地数据库。": "Unable to read the saved ADIT project identity. Check the local database.",
   "已保存的 ADIT 工作目录配置无法读取，请检查 .adit/workspace.json。": "The saved ADIT workspace configuration is unreadable. Check .adit/workspace.json.",

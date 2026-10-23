@@ -28,15 +28,13 @@ it("allows authenticated single-turn edits and deletion, rejects stale and cross
   const turnId = detail.turns[0].id;
   const draft = await (await call("/turn/edit", "GET", undefined, { turnId })).json() as any;
   const update = { revision: draft.revision, changes: [{ id: draft.blocks[1].id, text: "a long updated reply\n".repeat(4000) }] };
-  expect((await call("/turn", "PATCH", update, { turnId }, false)).status).toBe(401);
+  expect((await call("/turn", "PATCH", update, { turnId }, false)).status).toBe(403);
   expect((await call("/turn", "PATCH", update, { id: "second", turnId })).status).toBe(404);
   expect((await call("/turn", "PATCH", update, { turnId })).status).toBe(200);
   expect((await call("/turn", "PATCH", update, { turnId })).status).toBe(409);
   expect((await (await call("/turn/edit", "GET", undefined, { turnId })).json() as any).blocks[1].text).toBe(update.changes[0].text);
-  const login = await fetch(app.origin + "/api/local/session", { method: "POST", headers: { origin: app.origin, "content-type": "application/json" }, body: JSON.stringify({ token: app.token }) });
-  const cookie = login.headers.get("set-cookie")!.split(";")[0];
   const url = app.origin + "/api/local/sessions/turn?" + new URLSearchParams({ workspaceId: w.id, provider: "claude", id: "first", turnId });
-  expect((await fetch(url, { method: "DELETE", headers: { cookie, origin: "http://other.invalid", "x-adit-local": "1" }, body: JSON.stringify({ revision: draft.revision + 1 }) })).status).toBe(403);
+  expect((await fetch(url, { method: "DELETE", headers: { origin: "http://other.invalid", "x-adit-local": "1" }, body: JSON.stringify({ revision: draft.revision + 1 }) })).status).toBe(403);
   expect((await call("/turn", "DELETE", { revision: draft.revision + 1 }, { turnId })).status).toBe(200);
   expect((await call("/turn", "GET", undefined, { turnId })).status).toBe(404);
   const after = await (await call("/detail")).json() as any;
@@ -84,7 +82,7 @@ it("authenticates session browsing and enforces workspace boundaries for all det
         }),
       { headers: auth ? { authorization: "Bearer " + app!.token } : {} },
     );
-  expect((await get("", {}, false)).status).toBe(401);
+  expect((await get("", {}, false)).status).toBe(403);
   const list = (await (await get("")).json()) as any;
   expect(list.total).toBe(1);
   const detail = (await (await get("/detail")).json()) as any;

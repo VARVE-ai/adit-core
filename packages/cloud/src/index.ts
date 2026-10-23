@@ -27,6 +27,7 @@ export {
   loadCredentials,
   saveCredentials,
   clearCredentials,
+  logoutCredentials,
   updateCloudAccountMetadata,
   type CloudAccountMetadata,
   isTokenExpired,

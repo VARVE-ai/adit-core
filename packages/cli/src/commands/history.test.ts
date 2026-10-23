@@ -138,8 +138,8 @@ it("returns saved submitter and writer separately, preserves unmatched commits a
   store.db.prepare("INSERT INTO adit_attribution_runs(id,workspace_id,algorithm_version,input_fingerprint,status,started_at,finished_at) VALUES ('run',?,1,'fixture','done',100,200)").run(w.id);
   store.db.prepare("INSERT INTO adit_attribution_commits VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
     .run("run", project, sha, "codex", "codex-session", null, null, "hash", sha, 3, 0, 1, 0, 0, 1, 1);
-  store.db.prepare("INSERT INTO adit_attribution_lines VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-    .run("line", "run", project, sha, "code.ts", 1, 1, "linehash", "certain", "claude", "claude-session", null, "exact", 1);
+  store.db.prepare("INSERT INTO adit_attribution_writers VALUES (?,?,?,?,?,?,?,?,?)")
+    .run("run", project, sha, "claude", "claude-session", "code.ts", 1, 0, 0);
   const all = reader.commits(w, { limit: 1, offset: 0 }); expect(all.total).toBe(3); expect(all.nextOffset).toBe(1);
   expect(reader.commits(w, { session: "claude-session", limit: 20, offset: 0 }).commits.map(c => c.sha)).toEqual([sha]);
   expect(reader.commits(w, { session: "codex-session", limit: 20, offset: 0 }).commits.map(c => c.sha)).toEqual([sha]);

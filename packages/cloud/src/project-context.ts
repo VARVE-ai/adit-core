@@ -5,7 +5,8 @@
  * each repository before sync/link requests are sent.
  */
 
-import { projectNameFromRoot, toRepositoryPayload, readProjectManifest, resolveManifestRepositories, resolveActiveManifestRepositories, deriveProjectType } from "@varveai/adit-core";
+import { toRepositoryPayload, LocalStore, loadConfig, projectUploadRepositories } from "@varveai/adit-core";
+import { join } from "node:path";
 import type { AditConfig, LocalRepository, ProjectType } from "@varveai/adit-core";
 import { getRemoteUrl } from "@varveai/adit-engine";
 import { normalizeGitHubRepoKey } from "./project-link/repo-key.js";
@@ -32,42 +33,21 @@ export interface CloudProjectContext {
 }
 
 export async function resolveCloudProjectContext(config: AditConfig): Promise<CloudProjectContext> {
-  const manifest = readProjectManifest(config.projectRoot);
-  if (manifest && manifest.projectId !== config.projectId) {
-    throw new Error("Project identity changed. Reload the project before syncing.");
-  }
-  const repositories = await Promise.all(
-    (manifest ? resolveActiveManifestRepositories(config.projectRoot, manifest) : config.repositories).map(async (repo) => enrichRepository(repo)),
-  );
-
-  const projectType = manifest ? deriveProjectType(manifest) : config.projectType;
-  const registration = manifest?.schemaVersion === 3 && !manifest.mergedIntoProjectId && !manifest.cloudDeletedAt
-    ? {
-      localProjectId: config.projectId,
-      projectName: projectNameFromRoot(config.projectRoot),
-      updatedAt: manifest.updatedAt,
-      repositories: resolveManifestRepositories(config.projectRoot, manifest).map((repository, index) => {
-        const entry = manifest.repositories[index];
-        const active = repositories.find((r) => r.localRepositoryId === repository.localRepositoryId);
-        return {
-          ...toRepositoryPayload(active ?? { ...repository, repositoryUrl: entry.repositoryUrl ?? null }),
-          included: entry.syncEnabled !== false && !entry.cloudDeletedAt,
-        };
-      }),
-    }
-    : undefined;
-
-  return {
-    projectType,
-    localProjectId: config.projectId,
-    projectRoot: config.projectRoot,
-    projectName: projectNameFromRoot(config.projectRoot),
-    repositories,
-    // Kept for wire compatibility; Git identities live only in repositories.
-    remoteUrl: null,
-    canonicalRepoKey: null,
-    ...(registration ? { registration } : {}),
-  };
+  const current=loadConfig(config.projectRoot);
+  if(current.projectId!==config.projectId)throw new Error("Project identity changed. Reload before linking.");
+  const store=new LocalStore();
+  try{
+    const workspace=store.workspace(current.projectId);
+    const selected=projectUploadRepositories(store.db,workspace);
+    const repositories=await Promise.all(selected.map(enrichRepository));
+    const entries=store.db.prepare("SELECT relative_path,repository_id FROM adit_local_project_repositories WHERE workspace_id=?").all(workspace.id) as {relative_path:string;repository_id:string}[];
+    return {projectType:current.projectType,localProjectId:workspace.id,projectRoot:workspace.path,projectName:workspace.name,
+      repositories,remoteUrl:null,canonicalRepoKey:null,
+      registration:{localProjectId:workspace.id,projectName:workspace.name,updatedAt:workspace.updatedAt,repositories:entries.map(entry=>{
+        const found=repositories.find(r=>r.localRepositoryId===entry.repository_id);
+        return {...toRepositoryPayload(found??{localRepositoryId:entry.repository_id,relativePath:entry.relative_path,path:join(workspace.path,entry.relative_path),displayName:entry.relative_path,repositoryUrl:null,canonicalRepoKey:null}),included:!!found};
+      })}};
+  }finally{store.close();}
 }
 
 export function repositoryPayloads(repositories: CloudRepository[]): ReturnType<typeof toRepositoryPayload>[] {

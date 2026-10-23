@@ -365,78 +365,9 @@ export class LocalInspection {
       .immediate();
   }
   maskReady(): boolean {
-    return (
-      (
-        this.db
-          .prepare(
-            "SELECT value FROM adit_history_inspection_meta WHERE key='safe-index'",
-          )
-          .get() as Row | undefined
-      )?.value === SECRET_RULES_VERSION
-    );
-  }
-  async rebuildSafeIndex(
-    cancel: () => boolean = () => false,
-    progress?: (completed: number, total: number) => void,
-  ) {
-    if (this.maskReady()) return;
-    const total = (
-      this.db
-        .prepare("SELECT count(*) AS n FROM adit_history_blocks")
-        .get() as Row
-    ).n;
-    let last = 0,
-      completed = 0;
-    progress?.(0, total);
-    for (;;) {
-      if (cancel()) return;
-      const rows = this.db
-        .prepare(
-          "SELECT b.rowid,b.id,b.message_id,b.text_content,f.text_content AS indexed_text FROM adit_history_blocks b LEFT JOIN adit_history_text_fts f ON f.rowid=b.rowid WHERE b.rowid>? ORDER BY b.rowid LIMIT 100",
-        )
-        .all(last) as Row[];
-      if (!rows.length) break;
-      const safe: Row[] = rows.map((r) => ({
-        ...r,
-        text: redactSecrets(r.text_content || ""),
-      }));
-      this.db
-        .transaction(() => {
-          for (const r of safe) {
-            if (r.text_content !== null && r.indexed_text === r.text) continue;
-            // Recheck after expensive redaction, because collection can replace these rows.
-            const current = this.db
-              .prepare(
-                "SELECT id,text_content FROM adit_history_blocks WHERE rowid=?",
-              )
-              .get(r.rowid) as Row | undefined;
-            if (
-              current?.id !== r.id ||
-              current?.text_content !== r.text_content
-            )
-              continue;
-            this.db
-              .prepare("DELETE FROM adit_history_text_fts WHERE rowid=?")
-              .run(r.rowid);
-            if (r.text_content !== null)
-              this.db
-                .prepare(
-                  "INSERT INTO adit_history_text_fts(rowid,text_content,block_id,message_id) VALUES(?,?,?,?)",
-                )
-                .run(r.rowid, r.text, r.id, r.message_id);
-          }
-        })
-        .immediate();
-      last = rows.at(-1)!.rowid;
-      completed += rows.length;
-      progress?.(completed, Math.max(total, completed));
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-    this.db
-      .prepare(
-        "INSERT OR REPLACE INTO adit_history_inspection_meta VALUES ('safe-index',?)",
-      )
-      .run(SECRET_RULES_VERSION);
+    // Display and search redact stored originals at read time. There is no
+    // persisted search body or index to sanitize before browsing.
+    return true;
   }
   start(workspace: LocalWorkspace, trigger = "manual"): string {
     const active = this.db
@@ -487,13 +418,6 @@ export class LocalInspection {
           state?.rules_version !== INSPECTION_SCAN_VERSION ||
           state?.mode !== "full"
         );
-      });
-      await this.rebuildSafeIndex(cancelled, (completed, total) => {
-        this.db
-          .prepare(
-            "UPDATE adit_history_secret_scan_runs SET status='indexing',total=?,completed=? WHERE id=?",
-          )
-          .run(total, completed, runId);
       });
       this.db
         .prepare(

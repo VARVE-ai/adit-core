@@ -1,5 +1,6 @@
 /** Cloud login belongs to the selected local.sqlite, never the legacy CLI JSON file. */
 import { localDataDir, normalizeServerUrl } from "@varveai/adit-core";
+import { randomUUID } from "node:crypto";
 import {
   credentialDatabase,
   readCredential,
@@ -73,9 +74,17 @@ export function loadCredentials(
 export function saveCredentials(
   creds: CloudCredentials,
   directory = localDataDir(),
+  loginGeneration?: string,
 ): void {
   credentialDatabase(directory, true, (db) =>
-    writeCredential(db, directory, creds),
+    db.transaction(() => {
+      if (loginGeneration) {
+        const current = db.prepare("SELECT data FROM adit_local_settings WHERE key='cloud-login-generation'").get() as { data: string } | undefined;
+        if (!current || JSON.parse(current.data) !== loginGeneration)
+          throw new Error("Login cancelled or replaced. Please try again.");
+      }
+      writeCredential(db, directory, creds);
+    }).immediate(),
   );
 }
 
@@ -95,6 +104,18 @@ export function clearCredentials(
       })
       .immediate(),
   );
+}
+
+/** Invalidate pending CLI/page logins and clear the account in one transaction. */
+export function logoutCredentials(directory = localDataDir()): CloudCredentials | null {
+  return credentialDatabase(directory, true, db => db.transaction(() => {
+    const current = readCredential(db,directory);
+    const set = db.prepare("INSERT INTO adit_local_settings(key,data) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET data=excluded.data");
+    set.run("cloud-login-generation", JSON.stringify(randomUUID()));
+    if (current) set.run("cloud-server", JSON.stringify({url:current.serverUrl}));
+    db.prepare("DELETE FROM adit_cloud_credentials WHERE id=1").run();
+    return current;
+  }).immediate());
 }
 
 /** Check if the access token has expired (with 60s safety margin) */

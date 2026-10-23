@@ -1,4 +1,4 @@
-import { analyticsSessions, projectRepositories, nativeContextSql, type LocalStore, type LocalWorkspace } from "@varveai/adit-core";
+import { analyticsSessions, projectUploadRepositories, nativeContextSql, type LocalStore, type LocalWorkspace } from "@varveai/adit-core";
 import { cloudCommitSelection, cloudFinalReply, cloudTurnUsage, syncKey, type CloudBaseline } from "./cloud-projection.js";
 
 export type CloudPending =
@@ -36,7 +36,7 @@ export function cloudPending(store: LocalStore, workspace: LocalWorkspace, scope
         !receipt.get(scope,"usage",syncKey(t.id,cloudTurnUsage(store,t.id)));
     })) sessions.add(`${s.provider}\0${s.conversation_id}`);
   }
-  for (const repo of projectRepositories(db,workspace)) {
+  for (const repo of projectUploadRepositories(db,workspace)) {
     const selection = cloudCommitSelection(store,scope,baseline,repo);
     // The legacy boundary cannot safely be guessed from the local archive total.
     if (!selection) return {state:"unverified",sessions:null,commits:null};

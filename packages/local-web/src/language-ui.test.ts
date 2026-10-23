@@ -23,6 +23,7 @@ vi.mock("react-dom", () => ({ createPortal: (children: React.ReactNode) => child
 let App: typeof import("./main").App;
 let i18n: typeof import("./i18n");
 let renderer: ReactTestRenderer | undefined;
+let gitAvailable=true;
 const storage = new Map<string, string>();
 const workspace = {
   id: "ws",
@@ -185,6 +186,7 @@ const respond = (path: string, input?: any): unknown => {
   if (path === "/workspaces" && input) {
     savedWorkspace = { ...workspace, ...input, id: "original-flow-project", version: 1, started: false };
     empty = false;
+  gitAvailable=true;
     return savedWorkspace;
   }
   if (path === "/startup") {
@@ -266,6 +268,7 @@ const respond = (path: string, input?: any): unknown => {
         },
       ],
     };
+  if (path.startsWith("/projects/git?")) return {available:gitAvailable,...(!gitAvailable?{error:"No Git repository found. Select a directory containing a Git repository to create the project or start organizing."}:{})};
   if (path === "/directories/list")
     return {
       path: workspace.path,
@@ -284,7 +287,7 @@ beforeAll(async () => {
     setItem: (key: string, value: string) => storage.set(key, value),
     removeItem: (key: string) => storage.delete(key),
   };
-  const location = { pathname: "/settings/workspaces", hash: "" };
+  const location = { pathname: "/settings/workspaces", search: "", hash: "" };
   vi.stubGlobal("localStorage", local);
   vi.stubGlobal("location", location);
   vi.stubGlobal("history", {
@@ -339,6 +342,8 @@ beforeEach(() => {
   jobs = [];
   syncStartFails = false;
   storage.clear();
+  location.hash = "";
+  location.search = "";
   i18n.setLanguage("en");
 });
 afterEach(() => {
@@ -351,6 +356,7 @@ async function render(path: string) {
   await act(async () => {
     renderer = create(React.createElement(App));
   });
+  await act(async () => { await vi.advanceTimersByTimeAsync(200); });
   return renderer!.root;
 }
 function text(node: ReactTestInstance): string {
@@ -372,6 +378,23 @@ async function toggle() {
       .props.onClick();
   });
 }
+it("opens a copied local address without a browser login exchange", async () => {
+  vi.mocked(fetch).mockClear();
+  await render("/overview/ws");
+  expect(text(renderer!.root)).not.toContain("Cannot connect to the local service");
+  expect(vi.mocked(fetch).mock.calls.some(([url]) => url === "/api/local/state")).toBe(true);
+  expect(vi.mocked(fetch).mock.calls.some(([url]) => url === "/api/local/session")).toBe(false);
+});
+it("removes an old launch token without logging in or losing the page query", async () => {
+  location.hash = "#token=expired-launch-token";
+  location.search = "?range=7d";
+  vi.mocked(fetch).mockClear();
+  vi.mocked(history.replaceState).mockClear();
+  await render("/overview/ws");
+  expect(history.replaceState).toHaveBeenCalledWith(null, "", "/overview/ws?range=7d");
+  expect(vi.mocked(fetch).mock.calls.some(([url]) => url === "/api/local/session")).toBe(false);
+  expect(text(renderer!.root)).not.toContain("Cannot connect to the local service");
+});
 function expectEnglish() {
   const native = [
     "中文",
@@ -664,6 +687,7 @@ describe("language switching across the local workbench", () => {
       root.findByProps({id:"workspace-path"}).props.onChange({target:{value:"D:/flowworkerspace"}});
     });
     expect(button("Sync now").props.disabled).toBe(true);
+    await act(async()=>{await vi.advanceTimersByTimeAsync(200);});
     expect(text(root)).toContain("Select at least one Git repository or session source.");
     await act(async () => { root.findAllByProps({className:"selection-row"}).find(n=>text(n).includes("Claude Code"))!.findByType("input").props.onChange({target:{checked:true}}); });
     expect(button("Sync now").props.disabled).toBe(false);
@@ -901,4 +925,13 @@ describe("language switching across the local workbench", () => {
       "工作轮次详情",
     );
   });
+});
+
+it("shows the no-Git reason in both languages, blocks organization, and rechecks changed paths",async()=>{
+ gitAvailable=false;savedWorkspace={...workspace,started:false};const root=await render("/settings/workspaces/ws");
+ expect(text(root)).toContain("No Git repository found.");expect(button("Start organizing").props.disabled).toBe(true);
+ await toggle();expect(text(root)).toContain("未检测到 Git 仓库");await toggle();
+ gitAvailable=true;await act(async()=>{root.findByProps({id:"workspace-path"}).props.onChange({target:{value:"D:/valid-git"}});});
+ expect(button("Start organizing").props.disabled).toBe(true);await act(async()=>{await vi.advanceTimersByTimeAsync(200);});
+ expect(text(root)).not.toContain("No Git repository found.");expect(button("Start organizing").props.disabled).toBe(false);
 });

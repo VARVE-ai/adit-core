@@ -205,5 +205,5 @@ export async function serveCommand(options: {
   const daemon = await startDaemon(port);
   console.log(daemon.url);
   if (options.browser !== false)
-    openBrowser(`${daemon.url}/#token=${daemon.token}`);
+    openBrowser(daemon.url);
 }

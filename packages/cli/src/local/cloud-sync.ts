@@ -1,5 +1,6 @@
+import { assertWorkspaceGit } from "@varveai/adit-core";
 import { randomUUID } from "node:crypto";
-import { LocalStore, LocalStateError, localLoginStartupEnabled, projectRepositories } from "@varveai/adit-core";
+import { LocalStore, LocalStateError, localLoginStartupEnabled, projectUploadRepositories } from "@varveai/adit-core";
 import { CloudClient, loadCredentials, collectDefaultBranch, type UpgradeNotice } from "@varveai/adit-cloud";
 import { CloudProjection, createCloudSyncSchema, syncKey, type CloudBaseline, type CloudEvent, type CloudSession } from "./cloud-projection.js";
 import type { Collector } from "./collector.js";
@@ -65,6 +66,8 @@ export class LocalCloudSync {
   start(id:string):LocalCloudJob {
     if(this.stopped)throw new LocalStateError("Cloud sync is stopping",409);
     const workspace=this.store.workspace(id);
+    assertWorkspaceGit(workspace.path);
+    if(workspace.cloudDeletedAt)throw new LocalStateError("This project was deleted from Cloud. Review its identity in Settings.",409);
     if(!workspace.cloud.enabled)throw new LocalStateError("Enable Cloud storage for this directory first.",409);
     if(this.active.has(id))return this.jobs.get(id)!;
     const credentials=loadCredentials(this.store.directory);
@@ -112,7 +115,7 @@ export class LocalCloudSync {
           this.store.db.prepare("INSERT INTO adit_local_cloud_scopes VALUES (?,?,?)").run(scope,workspace.id,JSON.stringify(baseline));
         }
         const projection=new CloudProjection(this.store,workspace,scope,baseline);
-        const repositories=await Promise.all(projectRepositories(this.store.db,workspace).map(async r=>{
+        const repositories=await Promise.all(projectUploadRepositories(this.store.db,workspace).map(async r=>{
           let repositoryUrl=await getRemoteUrl(r.path).catch(()=>null);
           if(repositoryUrl?.includes("://")) { try {const url=new URL(repositoryUrl);url.username="";url.password="";repositoryUrl=url.toString();}catch{repositoryUrl=null;} }
           const checkpoint=this.store.db.prepare("SELECT refs,identity FROM adit_local_git_checkpoints WHERE repository=?").get(r.path) as {refs:string;identity:string}|undefined;

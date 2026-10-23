@@ -29,9 +29,6 @@ importers:
       '@varveai/adit-engine':
         specifier: workspace:*
         version: link:../engine
-      '@varveai/adit-hooks':
-        specifier: workspace:*
-        version: link:../hooks
       better-sqlite3:
         specifier: 13.0.3
         version: 13.0.3
@@ -113,25 +110,6 @@ importers:
       '@varveai/adit-core':
         specifier: workspace:*
         version: link:../core
-    devDependencies:
-      '@types/better-sqlite3':
-        specifier: ^7.6.13
-        version: 7.6.13
-      typescript:
-        specifier: ^5.7.2
-        version: 5.9.3
-
-  packages/hooks:
-    dependencies:
-      '@varveai/adit-cloud':
-        specifier: workspace:*
-        version: link:../cloud
-      '@varveai/adit-core':
-        specifier: workspace:*
-        version: link:../core
-      '@varveai/adit-engine':
-        specifier: workspace:*
-        version: link:../engine
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^7.6.13

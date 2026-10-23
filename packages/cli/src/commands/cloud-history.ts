@@ -6,15 +6,11 @@
  * events are only known locally.
  */
 
-import { existsSync } from "node:fs";
 import { currentLocalSession } from "./current-local-session.js";
 import { Command, Option } from "commander";
 import {
-  CloudApiError,
-  CloudNetworkError,
   DEFAULT_SERVER_URL,
   cloudSessionLink,
-  countUnsyncedEvents,
   explainCloudCommit,
   listCloudProjects,
   listCloudSessions,
@@ -28,17 +24,6 @@ import {
   type CloudSessionAnalysis,
   type CloudSessionDetail,
 } from "@varveai/adit-cloud";
-import {
-  closeDatabase,
-  getLastEventOfSession,
-  getLatestSession,
-  getSessionByPlatformSessionId,
-  getSyncState,
-  listRecentSessions,
-  loadConfig,
-  openDatabase,
-  type AditSession,
-} from "@varveai/adit-core";
 import { commandWith, pageOptions, periodOptions, printJson, reportFailure, requireCloudClient } from "./cloud-read-output.js";
 import {
   arrow,
@@ -81,18 +66,6 @@ export interface CurrentSessionDeps {
   serverUrl: string;
   now?: Date;
   registry?: typeof currentLocalSession;
-  local: {
-    loadConfig: typeof loadConfig;
-    existsSync: typeof existsSync;
-    openDatabase: typeof openDatabase;
-    closeDatabase: typeof closeDatabase;
-    getSessionByPlatformSessionId: typeof getSessionByPlatformSessionId;
-    getLatestSession: typeof getLatestSession;
-    listRecentSessions: typeof listRecentSessions;
-    getLastEventOfSession: typeof getLastEventOfSession;
-    getSyncState: typeof getSyncState;
-    countUnsyncedEvents: typeof countUnsyncedEvents;
-  };
   /** Reads the session from Cloud; null skips Cloud entirely. */
   cloud: ((sessionId: string) => Promise<CloudSessionDetail>) | null;
 }
@@ -111,7 +84,6 @@ export interface CurrentSessionReport {
   hint: string;
 }
 
-const SYNC_HINT = "Run 'adit cloud sync' in this project directory, then query the session again.";
 
 export function defaultCurrentSessionDeps(): CurrentSessionDeps {
   const credentials = loadCredentials();
@@ -120,7 +92,6 @@ export function defaultCurrentSessionDeps(): CurrentSessionDeps {
     env: process.env,
     registry: currentLocalSession,
     serverUrl,
-    local: { loadConfig, existsSync, openDatabase, closeDatabase, getSessionByPlatformSessionId, getLatestSession, listRecentSessions, getLastEventOfSession, getSyncState, countUnsyncedEvents },
     cloud: credentials ? (sessionId) => showCloudSession(requireCloudClient(), sessionId) : null,
   };
 }
@@ -140,52 +111,8 @@ export async function resolveCurrentSession(deps: CurrentSessionDeps): Promise<C
   const { id: platformSessionId, platform } = platformSessionIdFromEnv(deps.env);
   const current=await deps.registry?.(deps,platformSessionId,platform);
   if(current)return current;
-  const now = deps.now ?? new Date();
   const base = { platformSessionId, platform, inferred: false, project: null, session: null, local: null, cloud: null, candidates: [] as CurrentSessionReport["candidates"] };
-  const config = deps.local.loadConfig(deps.cwd);
-  if (config.initialization !== "initialized" || !deps.local.existsSync(config.dbPath)) {
-    return { ...base, state: "notInitialized", hint: "This directory is not initialized for ADIT, so sessions started here are not recorded locally or in Cloud. Run this command inside the project where the session was recorded, or run 'adit init' there first." };
-  }
-  const project = { id: config.projectId, root: config.projectRoot };
-  const db = deps.local.openDatabase(config.dbPath);
-  try {
-    const describe = (session: AditSession) => ({ id: session.id, platform: session.platform, startedAt: session.startedAt, lastEventAt: deps.local.getLastEventOfSession(db, session.id)?.startedAt ?? null });
-    let session = platformSessionId ? deps.local.getSessionByPlatformSessionId(db, platformSessionId) : null;
-    let inferred = false;
-    const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
-    const recent = deps.local.listRecentSessions(db, { projectId: config.projectId, since, limit: 5 });
-    if (!session && platformSessionId) {
-      return { ...base, state: "notRecorded", project, candidates: recent.map(describe), hint: "The current session is not recorded in this project: hooks may not be installed here, or the session belongs to another project directory. Run 'adit doctor' to check the hooks." };
-    }
-    if (!session) {
-      if (recent.length > 1) return { ...base, state: "ambiguous", project, candidates: recent.map(describe), hint: "No session ID is available from the environment and several sessions were active in the last day; pick one by ID." };
-      session = recent[0] ?? deps.local.getLatestSession(db, config.projectId, config.clientId);
-      inferred = true;
-      if (!session) return { ...base, state: "notRecorded", project, hint: "No session has been recorded in this project yet." };
-    }
-    const syncState = deps.local.getSyncState(db, deps.serverUrl);
-    const local = { unsyncedEvents: deps.local.countUnsyncedEvents(db, syncState?.lastSyncedEventId ?? null, config.projectId), lastSyncedAt: syncState?.lastSyncedAt ?? null };
-    let cloud: CurrentSessionReport["cloud"] = { status: "skipped", analysis: null, title: null, error: null };
-    if (deps.cloud) {
-      try {
-        const detail = await deps.cloud(session.id);
-        cloud = { status: "ready", analysis: detail.session.analysis, title: detail.session.title, error: null };
-      } catch (error) {
-        const cause = error instanceof CloudNetworkError && error.cause ? `: ${error.cause.message}` : "";
-        cloud = error instanceof CloudApiError && error.status === 404
-          ? { status: "notSynced", analysis: null, title: null, error: null }
-          : { status: "unreachable", analysis: null, title: null, error: `${error instanceof Error ? error.message : String(error)}${cause}` };
-      }
-    }
-    const hints: string[] = [];
-    if (inferred) hints.push("No session ID came from the environment; this is the latest session recorded in the project.");
-    if (local.unsyncedEvents > 0) hints.push(`${local.unsyncedEvents} events of this project are not in Cloud yet (the count covers the whole project, not only this session). ${SYNC_HINT}`);
-    else if (cloud.status === "notSynced") hints.push(`Cloud has not received this session yet. ${SYNC_HINT}`);
-    if (cloud.analysis && cloud.analysis.state !== "ready") hints.push(`Cloud analysis is ${cloud.analysis.state}; read raw events when the outline is missing.`);
-    return { ...base, state: "resolved", inferred, project, session: describe(session), local, cloud, candidates: [], hint: hints.join(" ") };
-  } finally {
-    deps.local.closeDatabase(db);
-  }
+  return { ...base, state: "notInitialized", candidates: [], hint: "Run adit init and organize native history in the local page." };
 }
 
 async function sessionArgument(value: string): Promise<string> {
