@@ -63,8 +63,8 @@
 }
 .commits-work {
   display: grid;
-  /* Prototype: a 900px list within the 1918px work area. */
-  grid-template-columns: minmax(0, 900fr) minmax(0, 1018fr);
+  /* Keep the split aligned with the sessions page. */
+  grid-template-columns: max(336px, 35.004%) minmax(0, 1fr);
   flex: 1;
   min-height: 0;
 }
@@ -545,7 +545,12 @@
   font-size: 12px;
   text-decoration: underline;
 }
-@media (max-width: 850px) {
+@media (max-width: 1000px) {
+  .commits-work {
+    grid-template-columns: max(300px, 42%) minmax(0, 1fr);
+  }
+}
+@media (max-width: 700px) {
   .commits-work {
     grid-template-columns: minmax(0, 1fr);
   }
