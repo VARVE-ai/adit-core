@@ -185,19 +185,66 @@ function Content({
     </div>
   );
 }
-function Message({ text, matched = false, metadata, children }: {
-  text: string; matched?: boolean; metadata?: ReactNode; children?: ReactNode;
+export function Message({ text, matched = false, defaultExpanded = false, metadata, children, actions }: {
+  text: string; matched?: boolean; defaultExpanded?: boolean; metadata?: ReactNode; children?: ReactNode; actions?: ReactNode;
 }) {
-  const [open, setOpen] = useState(matched);
+  const [open, setOpen] = useState(matched || defaultExpanded);
+  const shell = useRef<HTMLDivElement>(null), controls = useRef<HTMLDivElement>(null);
+  const collapseTimer = useRef<ReturnType<typeof setTimeout>>();
+  const pointerStart = useRef<{ x: number; y: number }>();
+  const cancelCollapse = () => { clearTimeout(collapseTimer.current); collapseTimer.current = undefined; };
+  const collapseLine = (target: EventTarget, y: number) => {
+    if (!open || !(target instanceof Element) || target.closest("a,button,summary,input,textarea,select,pre,code,table,[role=button],.session-message-controls")) return;
+    const first = shell.current?.querySelector<HTMLElement>(".session-message-body .session-markdown > :first-child");
+    if (!first || !/^(P|H[1-6])$/.test(first.tagName)) return;
+    const rect = first.getBoundingClientRect(), style = getComputedStyle(first);
+    const height = Math.min(rect.height, parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.5);
+    if (y >= rect.top && y < rect.top + height) return { top: rect.top - shell.current!.getBoundingClientRect().top, height };
+  };
+  useEffect(() => {
+    if (shell.current) delete shell.current.dataset.collapseHover;
+    return cancelCollapse;
+  }, [open]);
+  useLayoutEffect(() => {
+    const node = controls.current;
+    if (!node || !shell.current) return;
+    const measure = () => shell.current?.style.setProperty("--session-controls-width", `${Math.ceil(node.getBoundingClientRect().width) + 36}px`);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [metadata, actions]);
   useEffect(() => { if (matched) setOpen(true); }, [matched]);
-  return <details className="session-message" open={open} onToggle={e => setOpen(e.currentTarget.open)}>
-    <summary>
-      <span className="session-message-preview">{text.replace(/\s+/g, " ") || "—"}</span>
-      {metadata}
+  return <div ref={shell} className="session-message-shell"
+    onPointerDown={e => { cancelCollapse(); pointerStart.current = { x: e.clientX, y: e.clientY }; }}
+    onPointerMove={e => {
+      const line = collapseLine(e.target, e.clientY);
+      if (!line) { delete e.currentTarget.dataset.collapseHover; return; }
+      e.currentTarget.dataset.collapseHover = "true";
+      e.currentTarget.style.setProperty("--session-collapse-top", `${line.top}px`);
+      e.currentTarget.style.setProperty("--session-collapse-height", `${line.height}px`);
+    }}
+    onPointerLeave={e => { delete e.currentTarget.dataset.collapseHover; }}
+    onClick={e => {
+      cancelCollapse();
+      if (e.detail > 1 || !collapseLine(e.target, e.clientY) || window.getSelection()?.toString()) return;
+      const start = pointerStart.current;
+      if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4) return;
+      // Let a second click select a word instead of collapsing mid-selection.
+      collapseTimer.current = setTimeout(() => {
+        if (!window.getSelection()?.toString()) setOpen(false);
+      }, 250);
+    }}>
+    {(metadata || actions) && <div ref={controls} className="session-message-controls">{metadata}{actions}</div>}
+    <details className="session-message" data-inline-event open={open} onToggle={e => setOpen(e.currentTarget.open)}>
+    <summary aria-label={open ? sc("收起") : sc("展开查看完整内容")}>
+      {!open && <span className="session-message-preview">{text.replace(/\s+/g, " ") || "—"}</span>}
       <ChevronRight size={12} aria-hidden="true" />
     </summary>
-    {open && <div className="session-message-body">{children ?? <Body text={text} />}</div>}
-  </details>;
+    {open && <div className="session-message-body session-inline-body">
+      {children ?? <Body text={text} />}
+    </div>}
+  </details></div>;
 }
 /** Intersection is scoped to the detail pane; one request per visible cursor. */
 function AutoLoad({ cursor, loading, error, load }: {
@@ -243,10 +290,14 @@ function Event({
   event,
   request,
   matched = false,
+  onEdit,
+  onDelete,
 }: {
   event: SessionEvent;
   request: <T>(path: string, params?: Record<string, string>) => Promise<T>;
   matched?: boolean;
+  onEdit?: () => void;
+  onDelete?: () => void;
 }) {
   const [open, setOpen] = useState(matched);
   if (event.kind === "reply")
@@ -257,7 +308,7 @@ function Event({
         title={date(event.at, true)}
       >
         <ReplyNode />
-        <Message text={event.text} matched={matched}>
+        <Message text={event.text} matched={matched} actions={onEdit && onDelete ? <SessionTurnActions reply onEdit={onEdit} onDelete={onDelete} /> : undefined}>
           {event.truncated ? <Content eventId={event.id} kind="reply" request={request} markdown /> : undefined}
         </Message>
       </div>
@@ -291,11 +342,13 @@ function Event({
   return (
     <details
       className={`session-operation${matched ? " search-event-match" : ""}`}
+      data-inline-event
       data-event-id={event.id}
       open={open}
       onToggle={(e) => setOpen(e.currentTarget.open)}
     >
-      <summary title={date(event.at, true)}>
+      <summary title={date(event.at, true)} aria-label={open ? sc("收起") : sc("展开查看完整内容")}>
+        {!open && <>
         <Icon size={12} aria-hidden="true" />
         {command ? (
           <code>{summary || title}</code>
@@ -305,10 +358,11 @@ function Event({
             {summary && ` · ${summary.replace(/\s+/g, " ").slice(0, 180)}`}
           </span>
         )}
+        </>}
         <ChevronRight size={12} />
       </summary>
-      {open &&
-        (event.kind === "tool" ? (
+      {open && <div className="session-inline-body">
+        {event.kind === "tool" ? (
           <div className="session-tool-content">
             <h5>{sc("工具输入")}</h5>
             <Content eventId={event.id} kind="tool-input" request={request} />
@@ -317,7 +371,8 @@ function Event({
           </div>
         ) : (
           <Content eventId={event.id} kind={event.kind} request={request} />
-        ))}
+        )}
+      </div>}
     </details>
   );
 }
@@ -362,19 +417,22 @@ function Commit({
   commit: SessionCommit;
   onCommit: (c: SessionCommit) => void;
 }) {
+  const [open, setOpen] = useState(false);
   return (
-    <details className="session-commit">
-      <summary title={sc("提交信息")}>
+    <details className="session-commit" data-inline-event open={open} onToggle={e => setOpen(e.currentTarget.open)}>
+      <summary title={sc("提交信息")} aria-label={open ? sc("收起") : sc("展开查看完整内容")}>
+        {!open && <>
         <span className="session-commit-node"><GitCommitHorizontal size={11} aria-hidden="true" /></span>
         <code>{commit.sha.slice(0, 7)}</code>
         <span>{commit.subject}</span>
         <small>
           {commit.repository.split(/[\\/]/).pop()} · {clock(commit.at)}
         </small>
+        </>}
         <ChevronRight size={12} aria-hidden="true" />
       </summary>
-      <div className="session-event-detail">
-        <h5>{sc("提交信息")}</h5>
+      {open && <div className="session-event-detail session-inline-body">
+        <span className="session-commit-node"><GitCommitHorizontal size={11} aria-hidden="true" /></span>
         <p>{commit.subject}</p>
         <p>
           {sc("仓库")}：{commit.repository}
@@ -382,8 +440,9 @@ function Commit({
         <p>
           {sc("提交编号")}：<code>{commit.sha}</code>
         </p>
+        <p className="session-muted">{date(commit.at, true)}</p>
         <button onClick={() => onCommit(commit)}>{sc("查看提交")}</button>
-      </div>
+      </div>}
     </details>
   );
 }
@@ -395,6 +454,8 @@ export function SessionTurnView({
   matched,
   onEdit,
   onDelete,
+  onEditReply,
+  onDeleteReply,
 }: {
   turn: SessionTurn;
   mode: TranscriptMode;
@@ -403,6 +464,8 @@ export function SessionTurnView({
   matched?: boolean;
   onEdit?: () => void;
   onDelete?: () => void;
+  onEditReply?: (event: SessionEvent) => void;
+  onDeleteReply?: (event: SessionEvent) => void;
 }) {
   const [events, setEvents] = useState(turn.events),
     [next, setNext] = useState(turn.nextOffset),
@@ -458,6 +521,8 @@ export function SessionTurnView({
       event={e}
       request={request}
       matched={e.id === turn.matchEventId}
+      onEdit={onEditReply ? () => onEditReply(e) : undefined}
+      onDelete={onDeleteReply ? () => onDeleteReply(e) : undefined}
     />
   );
   // Normal mode keeps the collected event order. Only adjacent tool calls share
@@ -536,8 +601,8 @@ export function SessionTurnView({
         <MessageSquare size={11} />
       </span>
       <div className="session-question">
-        {onEdit && onDelete && <SessionTurnActions onEdit={onEdit} onDelete={onDelete} />}
         <Message text={turn.prompt || (turn.imageCount ? sc("图片提问（{0} 张）",turn.imageCount) : "—")}
+          actions={onEdit && onDelete ? <SessionTurnActions onEdit={onEdit} onDelete={onDelete} /> : undefined}
           matched={matched && !turn.matchEventId} metadata={
         <span
           className="session-usage"
@@ -608,7 +673,7 @@ export function SessionsPage({
   const [list, setList] = useState<SessionList>(),
     [selected, setSelected] = useState<Selection | undefined>(requestedSession.current),
     [detail, setDetail] = useState<SessionDetail>();
-  const [turnAction, setTurnAction] = useState<{ kind: 'edit' | 'delete'; turn: SessionTurn; session: Selection }>();
+  const [turnAction, setTurnAction] = useState<{ kind: 'edit' | 'delete'; turn: SessionTurn; session: Selection; reply?: SessionEvent }>();
   const [listError, setListError] = useState(""),
     [detailError, setDetailError] = useState(""),
     [listLoading, setListLoading] = useState(true),
@@ -1180,6 +1245,8 @@ export function SessionsPage({
                         matched={detail.matchTurnId === turn.id}
                         onEdit={() => setTurnAction({ kind: 'edit', turn, session: { provider: detail.session.provider, id: detail.session.id } })}
                         onDelete={() => setTurnAction({ kind: 'delete', turn, session: { provider: detail.session.provider, id: detail.session.id } })}
+                        onEditReply={reply => setTurnAction({ kind: 'edit', turn, reply, session: { provider: detail.session.provider, id: detail.session.id } })}
+                        onDeleteReply={reply => setTurnAction({ kind: 'delete', turn, reply, session: { provider: detail.session.provider, id: detail.session.id } })}
                       />
                     ))}
                   <CommitGroup commits={detail.commits} onCommit={onCommit} />
@@ -1192,10 +1259,10 @@ export function SessionsPage({
           )}
         </div>
       </div>
-      {turnAction && <SessionTurnEditor key={`${key(turnAction.session)}:${turnAction.turn.id}:${turnAction.kind}`}
-        kind={turnAction.kind} prompt={turnAction.turn.prompt}
-        read={() => api<SessionTurnEdit>("/sessions/turn/edit?" + new URLSearchParams({ workspaceId: workspace.id, provider: turnAction.session.provider, id: turnAction.session.id, turnId: turnAction.turn.id }))}
-        mutate={(method, body) => api("/sessions/turn?" + new URLSearchParams({ workspaceId: workspace.id, provider: turnAction.session.provider, id: turnAction.session.id, turnId: turnAction.turn.id }), method, body)}
+      {turnAction && <SessionTurnEditor key={`${key(turnAction.session)}:${turnAction.turn.id}:${turnAction.reply?.id || ''}:${turnAction.kind}`}
+        kind={turnAction.kind} reply={!!turnAction.reply} prompt={turnAction.reply?.text ?? turnAction.turn.prompt}
+        read={() => api<SessionTurnEdit>(`/sessions/${turnAction.reply ? 'reply' : 'turn'}/edit?` + new URLSearchParams({ workspaceId: workspace.id, provider: turnAction.session.provider, id: turnAction.session.id, turnId: turnAction.turn.id, ...(turnAction.reply ? { eventId: turnAction.reply.id } : {}) }))}
+        mutate={(method, body) => api(`/sessions/${turnAction.reply ? 'reply' : 'turn'}?` + new URLSearchParams({ workspaceId: workspace.id, provider: turnAction.session.provider, id: turnAction.session.id, turnId: turnAction.turn.id, ...(turnAction.reply ? { eventId: turnAction.reply.id } : {}) }), method, body)}
         onClose={() => setTurnAction(undefined)} onDone={() => void refreshAfterTurnChange()} />}
     </section>
   );

@@ -42,6 +42,38 @@ it("allows authenticated single-turn edits and deletion, rejects stale and cross
   expect(after.session.prompts).toBe(1);
   expect((await call("", "DELETE", { revision: 1 })).status).toBe(404);
 });
+it("limits reply mutations to one authenticated reply and preserves its turn", async () => {
+  root = mkdtempSync(join(tmpdir(), "adit-reply-api-"));
+  app = await startLocalServer({ directory: join(root, "state") });
+  const w = app.store.saveWorkspace({ path: root, providers: ["claude"], repositories: [] });
+  const history = new StructuredHistory(app.store.db);
+  for (const id of ["first", "second"]) history.write({ provider: "claude", id, cwd: root, messages: [
+    { key: "u", role: "user", content: "keep prompt", raw: {} },
+    { key: "a", role: "assistant", content: "target reply", raw: {} },
+    { key: "b", role: "assistant", content: "keep reply", raw: {} },
+  ] });
+  const call = (route: string, method = "GET", input?: unknown, params: Record<string, string> = {}, auth = true) => fetch(
+    app!.origin + "/api/local/sessions" + route + "?" + new URLSearchParams({ workspaceId: w.id, provider: "claude", id: "first", ...params }),
+    { method, headers: { "content-type": "application/json", ...(auth ? { authorization: "Bearer " + app!.token } : {}) }, ...(input ? { body: JSON.stringify(input) } : {}) },
+  );
+  const before = await (await call("/detail")).json() as any;
+  const turn = before.turns[0], params = { turnId: turn.id, eventId: turn.events[0].id };
+  const draft = await (await call("/reply/edit", "GET", undefined, params)).json() as any;
+  expect(draft.blocks).toHaveLength(1);
+  const body = { revision: draft.revision, changes: [{ id: params.eventId, text: "edited\n".repeat(12000) }] };
+  expect((await call("/reply", "PATCH", body, params, false)).status).toBe(403);
+  expect((await call("/reply", "PATCH", body, { ...params, id: "second" })).status).toBe(404);
+  expect((await call("/reply", "PATCH", body, params)).status).toBe(200);
+  expect((await call("/reply", "DELETE", { revision: draft.revision }, params)).status).toBe(409);
+  const updated = await (await call("/reply/edit", "GET", undefined, params)).json() as any;
+  expect(updated.blocks[0].text).toBe(body.changes[0].text);
+  expect((await call("/reply", "DELETE", { revision: updated.revision }, params)).status).toBe(200);
+  const after = await (await call("/detail")).json() as any;
+  expect(after.turns[0].prompt).toBe("keep prompt");
+  expect(after.turns[0].events.map((e: any) => e.text)).toEqual(["keep reply"]);
+  expect((await call("/reply/edit", "GET", undefined, params)).status).toBe(404);
+});
+
 it("authenticates session browsing and enforces workspace boundaries for all detail endpoints", async () => {
   root = mkdtempSync(join(tmpdir(), "adit-session-api-"));
   app = await startLocalServer({ directory: join(root, "state") });

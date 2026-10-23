@@ -210,6 +210,43 @@ it("edits complete prompt/reply blocks, updates search, preserves tools/usage an
   expect(original.messages[0].content).toBe("original question");
 });
 
+it("edits and deletes only the selected reply block and reapplies it without losing tools or usage", () => {
+  const { w, history, browser } = fixture();
+  const original = { provider: "claude", id: "reply-actions", cwd: root, messages: [
+    m("u", "user", "keep prompt"),
+    m("a", "assistant", [{ type: "text", text: "target reply" }, { type: "text", text: "neighbor reply" }],
+      { usage: { input_tokens: 10, output_tokens: 20 }, model: "test-model" }),
+    m("t", "assistant", [{ type: "tool_use", id: "call", name: "Bash", input: { command: "echo keep" } }]),
+    m("f", "assistant", "final reply"),
+    m("u2", "user", "next turn"), m("a2", "assistant", "next reply"),
+  ] };
+  history.write(original);
+  const before = browser.detail(w, "claude", original.id), first = before.turns[0], target = first.events[0];
+  const draft = browser.editReply(w, "claude", original.id, first.id, target.id);
+  expect(draft.blocks).toEqual([{ id: target.id, kind: "reply", text: "target reply" }]);
+  expect(() => browser.editReply(w, "claude", original.id, first.id, first.promptBlockId!)).toThrow("Reply not found");
+  expect(() => browser.editReply(w, "claude", original.id, first.id, first.events.find(e => e.kind === "tool")!.id)).toThrow("Reply not found");
+  expect(() => browser.editReply(w, "claude", original.id, before.turns[1].id, target.id)).toThrow("Reply not found");
+  expect(() => browser.updateReply(w, "claude", original.id, first.id, target.id, draft.revision,
+    [{ id: target.id, text: "wrong" }, { id: first.promptBlockId, text: "wrong prompt" }])).toThrow("only the current reply");
+  browser.updateReply(w, "claude", original.id, first.id, target.id, draft.revision, [{ id: target.id, text: "edited reply" }]);
+  expect(() => browser.deleteReply(w, "claude", original.id, first.id, target.id, draft.revision)).toThrow("conversation changed");
+  const edited = browser.editReply(w, "claude", original.id, first.id, target.id);
+  expect(edited.blocks[0].text).toBe("edited reply");
+  browser.deleteReply(w, "claude", original.id, first.id, target.id, edited.revision);
+  expect(() => browser.editReply(w, "claude", original.id, first.id, target.id)).toThrow("Reply not found");
+  expect(browser.list(w, { query: "edited reply" }).total).toBe(0);
+  const after = browser.detail(w, "claude", original.id);
+  expect(after.turns[0].prompt).toBe("keep prompt");
+  expect(after.turns[0].events.map(e => e.id)).toEqual(first.events.slice(1).map(e => e.id));
+  expect(after.turns[0].usage).toEqual(first.usage);
+  expect(after.turns[1]).toEqual(before.turns[1]);
+  history.write(original);
+  expect(browser.detail(w, "claude", original.id).turns[0].events.map(e => e.id)).toEqual(first.events.slice(1).map(e => e.id));
+  expect(browser.detail(w, "claude", original.id).turns[0].usage).toEqual(first.usage);
+  expect((original.messages[1].content as { text: string }[])[0].text).toBe("target reply");
+});
+
 it("deletes exactly one whole turn including search/tools/usage, keeps other turns and never reimports it", () => {
   const { w, history, browser } = fixture();
   const original = { provider: "claude", id: "deletable", cwd: root, messages: [

@@ -609,6 +609,30 @@ export class LocalSessionBrowser {
       })) };
     })();
   }
+  editReply(w: LocalWorkspace, provider: string, id: string, turnId: string, eventId: string): SessionTurnEdit {
+    return this.db.transaction(() => {
+      const { turn } = this.editable(w, provider, id, turnId);
+      const event = this.eventIndex(provider, turn.session_id, turnId, "normal", turn.prompt_message_id)
+        .projected.find(e => e.id === eventId && e.type === "reply");
+      const draft = this.editTurn(w, provider, id, turnId);
+      const block = draft.blocks.find(b => b.id === eventId && b.kind === "reply");
+      if (!event || !block) throw new LocalStateError("Reply not found", 404);
+      return { ...draft, blocks: [block] };
+    })();
+  }
+  updateReply(w: LocalWorkspace, provider: string, id: string, turnId: string, eventId: string, revision: unknown, changes: unknown): void {
+    this.db.transaction(() => {
+      this.editReply(w, provider, id, turnId, eventId);
+      if (!Array.isArray(changes) || changes.length !== 1 || changes[0]?.id !== eventId)
+        throw new LocalStateError("Select only the current reply to edit");
+      this.updateTurn(w, provider, id, turnId, revision, changes);
+    })();
+  }
+  deleteReply(w: LocalWorkspace, provider: string, id: string, turnId: string, eventId: string, revision: unknown): void {
+    // An empty local text override removes just this reply from the timeline.
+    // Native block identity, tools and usage remain intact, and collection reapplies it.
+    this.updateReply(w, provider, id, turnId, eventId, revision, [{ id: eventId, text: "" }]);
+  }
   updateTurn(w: LocalWorkspace, provider: string, id: string, turnId: string, revision: unknown, changes: unknown): void {
     this.db.transaction(() => {
       const { session, turn, blocks } = this.editable(w, provider, id, turnId);
@@ -763,7 +787,9 @@ export class LocalSessionBrowser {
       length(b.text_content) text_length,substr(b.text_content,1,180) preview,
       (SELECT id FROM adit_history_tool_calls t WHERE t.message_id=m.id ORDER BY call_index LIMIT 1) tool_id,
       m.id message_id,${nativeContextSql()} native_context FROM adit_history_messages m JOIN adit_history_blocks b ON b.message_id=m.id JOIN json_each(?) q ON q.value=m.session_id
-      WHERE m.provider=? AND m.turn_id IS ? AND m.id!=? ORDER BY CAST(q.key AS INTEGER),m.ordinal,b.block_index`,
+      WHERE m.provider=? AND m.turn_id IS ? AND m.id!=?
+      AND NOT (m.role='assistant' AND b.kind IN (${textKinds}) AND coalesce(length(b.text_content),0)=0)
+      ORDER BY CAST(q.key AS INTEGER),m.ordinal,b.block_index`,
       )
       .all(segmentIds,provider, turnId, promptId) as Row[];
     // Determine the closing reply across the complete event index, including

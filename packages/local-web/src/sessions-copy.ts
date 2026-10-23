@@ -2,6 +2,11 @@ import { getLanguage } from "./i18n";
 
 const copy = {
   本轮操作: "Turn actions",
+  回复操作: "Reply actions",
+  修改回复: "Edit reply",
+  删除回复: "Delete reply",
+  "仅删除当前这条回复，提问、其他回复和工具过程保留。": "Only this reply will be deleted. The prompt, other replies and tool activity will be kept.",
+  "后续采集不会恢复这条回复。Agent 原始记录不会被修改。": "Later collection will not restore this reply. Original agent records will be kept.",
   修改本轮: "Edit turn",
   删除本轮: "Delete turn",
   修改本轮对话: "Edit this turn",
@@ -82,6 +87,7 @@ const copy = {
   工具输出: "Tool output",
   附件: "Attachment",
   展开查看完整内容: "Expand full content",
+  收起: "Collapse",
   加载更多内容: "Load more content",
   加载更多过程: "Load more activity",
   加载更多提问: "Load more prompts",

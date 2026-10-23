@@ -275,20 +275,19 @@ export function CommitsPage({
                       }}
                     >
                       <div className="commit-heading">
-                        <ChevronRight size={14} />
-                        <strong>{c.subject}</strong>
-                      </div>
-                      <div className="commit-meta">
-                        <code>{c.sha.slice(0, 7)}</code>
-                        <span>{name(c.repository)}</span>
-                        <span>
-                          ·{" "}
-                          {c.authoredAt
-                            ? new Date(c.authoredAt).toLocaleTimeString(
-                                locale(),
-                                { hour: "2-digit", minute: "2-digit" },
-                              )
-                            : "—"}
+                        <strong title={c.subject}>{c.subject}</strong>
+                        <span className="commit-meta">
+                          <code>{c.sha.slice(0, 7)}</code>
+                          <span className="commit-repository" title={name(c.repository)}>{name(c.repository)}</span>
+                          <span>
+                            ·{" "}
+                            {c.authoredAt
+                              ? new Date(c.authoredAt).toLocaleTimeString(
+                                  locale(),
+                                  { hour: "2-digit", minute: "2-digit" },
+                                )
+                              : "—"}
+                          </span>
                         </span>
                       </div>
                       <div className="commit-relations">

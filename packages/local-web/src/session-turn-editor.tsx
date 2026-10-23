@@ -5,7 +5,7 @@ import type { SessionTurnEdit } from "../../core/src/local-history/session-brows
 import { sc } from "./sessions-copy";
 import { systemMessage } from "./i18n";
 
-export function SessionTurnActions({ onEdit, onDelete }: { onEdit: () => void; onDelete: () => void }) {
+export function SessionTurnActions({ onEdit, onDelete, reply = false }: { onEdit: () => void; onDelete: () => void; reply?: boolean }) {
   const trigger = useRef<HTMLButtonElement>(null), menu = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{ top: number; left: number }>();
   const open = () => {
@@ -44,19 +44,19 @@ export function SessionTurnActions({ onEdit, onDelete }: { onEdit: () => void; o
   }, [position]);
   const select = (action: () => void) => { setPosition(undefined); trigger.current?.focus({ preventScroll: true }); action(); };
   return <>
-    <button ref={trigger} className="session-turn-more" title={sc("本轮操作")} aria-label={sc("本轮操作")} aria-haspopup="menu" aria-expanded={!!position}
+    <button ref={trigger} className="session-turn-more" title={sc(reply ? "回复操作" : "本轮操作")} aria-label={sc(reply ? "回复操作" : "本轮操作")} aria-haspopup="menu" aria-expanded={!!position}
       onClick={() => position ? setPosition(undefined) : open()} onKeyDown={e => { if (e.key === 'ArrowDown') { e.preventDefault(); open(); } }}>
       <MoreHorizontal size={16} />
     </button>
-    {position && createPortal(<div ref={menu} className="session-turn-menu" role="menu" aria-label={sc("本轮操作")} style={position}>
-      <button role="menuitem" onClick={() => select(onEdit)}><Pencil size={14} />{sc("修改本轮")}</button>
-      <button role="menuitem" className="danger" onClick={() => select(onDelete)}><Trash2 size={14} />{sc("删除本轮")}</button>
+    {position && createPortal(<div ref={menu} className="session-turn-menu" role="menu" aria-label={sc(reply ? "回复操作" : "本轮操作")} style={position}>
+      <button role="menuitem" onClick={() => select(onEdit)}><Pencil size={14} />{sc(reply ? "修改回复" : "修改本轮")}</button>
+      <button role="menuitem" className="danger" onClick={() => select(onDelete)}><Trash2 size={14} />{sc(reply ? "删除回复" : "删除本轮")}</button>
     </div>, document.body)}
   </>;
 }
 
-export function SessionTurnEditor({ kind, prompt, read, mutate, onClose, onDone }: {
-  kind: 'edit' | 'delete'; prompt: string;
+export function SessionTurnEditor({ kind, prompt, read, mutate, onClose, onDone, reply = false }: {
+  kind: 'edit' | 'delete'; prompt: string; reply?: boolean;
   read: () => Promise<SessionTurnEdit>;
   mutate: (method: 'PATCH' | 'DELETE', body: unknown) => Promise<unknown>;
   onClose: () => void; onDone: () => void;
@@ -77,7 +77,7 @@ export function SessionTurnEditor({ kind, prompt, read, mutate, onClose, onDone 
     return () => { current = false; };
   }, [attempt]);
   const changes = draft?.blocks.filter(b => texts[b.id] !== b.text).map(b => ({ id: b.id, text: texts[b.id] })) || [];
-  const currentPrompt = draft ? draft.blocks.filter(b => b.kind === 'prompt').map(b => b.text).join('\n') : prompt;
+  const currentPrompt = draft ? draft.blocks.filter(b => b.kind === (reply ? 'reply' : 'prompt')).map(b => b.text).join('\n') : prompt;
   const save = async () => {
     if (!draft || busy) return;
     setBusy(true); setError('');
@@ -85,20 +85,20 @@ export function SessionTurnEditor({ kind, prompt, read, mutate, onClose, onDone 
     catch (e) { setError(String(e)); }
     finally { setBusy(false); }
   };
-  let reply = 0, question = 0;
+  let replyNumber = 0, question = 0;
   return createPortal(<dialog ref={dialog} className={`session-turn-dialog ${kind}`} aria-labelledby="session-turn-editor-title"
     onCancel={e => { e.preventDefault(); if (!busy) onClose(); }}>
-    <header><h2 id="session-turn-editor-title">{sc(kind === 'edit' ? "修改本轮对话" : "删除本轮对话")}</h2>
+    <header><h2 id="session-turn-editor-title">{sc(reply ? (kind === 'edit' ? "修改回复" : "删除回复") : (kind === 'edit' ? "修改本轮对话" : "删除本轮对话"))}</h2>
       <button type="button" disabled={busy} aria-label={sc("关闭")} onClick={onClose}><X size={17} /></button></header>
     <div className="session-turn-editor-body">
       {kind === 'delete' ? <>
-        <p>{sc("仅删除这一轮的提问、回复和工具过程，其他轮次保留。")}</p>
+        <p>{sc(reply ? "仅删除当前这条回复，提问、其他回复和工具过程保留。" : "仅删除这一轮的提问、回复和工具过程，其他轮次保留。")}</p>
         <blockquote>{currentPrompt.slice(0, 400)}{currentPrompt.length > 400 ? '…' : ''}</blockquote>
-        <p className="session-muted">{sc("删除后无法在此恢复，后续采集也不会重新导入这一轮。Agent 原始记录不会被修改。")}</p>
+        <p className="session-muted">{sc(reply ? "后续采集不会恢复这条回复。Agent 原始记录不会被修改。" : "删除后无法在此恢复，后续采集也不会重新导入这一轮。Agent 原始记录不会被修改。")}</p>
       </> : <>
         <p className="session-muted">{sc("修改保存在 ADIT 本地。Agent 原始记录和工具过程不会被修改。")}</p>
         {draft?.blocks.map(block => <label key={block.id} className="session-turn-field">
-          <span>{block.kind === 'prompt' ? (++question === 1 ? sc("提问") : sc("提问 {0}", question)) : sc("回复 {0}", ++reply)}</span>
+          <span>{block.kind === 'prompt' ? (++question === 1 ? sc("提问") : sc("提问 {0}", question)) : reply ? sc("Agent 回复") : sc("回复 {0}", ++replyNumber)}</span>
           <textarea value={texts[block.id] ?? ''} disabled={busy || loading} spellCheck={false}
             rows={Math.min(12, Math.max(block.kind === 'prompt' ? 3 : 5, (texts[block.id] || '').split('\n').length))}
             onChange={e => setTexts(old => ({ ...old, [block.id]: e.target.value }))} />
@@ -111,6 +111,6 @@ export function SessionTurnEditor({ kind, prompt, read, mutate, onClose, onDone 
     </div>
     <footer><button disabled={busy} onClick={onClose}>{sc("取消")}</button>
       <button className={kind === 'delete' ? 'danger' : 'primary'} disabled={busy || loading || !draft || (kind === 'edit' && !changes.length)} onClick={() => void save()}>
-        {busy ? sc("正在保存…") : sc(kind === 'edit' ? "保存修改" : "删除本轮")}</button></footer>
+        {busy ? sc("正在保存…") : sc(kind === 'edit' ? "保存修改" : reply ? "删除回复" : "删除本轮")}</button></footer>
   </dialog>, document.body);
 }

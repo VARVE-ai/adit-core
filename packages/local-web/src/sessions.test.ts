@@ -2,6 +2,7 @@ import React from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { SessionTurnView } from "./sessions";
+import { SessionTurnActions } from "./session-turn-editor";
 import { setLanguage, type Language } from "./i18n";
 import type {
   SessionEvent,
@@ -224,6 +225,10 @@ it("shows each associated commit as its own timeline node and retains the detail
   expect(entries.every(entry => entry.type === "details" && !entry.props.open)).toBe(true);
   expect(entries.map(entry => entry.findByProps({ className: "session-commit-node" }).type)).toEqual(["span", "span"]);
   expect(entries.map(entry => entry.findByType("summary").findByType("code").children.join(""))).toEqual(["abcdef1", "1234567"]);
+  act(() => entries[1].props.onToggle({ currentTarget: { open: true } }));
+  expect(entries[1].findByType("summary").props["aria-label"]).toBe("Collapse");
+  expect(entries[1].findByType("summary").children).not.toContain("Collapse");
+  expect(entries[1].findAllByType("p").filter(p => p.children.includes("Second change"))).toHaveLength(1);
   act(() => entries[1].findByType("button").props.onClick());
   expect(onCommit).toHaveBeenCalledWith(commits[1]);
 });
@@ -291,9 +296,15 @@ it("collapses prompts and replies independently and preserves Markdown when expa
     expect(messages()[index].findAllByType("table")).toHaveLength(1);
     expect(messages()[index].findAllByType("pre")).toHaveLength(1);
     expect(messages()[index].findAllByType("strong")).toHaveLength(1);
+    expect(messages()[index].findAllByProps({ className: "session-message-preview" })).toHaveLength(0);
+    expect(messages()[index].findByType("summary").props["aria-label"]).toBe("Collapse");
+    expect(messages()[index].findByType("summary").children).not.toContain("Collapse");
+    expect(renderer.root.findAllByProps({ className: "session-usage" })).toHaveLength(1);
+    expect(renderer.root.findByProps({ className: "session-usage" }).parent?.props.className).toBe("session-message-controls");
     expect(messages()[1 - index].props.open).toBe(false);
     act(() => messages()[index].props.onToggle({ currentTarget: { open: false } }));
     expect(messages()[index].findAllByType("table")).toHaveLength(0);
+    expect(messages()[index].findAllByProps({ className: "session-message-preview" })).toHaveLength(1);
   }
 });
 
@@ -305,4 +316,39 @@ it("loads truncated reply content only when expanded and retains Markdown render
   await act(async () => reply.findByType("details").props.onToggle({ currentTarget: { open: true } }));
   expect(api).toHaveBeenCalledWith("content", { eventId: "final", kind: "reply", offset: "0" });
   expect(reply.findByType("strong").children).toEqual(["Full response"]);
+  expect(reply.findAllByProps({ className: "session-message-preview" })).toHaveLength(0);
+});
+
+it("replaces tool previews with their input and output and restores them on collapse", async () => {
+  const tool = { ...event("tool"), text: "read source file" };
+  const api = vi.fn(async (_path: string, params: Record<string, string>) => ({
+    text: params.kind === "tool-input" ? "read source file" : "file contents", nextOffset: null,
+  }));
+  render(turn({ events: [tool], commits: [] }), "normal", api);
+  const entry = renderer.root.findByProps({ "data-event-id": "tool" });
+  expect(api).not.toHaveBeenCalled();
+  await act(async () => entry.props.onToggle({ currentTarget: { open: true } }));
+  expect(entry.findByType("summary").props["aria-label"]).toBe("Collapse");
+  expect(entry.findAllByType("pre").map(p => p.children.join(""))).toEqual(["read source file", "file contents"]);
+  act(() => entry.props.onToggle({ currentTarget: { open: false } }));
+  expect(entry.findAllByType("pre")).toHaveLength(0);
+  expect(JSON.stringify(entry.findByType("summary").children.map(n => typeof n === "string" ? n : n.props.children))).toContain("read source file");
+});
+
+it("routes each reply menu to that reply and preserves the prompt's whole-turn actions", () => {
+  const onEdit = vi.fn(), onDelete = vi.fn(), onEditReply = vi.fn(), onDeleteReply = vi.fn();
+  act(() => { renderer = create(React.createElement(SessionTurnView, {
+    turn: turn({ events: [opener, final] }), mode: "normal", request, onCommit: () => {},
+    onEdit, onDelete, onEditReply, onDeleteReply,
+  })); });
+  const menus = renderer.root.findAllByType(SessionTurnActions);
+  expect(menus).toHaveLength(3);
+  act(() => menus[0].props.onEdit());
+  act(() => menus[1].props.onEdit());
+  act(() => menus[2].props.onDelete());
+  expect(onEdit).toHaveBeenCalledTimes(1);
+  expect(onDelete).not.toHaveBeenCalled();
+  expect(onEditReply).toHaveBeenCalledWith(opener);
+  expect(onDeleteReply).toHaveBeenCalledWith(final);
+  expect(menus.slice(1).every(menu => menu.props.reply)).toBe(true);
 });

@@ -13,6 +13,10 @@ beforeEach(() => {
   observers.length = 0;
   vi.stubGlobal("location", { search: "" });
   vi.stubGlobal("localStorage", { getItem: () => "en", setItem: () => {} });
+  vi.stubGlobal("ResizeObserver", class {
+    observe() {}
+    disconnect() {}
+  });
   vi.stubGlobal("IntersectionObserver", class {
     record: typeof observers[number];
     constructor(callback: (entries: unknown[]) => void, options: { root: unknown }) {
@@ -51,7 +55,10 @@ async function mount(api: ReturnType<typeof apiWithList>) {
   await act(async () => {
     renderer = create(React.createElement(SessionsPage, {
       workspace: { id: "workspace", name: "Project" }, api: api as any, onCommit: () => {},
-    }), { createNodeMock: element => element.props.className === "sessions-list" ? listNode : element.props.className === "session-events-scroll" ? detailNode : { closest: () => detailNode } });
+    }), { createNodeMock: element => element.props.className === "sessions-list" ? listNode : element.props.className === "session-events-scroll" ? detailNode : {
+      closest: () => detailNode, dataset: {}, style: { setProperty() {} },
+      getBoundingClientRect: () => ({ width: 100 }),
+    } });
   });
 }
 const rows = () => renderer.root.findAll(n => n.type === "button" && n.props.className?.startsWith("session-row "));

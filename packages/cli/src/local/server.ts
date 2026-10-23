@@ -152,7 +152,7 @@ export async function startLocalServer(
           req.headers.origin !== origin
         )
           throw new LocalStateError("Invalid request origin", 403);
-        const input = req.method === "GET" ? {} : await body(req, path === "/api/local/sessions/turn" && req.method === "PATCH" ? 2_097_152 : 65536);
+        const input = req.method === "GET" ? {} : await body(req, ["/api/local/sessions/turn", "/api/local/sessions/reply"].includes(path) && req.method === "PATCH" ? 2_097_152 : 65536);
         const route = path.replace("/api/local", "");
         // Older cached pages may still exchange a launch token. No credential
         // is needed or issued; let them finish loading until their next refresh.
@@ -212,7 +212,7 @@ export async function startLocalServer(
         if (route === "/commits" && req.method === "GET") {
           return json(res, queryCommits(store,store.workspace(url.searchParams.get("workspaceId")||"")));
         }
-        if (["/sessions", "/sessions/detail", "/sessions/preview", "/sessions/turn", "/sessions/turn/edit", "/sessions/content", "/sessions/context"].includes(route) && ["GET", "PATCH", "DELETE"].includes(req.method || "")) {
+        if (["/sessions", "/sessions/detail", "/sessions/preview", "/sessions/turn", "/sessions/turn/edit", "/sessions/reply", "/sessions/reply/edit", "/sessions/content", "/sessions/context"].includes(route) && ["GET", "PATCH", "DELETE"].includes(req.method || "")) {
           const workspace=store.workspace(url.searchParams.get("workspaceId")||"");
           const browser=new LocalSessionBrowser(store.db,analytics.prices);
           const provider=url.searchParams.get("provider")||"all",id=url.searchParams.get("id")||"";
@@ -220,6 +220,12 @@ export async function startLocalServer(
           const mode=url.searchParams.get("mode")==="focused"?"focused":"normal";
           const day=url.searchParams.has("day") ? { day:url.searchParams.get("day")==="unknown"?null:url.searchParams.get("day")!, timezone:url.searchParams.get("timezone")||undefined } : undefined;
           if(req.method!=="GET") {
+            if(route==="/sessions/reply") {
+              const turnId=url.searchParams.get("turnId")||"",eventId=url.searchParams.get("eventId")||"";
+              if(req.method==="PATCH")browser.updateReply(workspace,provider,id,turnId,eventId,input.revision,input.changes);
+              else browser.deleteReply(workspace,provider,id,turnId,eventId,input.revision);
+              return json(res,{ok:true});
+            }
             if(route!=="/sessions/turn")throw new LocalStateError("Not found",404);
             const turnId=url.searchParams.get("turnId")||"";
             if(req.method==="PATCH")browser.updateTurn(workspace,provider,id,turnId,input.revision,input.changes);
@@ -227,6 +233,8 @@ export async function startLocalServer(
             return json(res,{ok:true});
           }
           if(route==="/sessions/turn/edit")return json(res,browser.editTurn(workspace,provider,id,url.searchParams.get("turnId")||""));
+          if(route==="/sessions/reply/edit")return json(res,browser.editReply(workspace,provider,id,url.searchParams.get("turnId")||"",url.searchParams.get("eventId")||""));
+          if(route==="/sessions/reply")throw new LocalStateError("Not found",404);
           if(route==="/sessions")return json(res,browser.list(workspace,{provider,query:url.searchParams.get("q")||"",sort:url.searchParams.get("sort")||"activity",onlyCommits:url.searchParams.get("commits")==="1",offset,timezone:url.searchParams.get("timezone")||undefined}));
           if(route==="/sessions/detail")return json(res,browser.detail(workspace,provider,id,mode,url.searchParams.has("offset")?offset:undefined,url.searchParams.get("q")||"",url.searchParams.get("turnId")||undefined,day));
           if(route==="/sessions/preview")return json(res,browser.preview(workspace,provider,id,url.searchParams.get("turnId")||""));

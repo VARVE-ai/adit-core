@@ -1,5 +1,5 @@
 import { AgentLabel } from "./agent-label";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowDownToLine, ArrowUpFromLine, Archive, Check, Copy, GitCommitHorizontal, MessageSquare, ShieldCheck, Terminal, FileText, Search, Pencil, FilePlus, FolderSearch, Globe, GitBranch, Wrench } from "lucide-react";
@@ -44,7 +44,7 @@ export function PublicationAgent({ provider }: { provider: string }) {
 export function SharedCommitRow({ commit: c }: { commit: SharedCommit }) {
   return <div className="shared-commit"><GitCommitHorizontal size={17} /><code>{c.sha.slice(0, 7)}</code><span>{c.subject}</span><small>{c.repository} · {c.files} {p("个文件", "files")}</small>{c.additions !== null && <em>+{c.additions} −{c.deletions ?? 0}</em>}</div>;
 }
-export function SharedSessionView({ snapshot: s, review = false }: { snapshot: ShareSnapshot; review?: boolean }) {
+export function SharedSessionView({ snapshot: s, review = false, timeline }: { snapshot: ShareSnapshot; review?: boolean; timeline?: ReactNode }) {
   const compact = (v: number | null) => v === null ? "—" : new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(v);
   const icons: Record<string, typeof Terminal> = { read: FileText, search: Search, edit: Pencil, write: FilePlus, list: FolderSearch, web: Globe, git: GitBranch, terminal: Terminal, plan: FileText, task: GitBranch, tool: Wrench };
   return <article className={`shared-session ${review ? "review" : ""}`}>
@@ -52,7 +52,7 @@ export function SharedSessionView({ snapshot: s, review = false }: { snapshot: S
     <h1>{s.title}</h1>
     <div className="publication-meta"><span><AgentLabel provider={s.provider} name={s.agent} /></span>{s.models.map(m => <code key={m}>{m}</code>)}<span>{publicationDate(s.date)}</span><span>{s.promptCount} {p("轮提问", "prompts")}</span><span><GitCommitHorizontal size={13} />{s.commitCount} {p("个提交", "commits")}</span></div>
     {!review && <p className="shared-reviewed"><ShieldCheck size={14} />{p("作者分享前检查过内容，本机路径和会话文件名已遮盖", "The author reviewed this session before sharing. Local paths and session filenames have been redacted.")}</p>}
-    <div className="shared-timeline">{s.turns.map((t, index) => <section className="shared-turn" key={index}>
+    {timeline ?? <><div className="shared-timeline">{s.turns.map((t, index) => <section className="shared-turn" key={index}>
       <span className="shared-node"><MessageSquare size={13} /></span>
       <div className="shared-prompt">{t.prompt && <span>{t.prompt}</span>}<span className="shared-usage">{t.models.join(", ")}{t.efforts.length > 0 && ` · ${t.efforts.join(", ")}`} <span><ArrowDownToLine size={11} />{compact(t.input)}</span><span><ArrowUpFromLine size={11} />{compact(t.output)}</span><span><Archive size={11} />{compact(t.cache)}</span></span></div>
       {t.events.map((event, i) => {
@@ -64,7 +64,7 @@ export function SharedSessionView({ snapshot: s, review = false }: { snapshot: S
       })}
       {t.commits.map(c => <SharedCommitRow key={c.sha} commit={c} />)}
     </section>)}</div>
-    {s.commits.map(c => <SharedCommitRow key={c.sha} commit={c} />)}
+    {s.commits.map(c => <SharedCommitRow key={c.sha} commit={c} />)}</>}
     {s.costMicrousd !== undefined && <p>{p("花费", "Cost")}: {s.costMicrousd === null ? p("未知", "Unknown") : `$${(s.costMicrousd / 1e6).toFixed(2)}`}{s.costIncomplete && ` · ${p("用量不完整", "Incomplete usage")}`}</p>}
     {!review && <footer><span>{p("这是作者用 ADIT 分享的 AI 会话", "An AI session shared by its author with ADIT")}</span><span>{p("用 ADIT 整理和分享你自己的 AI 会话", "Organize and share your own AI sessions with ADIT")}</span></footer>}
   </article>;

@@ -421,13 +421,13 @@
   line-height: 22px;
 }
 .session-turn-more {
-  float: right;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 28px;
   height: 28px;
-  margin: -3px 0 4px 12px;
+  flex-shrink: 0;
+  margin: -3px 0;
   padding: 0;
   border: 1px solid transparent;
   border-radius: 5px;
@@ -541,7 +541,16 @@
   overflow: hidden;
   margin-inline-start: 0;
 }
-.session-message-body { padding-top: 8px; }
+.session-message-shell { position: relative; --session-controls-width: 28px; }
+.session-message-shell[data-collapse-hover="true"] {
+  cursor: pointer;
+  background: linear-gradient(hsl(var(--muted) / .5), hsl(var(--muted) / .5)) 0 var(--session-collapse-top) / 100% var(--session-collapse-height) no-repeat;
+}
+.session-message-controls { position: absolute; top: 0; right: 24px; max-width: 55%; min-height: 23px; display: flex; align-items: center; gap: 8px; z-index: 1; }
+.session-message-controls > .session-usage { margin-inline-start: 0; max-width: 100%; min-width: 0; overflow: hidden; flex-wrap: nowrap; }
+.session-message-controls .session-usage code { flex-shrink: 0; }
+.session-message > summary { position: relative; padding-right: var(--session-controls-width); }
+.session-message > summary > svg { position: absolute; right: 2px; }
 .session-usage {
   display: inline-flex;
   align-items: center;
@@ -840,6 +849,29 @@
 .session-event-detail pre {
   max-height: 256px;
 }
+/* Replace the preview in place; the native summary remains the collapse control. */
+[data-inline-event][open] { position: relative; min-height: 23px; }
+[data-inline-event][open] > summary {
+  position: absolute;
+  top: 0;
+  right: 0;
+  gap: 4px;
+  min-height: 23px;
+  padding: 0 2px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 23px;
+  width: 20px;
+  justify-content: center;
+}
+[data-inline-event][open] > summary > svg:last-child { transform: rotate(-90deg); }
+[data-inline-event] > .session-inline-body { min-width: 0; padding: 0 28px 0 0; overflow-wrap: anywhere; }
+.session-message[data-inline-event] > .session-inline-body { padding-right: 0; }
+.session-message-body .session-markdown > :first-child { max-width: calc(100% - var(--session-controls-width)); }
+.session-inline-body > .session-event-detail { padding-top: 0; }
+.session-inline-body > .session-tool-content { margin-top: 0; }
+.session-commit > .session-inline-body > p:first-of-type { margin-top: 0; }
 .session-children,
 .session-context {
   margin: 6px 0 12px;

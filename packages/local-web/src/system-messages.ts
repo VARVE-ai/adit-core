@@ -28,6 +28,8 @@ export const systemMessages: Record<string, string> = {
   "这轮对话已更新，请重新打开编辑窗口后重试。": "This conversation changed. Reopen the editor and try again.",
   "请选择需要修改的提问或回复正文。": "Select prompt or reply text to edit",
   "对话正文无效或过长，请检查后重试。": "Invalid conversation text",
+  "这条回复不存在或已删除。": "Reply not found",
+  "只能修改当前这条回复。": "Select only the current reply to edit",
   "提问不能为空。": "The prompt cannot be empty",
   "工作目录设置已更改，请刷新后再删除。": "Workspace settings changed. Reload before deleting.",
   "请等待此工作目录整理结束后再删除。": "Wait for this workspace's organization to finish before deleting it.",
