@@ -38,7 +38,7 @@ export async function initCommand(opts: InitOptions = {}): Promise<void> {
     if (requestedRepos) validateWorkspaceRepositories(root, requestedRepos);
     const gitChoices = repositoryChoices(root, discovered, requestedRepos);
     const selected = opts.yes ? gitChoices.filter(c=>c.checked).map(c=>c.id) : await selectInitChoices("1. Git repositories",gitChoices);
-    for (const choice of gitChoices) console.log(`  [${selected.includes(choice.id)?"x":" "}] ${choice.label} · ${choice.detail}`);
+    for (const choice of gitChoices) console.log(`  [${selected.includes(choice.id)?"✓":" "}] ${choice.label} · ${choice.detail}`);
 
     console.log("\nChecking sessions for this directory. Full parsing and analysis start after confirmation.");
     const sources = await localRequest<Provider[]>("/providers");
@@ -50,7 +50,7 @@ export async function initCommand(opts: InitOptions = {}): Promise<void> {
     console.log(`\nSelected: ${selected.length} Git repositories · ${providers.length} session sources`);
     for (const id of providers) {
       const choice=choices.find(c=>c.id===id)!;
-      console.log(`  [x] ${choice.label} · ${choice.detail}`);
+      console.log(`  [✓] ${choice.label} · ${choice.detail}`);
     }
     if (!opts.yes && !await confirmInit()) { console.log("Canceled. Project settings were not changed."); return; }
 

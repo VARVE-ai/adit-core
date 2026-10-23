@@ -37,7 +37,7 @@ export async function selectInitChoices(title: string, choices: InitChoice[]): P
   if (!choices.length) { console.log(`${title}: none available`); return []; }
   if (process.env.ADIT_PLAIN_PROMPTS || typeof process.stdin.setRawMode !== "function") {
     console.log(title);
-    choices.forEach((c, i) => console.log(`  ${i + 1}. [${c.checked ? "x" : " "}] ${c.label} · ${c.detail}`));
+    choices.forEach((c, i) => console.log(`  ${i + 1}. [${c.checked ? "✓" : " "}] ${c.label} · ${c.detail}`));
     for (;;) {
       const answer = (await question("Numbers separated by commas; enter keeps selection; none clears; q cancels: ")).trim();
       if (answer.toLowerCase() === "q") throw new InitCancelled();
@@ -62,7 +62,7 @@ export async function selectInitChoices(title: string, choices: InitChoice[]): P
         <Text dimColor>  ↑/↓ move · space toggle · enter continue · esc cancel</Text>
         {choices.slice(start, start + size).map((c, i) => <Box key={c.id}>
           <Text color="cyan">{start + i === cursor ? " > " : "   "}</Text>
-          <Text color={checked.has(c.id) ? "green" : undefined} dimColor={c.disabled}>[{checked.has(c.id) ? "x" : " "}] </Text>
+          <Text color={checked.has(c.id) ? "green" : undefined} dimColor={c.disabled}>[{checked.has(c.id) ? "✓" : " "}] </Text>
           <Text wrap="truncate-end" dimColor={c.disabled}>{c.label} · {c.detail}</Text>
         </Box>)}
         <Text dimColor>  {checked.size} selected · {cursor + 1}/{choices.length}</Text>
