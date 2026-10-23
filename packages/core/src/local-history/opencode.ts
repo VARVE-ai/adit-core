@@ -17,6 +17,8 @@ import {
   type HistorySession,
 } from "./types.js";
 import { insideDirectory } from "./sources.js";
+import {openCodeContent} from "./opencode-content.js";
+import {separateCollectedTools} from "./collected-blocks.js";
 
 function nativeTitle(value: unknown): string {
   const title = string(value).trim();
@@ -41,14 +43,14 @@ function message(
   const role = kind || string(data.role);
   return {
     key: id,
-    role,
+    role:["synthetic","skill","compaction"].includes(role)?"system":role==="shell"?"assistant":role,
     model:
       string(data.modelID) ||
       string(model.modelID) ||
       string(model.id) ||
       undefined,
     timestamp: timestamp(created),
-    content: kind ? (data.content ?? data.text ?? data.summary ?? data) : parts,
+    content:openCodeContent(data,parts,kind),
     usage: Object.keys(usage).length ? usage : undefined,
     raw: { ...data, parts },
   };
@@ -193,7 +195,7 @@ export function readOpenCodeDatabase(
         cwd,
         parentId: string(s.parent_id) || undefined,
         metadata: { title: nativeTitle(s.title) },
-        messages: merged,
+        messages: separateCollectedTools(merged),
       });
     }
     return result;
@@ -274,7 +276,7 @@ export async function readOpenCodeStorage(
       cwd,
       parentId: string(data.parentID) || undefined,
       metadata: { title: nativeTitle(data.title) },
-      messages,
+      messages:separateCollectedTools(messages),
     },
   ];
 }

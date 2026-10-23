@@ -5,6 +5,9 @@ import { cursorWorkspace } from "./cursor.js";
 import { geminiWorkspace } from "./sources.js";
 import { trackSource } from "./source-checkpoints.js";
 import { readDatabaseMetadata } from "./discovery-databases.js";
+import { isCodexInternalReview } from "./codex.js";
+import {codexFileRows} from "./codex-file.js";
+import {record,string} from "./types.js";
 
 export interface SessionMetadata {
   id: string;
@@ -101,7 +104,17 @@ export async function readSessionMetadata(path:string,provider:string,root:strin
   }
   if(provider==="aider")return {sessions:[],pending:true}; // One file contains multiple runs, split during collection.
   if(["codex","traex","augure-code"].includes(provider)) {
-    const meta=await metadataFields(path,["type","payload.id","payload.cwd","payload.forked_from_id","payload.source.subagent.thread_spawn.parent_thread_id","payload.session_id"],signal,meta=>meta.type==="session_meta");
+    if(path.endsWith(".zst")) {
+      for(const row of codexFileRows(path,signal))if(row.type==="session_meta") {
+        const p=record(row.payload);
+        if(isCodexInternalReview(p.source))return {sessions:[]};
+        const fork=string(p.forked_from_id),parent=fork||string(record(record(record(p.source).subagent).thread_spawn).parent_thread_id)||string(p.parent_thread_id);
+        return result(string(p.id),string(p.cwd),parent,fork?"fork":"subagent");
+      }
+      return {sessions:[],pending:true};
+    }
+    const meta=await metadataFields(path,["type","payload.id","payload.cwd","payload.forked_from_id","payload.source.subagent.thread_spawn.parent_thread_id","payload.source.subagent.other","payload.session_id"],signal,meta=>meta.type==="session_meta");
+    if(meta.type==="session_meta"&&isCodexInternalReview({subagent:{other:meta["payload.source.subagent.other"]}}))return {sessions:[]};
     // Paginated Traex/Augure sources need lineage from the complete native record.
     if(provider!=="codex")return {sessions:[],pending:true};
     if(meta.type!=="session_meta")return {sessions:[],pending:true};

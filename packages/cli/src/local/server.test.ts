@@ -120,18 +120,20 @@ it("authenticates achievement reads and validates workspace-scoped preferences",
   expect((await api("/achievements/acknowledge" + query,"POST",{ids:["another-workspace-unlock"]})).status).toBe(200);
   expect((await api("/achievements?workspaceId=missing")).status).toBe(404);
 });
-it("requires authenticated explicit login startup before automatic sync, including API callers", async () => {
+it("enables startup by default and gates automatic sync on the current global setting, including API callers", async () => {
   const automatic = { enabled: true, mode: "automatic", interval: 5 };
+  expect((await (await api("/state")).json() as any).startup).toEqual({ enabled: true, supported: true, version: 1 });
+  expect((await api("/startup", "PATCH", { enabled: false, version: 1 })).status).toBe(200);
   expect((await fetch(app.origin + "/api/local/startup", {
     method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true, version: 0 }),
   })).status).toBe(403);
   expect((await api("/workspaces", "POST", { path: root, cloud: automatic })).status).toBe(409);
   expect(app.store.workspaces()).toHaveLength(0);
-  expect((await api("/startup", "PATCH", { enabled: true, version: 0 })).status).toBe(200);
+  expect((await api("/startup", "PATCH", { enabled: true, version: 2 })).status).toBe(200);
   const response = await api("/workspaces", "POST", { path: root, cloud: automatic });
   expect(response.status).toBe(201);
   const workspace = await response.json() as { id: string; version: number };
-  expect((await api("/startup", "PATCH", { enabled: false, version: 1 })).status).toBe(200);
+  expect((await api("/startup", "PATCH", { enabled: false, version: 3 })).status).toBe(200);
   const saved = app.store.workspace(workspace.id);
   expect(saved.cloud.mode).toBe("manual");
   expect((await api(`/workspaces/${workspace.id}`, "PATCH", { version: saved.version, cloud: automatic })).status).toBe(409);
@@ -348,7 +350,7 @@ it("allows fresh browsers after restart while keeping CLI token validation", asy
   expect((await api("/state")).status).toBe(200);
 });
 it("validates repository scope on create and update", async () => {
-  await api("/startup", "PATCH", { enabled: true, version: 0 });
+  expect((await (await api("/state")).json() as any).startup.enabled).toBe(true);
   const path = join(root, "workspace"),
     outside = join(root, "outside");
   mkdirSync(join(path,".git"),{recursive:true});

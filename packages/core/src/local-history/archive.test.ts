@@ -95,8 +95,10 @@ describe("Core-owned local history", () => {
     await f.archive.scan(f.workspace,f.sources);
     expect(read).not.toHaveBeenCalled();
     appendFileSync(f.path,"{broken}\n");
+    const tailRead=vi.spyOn(codexReader,"codexFileRows");
     for(let i=0;i<2;i++)expect((await f.archive.scan(f.workspace,f.sources,{scopes})).errors).toHaveLength(1);
-    expect(read).toHaveBeenCalledTimes(2);
+    expect(read).not.toHaveBeenCalled();
+    expect(tailRead.mock.calls.filter(call=>call[0]===f.path && Number(call[2])>0)).toHaveLength(2);
     expect(f.archive.session("codex","one")!.messages).toHaveLength(2);
     writeFileSync(f.path,f.initial+lines(item("user","new turn")));
     expect((await f.archive.scan(f.workspace,f.sources,{scopes})).updated).toBe(1);

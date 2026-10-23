@@ -10,6 +10,7 @@ export interface HistoryMessage {
   raw: Record<string, unknown>;
   finalReply?: boolean;
   contextKind?: "compaction";
+  previewExcluded?: boolean;
 }
 
 export interface HistorySession {

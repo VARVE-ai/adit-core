@@ -3,7 +3,24 @@ import {fileURLToPath} from "node:url";
 import {readSource,readSourceJSON} from "./source-io.js";
 import {array,first,message,session,type Row} from "./provider-common.js";
 import {HistoryFormatError,jsonLines,jsonDocument,record,string,type HistoryMessage} from "./types.js";
+import {separateCollectedTools} from "./collected-blocks.js";
 export const vscodeChatProviders=["vscode-copilot","positron"];
+function responseBlocks(value:unknown):Row[] {
+  return array(value).flatMap((item):Row[]=>{
+    if(item.kind==="toolInvocationSerialized" && item.toolId) {
+      const data=record(item.toolSpecificData),command=string(data.command)||string(record(data.commandLine).original);
+      const display=item.pastTenseMessage??item.invocationMessage;
+      return [{type:"tool_use",id:item.toolCallId,name:item.toolId,input:{...(command?{command}:{}),message:typeof display==="string"?display:record(display).value}}];
+    }
+    if(["prepareToolInvocation","undoStop","codeblockUri","textEditGroup"].includes(string(item.kind)))return [];
+    if(typeof item.value==="string")return [{type:"text",text:item.value}];
+    if(item.kind==="inlineReference") {
+      const ref=record(item.inlineReference),uri=record(ref.uri??ref);
+      if(typeof uri.path==="string")return [{type:"text",text:`\`${uri.path}\``}];
+    }
+    return item.type==="text" && typeof item.text==="string"?[item]:[];
+  });
+}
 export function replayChatOperations(rows:Row[]):Row{
   let state:unknown;
   for(const op of rows){
@@ -36,8 +53,8 @@ export async function readVSCodeChat(path:string,provider:string,signal?:AbortSi
   for(const row of array(doc.requests)){
     signal?.throwIfAborted();
     const id=string(row.requestId)||String(messages.length),usage=record(record(row.result).metadata),model=first(usage,"resolvedModel") || string(row.modelId);
-    messages.push(message(row,messages.length,{key:`${id}:user`,role:"user",content:row.message,usage:undefined}));
-    if(Array.isArray(row.response))messages.push(message(row,messages.length,{key:`${id}:assistant`,role:"assistant",content:row.response,model:model||undefined,usage:Object.keys(usage).length?usage:undefined}));
+    messages.push(message(row,messages.length,{key:`${id}:user`,role:"user",content:typeof row.message==="string"?row.message:[{type:"text",text:string(record(row.message).text)}],usage:undefined}));
+    if(Array.isArray(row.response))messages.push(message(row,messages.length,{key:`${id}:assistant`,role:"assistant",content:responseBlocks(row.response),model:model||undefined,usage:Object.keys(usage).length?usage:undefined}));
   }
-  return [session(provider,doc.sessionId || basename(path).replace(/\.jsonl?$/,""),cwd,messages,{title:doc.customTitle})];
+  return [session(provider,doc.sessionId || basename(path).replace(/\.jsonl?$/,""),cwd,separateCollectedTools(messages),{title:doc.customTitle})];
 }

@@ -28,7 +28,7 @@ export interface StartupRegistration {
   remove(): Promise<void>;
 }
 
-/** One user-login entry per local data directory; never installed by merely starting ADIT. */
+/** One user-login entry per local data directory, installed by startup initialization or settings. */
 export class UserLoginRegistration implements StartupRegistration {
   readonly path: string;
   readonly supported: boolean;
@@ -103,15 +103,33 @@ export class UserLoginRegistration implements StartupRegistration {
   }
 }
 
-export type LoginStartupStatus = { enabled: boolean; supported: boolean; version: number };
-type SavedStartup = { enabled: boolean; version: number; registration?: string };
+export type LoginStartupStatus = { enabled: boolean; supported: boolean; version: number; error?: string };
+type SavedStartup = { enabled: boolean; version: number; registration?: string; error?: string };
 
 export class LoginStartup {
   private queue: Promise<unknown> = Promise.resolve();
   constructor(private readonly store: LocalStore, private readonly registration: StartupRegistration = new UserLoginRegistration(store.directory)) {}
   status(): LoginStartupStatus {
     const saved = this.store.get<SavedStartup>("login-startup", { enabled: false, version: 0 });
-    return { enabled: saved.enabled && this.registration.installed(), supported: this.registration.supported, version: saved.version };
+    return { enabled: saved.enabled && this.registration.installed(), supported: this.registration.supported, version: saved.version, ...(saved.error ? { error: saved.error } : {}) };
+  }
+  initialize(): Promise<LoginStartupStatus> {
+    const task = this.queue.then(async () => {
+      // Set the first-run default once. Explicitly disabled or externally removed
+      // registrations must not be silently enabled again on each daemon restart.
+      if (this.store.get<SavedStartup | null>("login-startup", null) || !this.registration.supported) return this.status();
+      try {
+        await this.registration.install();
+        if (!this.registration.installed()) throw new LocalStateError("Login startup registration failed");
+        this.store.set("login-startup", { enabled: true, version: 1, registration: this.registration.path });
+      } catch (error) {
+        // A failed OS registration must not prevent manual use of the local service.
+        this.store.set("login-startup", { enabled: false, version: 1, error: error instanceof Error ? error.message : String(error) });
+      }
+      return this.status();
+    });
+    this.queue = task.catch(() => {});
+    return task;
   }
   save(input: Record<string, unknown>): Promise<LoginStartupStatus> {
     const task = this.queue.then(async () => {

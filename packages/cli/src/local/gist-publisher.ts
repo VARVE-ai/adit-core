@@ -1,5 +1,6 @@
 import { LocalStateError, publicationDigest, type LocalWorkspace, type LocalSharing } from "@varveai/adit-core";
 import type { LocalSecrets } from "./secrets.js";
+import { renderShareHtml } from "./share-html.js";
 type Gist = { id: string; html_url: string; description: string; history?: { version: string }[]; files?: Record<string, { content?: string; truncated?: boolean; raw_url?: string }> };
 
 /** The only network boundary for local session publication. Never used by preview. */
@@ -27,6 +28,7 @@ export class GistPublisher {
       return response;
     };
     try {
+      const html = await renderShareHtml(draft.snapshot);
       let gist: Gist | undefined;
       if (draft.reconcile) {
         // A timed-out POST may have succeeded. Never create a second Gist until reconciled.
@@ -40,7 +42,7 @@ export class GistPublisher {
         postStarted = true;
         const response = await this.request("https://api.github.com/gists", { method: "POST", headers, signal: AbortSignal.timeout(30000), body: JSON.stringify({
           public: false, description: `${marker} · ${draft.snapshot.title}`.slice(0, 500), files: {
-            "README.md": { content: draft.markdown },
+            "adit-session.html": { content: html },
             "adit-session.json": { content: JSON.stringify(draft.snapshot) },
           },
         }) });
@@ -57,22 +59,32 @@ export class GistPublisher {
       const full = gist.history?.[0]?.version ? gist : await (await api(`/gists/${gist.id}`)).json() as Gist;
       const revision = full.history?.[0]?.version;
       if (!revision || !/^[a-f0-9]+$/i.test(revision)) throw new Error("Missing Gist revision");
+      let hasHtml = !draft.reconcile;
       if (draft.reconcile) {
         const fixed = await (await api(`/gists/${gist.id}/${revision}`)).json() as Gist;
-        const file = fixed.files?.["adit-session.json"];
-        let content = file?.content;
-        if (file?.truncated && file.raw_url) {
+        const readContent = async (name: string) => {
+          const file = fixed.files?.[name];
+          if (!file?.truncated) return file?.content;
+          if (!file.raw_url) throw new Error("Missing Gist content source");
           const raw = new URL(file.raw_url);
-          if (raw.protocol !== "https:" || raw.hostname !== "gist.githubusercontent.com" || !raw.pathname.includes(`/raw/${revision}/`)) throw new Error("Invalid Gist content source");
+          if (raw.protocol !== "https:" || raw.hostname !== "gist.githubusercontent.com" || raw.username || raw.password || !raw.pathname.endsWith(`/${gist.id}/raw/${revision}/${name}`)) throw new Error("Invalid Gist content source");
           const response = await this.request(raw.href, { signal: AbortSignal.timeout(30000), credentials: "omit", referrerPolicy: "no-referrer" });
           if (!response.ok) throw new Error("Unable to verify Gist content");
-          content = await response.text();
-        }
+          return response.text();
+        };
+        const content = await readContent("adit-session.json");
         if (!content || content.length > 8 * 1024 * 1024 || publicationDigest(content.trim()) !== draft.digest) throw new LocalStateError("The remote share no longer matches the reviewed preview. Check your GitHub Gist.", 409);
+        hasHtml = !!fixed.files?.["adit-session.html"];
+        if (hasHtml && await readContent("adit-session.html") !== html) throw new LocalStateError("The remote share no longer matches the reviewed preview. Check your GitHub Gist.", 409);
       }
       let viewer: string | null = null;
       if (reader) {
         reader.hash = new URLSearchParams({ gist: gist.id, revision }).toString(); viewer = reader.href;
+      } else if (hasHtml) {
+        const url = new URL(gist.html_url);
+        const [owner, remoteId] = url.pathname.split("/").filter(Boolean);
+        if (url.hostname !== "gist.github.com" || !/^[\w-]+$/.test(owner) || remoteId !== gist.id) throw new Error("Invalid Gist owner");
+        viewer = `https://htmlpreview.github.io/?https://gist.githubusercontent.com/${owner}/${gist.id}/raw/${revision}/adit-session.html`;
       }
       return this.sharing.published(w, id, input.idempotencyKey, { id: gist.id, url: gist.html_url, revision, viewer });
     } catch (e) {

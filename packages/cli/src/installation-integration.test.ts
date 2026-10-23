@@ -15,7 +15,7 @@ it.skipIf(process.getuid?.()===0)("runs npm postinstall to update Skills and rep
   // Redirect only these child processes; no user configuration or environment
   // variables such as HOME are changed. The daemon inherits this preload.
   writeFileSync(preload,`require('node:os').homedir=()=>${JSON.stringify(home)};require('node:module').syncBuiltinESMExports();`);
-  const env={...process.env,ADIT_LOCAL_DATA_DIR:data,NODE_OPTIONS:`${process.env.NODE_OPTIONS||""} --require ${JSON.stringify(preload)}`};
+  const env={...process.env,ADIT_LOCAL_DATA_DIR:data,APPDATA:join(root,"appdata"),XDG_CONFIG_HOME:join(root,"config"),NODE_OPTIONS:`${process.env.NODE_OPTIONS||""} --require ${JSON.stringify(preload)}`};
   // A temporary npm package uses the real published hook and compiled setup.
   // Its prefix/cache/home are isolated; no global user installation is replaced.
   const packageDir=join(root,"package");mkdirSync(join(packageDir,"dist"),{recursive:true});
@@ -42,7 +42,7 @@ it.skipIf(process.getuid?.()===0)("runs npm postinstall to update Skills and rep
     const health=await fetch(original.url+"/health").then(r=>r.json());
     expect(health).toMatchObject({version:CLI_VERSION,instance:original.instance});
     const state=await fetch(original.url+"/api/local/state",{headers:{authorization:`Bearer ${original.token}`}}).then(r=>r.json()) as {startup:{enabled:boolean};workspaces:unknown[]};
-    expect(state.startup.enabled).toBe(false);expect(state.workspaces).toEqual([]);
+    expect(state.startup.enabled).toBe(true);expect(state.workspaces).toEqual([]);
     const directory=join(home,".agents/skills/adit-history"),old="previous managed Skill";
     writeFileSync(join(directory,"SKILL.md"),old);
     writeFileSync(join(directory,".adit-managed.json"),JSON.stringify({owner:"adit",sha256:createHash("sha256").update(old).digest("hex")}));

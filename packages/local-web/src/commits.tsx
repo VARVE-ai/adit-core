@@ -1,4 +1,6 @@
 import { AgentLabel } from "./agent-label";
+import { PlatformIcon } from "./platform-icon";
+import { agentName } from "./achievement-export";
 import { t, locale, systemMessage } from "./i18n";
 import React, { useEffect, useState } from "react";
 import {
@@ -395,7 +397,7 @@ export function CommitsPage({
                     </div>
                   ))}
                 </details>
-                <div className="commit-source-empty">
+                <div className={sources?.sources.length && !sourceError && sources.eligible !== null ? "commit-source-list" : "commit-source-empty"}>
                   {sourceError ? (
                     <span role="alert">
                       {t("代码来源分析失败：")}
@@ -413,14 +415,19 @@ export function CommitsPage({
                         className="commit-source-entry"
                         key={s.provider + s.sessionId}
                       >
-                        <div className="commit-session">
-                          <b><AgentLabel provider={s.provider} name={agents[s.provider]} /></b>
-                          <strong className="commit-line-total">
-                            {s.certain + s.likely + s.possible} {t("行")}
-                          </strong>
+                        <div className="commit-source-heading">
+                          <span className="commit-source-node" title={agents[s.provider] || agentName(s.provider)}>
+                            <PlatformIcon platform={s.provider} size={12} />
+                          </span>
+                          <SessionLink className="commit-source-title" href={sessionHref(workspace.id, s.provider, s.sessionId)} onNavigate={onNavigate} title={s.title}>
+                            <span>{s.title}</span><ChevronRight size={13} />
+                          </SessionLink>
+                          <span className="commit-source-meta">
+                            <span>{agents[s.provider] || agentName(s.provider)}</span>
+                            <strong className="commit-line-total">{s.certain + s.likely + s.possible} {t("行")}</strong>
+                          </span>
                         </div>
-                        <SessionLink className="commit-source-title" href={sessionHref(workspace.id, s.provider, s.sessionId)} onNavigate={onNavigate}>{s.title}<ChevronRight size={13} /></SessionLink>
-                        <details>
+                        <details className="commit-source-files">
                           <summary>{t("查看匹配文件")}</summary>
                           {s.files.map((f) => (
                             <div className="commit-file" key={f.path}>
@@ -432,7 +439,7 @@ export function CommitsPage({
                           ))}
                         </details>
                         {!!s.alternatives.length && (
-                          <details>
+                          <details className="commit-source-alternatives">
                             <summary>{t("也写过这些内容")}</summary>
                             {s.alternatives.map((a) => (
                               <p key={a.provider + a.sessionId}>

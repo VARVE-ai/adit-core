@@ -20,6 +20,30 @@ import {
 type Row = Record<string, any>;
 type EventIndex = { projected: Row[]; closingRows: Row[] };
 const DETAIL_PAGE_SIZE = 50;
+export type SessionDayFilter = { day: string | null; timezone?: string };
+type DayMatch = (at: number | null) => boolean;
+function dayFormatter(timezone?: string) {
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+      year: "numeric", month: "2-digit", day: "2-digit",
+    });
+  } catch { throw new LocalStateError("Invalid timezone"); }
+}
+function dayMatch(filter?: SessionDayFilter): DayMatch | undefined {
+  if (!filter) return;
+  const format = dayFormatter(filter.timezone);
+  if (filter.day !== null && (!/^\d{4}-\d{2}-\d{2}$/.test(filter.day) ||
+    !Number.isFinite(Date.parse(filter.day)) || new Date(filter.day).toISOString().slice(0, 10) !== filter.day))
+    throw new LocalStateError("Invalid day");
+  return at => at === null ? filter.day === null : filter.day !== null && format.format(at) === filter.day;
+}
+function dayIndex(index: EventIndex, matches?: DayMatch): EventIndex {
+  return matches ? {
+    projected: index.projected.filter(row => matches(row.occurred_at)),
+    closingRows: index.closingRows.filter(row => matches(row.occurred_at)),
+  } : index;
+}
 export type TranscriptMode = "normal" | "focused";
 export type SessionItem = {
   provider: string;
@@ -217,15 +241,7 @@ export class LocalSessionBrowser {
       timezone?: string;
     } = {},
   ): SessionList {
-    let dayFormat: Intl.DateTimeFormat;
-    try {
-      dayFormat = new Intl.DateTimeFormat("en-CA", {
-        timeZone: options.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone,
-        year: "numeric", month: "2-digit", day: "2-digit",
-      });
-    } catch {
-      throw new LocalStateError("Invalid timezone");
-    }
+    const dayFormat = dayFormatter(options.timezone);
     this.db.function("session_day", { deterministic: true }, (at: number | null) =>
       at === null ? null : dayFormat.format(at),
     );
@@ -366,6 +382,7 @@ export class LocalSessionBrowser {
     provider: string,
     id: string,
     query: string,
+    messageIds?: string[],
   ): { turnId: string | null; text: string; eventId: string } | null {
     if (!query.trim()) return null;
     const pattern =
@@ -379,11 +396,13 @@ export class LocalSessionBrowser {
       .prepare(
         `SELECT turn_id,text,eventId FROM (
       SELECT m.turn_id,m.ordinal,b.text_content text,coalesce((SELECT t.id FROM adit_history_tool_calls t WHERE t.message_id=m.id LIMIT 1),(SELECT r.tool_call_id FROM adit_history_tool_results r WHERE r.message_id=m.id AND r.tool_call_id IS NOT NULL LIMIT 1),b.id) eventId FROM adit_history_messages m JOIN adit_history_blocks b ON b.message_id=m.id
-        WHERE m.provider=@provider AND m.session_id IN (SELECT value FROM json_each(@ids)) AND ${historyTextMatch("b.text_content")}
+        WHERE m.provider=@provider AND m.session_id IN (SELECT value FROM json_each(@ids))
+          AND (@dayMessages IS NULL OR m.id IN (SELECT value FROM json_each(@dayMessages))) AND ${historyTextMatch("b.text_content")}
       UNION ALL SELECT t.turn_id,m.ordinal,coalesce(t.command_text,t.input_json) text,t.id eventId FROM adit_history_tool_calls t JOIN adit_history_messages m ON m.id=t.message_id
-        WHERE t.provider=@provider AND t.session_id IN (SELECT value FROM json_each(@ids)) AND (${historyTextMatch("t.command_text")} OR ${historyTextMatch("t.input_json")})) ORDER BY ordinal LIMIT 1`,
+        WHERE t.provider=@provider AND t.session_id IN (SELECT value FROM json_each(@ids))
+          AND (@dayMessages IS NULL OR m.id IN (SELECT value FROM json_each(@dayMessages))) AND (${historyTextMatch("t.command_text")} OR ${historyTextMatch("t.input_json")})) ORDER BY ordinal LIMIT 1`,
       )
-      .get({ provider, ids:this.segments(provider,id), pattern, masked: Number(query.includes("•")) }) as Row | undefined;
+      .get({ provider, ids:this.segments(provider,id), pattern, masked: Number(query.includes("•")), dayMessages: messageIds ? JSON.stringify(messageIds) : null }) as Row | undefined;
     if (!found) return null;
     const text = redactSecrets(found.text || ""),
       position = text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase());
@@ -404,50 +423,70 @@ export class LocalSessionBrowser {
     offset?: number,
     query = "",
     targetTurnId?: string,
+    day?: SessionDayFilter,
   ): SessionDetail {
+    const matches = dayMatch(day);
     return this.db.transaction(() => {
       this.session(w,provider,id);
       const ids=conversationSegments(this.db,provider,id);
       const s = this.session(w, provider, ids[0]),
-        commits = this.commits(w, provider, id);
-      const totals=this.db.prepare(`SELECT min(started_at) started_at,max(last_activity_at) last_activity_at,sum(message_count) message_count,
+        commits = this.commits(w, provider, id).filter(c => !matches || matches(c.at));
+      let totals=this.db.prepare(`SELECT min(started_at) started_at,max(last_activity_at) last_activity_at,sum(message_count) message_count,
         sum(user_prompt_count) user_prompt_count FROM adit_history_sessions WHERE provider=? AND id IN (SELECT value FROM json_each(?))`)
         .get(provider,JSON.stringify(ids)) as Row;
       const allTurns=this.turnRows(provider,id).map((t,index):Row=>({...t,ordinal:index+1}));
-      const indexed = allTurns.map(t => ({ turn: t, index: this.eventIndex(t.provider,t.session_id,t.id,mode,t.prompt_message_id) }));
+      // Date rows are views of the same conversation. Scope the messages before
+      // pagination so a midnight-spanning turn cannot leak another day's reply.
+      const dayMessages = matches ? (this.db.prepare(`SELECT id,turn_id,occurred_at FROM adit_history_messages
+        WHERE provider=? AND session_id IN (SELECT value FROM json_each(?))`).all(provider, JSON.stringify(ids)) as Row[])
+        .filter(m => matches(m.occurred_at)) : undefined;
+      const messageIds = dayMessages ? new Set<string>(dayMessages.map(m => m.id)) : undefined;
+      const turnIds = dayMessages ? new Set<string>(dayMessages.map(m => m.turn_id).filter(Boolean)) : undefined;
+      if (dayMessages) {
+        const times = dayMessages.map(m => m.occurred_at).filter((at): at is number => at !== null);
+        totals = { started_at: times.length ? times.reduce((a,b) => Math.min(a,b)) : null,
+          last_activity_at: times.length ? times.reduce((a,b) => Math.max(a,b)) : null,
+          message_count: dayMessages.length, user_prompt_count: allTurns.filter(t => messageIds!.has(t.prompt_message_id)).length };
+      }
+      const scopedTurns = allTurns.filter(t => !turnIds || turnIds.has(t.id) || messageIds!.has(t.prompt_message_id));
+      const indexed = scopedTurns.map(t => ({ turn: t,
+        promptCount: !messageIds || messageIds.has(t.prompt_message_id) ? 1 : 0,
+        index: dayIndex(this.eventIndex(t.provider,t.session_id,t.id,mode,t.prompt_message_id), matches) }));
       let totalEntries = 0;
       const windows = indexed.map(entry => {
         const start = totalEntries;
-        totalEntries += 1 + entry.index.projected.length;
+        totalEntries += entry.promptCount + entry.index.projected.length;
         return { ...entry, start, end: totalEntries };
       });
-      const match = this.findMatch(provider, id, query);
-      if (targetTurnId && !allTurns.some(t => t.id === targetTurnId))
+      const match = this.findMatch(provider, id, query, messageIds ? [...messageIds] : undefined);
+      if (targetTurnId && !scopedTurns.some(t => t.id === targetTurnId))
         throw new LocalStateError("Turn not found", 404);
       const selectedTurnId = targetTurnId || match?.turnId;
       if (offset === undefined && selectedTurnId) {
         const found = windows.find(entry => entry.turn.id === selectedTurnId);
         if (found) {
           const event = found.index.projected.findIndex(e => e.id === (targetTurnId ? undefined : match?.eventId));
-          offset = Math.floor((found.start + (event >= 0 ? event + 1 : 0)) / DETAIL_PAGE_SIZE) * DETAIL_PAGE_SIZE;
+          offset = Math.floor((found.start + (event >= 0 ? event + found.promptCount : 0)) / DETAIL_PAGE_SIZE) * DETAIL_PAGE_SIZE;
         }
       }
       offset = offsetOf(offset);
       const pageEnd = offset + DETAIL_PAGE_SIZE;
       const turns = windows.filter(entry => entry.end > offset! && entry.start < pageEnd).map(entry => {
-        const eventOffset = Math.max(0, offset! - entry.start - 1);
-        const limit = Math.max(0, Math.min(entry.end, pageEnd) - Math.max(offset!, entry.start + 1));
+        const eventStart = entry.start + entry.promptCount;
+        const eventOffset = Math.max(0, offset! - eventStart);
+        const limit = Math.max(0, Math.min(entry.end, pageEnd) - Math.max(offset!, eventStart));
         return { ...this.readTurn(entry.turn,mode,eventOffset,commits,match?.turnId === entry.turn.id ? match?.eventId : undefined,
-          { limit, index: entry.index }), promptVisible: entry.start >= offset!, hasMoreEvents: entry.end > pageEnd };
+          { limit, index: entry.index }, matches), promptVisible: !!entry.promptCount && entry.start >= offset!, hasMoreEvents: entry.end > pageEnd };
       });
       const usage = this.db
         .prepare(
           "SELECT * FROM adit_history_usage_entries WHERE provider=? AND session_id IN (SELECT value FROM json_each(?)) AND ledger_role='canonical'",
         )
         .all(provider, JSON.stringify(ids)) as (Row & CostUsage)[];
-      const costs = this.prices ? usage.map((u) => this.prices!.estimate(u)) : [],
+      const scopedUsage = usage.filter(u => !matches || matches(u.occurred_at));
+      const costs = this.prices ? scopedUsage.map((u) => this.prices!.estimate(u)) : [],
         priced = costs.filter((v): v is number => v !== null);
-      const total = allTurns.length;
+      const total = scopedTurns.length;
       const allowed = new Set(
         this.scope(w)
           .filter((a) => a.provider === provider)
@@ -464,11 +503,12 @@ export class LocalSessionBrowser {
         .map((c) =>
           item({ ...c, commits: this.commits(w, provider, c.id).length }),
         );
-      const context = this.events(provider, ids[0], null, mode, 0, "", undefined, 50);
+      const context = this.events(provider, ids[0], null, mode, 0, "", undefined, 50,
+        matches ? dayIndex(this.eventIndex(provider, ids[0], null, mode), matches) : undefined);
       return {
         session: item({ ...s, ...totals, commits: commits.length }),
         models: [
-          ...new Set(usage.map((u) => u.model).filter((m): m is string => !!m)),
+          ...new Set(scopedUsage.map((u) => u.model).filter((m): m is string => !!m)),
         ],
         cost: priced.length ? priced.reduce((a, b) => a + b, 0) : null,
         unpriced: costs.length - priced.length,
@@ -488,7 +528,7 @@ export class LocalSessionBrowser {
           s.parent_id && allowed.has(s.parent_id)
             ? { provider, id: s.parent_id }
             : null,
-        commits: commits.filter((c) => !c.turnId),
+        commits: commits.filter((c) => !c.turnId || !scopedTurns.some(t => t.id === c.turnId)),
         context: context.events,
         contextNextOffset: context.nextOffset,
         previousOffset: offset > 0 ? Math.max(0, offset - DETAIL_PAGE_SIZE) : null,
@@ -534,7 +574,9 @@ export class LocalSessionBrowser {
     turnId: string,
     mode: TranscriptMode,
     offset = 0,
+    day?: SessionDayFilter,
   ): SessionTurn {
+    const matches = dayMatch(day);
     this.session(w, provider, id);
     const turn = this.turnRows(provider,id).map((t,index):Row=>({...t,ordinal:index+1})).find(t=>t.id===turnId);
     if (!turn) throw new LocalStateError("Turn not found", 404);
@@ -542,7 +584,8 @@ export class LocalSessionBrowser {
       turn,
       mode,
       offsetOf(offset),
-      this.commits(w, provider, id),
+      this.commits(w, provider, id).filter(c => !matches || matches(c.at)),
+      undefined, undefined, matches,
     );
   }
   private editable(w: LocalWorkspace, provider: string, id: string, turnId: string) {
@@ -655,6 +698,7 @@ export class LocalSessionBrowser {
     commits: SessionCommit[],
     matchEventId?: string,
     page?: { limit: number; index: EventIndex },
+    matches?: DayMatch,
   ): SessionTurn {
     const { prompt, imageCount, contextOnly, displayed } = this.readPrompt(turn);
     const usageRows = this.db
@@ -662,15 +706,17 @@ export class LocalSessionBrowser {
         "SELECT * FROM adit_history_usage_entries WHERE turn_id=? AND ledger_role='canonical'",
       )
       .all(turn.id) as Row[];
+    const scopedUsage = usageRows.filter(u => !matches || matches(u.occurred_at));
     const sum = (key: string) =>
-      usageRows.length && usageRows.every((u) => u[key] !== null)
-        ? usageRows.reduce((a, u) => a + u[key], 0)
+      scopedUsage.length && scopedUsage.every((u) => u[key] !== null)
+        ? scopedUsage.reduce((a, u) => a + u[key], 0)
         : null;
     const models = this.db
       .prepare(
-        "SELECT DISTINCT model,effort FROM adit_history_messages WHERE turn_id=? AND (model IS NOT NULL OR effort IS NOT NULL)",
+        "SELECT model,effort,occurred_at FROM adit_history_messages WHERE turn_id=? AND (model IS NOT NULL OR effort IS NOT NULL)",
       )
       .all(turn.id) as Row[];
+    const scopedModels = models.filter(m => !matches || matches(m.occurred_at));
     return {
       id: turn.id,
       ordinal: turn.ordinal,
@@ -687,9 +733,9 @@ export class LocalSessionBrowser {
         output: sum("output_tokens"),
         cache: sum("cache_read_tokens"),
         cacheWrite: sum("cache_write_tokens"),
-        requests: usageRows.length,
-        models: [...new Set(models.map((m) => m.model).filter(Boolean))],
-        efforts: [...new Set(models.map((m) => m.effort).filter(Boolean))],
+        requests: scopedUsage.length,
+        models: [...new Set(scopedModels.map((m) => m.model).filter(Boolean))],
+        efforts: [...new Set(scopedModels.map((m) => m.effort).filter(Boolean))],
       },
       ...this.events(
         turn.provider,
@@ -700,7 +746,7 @@ export class LocalSessionBrowser {
         turn.prompt_message_id,
         page ? undefined : matchEventId,
         page?.limit,
-        page?.index,
+        page?.index ?? (matches ? dayIndex(this.eventIndex(turn.provider, turn.session_id, turn.id, mode, turn.prompt_message_id), matches) : undefined),
       ),
       ...(page ? { nextOffset: null, previousOffset: null } : {}),
       commits: commits.filter((c) => c.turnId === turn.id),
@@ -803,7 +849,10 @@ export class LocalSessionBrowser {
     if (mode === "normal") {
       const calls = this.db
         .prepare(
-          `SELECT t.id,t.message_id,(CAST(q.key AS INTEGER)*1000000000+m.ordinal) ordinal,m.occurred_at FROM adit_history_tool_calls t JOIN adit_history_messages m ON m.id=t.message_id
+          // Start with this turn's messages. Starting with the session's tools
+          // scans every tool call again for each turn when paging a long session.
+          `SELECT t.id,t.message_id,(CAST(q.key AS INTEGER)*1000000000+m.ordinal) ordinal,m.occurred_at FROM adit_history_messages m
+        CROSS JOIN adit_history_tool_calls t ON t.message_id=m.id
         JOIN json_each(?) q ON q.value=t.session_id WHERE t.provider=? AND m.turn_id IS ? ORDER BY CAST(q.key AS INTEGER),m.ordinal,t.call_index`,
         )
         .all(segmentIds,provider, turnId) as Row[];
@@ -909,9 +958,11 @@ export class LocalSessionBrowser {
       previousOffset: offset > 0 ? Math.max(0, offset - 40) : null,
     };
   }
-  context(w: LocalWorkspace, provider: string, id: string, offset = 0) {
+  context(w: LocalWorkspace, provider: string, id: string, offset = 0, day?: SessionDayFilter) {
     this.session(w, provider, id);
-    return this.events(provider, id, null, "normal", offsetOf(offset), "", undefined, 50);
+    const matches = dayMatch(day);
+    return this.events(provider, id, null, "normal", offsetOf(offset), "", undefined, 50,
+      matches ? dayIndex(this.eventIndex(provider, id, null, "normal"), matches) : undefined);
   }
   content(
     w: LocalWorkspace,

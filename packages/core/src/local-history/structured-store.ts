@@ -87,7 +87,7 @@ export class StructuredHistory {
     const times=messages.map(m=>time(m.timestamp)).filter((value):value is number=>value!==null);
     const title=string(metadata?.title).trim() || null;
     let firstPrompt:string|null=null;
-    for(const message of messages)if(isPrompt(message)) {
+    for(const message of messages)if(isPrompt(message) && !message.previewExcluded) {
       firstPrompt=promptSummary(provider,message.content);
       if(firstPrompt)break;
     }
@@ -211,7 +211,7 @@ export class StructuredHistory {
     const sessionUsage=metadata?.usage;
     if(Array.isArray(sessionUsage))for(const [index,value] of sessionUsage.entries()) {
       const entry=record(value);
-      this.usage(session,null,null,`session:${index}`,entry,optional(entry.model??metadata?.model),null,null,null,"session",usageGroups);
+      this.usage(session,null,null,`session:${index}`,entry,optional(entry.model??metadata?.model),null,null,time(string(entry.timestamp??entry.created_at)),"session",usageGroups);
     }
     else if(sessionUsage && typeof sessionUsage==="object")this.usage(session,null,null,"session",record(sessionUsage),
       optional(metadata?.model),null,null,null,"session",usageGroups);
@@ -232,7 +232,7 @@ export class StructuredHistory {
     const write5=numberAt(cache,"ephemeral_5m_input_tokens"),write1h=numberAt(cache,"ephemeral_1h_input_tokens");
     const reasoning=numberAt(usage,"reasoning_output_tokens","reasoning_tokens","reasoningTokens","reasoning")??numberAt(record(usage.completion_tokens_details),"reasoning_tokens");
     const reportedTotal=numberAt(usage,"total_tokens","totalTokens","totalTokenCount");
-    const semantic=["claude","qoder","iflow","pi","omp","omo","prime-agent","stepcode","opencode","kilo","mimocode","icodemate","zcode"].includes(provider)?"excludes_cache":
+    const semantic=["copilot","muse","poolside","junie","roocode","kilo-legacy","kimi","kimi-work"].includes(provider) && ["excludes_cache","unknown"].includes(string(usage.adit_input_semantics))?string(usage.adit_input_semantics):["claude","qoder","iflow","pi","omp","omo","prime-agent","stepcode","opencode","kilo","mimocode","icodemate","zcode"].includes(provider)?"excludes_cache":
       ["codex","traex","augure-code","gemini","deepseek"].includes(provider)?"includes_cache":"unknown";
     let inputTotal:number|null=null,uncached:number|null=null;
     if(semantic==="excludes_cache") {uncached=reported;inputTotal=sum(reported,read,write);}

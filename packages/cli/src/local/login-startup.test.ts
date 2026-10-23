@@ -25,7 +25,38 @@ function fixture() {
   };
   return { root, store, registration, startup: new LoginStartup(store, registration) };
 }
-it("defaults off, verifies registration, rejects stale saves and pauses all directories on disable", async () => {
+it("enables the first-run default once and preserves disabled or externally removed registrations", async () => {
+  const { startup, registration, store } = fixture();
+  await Promise.all([startup.initialize(), startup.initialize()]);
+  expect(startup.status()).toEqual({ enabled: true, supported: true, version: 1 });
+  expect(registration.install).toHaveBeenCalledOnce();
+  await registration.remove();
+  await startup.initialize();
+  expect(startup.status().enabled).toBe(false);
+  expect(registration.install).toHaveBeenCalledOnce();
+  await startup.save({ enabled: false, version: 1 });
+  await new LoginStartup(store, registration).initialize();
+  expect(startup.status()).toEqual({ enabled: false, supported: true, version: 2 });
+  expect(registration.install).toHaveBeenCalledOnce();
+});
+it("keeps failed first-run registration disabled and allows an explicit retry", async () => {
+  const { startup, registration } = fixture();
+  vi.mocked(registration.install).mockRejectedValueOnce(new Error("permission denied"));
+  await expect(startup.initialize()).resolves.toEqual({ enabled: false, supported: true, version: 1, error: "permission denied" });
+  expect(() => startup.assertCloudMode({ cloud: { mode: "automatic" } })).toThrow();
+  await startup.initialize();
+  expect(registration.install).toHaveBeenCalledOnce();
+  await startup.save({ enabled: true, version: 1 });
+  expect(startup.status()).toEqual({ enabled: true, supported: true, version: 2 });
+});
+it("does not install a first-run entry on unsupported systems", async () => {
+  const { startup, registration, store } = fixture();
+  registration.supported = false;
+  await expect(startup.initialize()).resolves.toEqual({ enabled: false, supported: false, version: 0 });
+  expect(registration.install).not.toHaveBeenCalled();
+  expect(store.get("login-startup", null)).toBeNull();
+});
+it("keeps status reads inert, verifies registration, rejects stale saves and pauses all directories on disable", async () => {
   const { startup, registration, store, root } = fixture();
   const schedule = store.schedule();
   expect(startup.status()).toEqual({ enabled: false, supported: true, version: 0 });

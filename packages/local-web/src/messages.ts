@@ -242,6 +242,12 @@ export const messages = {
   开启云端存储: "Enable cloud storage",
   自动同步新记录: "Automatically sync new records",
   登录电脑后自动启动: "Start automatically when you sign in",
+  分享与云端设置: "Sharing and cloud settings",
+  启动设置: "Startup settings",
+  开启自动同步: "Enable automatic sync",
+  开启并继续: "Enable and continue",
+  "自动同步需要登录电脑后自动启动 ADIT。此设置对本机所有工作目录生效。":
+    "Automatic sync requires ADIT to start when you sign in. This setting applies to all workspaces on this computer.",
   "此选项对本机所有目录立即生效。勾选后才可自动同步；取消勾选会暂停所有目录的自动同步，仍可手动同步。":
     "Applies immediately to all directories on this computer. Required for automatic sync. Turning it off pauses automatic sync for all directories; manual sync remains available.",
   "当前系统不支持登录后自动启动，可使用手动同步。":

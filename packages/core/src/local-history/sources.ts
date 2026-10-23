@@ -294,9 +294,9 @@ export async function* sourceFiles(
       if (provider === "vibe" && entry.name === "meta.json") yield path;
       if (
         ["codex", "traex", "augure-code"].includes(provider) &&
-        /^rollout-.*\.jsonl$/.test(entry.name)
+        /^rollout-.*\.jsonl(?:\.zst)?$/.test(entry.name)
       )
-        yield path;
+        if(!entry.name.endsWith(".zst") || !entries.some(e=>e.isFile()&&e.name===entry.name.slice(0,-4)))yield path;
       if (["claude", "openclaude", "icodemate", "zencoder"].includes(provider) && entry.name.endsWith(".jsonl")) yield path;
       if (provider === "qwen" && basename(root) === "chats" && entry.name.endsWith(".jsonl")) yield path;
       if (provider === "commandcode" && entry.name.endsWith(".jsonl") && !/\.(checkpoints|prompts)\.jsonl$/.test(entry.name)) yield path;

@@ -152,3 +152,29 @@ it("serves 50 detail entries per page including a prompt only once", async () =>
   expect([first, second, last].map(p => p.turns[0].promptVisible)).toEqual([true,false,false]);
   expect(last.nextOffset).toBeNull();
 });
+
+it("passes day and timezone through detail, turn and context reads while keeping full-session links", async () => {
+  root = mkdtempSync(join(tmpdir(), "adit-session-selected-day-api-"));
+  app = await startLocalServer({ directory: join(root, "state") });
+  const w = app.store.saveWorkspace({ path: root, providers: ["claude"], repositories: [] });
+  new StructuredHistory(app.store.db).write({ provider: "claude", id: "days", cwd: w.path, messages: [
+    { key: "context", role: "system", content: "prior context", timestamp: "2026-10-20T15:58:00Z", raw: {} },
+    { key: "p", role: "user", content: "prior question", timestamp: "2026-10-20T15:59:00Z", raw: {} },
+    { key: "a", role: "assistant", content: "selected day answer", timestamp: "2026-10-20T16:01:00Z", raw: {} },
+  ] });
+  const get = (route: string, params: Record<string, string> = {}) => fetch(app!.origin + "/api/local/sessions/" + route + "?" + new URLSearchParams({
+    workspaceId: w.id, provider: "claude", id: "days", timezone: "Asia/Shanghai", ...params,
+  }), { headers: { "x-adit-local": "1" } });
+  const selected = await (await get("detail", { day: "2026-10-21" })).json() as any;
+  expect(selected.session).toMatchObject({ prompts: 0, messages: 1 });
+  expect(selected.turns[0]).toMatchObject({ promptVisible: false, events: [{ text: "selected day answer" }] });
+  expect(selected.context).toEqual([]);
+  const turnId = selected.turns[0].id;
+  const prior = await (await get("turn", { turnId, day: "2026-10-20" })).json() as any;
+  expect(prior.events).toEqual([]);
+  expect((await (await get("context", { day: "2026-10-21" })).json() as any).events).toEqual([]);
+  expect((await (await get("detail", { turnId })).json() as any).session.messages).toBe(3);
+  expect((await get("detail", { day: "2026-02-30" })).status).toBe(400);
+  expect((await get("detail", { day: "2026-10-21", timezone: "invalid/zone" })).status).toBe(400);
+  expect((await (await get("detail", { day: "unknown" })).json() as any).session.messages).toBe(0);
+});

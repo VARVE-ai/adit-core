@@ -164,6 +164,7 @@ let startup = { enabled: false, supported: true, version: 0 };
 let savedWorkspace: typeof workspace & { cloudSync?: CloudSyncSummary; repositoryInfo?: {path:string;count:number|null;skipReason?:"missing-git-email"}[] } = workspace;
 let jobs: { id: string; workspaceId: string; kind: string; status: string; phase?:string; repositories?:{path:string;count:number|null}[]; providers?:Record<string,number>;pending?:Record<string,number>;sourceProgress?:Record<string,{completed:number;total:number|null;status:string}>;repositoryProgress?:Record<string,{completed:number;total:number|null;status:string;matched:number}> }[] = [];
 let syncStartFails = false;
+let startupSaveFails = false;
 const respond = (path: string, input?: any): unknown => {
   if(path === "/discoveries") {
     const job={id:"discover",workspaceId:input.path,kind:"discover",status:"running",phase:"git"};
@@ -192,6 +193,7 @@ const respond = (path: string, input?: any): unknown => {
     return savedWorkspace;
   }
   if (path === "/startup") {
+    if (startupSaveFails) throw new Error("Login startup registration failed");
     startup = { ...startup, enabled: input.enabled, version: startup.version + 1 };
     if (!startup.enabled) savedWorkspace = { ...savedWorkspace, version: savedWorkspace.version + 1, cloud: { ...savedWorkspace.cloud, mode: "manual" } };
     return startup;
@@ -359,6 +361,7 @@ beforeEach(() => {
   savedWorkspace = workspace;
   jobs = [];
   syncStartFails = false;
+  startupSaveFails = false;
   storage.clear();
   location.hash = "";
   location.search = "";
@@ -665,27 +668,63 @@ describe("language switching across the local workbench", () => {
     await toggle();
     expect(text(header)).toContain("本地采集完成");
   });
-  it("requires login startup for automatic sync and pauses the saved directory when unchecked", async () => {
-    const root = await render("/settings/workspaces/ws");
+  it("manages login startup globally in ADIT CLI and pauses automatic sync when disabled", async () => {
+    startup = { enabled: true, supported: true, version: 1 };
+    savedWorkspace = { ...workspace, cloud: { ...workspace.cloud, mode: "automatic" } };
+    const root = await render("/settings/cli");
     const checkbox = () => root.findAllByType("label")
       .find(n => text(n).trim() === "Start automatically when you sign in")!.findByType("input");
-    const automatic = () => root.findAllByType("input").filter(n => n.props.name === "cloud-mode")[1];
-    expect(root.findAllByProps({ id: "cloud-settings" })).toHaveLength(0);
-    await act(async () => { button("Change frequency").props.onClick(); });
-    expect(checkbox().props.checked).toBe(false);
-    expect(automatic().props.disabled).toBe(true);
-    await act(async () => { await checkbox().props.onChange({ target: { checked: true } }); });
     expect(checkbox().props.checked).toBe(true);
-    expect(automatic().props.disabled).toBe(false);
-    await act(async () => { automatic().props.onChange(); });
-    expect(automatic().props.checked).toBe(true);
     await act(async () => { await checkbox().props.onChange({ target: { checked: false } }); });
     expect(checkbox().props.checked).toBe(false);
-    expect(automatic().props.disabled).toBe(true);
-    expect(automatic().props.checked).toBe(false);
     expect(savedWorkspace.cloud.mode).toBe("manual");
     await toggle();
+    expect(text(root)).toContain("启动设置");
     expect(text(root)).toContain("登录电脑后自动启动");
+  });
+  it("asks for startup consent before selecting automatic sync and keeps manual mode on cancel or failure", async () => {
+    const root = await render("/settings/workspaces/ws");
+    const automatic = () => root.findAllByType("input").filter(n => n.props.name === "cloud-mode")[1];
+    await act(async () => { button("Change frequency").props.onClick(); });
+    expect(text(root)).not.toContain("Start automatically when you sign in");
+    await act(async () => { automatic().props.onChange(); });
+    expect(automatic().props.checked).toBe(false);
+    expect(button("Enable and continue").props.disabled).toBe(true);
+    const dialog = () => root.findByProps({ role: "dialog" });
+    await act(async () => { dialog().findAllByType("button").find(n => text(n) === "Cancel")!.props.onClick(); });
+    expect(automatic().props.checked).toBe(false);
+    expect(startup.enabled).toBe(false);
+    await act(async () => { automatic().props.onChange(); });
+    await act(async () => { dialog().findByType("input").props.onChange({ target: { checked: true } }); });
+    startupSaveFails = true;
+    await act(async () => { button("Enable and continue").props.onClick(); });
+    expect(dialog().findByProps({ role: "alert" })).toBeTruthy();
+    expect(automatic().props.checked).toBe(false);
+    expect(savedWorkspace.cloud.mode).toBe("manual");
+    startupSaveFails = false;
+    await act(async () => { button("Enable and continue").props.onClick(); });
+    expect(root.findAllByProps({ role: "dialog" })).toHaveLength(0);
+    expect(startup.enabled).toBe(true);
+    expect(automatic().props.checked).toBe(true);
+    await act(async () => { button("Save").props.onClick(); });
+    expect(savedWorkspace.cloud.mode).toBe("automatic");
+  });
+  it("selects automatic sync directly when startup is enabled and explains unsupported systems", async () => {
+    startup = { enabled: true, supported: true, version: 1 };
+    const root = await render("/settings/workspaces/ws");
+    await act(async () => { button("Change frequency").props.onClick(); });
+    const automatic = () => root.findAllByType("input").filter(n => n.props.name === "cloud-mode")[1];
+    await act(async () => { automatic().props.onChange(); });
+    expect(automatic().props.checked).toBe(true);
+    expect(root.findAllByProps({ role: "dialog" })).toHaveLength(0);
+    startup = { enabled: false, supported: false, version: 2 };
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    await act(async () => { automatic().props.onChange(); });
+    expect(automatic().props.checked).toBe(false);
+    expect(button("Enable and continue").props.disabled).toBe(true);
+    expect(text(root.findByProps({ role: "dialog" }))).toContain("Login startup is not supported on this system");
+    await toggle();
+    expect(text(root.findByProps({ role: "dialog" }))).toContain("当前系统不支持登录后自动启动");
   });
   it("keeps manual sync available without startup and without expanding cloud settings", async () => {
     savedWorkspace = { ...workspace, cloud: { ...workspace.cloud, enabled: true } };
