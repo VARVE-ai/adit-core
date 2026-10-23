@@ -218,6 +218,7 @@ export async function startLocalServer(
           const provider=url.searchParams.get("provider")||"all",id=url.searchParams.get("id")||"";
           const offset=Number(url.searchParams.get("offset")||0);
           const mode=url.searchParams.get("mode")==="focused"?"focused":"normal";
+          const day=url.searchParams.has("day") ? { day:url.searchParams.get("day")==="unknown"?null:url.searchParams.get("day")!, timezone:url.searchParams.get("timezone")||undefined } : undefined;
           if(req.method!=="GET") {
             if(route!=="/sessions/turn")throw new LocalStateError("Not found",404);
             const turnId=url.searchParams.get("turnId")||"";
@@ -227,10 +228,10 @@ export async function startLocalServer(
           }
           if(route==="/sessions/turn/edit")return json(res,browser.editTurn(workspace,provider,id,url.searchParams.get("turnId")||""));
           if(route==="/sessions")return json(res,browser.list(workspace,{provider,query:url.searchParams.get("q")||"",sort:url.searchParams.get("sort")||"activity",onlyCommits:url.searchParams.get("commits")==="1",offset,timezone:url.searchParams.get("timezone")||undefined}));
-          if(route==="/sessions/detail")return json(res,browser.detail(workspace,provider,id,mode,url.searchParams.has("offset")?offset:undefined,url.searchParams.get("q")||"",url.searchParams.get("turnId")||undefined));
+          if(route==="/sessions/detail")return json(res,browser.detail(workspace,provider,id,mode,url.searchParams.has("offset")?offset:undefined,url.searchParams.get("q")||"",url.searchParams.get("turnId")||undefined,day));
           if(route==="/sessions/preview")return json(res,browser.preview(workspace,provider,id,url.searchParams.get("turnId")||""));
-          if(route==="/sessions/turn")return json(res,browser.turn(workspace,provider,id,url.searchParams.get("turnId")||"",mode,offset));
-          if(route==="/sessions/context")return json(res,browser.context(workspace,provider,id,offset));
+          if(route==="/sessions/turn")return json(res,browser.turn(workspace,provider,id,url.searchParams.get("turnId")||"",mode,offset,day));
+          if(route==="/sessions/context")return json(res,browser.context(workspace,provider,id,offset,day));
           return json(res,browser.content(workspace,provider,id,url.searchParams.get("eventId")||"",url.searchParams.get("kind")||"",offset));
         }
         if (route === "/readme-preview" && req.method === "GET") {

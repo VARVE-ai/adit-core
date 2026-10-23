@@ -202,3 +202,50 @@ it("stops detail pagination after an error and allows a visible retry", async ()
   expect(readDetail).toHaveBeenCalledTimes(3);
   expect(renderer.root.findAllByProps({ role: "alert" })).toHaveLength(0);
 });
+
+it("reloads the same session on each selected day and keeps pagination inside that day", async () => {
+  const readDetail = vi.fn(async (params: URLSearchParams) => {
+    const detail = detailPage(Number(params.get("offset")));
+    detail.turns[0].events = [{ id: `reply-${params.get("day")}-${detail.pageOffset}`, kind: "reply", text: `Answer for ${params.get("day")}`, at: null }];
+    return detail;
+  });
+  await mount(apiWithList(async () => page(0, 3), readDetail));
+  const visibleReply = () => renderer.root.findAllByProps({ className: "session-reply" })[0]
+    .findByProps({ className: "session-message-preview" }).children.join("");
+  expect(visibleReply()).toBe("Answer for 2026-10-23");
+  await act(async () => rows()[1].props.onClick());
+  expect(visibleReply()).toBe("Answer for 2026-10-22");
+  await act(async () => rows()[2].props.onClick());
+  expect(visibleReply()).toBe("Answer for 2026-10-21");
+  await act(async () => activeObserver().fire());
+  expect(readDetail.mock.calls.map(([params]) => [params.get("day"), params.get("offset")])).toEqual([
+    ["2026-10-23",null], ["2026-10-22",null], ["2026-10-21",null], ["2026-10-21","50"],
+  ]);
+  expect(readDetail.mock.calls.every(([params]) => params.get("timezone") === Intl.DateTimeFormat().resolvedOptions().timeZone)).toBe(true);
+});
+
+it("discards a pending page from another day of the same session", async () => {
+  let resolve: (value: any) => void = () => {};
+  const readDetail = vi.fn(async (params: URLSearchParams) => params.get("offset") === "50"
+    ? new Promise(r => { resolve = r; }) : params.get("day") === "2026-10-22"
+      ? { ...detailPage(100), pageOffset: 0, previousOffset: null } : detailPage(0));
+  await mount(apiWithList(async () => page(0, 2), readDetail));
+  await act(async () => activeObserver().fire());
+  await act(async () => rows()[1].props.onClick());
+  await act(async () => resolve(detailPage(50)));
+  expect(renderer.root.findAllByProps({ className: "session-reply-node" })).toHaveLength(5);
+  expect(rows()[1].props["aria-pressed"]).toBe(true);
+});
+
+it("requests the undated group explicitly and leaves an exact-turn link unfiltered", async () => {
+  const readDetail = vi.fn(async () => detailPage(0));
+  await mount(apiWithList(async () => ({ ...page(0,1), items: [{ ...row(0), day: null }] }), readDetail));
+  expect(readDetail.mock.calls).toHaveLength(1);
+  const api = renderer.root.findByType(SessionsPage).props.api;
+  expect(new URL(api.mock.calls.find(([url]: [string]) => url.startsWith("/sessions/detail"))[0], "http://localhost").searchParams.get("day")).toBe("unknown");
+  act(() => renderer.unmount());
+  vi.stubGlobal("location", { search: "?provider=claude&session=same-conversation&turn=original-turn" });
+  const linked = vi.fn(async (params: URLSearchParams) => detailPage(0));
+  await mount(apiWithList(async () => page(0,3), linked));
+  expect(linked.mock.calls.every(([params]) => !params.has("day") && params.get("turnId") === "original-turn")).toBe(true);
+});

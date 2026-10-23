@@ -488,31 +488,78 @@
   display: flex;
   align-items: baseline;
 }
-.commit-source-entry + .commit-source-entry {
-  border-top: 1px solid hsl(var(--border));
-}
-.commit-source-empty:has(.commit-source-entry) {
-  padding: 0;
-  overflow: hidden;
-}
+.commit-source-list { min-width: 0; }
 .commit-source-entry {
-  padding: 12px;
+  position: relative;
+  min-width: 0;
+  padding: 0 0 12px 32px;
 }
-.commit-line-total {
-  margin-left: auto;
+.commit-source-entry:last-child { padding-bottom: 0; }
+.commit-source-entry::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: hsl(var(--border));
 }
+.commit-source-entry:first-child::before { top: 16px; }
+.commit-source-entry:last-child::before { bottom: calc(100% - 16px); }
+.commit-source-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 32px;
+  padding-right: 8px;
+  border-radius: 4px;
+}
+.commit-source-heading:hover { background: hsl(var(--muted) / 0.5); }
+.commit-source-node {
+  position: absolute;
+  left: 1px;
+  top: 6px;
+  z-index: 1;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 2px solid hsl(var(--muted-foreground) / 0.3);
+  border-radius: 50%;
+  background: hsl(var(--background));
+}
+.commit-source-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.commit-line-total { font-weight: 400; }
 .commit-source-title {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 6px;
   text-decoration: none;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
-  margin-top: 6px;
+  line-height: 20px;
   color: hsl(var(--foreground));
-  overflow-wrap: anywhere;
 }
+.commit-source-title > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .commit-source-title > svg { flex-shrink: 0; }
+.commit-detail .commit-source-files,
+.commit-detail .commit-source-alternatives { margin-top: 2px; }
+.commit-source-files > summary,
+.commit-source-alternatives > summary { padding: 3px 0; }
+.commit-source-files .commit-file { padding: 8px 0; }
+.commit-source-alternatives p { margin: 8px 0; font-size: 12px; }
 .commit-badge-dialog {
   color: hsl(var(--foreground));
   background: hsl(var(--background));

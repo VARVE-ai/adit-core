@@ -47,6 +47,9 @@ type Api = <T = any>(
   signal?: AbortSignal,
 ) => Promise<T>;
 type Selection = { provider: string; id: string; day?: string | null };
+const dayParams = (selection?: Selection): Record<string, string> => selection?.day === undefined ? {} : {
+  day: selection.day ?? "unknown", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+};
 const n = (value: number) => value.toLocaleString(locale());
 const date = (at: number | null, time = false) =>
   at === null
@@ -590,6 +593,7 @@ export function SessionsPage({
     const query = new URLSearchParams(location.search);
     return query.get("provider") && query.get("session") ? { provider: query.get("provider")!, id: query.get("session")! } : undefined;
   })());
+  const requestedTurnSession = useRef(requestedSession.current);
   const requestedTurn = useRef(new URLSearchParams(location.search).get("turn") || undefined);
   const [provider, setProvider] = useState("all"),
     [search, setSearch] = useState(""),
@@ -657,7 +661,7 @@ export function SessionsPage({
         const requested = requestedSession.current;
         requestedSession.current = undefined;
         setSelected((old) =>
-          requested ? { ...requested, day: d.items.find((s) => key(s) === key(requested))?.day } : old && d.items.some((s) => rowKey(s) === rowKey(old))
+          requested ? requested : old && d.items.some((s) => rowKey(s) === rowKey(old))
             ? old
             : d.items[0]
               ? { provider: d.items[0].provider, id: d.items[0].id, day: d.items[0].day }
@@ -702,6 +706,7 @@ export function SessionsPage({
           workspaceId: workspace.id,
           provider: selected!.provider,
           id: selected!.id,
+          ...dayParams(selected),
           ...params,
         }),
     );
@@ -722,9 +727,10 @@ export function SessionsPage({
             workspaceId: workspace.id,
             provider: selected.provider,
             id: selected.id,
+            ...dayParams(selected),
             mode,
             q: query,
-            ...(!query && requestedTurn.current && selected.provider === requestedSession.current?.provider && selected.id === requestedSession.current?.id
+            ...(!query && requestedTurn.current && selected.provider === requestedTurnSession.current?.provider && selected.id === requestedTurnSession.current?.id
               ? { turnId: requestedTurn.current } : {}),
             ...(offset === undefined ? {} : { offset: String(offset) }),
           }),
@@ -765,7 +771,7 @@ export function SessionsPage({
         if (!signal?.aborted) setDetailLoading(false);
       }
     }
-  }, [api, workspace.id, selected?.provider, selected?.id, mode, query]);
+  }, [api, workspace.id, selected?.provider, selected?.id, selected?.day, mode, query]);
   useLayoutEffect(() => {
     const previous = prependScroll.current;
     if (previous && detailScroll.current) detailScroll.current.scrollTop = previous.top + detailScroll.current.scrollHeight - previous.height;
@@ -1177,7 +1183,7 @@ export function SessionsPage({
                       />
                     ))}
                   <CommitGroup commits={detail.commits} onCommit={onCommit} />
-                  {!detail.totalTurns && <p className="session-empty">{sc("此会话暂无对话内容")}</p>}
+                  {!detail.totalEntries && !detail.context.length && <p className="session-empty">{sc("此会话暂无对话内容")}</p>}
                   <AutoLoad cursor={detail.nextOffset} loading={detailLoading} error={detailError}
                     load={() => loadDetail(detail.nextOffset!)} />
                 </div>

@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -731,4 +731,109 @@ it("marks a reply pending pagination when the page ends at its prompt", () => {
   const first = browser.detail(w, "claude", "boundary", "focused");
   expect(first.turns.at(-1)).toMatchObject({ events: [], hasMoreEvents: true });
   expect(browser.detail(w, "claude", "boundary", "focused", 50).turns[0]).toMatchObject({ promptVisible: false, hasMoreEvents: false });
+});
+
+it("looks up tools by turn messages without rescanning every tool in a long session", () => {
+  const { w, history, browser } = fixture();
+  history.write({ id: "many-tools", provider: "codex", cwd: root, messages: Array.from({ length: 90 }, (_, i) => [
+    m(`p${i}`, "user", `question ${i}`),
+    m(`t${i}`, "assistant", [{ type: "function_call", call_id: `call${i}`, name: "exec_command",
+      arguments: JSON.stringify({ cmd: `echo item-${i}` }) }]),
+    m(`a${i}`, "assistant", `reply ${i}`),
+  ]).flat() });
+  const prepare = vi.spyOn(store.db, "prepare");
+  let page = browser.detail(w, "codex", "many-tools");
+  const tools: string[] = [];
+  for (;;) {
+    tools.push(...page.turns.flatMap(t => t.events.filter(e => e.kind === "tool").map(e => e.id)));
+    if (page.nextOffset === null) break;
+    page = browser.detail(w, "codex", "many-tools", "normal", page.nextOffset);
+  }
+  const query = prepare.mock.calls.map(([sql]) => sql).find(sql => sql.startsWith("SELECT t.id,t.message_id,"));
+  prepare.mockRestore();
+  expect(tools).toHaveLength(90);
+  expect(new Set(tools).size).toBe(90);
+  expect(page.totalEntries).toBe(270);
+  expect(query).toBeTruthy();
+  const turn = store.db.prepare("SELECT id FROM adit_history_turns WHERE session_id=? ORDER BY ordinal LIMIT 1").get("many-tools") as { id: string };
+  const plan = store.db.prepare("EXPLAIN QUERY PLAN " + query).all(JSON.stringify(["many-tools"]), "codex", turn.id) as { detail: string }[];
+  // A query-plan assertion is stable across machine speeds and guards the
+  // regression that spent over a minute rescanning a real 264-turn session.
+  expect(plan.some(row => /SEARCH m USING .*adit_history_messages_turn.*turn_id=/.test(row.detail))).toBe(true);
+  expect(plan.some(row => /SEARCH t USING .*adit_history_tools_message.*message_id=/.test(row.detail))).toBe(true);
+});
+
+it.each(["normal", "focused"] as const)("shows only the selected day's conversation and metrics in %s mode", mode => {
+  const { w, history, browser } = fixture();
+  for (const [i, id] of ["days", "continued"].entries()) history.write({ id, provider: "claude", cwd: root,
+    ...(i ? { parentId: "days", relationship: "continuation" as const } : {}), messages: [
+      m(`p${i}`, "user", `question day ${i}`, { timestamp: `2026-10-${21 + i}T01:00:00Z` }),
+      m(`a${i}`, "assistant", `needle answer day ${i}`, { timestamp: `2026-10-${21 + i}T02:00:00Z`, model: "test-model",
+        usage: { input_tokens: 100 * (i + 1), output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }),
+    ] });
+  const before = store.db.prepare("SELECT id,transcript_revision FROM adit_history_sessions ORDER BY id").all();
+  const rows = browser.list(w, { timezone: "Asia/Shanghai" }).items;
+  for (const row of rows) {
+    const day = { day: row.day, timezone: "Asia/Shanghai" };
+    const detail = browser.detail(w, "claude", "days", mode, undefined, "needle", undefined, day);
+    expect(detail.session).toMatchObject({ id: "days", prompts: row.prompts, messages: row.messages,
+      startedAt: row.startedAt, lastActivityAt: row.lastActivityAt });
+    expect(detail.cost).toBe(row.cost);
+    expect(detail.models).toEqual(["test-model"]);
+    expect(detail.turns).toHaveLength(1);
+    const i = row.day === "2026-10-21" ? 0 : 1;
+    expect(detail.turns[0].prompt).toBe(`question day ${i}`);
+    expect(detail.turns[0].events.map(e => e.text)).toEqual([`needle answer day ${i}`]);
+    expect(detail.matchTurnId).toBe(detail.turns[0].id);
+    expect(detail.turns[0].usage.input).toBe(100 * (i + 1));
+    expect(detail.nextOffset).toBeNull();
+  }
+  expect(browser.detail(w, "claude", "days").totalTurns).toBe(2);
+  expect(store.db.prepare("SELECT id,transcript_revision FROM adit_history_sessions ORDER BY id").all()).toEqual(before);
+});
+
+it("pages a midnight-spanning turn within its day without repeating yesterday's prompt or tomorrow's replies", () => {
+  const { w, history, browser } = fixture();
+  history.write({ id: "midnight", provider: "claude", cwd: root, messages: [
+    m("p", "user", "yesterday question", { timestamp: "2026-10-20T15:59:00Z" }),
+    ...Array.from({ length: 65 }, (_, i) => m(`a${i}`, "assistant", `today reply ${i}`, { timestamp: "2026-10-20T16:01:00Z" })),
+    m("later", "user", "tomorrow question", { timestamp: "2026-10-21T16:00:00Z" }),
+  ] });
+  const yesterday = browser.detail(w, "claude", "midnight", "normal", undefined, "", undefined, { day: "2026-10-20", timezone: "Asia/Shanghai" });
+  expect(yesterday.totalEntries).toBe(1);
+  expect(yesterday.turns[0].events).toEqual([]);
+  const day = { day: "2026-10-21", timezone: "Asia/Shanghai" };
+  const first = browser.detail(w, "claude", "midnight", "normal", undefined, "", undefined, day);
+  const last = browser.detail(w, "claude", "midnight", "normal", first.nextOffset!, "", undefined, day);
+  expect(first.session).toMatchObject({ prompts: 0, messages: 65 });
+  expect([first.totalEntries, first.turns[0].events.length, last.turns[0].events.length]).toEqual([65,50,15]);
+  expect([first.turns[0].promptVisible, last.turns[0].promptVisible]).toEqual([false,false]);
+  expect(last.nextOffset).toBeNull();
+  expect(new Set([...first.turns[0].events, ...last.turns[0].events].map(e => e.id)).size).toBe(65);
+  expect(browser.detail(w, "claude", "midnight", "focused", undefined, "", undefined, day).turns[0].events.map(e => e.text)).toEqual(["today reply 64"]);
+});
+
+it("keeps context pagination, undated content, timezone boundaries and invalid day filters separate", () => {
+  const { w, history, browser } = fixture();
+  history.write({ id: "context-days", provider: "claude", cwd: root, messages: [
+    m("unknown", "system", "undated context", { timestamp: undefined }),
+    m("prior", "system", "previous day context", { timestamp: "2026-11-01T03:59:00Z" }),
+    ...Array.from({ length: 60 }, (_, i) => m(`s${i}`, "system", `selected context ${i}`, { timestamp: i < 30 ? "2026-11-01T05:30:00Z" : "2026-11-01T06:30:00Z" })),
+    m("next", "user", "next day question", { timestamp: "2026-11-02T05:00:00Z" }),
+  ] });
+  const day = { day: "2026-11-01", timezone: "America/New_York" };
+  const first = browser.detail(w, "claude", "context-days", "normal", undefined, "", undefined, day);
+  expect(first.session).toMatchObject({ prompts: 0, messages: 60 });
+  expect(first.context).toHaveLength(50);
+  const last = browser.context(w, "claude", "context-days", first.contextNextOffset!, day);
+  expect(last.events).toHaveLength(10);
+  expect(last.nextOffset).toBeNull();
+  expect([...first.context, ...last.events].every(e => e.text.startsWith("selected context"))).toBe(true);
+  const undated = browser.detail(w, "claude", "context-days", "normal", undefined, "", undefined, { day: null });
+  expect(undated.session.messages).toBe(1);
+  expect(undated.context.map(e => e.text)).toEqual(["undated context"]);
+  expect(browser.detail(w, "claude", "context-days", "normal", undefined, "", undefined, { day: "2026-12-01" }).session.messages).toBe(0);
+  for (const invalid of ["", "2026-02-30", "bad"])
+    expect(() => browser.detail(w, "claude", "context-days", "normal", undefined, "", undefined, { day: invalid })).toThrow("Invalid day");
+  expect(() => browser.detail(w, "claude", "context-days", "normal", undefined, "", undefined, { day: null, timezone: "invalid/zone" })).toThrow("Invalid timezone");
 });
