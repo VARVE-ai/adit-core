@@ -323,6 +323,19 @@ export function CommitsPage({
                   {current.branch || "—"}
                 </code>
               </div>
+              <details className="commit-submitted-files">
+                <summary>{t("查看提交文件")}</summary>
+                {current.files.map((f) => (
+                  <div className="commit-file" key={f.path}>
+                    <code>{f.path}</code>
+                    <span>
+                      {f.binary
+                        ? t("二进制")
+                        : `+${f.additions ?? "—"} −${f.deletions ?? "—"}`}
+                    </span>
+                  </div>
+                ))}
+              </details>
               <section>
                 <h4>{t("提交记录")}</h4>
                 {current.record ? (
@@ -351,19 +364,6 @@ export function CommitsPage({
                     </small>
                   )}
                 </h4>
-                <details className="commit-submitted-files">
-                  <summary>{t("查看提交文件")}</summary>
-                  {current.files.map((f) => (
-                    <div className="commit-file" key={f.path}>
-                      <code>{f.path}</code>
-                      <span>
-                        {f.binary
-                          ? t("二进制")
-                          : `+${f.additions ?? "—"} −${f.deletions ?? "—"}`}
-                      </span>
-                    </div>
-                  ))}
-                </details>
                 <div className={sources?.sources.length && !sourceError && sources.eligible !== null ? "commit-source-list" : "commit-source-empty"}>
                   {sourceError ? (
                     <span role="alert">
