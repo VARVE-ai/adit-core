@@ -143,7 +143,7 @@ export type SessionContent = { text: string; nextOffset: number | null };
 export type SessionTurnPreview = {
   session: { provider: string; id: string; title: string };
   targetTurnId: string | null;
-  turns: { id: string; ordinal: number; prompt: string; imageCount: number; reply: string | null; at: number | null }[];
+  turns: { id: string; ordinal: number; prompt: string; imageCount: number; reply: string | null; at: number | null; replyAt: number | null; usage: SessionUsage }[];
 };
 export type SessionTurnEdit = {
   turnId: string;
@@ -287,13 +287,17 @@ export class LocalSessionBrowser {
           AND (@from IS NULL OR s.last_activity_at>=@from) AND (@to IS NULL OR s.started_at<=@to)
           AND (@query='' OR ${historyTextMatch("s.title")} OR ${historyTextMatch("s.first_prompt")}
             OR EXISTS(SELECT 1 FROM matched m WHERE m.provider=s.provider AND m.id=s.id))),
-        daily AS (SELECT f.provider,f.id,f.title,f.first_prompt,f.commits,
+        daily AS MATERIALIZED (SELECT f.provider,f.id,f.title,f.first_prompt,f.commits,
           session_day(m.occurred_at) day,min(m.occurred_at) started_at,max(m.occurred_at) last_activity_at,
-          count(m.id) message_count,count(t.id) user_prompt_count
+          count(m.session_id) message_count
           FROM filtered f JOIN scope q ON q.provider=f.provider AND q.conversation_id=f.id
           LEFT JOIN adit_history_messages m ON m.provider=q.provider AND m.session_id=q.id
-          LEFT JOIN adit_history_turns t ON t.prompt_message_id=m.id
-          GROUP BY f.provider,f.id,day HAVING count(m.id)>0 OR max(f.message_count)=0)`;
+          GROUP BY f.provider,f.id,day HAVING count(m.session_id)>0 OR max(f.message_count)=0),
+        prompt_days AS (SELECT q.provider,q.conversation_id id,session_day(m.occurred_at) day,count(*) user_prompt_count
+          FROM filtered f JOIN scope q ON q.provider=f.provider AND q.conversation_id=f.id
+          JOIN adit_history_turns t ON t.provider=q.provider AND t.session_id=q.id
+          JOIN adit_history_messages m ON m.id=t.prompt_message_id AND m.provider=q.provider AND m.session_id=q.id
+          GROUP BY q.provider,q.conversation_id,day)`;
       const params = {
         scope,
         run: this.run(w),
@@ -307,12 +311,6 @@ export class LocalSessionBrowser {
         from: options.from ?? null,
         to: options.to ?? null,
       };
-      const summary = this.db
-        .prepare(
-          cte +
-            " SELECT count(*) total,coalesce(sum(message_count),0) messages,min(started_at) first FROM daily",
-        )
-        .get(params) as Row;
       const names = new Map(sourceDefinitions().map((p) => [p.id, p.name]));
       const providers = (
         this.db
@@ -335,27 +333,38 @@ export class LocalSessionBrowser {
         }[options.sort || "activity"] || "last_activity_at DESC";
       const offset = offsetOf(options.offset);
       const limit = Math.min(50, Math.max(1, offsetOf(options.limit ?? 50)));
-      const items = (
-        this.db
+      // Daily counts use the existing covering time index, without loading message
+      // bodies. Compute them once for both the page and its pagination summary.
+      const rows = this.db
           .prepare(
             cte +
-              ` SELECT *,count(day) OVER (PARTITION BY provider,id) day_count,
+              `, summary AS (SELECT count(*) total,coalesce(sum(message_count),0) messages,min(started_at) first FROM daily),
+                page AS (SELECT *,count(day) OVER (PARTITION BY provider,id) day_count,
                 CASE WHEN day IS NOT NULL THEN count(day) OVER (PARTITION BY provider,id ORDER BY day
                   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) END day_index
-                FROM daily ORDER BY ${sort},provider,id,day LIMIT @limit OFFSET @offset`,
+                FROM daily ORDER BY ${sort},provider,id,day LIMIT @limit OFFSET @offset)
+                SELECT summary.*,page.*,coalesce(p.user_prompt_count,0) user_prompt_count
+                FROM summary LEFT JOIN page ON 1
+                LEFT JOIN prompt_days p ON p.provider=page.provider AND p.id=page.id AND p.day IS page.day
+                ORDER BY page.${sort},page.provider,page.id,page.day`,
           )
-          .all({ ...params, offset, limit }) as Row[]
-      ).map((row): SessionDayItem => ({ ...item(row), day: row.day, dayIndex: row.day_index, dayCount: row.day_count, cost: null, unpriced: 0 }));
+          .all({ ...params, offset, limit }) as Row[];
+      const summary = rows[0]; // The summary remains available even beyond the last page.
+      const items = rows.filter(row => row.provider !== null).map((row): SessionDayItem => ({ ...item(row), day: row.day, dayIndex: row.day_index, dayCount: row.day_count, cost: null, unpriced: 0 }));
       // Price only the requested page; canonical usage prevents duplicate native observations.
       const page = JSON.stringify(items.map(s => ({ provider: s.provider, id: s.id, day: s.day })));
-      const usage = this.db.prepare(`WITH scope AS (
-        SELECT json_extract(value,'$.provider') provider,json_extract(value,'$.id') id,
-          json_extract(value,'$.conversation_id') conversation_id FROM json_each(@scope))
-        SELECT u.*,q.conversation_id,session_day(u.occurred_at) day FROM scope q
-        JOIN adit_history_usage_entries u ON u.provider=q.provider AND u.session_id=q.id
-        WHERE u.ledger_role='canonical' AND EXISTS (SELECT 1 FROM json_each(@page) p
-          WHERE json_extract(p.value,'$.provider')=q.provider AND json_extract(p.value,'$.id')=q.conversation_id
-          AND json_extract(p.value,'$.day') IS session_day(u.occurred_at))`).all({ scope, page }) as (Row & CostUsage)[];
+      // Materialize the small page keys once. A correlated json_each previously
+      // reparsed the page and converted dates repeatedly for every usage entry.
+      const usage = items.length ? this.db.prepare(`WITH page AS MATERIALIZED (
+        SELECT json_extract(value,'$.provider') provider,json_extract(value,'$.id') id,json_extract(value,'$.day') day FROM json_each(@page)),
+        scope AS MATERIALIZED (SELECT json_extract(value,'$.provider') provider,json_extract(value,'$.id') id,
+          json_extract(value,'$.conversation_id') conversation_id FROM json_each(@scope)
+          WHERE EXISTS (SELECT 1 FROM page p WHERE p.provider=json_extract(value,'$.provider') AND p.id=json_extract(value,'$.conversation_id'))),
+        usage AS MATERIALIZED (SELECT u.provider,u.model,u.scope,u.input_total_tokens,u.uncached_input_tokens,u.output_tokens,
+          u.cache_read_tokens,u.cache_write_tokens,u.cache_write_5m_tokens,u.cache_write_1h_tokens,
+          q.conversation_id,session_day(u.occurred_at) day FROM scope q
+          CROSS JOIN adit_history_usage_entries u ON u.provider=q.provider AND u.session_id=q.id WHERE u.ledger_role='canonical')
+        SELECT u.* FROM usage u JOIN page p ON p.provider=u.provider AND p.id=u.conversation_id AND p.day IS u.day`).all({ scope, page }) as (Row & CostUsage)[] : [];
       const byDay = new Map(items.map(s => [JSON.stringify([s.provider,s.id,s.day]),s]));
       for (const u of usage) {
         const row = byDay.get(JSON.stringify([u.provider,u.conversation_id,u.day]))!;
@@ -558,7 +567,8 @@ export class LocalSessionBrowser {
         const blocks = answer ? this.db.prepare(`SELECT text_content FROM adit_history_blocks
           WHERE message_id=? AND kind IN (${textKinds}) ORDER BY block_index`).all(answer.id) as Row[] : [];
         return { id: turn.id, ordinal: turn.ordinal, prompt: excerpt(prompt.displayed), imageCount: prompt.imageCount,
-          reply: answer ? excerpt(blocks.map(b => b.text_content || "").join("\n")) || null : null, at: turn.started_at };
+          reply: answer ? excerpt(blocks.map(b => b.text_content || "").join("\n")) || null : null, at: turn.started_at,
+          replyAt: answer?.occurred_at ?? null, usage: this.readUsage(turn.id) };
       };
       const before: SessionTurnPreview["turns"] = [], after: SessionTurnPreview["turns"] = [];
       for (let i = center - 1; i >= 0 && before.length < 1; i--) { const turn = read(i); if (turn) before.unshift(turn); }
@@ -701,22 +711,6 @@ export class LocalSessionBrowser {
     matches?: DayMatch,
   ): SessionTurn {
     const { prompt, imageCount, contextOnly, displayed } = this.readPrompt(turn);
-    const usageRows = this.db
-      .prepare(
-        "SELECT * FROM adit_history_usage_entries WHERE turn_id=? AND ledger_role='canonical'",
-      )
-      .all(turn.id) as Row[];
-    const scopedUsage = usageRows.filter(u => !matches || matches(u.occurred_at));
-    const sum = (key: string) =>
-      scopedUsage.length && scopedUsage.every((u) => u[key] !== null)
-        ? scopedUsage.reduce((a, u) => a + u[key], 0)
-        : null;
-    const models = this.db
-      .prepare(
-        "SELECT model,effort,occurred_at FROM adit_history_messages WHERE turn_id=? AND (model IS NOT NULL OR effort IS NOT NULL)",
-      )
-      .all(turn.id) as Row[];
-    const scopedModels = models.filter(m => !matches || matches(m.occurred_at));
     return {
       id: turn.id,
       ordinal: turn.ordinal,
@@ -728,15 +722,7 @@ export class LocalSessionBrowser {
       at: turn.started_at,
       contextOnly,
       matchEventId: matchEventId || null,
-      usage: {
-        input: sum("uncached_input_tokens"),
-        output: sum("output_tokens"),
-        cache: sum("cache_read_tokens"),
-        cacheWrite: sum("cache_write_tokens"),
-        requests: scopedUsage.length,
-        models: [...new Set(scopedModels.map((m) => m.model).filter(Boolean))],
-        efforts: [...new Set(scopedModels.map((m) => m.effort).filter(Boolean))],
-      },
+      usage: this.readUsage(turn.id, matches),
       ...this.events(
         turn.provider,
         turn.session_id,
@@ -750,6 +736,33 @@ export class LocalSessionBrowser {
       ),
       ...(page ? { nextOffset: null, previousOffset: null } : {}),
       commits: commits.filter((c) => c.turnId === turn.id),
+    };
+  }
+  private readUsage(turnId: string, matches?: DayMatch): SessionUsage {
+    const usageRows = this.db
+      .prepare(
+        "SELECT * FROM adit_history_usage_entries WHERE turn_id=? AND ledger_role='canonical'",
+      )
+      .all(turnId) as Row[];
+    const scopedUsage = usageRows.filter(u => !matches || matches(u.occurred_at));
+    const sum = (key: string) =>
+      scopedUsage.length && scopedUsage.every((u) => u[key] !== null)
+        ? scopedUsage.reduce((a, u) => a + u[key], 0)
+        : null;
+    const models = this.db
+      .prepare(
+        "SELECT model,effort,occurred_at FROM adit_history_messages WHERE turn_id=? AND (model IS NOT NULL OR effort IS NOT NULL)",
+      )
+      .all(turnId) as Row[];
+    const scopedModels = models.filter(m => !matches || matches(m.occurred_at));
+    return {
+        input: sum("uncached_input_tokens"),
+        output: sum("output_tokens"),
+        cache: sum("cache_read_tokens"),
+        cacheWrite: sum("cache_write_tokens"),
+        requests: scopedUsage.length,
+        models: [...new Set(scopedModels.map((m) => m.model).filter(Boolean))],
+        efforts: [...new Set(scopedModels.map((m) => m.effort).filter(Boolean))],
     };
   }
   private eventIndex(

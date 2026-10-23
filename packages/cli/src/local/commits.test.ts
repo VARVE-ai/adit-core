@@ -635,6 +635,8 @@ it("returns only configured repository commits and confirms native Git hash evid
     provider: "claude",
     title: "please commit",
   });
+  expect(queryCommits(store, workspace, { filter: "linked", limit: 50 }).commits.map(c => c.sha)).toEqual([sha]);
+  expect(queryCommits(store, workspace, { filter: "unlinked", limit: 50 }).total).toBe(0);
   expect(
     queryCommits(store, { ...workspace, repositories: [] }).commits,
   ).toEqual([]);

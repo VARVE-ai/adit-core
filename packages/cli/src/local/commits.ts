@@ -1,6 +1,7 @@
 import {
   redactOverview,
   NON_MERGE_COMMIT_SQL,
+  LocalStateError,
   type LocalStore,
   type LocalWorkspace,
 } from "@varveai/adit-core";
@@ -34,8 +35,12 @@ export interface CommitQuery {
   session?: { provider: string; ids: string[] };
   limit?: number;
   offset?: number;
+  filter?: string;
+  query?: string;
 }
 export function queryCommits(store: Pick<LocalStore, "db">, w: LocalWorkspace, options: CommitQuery = {}) {
+  if (options.offset !== undefined && (!Number.isSafeInteger(options.offset) || options.offset < 0)) throw new LocalStateError("Invalid offset");
+  if (options.limit !== undefined && (!Number.isSafeInteger(options.limit) || options.limit < 1)) throw new LocalStateError("Invalid limit");
   return store.db.transaction(() => readCommits(store, w, options))();
 }
 function readCommits(store: Pick<LocalStore, "db">, w: LocalWorkspace, options: CommitQuery) {
@@ -45,14 +50,21 @@ function readCommits(store: Pick<LocalStore, "db">, w: LocalWorkspace, options: 
     "SELECT content_text FROM adit_history_tool_results WHERE tool_call_id=? ORDER BY event_index",
   );
   const outputsByCall = new Map<string, string[]>();
-  const from = `FROM adit_local_commits c LEFT JOIN adit_attribution_commits a ON a.repository=c.repository AND a.sha=c.sha AND a.run_id=@run
+  const base = `FROM adit_local_commits c LEFT JOIN adit_attribution_commits a ON a.repository=c.repository AND a.sha=c.sha AND a.run_id=@run
+    LEFT JOIN adit_history_sessions s ON s.provider=a.submit_provider AND s.id=a.submit_session_id
     WHERE c.repository IN (SELECT value FROM json_each(@repositories)) AND ${NON_MERGE_COMMIT_SQL}
+    `;
+  const from = `${base}
       AND (@sha IS NULL OR c.sha LIKE @sha) AND (@repository IS NULL OR c.repository=@repository)
+      AND (@filter='all' OR (@filter='linked' AND s.id IS NOT NULL) OR (@filter='unlinked' AND a.eligible_lines IS NOT NULL AND s.id IS NULL))
+      AND (@query='' OR instr(lower(c.subject || ' ' || c.sha), @query)>0)
       AND (@provider IS NULL OR (a.submit_provider=@provider AND a.submit_session_id IN (SELECT value FROM json_each(@sessions)))
         OR EXISTS(SELECT 1 FROM adit_attribution_writers l WHERE l.run_id=@run AND l.repository=c.repository AND l.sha=c.sha
           AND l.provider=@provider AND l.session_id IN (SELECT value FROM json_each(@sessions))))`;
   const params = { run: analysis.runId, repositories: JSON.stringify(w.repositories), sha: options.sha ? options.sha + "%" : null,
-    repository: options.repository ?? null, provider: options.session?.provider ?? null, sessions: JSON.stringify(options.session?.ids ?? []) };
+    repository: options.repository || null, provider: options.session?.provider ?? null, sessions: JSON.stringify(options.session?.ids ?? []),
+    filter: options.filter || "all", query: (options.query || "").toLowerCase() };
+  const summary = db.prepare(`SELECT count(*) total, count(s.id) linked, min(nullif(c.authored_at,0)) first ${base}`).get({ run: params.run, repositories: params.repositories }) as { total: number; linked: number; first: number | null };
   const total = (db.prepare(`SELECT count(*) n ${from}`).get(params) as Row).n as number;
   const offset = options.offset ?? 0;
   const commits = db.prepare(`SELECT c.*,a.submit_provider,a.submit_session_id,a.submit_turn_id,a.submit_tool_call_id,a.match_method,a.matched_sha,a.eligible_lines
@@ -62,6 +74,7 @@ function readCommits(store: Pick<LocalStore, "db">, w: LocalWorkspace, options: 
     repositories: w.repositories,
     analysis,
     total,
+    summary,
     nextOffset: offset + commits.length < total ? offset + commits.length : null,
     commits: commits
       .map((c) => {

@@ -210,7 +210,12 @@ export async function startLocalServer(
           return json(res, await queryCommitSources(store, store.workspace(url.searchParams.get("workspaceId")||""),url.searchParams.get("repository")||"",url.searchParams.get("sha")||""));
         }
         if (route === "/commits" && req.method === "GET") {
-          return json(res, queryCommits(store,store.workspace(url.searchParams.get("workspaceId")||"")));
+          return json(res, queryCommits(store,store.workspace(url.searchParams.get("workspaceId")||""), {
+            limit: 50, offset: Number(url.searchParams.get("offset") || 0),
+            repository: url.searchParams.get("repository") || undefined,
+            sha: url.searchParams.get("sha") || undefined,
+            filter: url.searchParams.get("filter") || "all", query: url.searchParams.get("q") || "",
+          }));
         }
         if (["/sessions", "/sessions/detail", "/sessions/preview", "/sessions/turn", "/sessions/turn/edit", "/sessions/content", "/sessions/context"].includes(route) && ["GET", "PATCH", "DELETE"].includes(req.method || "")) {
           const workspace=store.workspace(url.searchParams.get("workspaceId")||"");

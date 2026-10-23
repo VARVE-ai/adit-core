@@ -290,13 +290,34 @@ it("paginates saved results without duplicates when a newer result is inserted",
   const { w } = fixture(); w.repositories = [root];
   const pr = new LocalPrDescriptions(store.db);
   const scope: PrScope = { repository: root, kind: "commits", head: null, base: null, headSha: null, baseSha: null, mergeBase: null, author: "me", digest: "scope", commits: [{ sha: "a".repeat(40), subject: "pending", included: true, reason: null }] };
-  const records = Array.from({ length: 43 }, () => pr.generate(w, scope, { lines: false }));
+  const records = Array.from({ length: 103 }, () => pr.generate(w, scope, { lines: false }));
   const first = pr.list(w);
+  expect(first.items).toHaveLength(50); expect(first.nextOffset).toBe(50);
   const inserted = pr.generate(w, scope, { lines: false });
   store.db.prepare("UPDATE adit_pr_descriptions SET created_at=? WHERE id=?").run(Date.now() + 60000, inserted.id);
   const next = pr.list(w, first.nextOffset!, first.nextCursor);
-  const ids = [...first.items, ...next.items].map(r => r.id);
-  expect(ids).toHaveLength(43); expect(new Set(ids).size).toBe(43);
-  expect(new Set(ids)).toEqual(new Set(records.map(r => r.id))); expect(next.nextCursor).toBe(null);
+  expect(next.items).toHaveLength(50); expect(next.nextOffset).toBe(100);
+  const last = pr.list(w, next.nextOffset!, next.nextCursor);
+  const ids = [...first.items, ...next.items, ...last.items].map(r => r.id);
+  expect(ids).toHaveLength(103); expect(new Set(ids).size).toBe(103);
+  expect(new Set(ids)).toEqual(new Set(records.map(r => r.id))); expect(last.nextCursor).toBe(null);
   expect(() => pr.list(w, 0, "invalid")).toThrow("cursor");
+});
+
+it("pages published shares in groups of 50 with a stable cursor across new publications", () => {
+  const { w, sharing } = fixture();
+  const insert = store.db.prepare(`INSERT INTO adit_shares(id,workspace_id,provider,session_id,title,status,created_at,published_at,current_version_id,prompt_count,commit_count)
+    VALUES (?,?,'codex','session','Title',?,1,?,'version',1,0)`);
+  for (let i = 0; i < 101; i++) insert.run(`share-${String(i).padStart(3, "0")}`, w.id, "published", 1000);
+  insert.run("draft", w.id, "ready", null);
+  insert.run("foreign", "other-workspace", "published", 1000);
+  const first = sharing.list(w);
+  expect(first.total).toBe(101); expect(first.items).toHaveLength(50); expect(first.nextOffset).toBe(50);
+  insert.run("new-share", w.id, "published", 2000);
+  const second = sharing.list(w, first.nextOffset!, first.nextCursor);
+  expect(second.items).toHaveLength(50); expect(second.nextOffset).toBe(100);
+  const last = sharing.list(w, second.nextOffset!, second.nextCursor);
+  expect(last.items).toHaveLength(1); expect(last.nextOffset).toBeNull(); expect(last.nextCursor).toBeNull();
+  const ids = [...first.items, ...second.items, ...last.items].map(item => item.id);
+  expect(new Set(ids).size).toBe(101); expect(ids).not.toContain("new-share");
 });
