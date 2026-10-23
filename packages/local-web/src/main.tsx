@@ -715,7 +715,7 @@ export function App() {
           ) : isAchievements && selected ? (
             <AchievementsPage key={selected.id} workspace={selected} api={api} onOverview={() => go(`/overview/${selected.id}`)} onTab={(tab) => go(`/${tab}/${selected.id}`)} />
           ) : isCommits && selected ? (
-            <CommitsPage key={selected.id} workspace={selected} api={api} />
+            <CommitsPage key={selected.id} workspace={selected} api={api} onNavigate={go} />
           ) : isSessions && selected ? (
             <Suspense fallback={<div className="empty"><Loader2 className="spin" /></div>}>
             <SessionsPage key={selected.id} workspace={selected} api={api} revision={state.jobs.find(job=>job.workspaceId===selected.id&&job.kind==='collect'&&['done','partial'].includes(job.status))?.id} onCommit={(commit) => go(`/commits/${selected.id}?${new URLSearchParams({repository:commit.repository,sha:commit.sha})}`)} onShare={(session) => go(`/share-review/${selected.id}?${new URLSearchParams({provider:session.provider,session:session.id})}`)} />

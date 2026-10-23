@@ -88,12 +88,15 @@ it("authenticates session browsing and enforces workspace boundaries for all det
   const detail = (await (await get("/detail")).json()) as any;
   expect(detail.turns[0].prompt).toBe("question");
   const turn = detail.turns[0];
+  expect((await get("/preview", { turnId: turn.id }, false)).status).toBe(403);
+  expect(await (await get("/preview", { turnId: turn.id })).json()).toMatchObject({ targetTurnId: turn.id, turns: [{ prompt: "question" }] });
+  expect(await (await get("/detail", { turnId: turn.id })).json()).toMatchObject({ matchTurnId: turn.id });
   expect((await get("/turn", { turnId: turn.id })).status).toBe(200);
   expect(
     (await get("/content", { eventId: turn.events[0].id, kind: "reply" }))
       .status,
   ).toBe(200);
-  for (const route of ["/detail", "/turn", "/content", "/context"])
+  for (const route of ["/detail", "/preview", "/turn", "/content", "/context"])
     expect(
       (
         await get(route, {

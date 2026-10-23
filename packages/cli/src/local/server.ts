@@ -210,7 +210,7 @@ export async function startLocalServer(
         if (route === "/commits" && req.method === "GET") {
           return json(res, queryCommits(store,store.workspace(url.searchParams.get("workspaceId")||"")));
         }
-        if (["/sessions", "/sessions/detail", "/sessions/turn", "/sessions/turn/edit", "/sessions/content", "/sessions/context"].includes(route) && ["GET", "PATCH", "DELETE"].includes(req.method || "")) {
+        if (["/sessions", "/sessions/detail", "/sessions/preview", "/sessions/turn", "/sessions/turn/edit", "/sessions/content", "/sessions/context"].includes(route) && ["GET", "PATCH", "DELETE"].includes(req.method || "")) {
           const workspace=store.workspace(url.searchParams.get("workspaceId")||"");
           const browser=new LocalSessionBrowser(store.db,analytics.prices);
           const provider=url.searchParams.get("provider")||"all",id=url.searchParams.get("id")||"";
@@ -225,7 +225,8 @@ export async function startLocalServer(
           }
           if(route==="/sessions/turn/edit")return json(res,browser.editTurn(workspace,provider,id,url.searchParams.get("turnId")||""));
           if(route==="/sessions")return json(res,browser.list(workspace,{provider,query:url.searchParams.get("q")||"",sort:url.searchParams.get("sort")||"activity",onlyCommits:url.searchParams.get("commits")==="1",offset}));
-          if(route==="/sessions/detail")return json(res,browser.detail(workspace,provider,id,mode,url.searchParams.has("offset")?offset:undefined,url.searchParams.get("q")||""));
+          if(route==="/sessions/detail")return json(res,browser.detail(workspace,provider,id,mode,url.searchParams.has("offset")?offset:undefined,url.searchParams.get("q")||"",url.searchParams.get("turnId")||undefined));
+          if(route==="/sessions/preview")return json(res,browser.preview(workspace,provider,id,url.searchParams.get("turnId")||""));
           if(route==="/sessions/turn")return json(res,browser.turn(workspace,provider,id,url.searchParams.get("turnId")||"",mode,offset));
           if(route==="/sessions/context")return json(res,browser.context(workspace,provider,id,offset));
           return json(res,browser.content(workspace,provider,id,url.searchParams.get("eventId")||"",url.searchParams.get("kind")||"",offset));

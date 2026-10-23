@@ -100,6 +100,11 @@ export type SessionDetail = {
   matchTurnId: string | null;
 };
 export type SessionContent = { text: string; nextOffset: number | null };
+export type SessionTurnPreview = {
+  session: { provider: string; id: string; title: string };
+  targetTurnId: string | null;
+  turns: { id: string; ordinal: number; prompt: string; imageCount: number; reply: string | null; at: number | null }[];
+};
 export type SessionTurnEdit = {
   turnId: string;
   revision: number;
@@ -342,6 +347,7 @@ export class LocalSessionBrowser {
     mode: TranscriptMode = "normal",
     offset?: number,
     query = "",
+    targetTurnId?: string,
   ): SessionDetail {
     return this.db.transaction(() => {
       this.session(w,provider,id);
@@ -353,8 +359,11 @@ export class LocalSessionBrowser {
         .get(provider,JSON.stringify(ids)) as Row;
       const allTurns=this.turnRows(provider,id).map((t,index):Row=>({...t,ordinal:index+1}));
       const match = this.findMatch(provider, id, query);
-      if (offset === undefined && match?.turnId) {
-        const found = allTurns.find(t=>t.id===match.turnId);
+      if (targetTurnId && !allTurns.some(t => t.id === targetTurnId))
+        throw new LocalStateError("Turn not found", 404);
+      const selectedTurnId = targetTurnId || match?.turnId;
+      if (offset === undefined && selectedTurnId) {
+        const found = allTurns.find(t=>t.id===selectedTurnId);
         if (found) offset = Math.floor((found.ordinal - 1) / 8) * 8;
       }
       offset = offsetOf(offset);
@@ -418,8 +427,39 @@ export class LocalSessionBrowser {
         context: context.events,
         contextNextOffset: context.nextOffset,
         previousOffset: offset > 0 ? Math.max(0, offset - 8) : null,
-        matchTurnId: match?.turnId || null,
+        matchTurnId: selectedTurnId || null,
       };
+    })();
+  }
+  /** Small, on-demand conversation excerpts; no tool bodies, usage calculation or persisted copies. */
+  preview(w: LocalWorkspace, provider: string, id: string, turnId: string): SessionTurnPreview {
+    return this.db.transaction(() => {
+      this.session(w, provider, id);
+      const canonical = conversationSegments(this.db, provider, id)[0];
+      const session = item(this.session(w, provider, canonical));
+      const rows = this.turnRows(provider, id).map((t, index): Row => ({ ...t, ordinal: index + 1 }));
+      const center = rows.findIndex(t => t.id === turnId);
+      const result: SessionTurnPreview = {
+        session: { provider, id: canonical, title: session.title },
+        targetTurnId: center < 0 ? null : turnId,
+        turns: [],
+      };
+      if (center < 0) return result;
+      const excerpt = (text: string) => redactSecrets(text).replace(/\s+/g, " ").trim().slice(0, 600);
+      const read = (index: number) => {
+        const turn = rows[index], prompt = this.readPrompt(turn);
+        if (prompt.contextOnly && index !== center) return null;
+        const answer = historyFinalReply(this.db, turn.id, index < rows.length - 1);
+        const blocks = answer ? this.db.prepare(`SELECT text_content FROM adit_history_blocks
+          WHERE message_id=? AND kind IN (${textKinds}) ORDER BY block_index`).all(answer.id) as Row[] : [];
+        return { id: turn.id, ordinal: turn.ordinal, prompt: excerpt(prompt.displayed), imageCount: prompt.imageCount,
+          reply: answer ? excerpt(blocks.map(b => b.text_content || "").join("\n")) || null : null, at: turn.started_at };
+      };
+      const before: SessionTurnPreview["turns"] = [], after: SessionTurnPreview["turns"] = [];
+      for (let i = center - 1; i >= 0 && before.length < 1; i--) { const turn = read(i); if (turn) before.unshift(turn); }
+      for (let i = center + 1; i < rows.length && after.length < 1; i++) { const turn = read(i); if (turn) after.push(turn); }
+      result.turns = [...before, read(center)!, ...after];
+      return result;
     })();
   }
   turn(
@@ -529,13 +569,7 @@ export class LocalSessionBrowser {
       user_prompt_count=(SELECT count(*) FROM adit_history_turns WHERE provider=@provider AND session_id=@id),
       transcript_revision=transcript_revision+1 WHERE provider=@provider AND id=@id`).run({ provider, id, first });
   }
-  private readTurn(
-    turn: Row,
-    mode: TranscriptMode,
-    offset: number,
-    commits: SessionCommit[],
-    matchEventId?: string,
-  ): SessionTurn {
+  private readPrompt(turn: Row) {
     const prompt = this.db
       .prepare(
         `SELECT id,kind,text_content FROM adit_history_blocks WHERE message_id=? ORDER BY block_index`,
@@ -547,6 +581,16 @@ export class LocalSessionBrowser {
     const contextOnly =
       hasCodexPromptContext(turn.provider, original) && !clean && !imageCount;
     const displayed = redactSecrets(clean || (imageCount ? "" : original));
+    return { prompt, imageCount, contextOnly, displayed };
+  }
+  private readTurn(
+    turn: Row,
+    mode: TranscriptMode,
+    offset: number,
+    commits: SessionCommit[],
+    matchEventId?: string,
+  ): SessionTurn {
+    const { prompt, imageCount, contextOnly, displayed } = this.readPrompt(turn);
     const usageRows = this.db
       .prepare(
         "SELECT * FROM adit_history_usage_entries WHERE turn_id=? AND ledger_role='canonical'",

@@ -524,6 +524,7 @@ export function SessionsPage({
     const query = new URLSearchParams(location.search);
     return query.get("provider") && query.get("session") ? { provider: query.get("provider")!, id: query.get("session")! } : undefined;
   })());
+  const requestedTurn = useRef(new URLSearchParams(location.search).get("turn") || undefined);
   const [provider, setProvider] = useState("all"),
     [search, setSearch] = useState(""),
     [query, setQuery] = useState(""),
@@ -543,7 +544,7 @@ export function SessionsPage({
     [listLoading, setListLoading] = useState(true),
     [detailLoading, setDetailLoading] = useState(false),
     [retry, setRetry] = useState(0),
-    [mobileDetail, setMobileDetail] = useState(false);
+    [mobileDetail, setMobileDetail] = useState(!!requestedSession.current);
   const detailScroll = useRef<HTMLDivElement>(null),
     listScroll = useRef<HTMLDivElement>(null),
     requestNumber = useRef(0),
@@ -636,6 +637,8 @@ export function SessionsPage({
             ...selected,
             mode,
             q: query,
+            ...(!query && requestedTurn.current && selected.provider === requestedSession.current?.provider && selected.id === requestedSession.current?.id
+              ? { turnId: requestedTurn.current } : {}),
             ...(offset === undefined ? {} : { offset: String(offset) }),
           }),
         "GET",
@@ -686,6 +689,7 @@ export function SessionsPage({
       )?.scrollIntoView({ block: "start" });
   }, [detail?.session.id, detail?.matchTurnId]);
   const choose = (s: Selection) => {
+    requestedTurn.current = undefined;
     setSelected(s);
     setMobileDetail(true);
   };

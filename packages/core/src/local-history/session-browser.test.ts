@@ -53,6 +53,46 @@ const m = (
   timestamp: "2026-10-20T10:00:00Z",
   ...extra,
 });
+it("previews one real turn on either side, masks excerpts and opens the exact page by turn ID", () => {
+  const { w, history, browser } = fixture();
+  const secret = "ghp_" + createHash("sha256").update("commit-context-fixture").digest("hex").slice(0, 36);
+  const messages: HistoryMessage[] = [];
+  for (let i = 1; i <= 14; i++) {
+    if (i === 10) messages.push(m("context", "user", "<environment_context>not a question</environment_context>"));
+    messages.push(m(`q${i}`, "user", i === 9 ? [{ type: "input_image", image_url: "data:PRIVATE_IMAGE" }] : `question ${i}`));
+    if (i < 14) messages.push(m(`a${i}`, "assistant", `answer ${i}`, { finalReply: true }));
+    if (i === 10) messages.push(m("compact", "assistant", "PRIVATE_CONTEXT", { raw: { metadata: { compaction_output: true } } }));
+  }
+  history.write({ provider: "codex", id: "nearby", cwd: root, metadata: { title: "Original session title" }, messages });
+  const later = browser.detail(w, "codex", "nearby", "normal", 8);
+  const target = later.turns.find(t => t.prompt === "question 10")!;
+  const draft = browser.editTurn(w, "codex", "nearby", target.id);
+  browser.updateTurn(w, "codex", "nearby", target.id, draft.revision, [
+    { id: draft.blocks.find(b => b.kind === "prompt")!.id, text: "edited question " + secret },
+    { id: draft.blocks.find(b => b.text === "answer 10")!.id, text: "edited answer " + secret },
+  ]);
+  const result = browser.preview(w, "codex", "nearby", target.id);
+  expect(result.session.title).toBe("Original session title");
+  expect(result.turns.map(t => t.id)).toHaveLength(3);
+  expect(result.turns.map(t => t.prompt)).toEqual(["", expect.stringContaining("edited question"), "question 11"]);
+  expect(result.turns[0].imageCount).toBe(1);
+  expect(result.turns[1].reply).toContain("edited answer");
+  for (const hidden of [secret, "PRIVATE_IMAGE", "PRIVATE_CONTEXT", "not a question"])
+    expect(JSON.stringify(result)).not.toContain(hidden);
+  const opened = browser.detail(w, "codex", "nearby", "focused", undefined, "", target.id);
+  expect(opened.matchTurnId).toBe(target.id);
+  expect(opened.turns.some(t => t.id === target.id)).toBe(true);
+  expect(opened.previousOffset).not.toBeNull();
+  const last = browser.detail(w, "codex", "nearby", "normal", 8).turns.at(-1)!;
+  expect(browser.preview(w, "codex", "nearby", last.id).turns.map(t => t.prompt)).toEqual(["question 13", "question 14"]);
+  expect(browser.preview(w, "codex", "nearby", last.id).turns.at(-1)?.reply).toBeNull();
+  const first = browser.detail(w, "codex", "nearby").turns[0];
+  expect(browser.preview(w, "codex", "nearby", first.id).turns.map(t => t.prompt)).toEqual(["question 1", "question 2"]);
+  const deletion = browser.editTurn(w, "codex", "nearby", target.id);
+  browser.deleteTurn(w, "codex", "nearby", target.id, deletion.revision);
+  expect(browser.preview(w, "codex", "nearby", target.id)).toMatchObject({ targetTurnId: null, turns: [] });
+  expect(() => browser.detail(w, "codex", "nearby", "normal", undefined, "", target.id)).toThrow("Turn not found");
+});
 it.each(["Native title", "   ", undefined])("uses a native title when present and otherwise the first prompt (%s)", title => {
   const { w, history, browser } = fixture();
   history.write({ id: "titled", provider: "claude", cwd: root, metadata: { title }, messages: [m("u", "user", "First question"), m("a", "assistant", "Answer")] });
@@ -97,6 +137,10 @@ it("shows native continuation pages once, searches both parts and keeps edit/del
  expect(detail.turns.map(t=>t.ordinal)).toEqual([1,2,3]);expect(detail.children).toEqual([]);
  expect(browser.list(w,{query:"later answer"}).items.map(s=>s.id)).toEqual(["native"]);
  expect(browser.detail(w,"codex","native_page").session.id).toBe("native");
+ const preview=browser.preview(w,"codex","native_page",detail.turns[1].id);
+ expect(preview.session.id).toBe("native");
+ expect(preview.turns.map(t=>t.ordinal)).toEqual([1,2,3]);
+ expect(browser.detail(w,"codex","native","normal",undefined,"",detail.turns[1].id).matchTurnId).toBe(detail.turns[1].id);
  expect(store.db.prepare("SELECT id FROM adit_history_messages ORDER BY id").all()).toEqual(before);
  const draft=browser.editTurn(w,"codex","native",detail.turns[1].id);
  browser.updateTurn(w,"codex","native",draft.turnId,draft.revision,[{id:draft.blocks[0].id,text:"edited later question"}]);

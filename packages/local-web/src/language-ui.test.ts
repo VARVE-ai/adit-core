@@ -47,6 +47,8 @@ const account = {
 };
 const record = {
   provider: "claude",
+  sessionId: "session",
+  turnId: "turn",
   title: "用户会话标题",
   ordinal: 1,
   at: Date.UTC(2026, 9, 19),
@@ -238,9 +240,13 @@ const respond = (path: string, input?: any): unknown => {
     items:[{provider:"claude",id:"session",title:"用户会话标题",startedAt:Date.UTC(2026,9,19),lastActivityAt:Date.UTC(2026,9,19),messages:12,prompts:1,commits:1}],
     total:1,messages:12,first:Date.UTC(2026,9,19),providers:[{id:"claude",name:"Claude Code",count:1}],nextOffset:null,
   };
+  if (path.startsWith("/sessions/preview?")) return {
+    session: {provider:"claude",id:"session",title:"用户会话标题"}, targetTurnId:"turn",
+    turns: [{id:"turn",ordinal:1,prompt:"用户原始提问",reply:"Final response",imageCount:0,at:Date.UTC(2026,9,19)}],
+  };
   if (path.startsWith("/sessions/detail?")) return {
     session:{provider:"claude",id:"session",title:"用户会话标题",startedAt:Date.UTC(2026,9,19),lastActivityAt:Date.UTC(2026,9,19),messages:12,prompts:1,commits:1},
-    models:["model-name"],cost:1000000,unpriced:0,totalTurns:1,nextOffset:null,previousOffset:null,matchTurnId:null,children:[],parent:null,commits:[],context:[],contextNextOffset:null,
+    models:["model-name"],cost:1000000,unpriced:0,totalTurns:1,nextOffset:null,previousOffset:null,matchTurnId:new URLSearchParams(path.split("?")[1]).get("turnId"),children:[],parent:null,commits:[],context:[],contextNextOffset:null,
     turns:[{id:"turn",ordinal:1,prompt:"用户原始提问",promptBlockId:"prompt",promptTruncated:false,at:Date.UTC(2026,9,19),contextOnly:false,nextOffset:null,previousOffset:null,matchEventId:null,commits:[],
       usage:{input:2000,output:500,cache:10000,cacheWrite:0,requests:1,models:["model-name"],efforts:["high"]},
       events: path.includes("mode=focused")?[{id:"reply",kind:"reply",text:"Final response",at:null}]:[{id:"tool",kind:"tool",name:"Bash",text:"echo hello",at:null},{id:"reply",kind:"reply",text:"Final response",at:null}],
@@ -302,7 +308,9 @@ beforeAll(async () => {
   vi.stubGlobal("location", location);
   vi.stubGlobal("history", {
     pushState: (_: unknown, __: string, path: string) => {
-      location.pathname = path;
+      const url = new URL(path, "http://127.0.0.1");
+      location.pathname = url.pathname;
+      location.search = url.search;
     },
     replaceState: vi.fn(),
   });
@@ -855,9 +863,7 @@ describe("language switching across the local workbench", () => {
       "Code sources",
       "Compared:",
       "Matched:",
-      "Certain",
-      "Likely",
-      "Possible",
+      "View committed files",
       "View matched files",
       "Also wrote this content",
     ]) {
@@ -956,6 +962,24 @@ describe("language switching across the local workbench", () => {
     expect(root.findByProps({ className: "commit-branch" }).props.title).toBe(
       "未记录提交时的分支",
     );
+  });
+
+  it("opens the exact session turn from a commit's question and preserves the original title and reply", async () => {
+    const root = await render("/commits/ws");
+    const conversation = root.findByProps({ className: "commit-conversation" });
+    expect(text(conversation)).toContain("用户会话标题");
+    expect(text(conversation)).toContain("用户原始提问");
+    expect(text(conversation)).toContain("Final response");
+    expect(text(conversation)).not.toContain("Locate commit event");
+    const row = conversation.findAllByType("a").find(node => node.props.className === "commit-context-row prompt")!;
+    const preventDefault = vi.fn();
+    await act(async () => { row.props.onClick({button:0,preventDefault}); });
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(location.pathname).toBe("/sessions/ws");
+    expect(new URLSearchParams(location.search).get("turn")).toBe("turn");
+    const calls = vi.mocked(fetch).mock.calls.map(([url]) => String(url));
+    expect(calls.some(url => url.startsWith("/api/local/sessions/detail?") && new URLSearchParams(url.split("?")[1]).get("turnId") === "turn")).toBe(true);
+    expect(renderer!.root.findAll(node => node.props.className?.split?.(" ").includes("search-match"))).toHaveLength(1);
   });
 
   it("shows the recorded branch after the file count as in the prototype", async () => {
