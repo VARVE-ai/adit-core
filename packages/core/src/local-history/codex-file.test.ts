@@ -2,6 +2,7 @@ import {afterEach,expect,it} from "vitest";
 import {mkdtempSync,writeFileSync,appendFileSync,rmSync,mkdirSync,statSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
+import {zstdCompressSync} from "node:zlib";
 import Database from "better-sqlite3";
 import {LocalHistory} from "./archive.js";
 import {codexFileRows,refreshCodexContinuations,refreshCodexContexts} from "./codex-file.js";
@@ -91,6 +92,26 @@ it("collects a Codex source beyond 128 MiB without loading its whole transcript"
 });
 it("ignores only an unfinished final record and reports malformed complete records",()=>{
  const root=fixture(),path=join(root,"rollout-tail.jsonl");writeFileSync(path,'{"type":"session_meta","payload":{"id":"s"}}\n{"type":');expect([...codexFileRows(path)]).toHaveLength(1);appendFileSync(path,"invalid}\n");expect(()=>[...codexFileRows(path)]).toThrow("line 2");
+});
+it.each([false,true])("preserves compressed records across read boundaries (concatenated frames: %s)",concatenated=>{
+ const root=fixture(),path=join(root,"rollout-chunks.jsonl.zst");
+ // Deterministic, poorly compressible data forces several 1 MiB input reads.
+ let seed=123456789;
+ const rows:Record<string,unknown>[]=[{type:"session_meta",payload:{id:"chunks",cwd:root}}];
+ for(let i=0;i<48;i++){
+  const bytes=Buffer.alloc(64*1024);
+  for(let j=0;j<bytes.length;j++){seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;bytes[j]=seed&255;}
+  rows.push({type:"diagnostic",index:i,text:"跨块内容",data:bytes.toString("base64")});
+ }
+ rows.push({type:"response_item",payload:{type:"message",role:"user",content:"last record"}});
+ const encode=(records:Record<string,unknown>[])=>zstdCompressSync(Buffer.from(records.map(row=>JSON.stringify(row)).join("\n")+"\n"));
+ const compressed=concatenated?Buffer.concat([encode(rows.slice(0,25)),encode(rows.slice(25))]):encode(rows);
+ expect(compressed.length).toBeGreaterThan(2*1024*1024);
+ writeFileSync(path,compressed);
+ expect([...codexFileRows(path)]).toEqual(rows);
+ // A real truncated archive must still fail, rather than silently losing rows.
+ writeFileSync(path,compressed.subarray(0,compressed.length-32));
+ expect(()=>[...codexFileRows(path)]).toThrow();
 });
 it("discovers Cursor's direct database without descending into unrelated extension directories",async()=>{
  const root=fixture(),path=join(root,"state.vscdb");writeFileSync(path,"");mkdirSync(join(root,...Array(15).fill("extension-cache")),{recursive:true});const paths=[];for await(const file of sourceFiles("cursor-ide",root))paths.push(file);expect(paths).toEqual([path]);const explicit=[];for await(const file of sourceFiles("cursor-ide",path))explicit.push(file);expect(explicit).toEqual([path]);

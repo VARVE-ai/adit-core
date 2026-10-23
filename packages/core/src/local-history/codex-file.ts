@@ -122,7 +122,8 @@ export function* codexFileRows(path:string,signal?:AbortSignal,offset=0):Generat
   if(decoder&&offset)throw new HistoryFormatError("Compressed rollouts require a full read");
   let position=offset,done=false;
   while(!done){signal?.throwIfAborted();const size=readSync(fd,chunk,0,chunk.length,position);position+=size;done=!size;
-   if(decoder)decoder.push(chunk.subarray(0,size),done);else if(size)decoded.push(chunk.subarray(0,size));
+   // The decoder retains incomplete compressed blocks; the next read reuses chunk.
+   if(decoder)decoder.push(Buffer.from(chunk.subarray(0,size)),done);else if(size)decoded.push(chunk.subarray(0,size));
    for(const bytes of decoded.splice(0)) {const data=pending.length?Buffer.concat([pending,bytes]):bytes;let start=0,end:number;
    while((end=data.indexOf(10,start))!==-1){if(end-start>64*1024*1024)throw new HistoryFormatError("Codex record exceeds the 64 MiB record limit");const row=parse(data.subarray(start,end));if(row)yield row;start=end+1;}
    pending=Buffer.from(data.subarray(start));if(pending.length>64*1024*1024)throw new HistoryFormatError("Codex record exceeds the 64 MiB record limit");
