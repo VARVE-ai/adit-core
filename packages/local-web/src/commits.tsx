@@ -2,7 +2,8 @@ import { AgentLabel } from "./agent-label";
 import { PlatformIcon } from "./platform-icon";
 import { agentName } from "./achievement-export";
 import { t, locale, systemMessage } from "./i18n";
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
+import { ListLoadMore, usePagedList } from "./paged-list";
 import {
   GitCommitHorizontal,
   ChevronRight,
@@ -36,7 +37,7 @@ type Analysis = {
   stale: boolean;
   error: string | null;
 };
-type Data = { repositories: string[]; commits: Commit[]; analysis: Analysis };
+type Data = { repositories: string[]; commits: Commit[]; analysis: Analysis; total: number; nextOffset: number | null; summary: { total: number; linked: number; first: number | null } };
 type Sources = {
   analysis: Analysis;
   eligible: number | null;
@@ -91,8 +92,6 @@ export function CommitsPage({
     signal?: AbortSignal,
   ) => Promise<T>;
 }) {
-  const [data, setData] = useState<Data>();
-  const [error, setError] = useState("");
   const [repo, setRepo] = useState(() => new URLSearchParams(location.search).get("repository") || "");
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
@@ -100,43 +99,27 @@ export function CommitsPage({
     const params = new URLSearchParams(location.search);
     return params.get("sha") ? `${params.get("repository") || ""}@${params.get("sha")}` : "";
   });
-  const [limit, setLimit] = useState(50);
+  const [search, setSearch] = useState(query);
+  useEffect(() => { const timer = setTimeout(() => setQuery(search), 250); return () => clearTimeout(timer); }, [search]);
+  const request = useCallback(async (offset: number, _cursor: string | undefined, signal: AbortSignal) => {
+    const d = await api<Data>(`/commits?${new URLSearchParams({ workspaceId: workspace.id, repository: repo, filter, q: query, offset: String(offset), limit: "50" })}`, "GET", undefined, signal);
+    return { ...d, items: d.commits };
+  }, [api, workspace.id, repo, filter, query]);
+  const pagination = usePagedList<Commit, Data & { items: Commit[] }>({ request, itemKey: c => c.repository + "@" + c.sha, refreshInterval: 5000 });
+  const data = pagination.data, rows = data?.items || [];
+  const selectedRow = rows.find(c => c.repository + "@" + c.sha === selected);
+  const [linkedCommit, setLinkedCommit] = useState<Commit>();
   useEffect(() => {
-    const controller = new AbortController();
-    const load = () =>
-      api<Data>(
-        `/commits?workspaceId=${encodeURIComponent(workspace.id)}`,
-        "GET",
-        undefined,
-        controller.signal,
-      )
-        .then((d) => {
-          setData(d);
-          setError("");
-        })
-        .catch((e) => {
-          if (!controller.signal.aborted) setError(String(e));
-        });
-    void load();
-    const timer = setInterval(() => void load(), 5000);
-    return () => {
-      controller.abort();
-      clearInterval(timer);
-    };
-  }, [workspace.id]);
-  useEffect(() => {
-    setLimit(50);
-  }, [repo, filter, query]);
-  const rows = (data?.commits || []).filter(
-    (c) =>
-      (!repo || c.repository === repo) &&
-      (filter === "all" ||
-        (filter === "linked" ? !!c.record : c.analyzed && !c.record)) &&
-      (!query ||
-        `${c.subject} ${c.sha}`.toLowerCase().includes(query.toLowerCase())),
-  );
+    setLinkedCommit(undefined);
+    if (!selected || selectedRow) return;
+    const separator = selected.lastIndexOf("@"), controller = new AbortController();
+    void api<Data>(`/commits?${new URLSearchParams({ workspaceId: workspace.id, repository: selected.slice(0, separator), sha: selected.slice(separator + 1), filter, q: query })}`, "GET", undefined, controller.signal)
+      .then(d => { if (!controller.signal.aborted) setLinkedCommit(d.commits.find(c => c.repository + "@" + c.sha === selected)); })
+      .catch(() => { /* The list remains usable if a deep-linked commit is unavailable. */ });
+    return () => controller.abort();
+  }, [api, workspace.id, selected, !!selectedRow, filter, query]);
   const current =
-    rows.find((c) => c.repository + "@" + c.sha === selected) || rows[0];
+    selectedRow || (linkedCommit && (!repo || linkedCommit.repository === repo) ? linkedCommit : undefined) || rows[0];
   const [sources, setSources] = useState<Sources>();
   const [sourceError, setSourceError] = useState("");
   useEffect(() => {
@@ -197,35 +180,26 @@ export function CommitsPage({
           <Search size={14} />
           <input
             placeholder={t("搜索提交说明或编号")}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
           />
         </label>
         <span className="commits-summary">
-          {data?.commits.length
+          {data?.summary.first
             ? t(
                 "{0}以来 ",
-                date(
-                  Math.min(
-                    ...data.commits.map((c) => c.authoredAt || Infinity),
-                  ),
-                ),
+                date(data.summary.first),
               )
             : ""}
-          <b>{data?.commits.length ?? "—"}</b> {t("个提交，")}
+          <b>{data?.summary.total ?? "—"}</b> {t("个提交，")}
           <b>
             {data?.analysis.runId
-              ? data.commits.filter((c) => c.record).length
+              ? data.summary.linked
               : "—"}
           </b>{" "}
           {t("个找到提交会话")}
         </span>
       </div>
-      {error && (
-        <p className="error" role="alert">
-          {systemMessage(error)}
-        </p>
-      )}
       {data && data.analysis.status !== "done" && (
         <p className="commit-note" role="status">
           {data.analysis.status === "running"
@@ -245,17 +219,17 @@ export function CommitsPage({
         </p>
       )}
       <div className="commits-work">
-        <div className="commits-list" aria-label={t("提交列表")}>
+        <div ref={pagination.scrollRef} className="commits-list" aria-label={t("提交列表")} aria-busy={pagination.loading}>
           {!data ? (
             <p className="commits-empty">{t("正在读取本地提交…")}</p>
           ) : !rows.length ? (
             <p className="commits-empty">
-              {data.commits.length
+              {data.summary.total
                 ? t("没有符合筛选条件的提交")
                 : t("暂未找到提交记录")}
             </p>
           ) : (
-            rows.slice(0, limit).map((c) => {
+            rows.map((c) => {
               const day = date(c.authoredAt);
               const heading = previous !== day;
               previous = day;
@@ -263,7 +237,7 @@ export function CommitsPage({
                 <React.Fragment key={c.repository + c.sha}>
                   {heading && <div className="commits-day">{day}</div>}
                   <div className="commits-rail">
-                    <span className="commits-node">
+                    <span className={`commits-node${c.record ? "" : " unlinked"}`}>
                       <GitCommitHorizontal size={13} />
                     </span>
                     <button
@@ -318,14 +292,7 @@ export function CommitsPage({
               );
             })
           )}
-          {rows.length > limit && (
-            <button
-              className="commits-more"
-              onClick={() => setLimit((n) => n + 50)}
-            >
-              {t("加载更多")}
-            </button>
-          )}
+          <ListLoadMore pagination={pagination} />
         </div>
         <div
           className="commit-detail"
@@ -355,6 +322,19 @@ export function CommitsPage({
                   {current.branch || "—"}
                 </code>
               </div>
+              <details className="commit-submitted-files">
+                <summary>{t("查看提交文件")}</summary>
+                {current.files.map((f) => (
+                  <div className="commit-file" key={f.path}>
+                    <code>{f.path}</code>
+                    <span>
+                      {f.binary
+                        ? t("二进制")
+                        : `+${f.additions ?? "—"} −${f.deletions ?? "—"}`}
+                    </span>
+                  </div>
+                ))}
+              </details>
               <section>
                 <h4>{t("提交记录")}</h4>
                 {current.record ? (
@@ -383,19 +363,6 @@ export function CommitsPage({
                     </small>
                   )}
                 </h4>
-                <details className="commit-submitted-files">
-                  <summary>{t("查看提交文件")}</summary>
-                  {current.files.map((f) => (
-                    <div className="commit-file" key={f.path}>
-                      <code>{f.path}</code>
-                      <span>
-                        {f.binary
-                          ? t("二进制")
-                          : `+${f.additions ?? "—"} −${f.deletions ?? "—"}`}
-                      </span>
-                    </div>
-                  ))}
-                </details>
                 <div className={sources?.sources.length && !sourceError && sources.eligible !== null ? "commit-source-list" : "commit-source-empty"}>
                   {sourceError ? (
                     <span role="alert">

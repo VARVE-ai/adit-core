@@ -7,7 +7,7 @@ import { PublicationPrivacy } from "./publication-privacy.js";
 import { sourceDefinitions } from "./sources.js";
 import { submittedPromptText } from "./prompt-summary.js";
 import { conversationSegments,conversationRevision } from "./session-identity.js";
-import { publicationCursor, nextPublicationCursor } from "./publication-pagination.js";
+import { publicationCursor, nextPublicationCursor, PUBLICATION_PAGE_SIZE } from "./publication-pagination.js";
 import { defaultPrOptions, type PrOptions, type PrScope, type PrCommit, type PrDescription, type PrLines, type PrSession, type PrItem } from "./pr-types.js";
 export * from "./pr-types.js";
 type Row = Record<string, any>;
@@ -29,9 +29,9 @@ export class LocalPrDescriptions {
     if (!Number.isSafeInteger(offset) || offset < 0) throw new LocalStateError("Invalid offset");
     const after = publicationCursor(cursor);
     const total = (this.db.prepare("SELECT count(*) n FROM adit_pr_descriptions WHERE workspace_id=? AND status='ready'").get(w.id) as Row).n;
-    const rows = this.db.prepare("SELECT id,title,repository,source_ref,target_ref,created_at,detail_level,language,commit_count,session_count,unmatched_count FROM adit_pr_descriptions WHERE workspace_id=? AND status='ready' AND (? IS NULL OR created_at<? OR (created_at=? AND id>?)) ORDER BY created_at DESC,id LIMIT 41 OFFSET ?").all(w.id, after?.at ?? null, after?.at ?? null, after?.at ?? null, after?.id ?? null, after ? 0 : offset) as PrItem[];
-    const items = rows.slice(0, 40), last = items.at(-1);
-    return { total, items, nextOffset: rows.length > 40 ? offset + items.length : null, nextCursor: rows.length > 40 && last ? nextPublicationCursor(last.created_at, last.id) : null };
+    const rows = this.db.prepare("SELECT id,title,repository,source_ref,target_ref,created_at,detail_level,language,commit_count,session_count,unmatched_count FROM adit_pr_descriptions WHERE workspace_id=? AND status='ready' AND (? IS NULL OR created_at<? OR (created_at=? AND id>?)) ORDER BY created_at DESC,id LIMIT ? OFFSET ?").all(w.id, after?.at ?? null, after?.at ?? null, after?.at ?? null, after?.id ?? null, PUBLICATION_PAGE_SIZE + 1, after ? 0 : offset) as PrItem[];
+    const items = rows.slice(0, PUBLICATION_PAGE_SIZE), last = items.at(-1);
+    return { total, items, nextOffset: rows.length > PUBLICATION_PAGE_SIZE ? offset + items.length : null, nextCursor: rows.length > PUBLICATION_PAGE_SIZE && last ? nextPublicationCursor(last.created_at, last.id) : null };
   }
   read(w: LocalWorkspace, id: string): PrDescription {
     const r = this.db.prepare("SELECT snapshot_json FROM adit_pr_descriptions WHERE id=? AND workspace_id=? AND status='ready'").get(id, w.id) as Row | undefined;

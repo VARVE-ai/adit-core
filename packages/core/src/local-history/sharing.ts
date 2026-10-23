@@ -11,7 +11,7 @@ import { sourceDefinitions } from "./sources.js";
 import { sessionToolDisplay } from "./session-tool-display.js";
 import { PublicationPrivacy, SHARE_POLICY_VERSION, isPersonalMemoryWrite } from "./publication-privacy.js";
 import { createPublicationSchema, insertPublication } from "./publication-schema.js";
-import { publicationCursor, nextPublicationCursor } from "./publication-pagination.js";
+import { publicationCursor, nextPublicationCursor, PUBLICATION_PAGE_SIZE } from "./publication-pagination.js";
 import { defaultShareOptions, type ShareDraft, type ShareOptions, type ShareSnapshot, type SharedCommit, type SharedTurn, type ShareItem } from "./sharing-types.js";
 export * from "./sharing-types.js";
 type Row = Record<string, any>;
@@ -46,9 +46,9 @@ export class LocalSharing {
     if (!Number.isSafeInteger(offset) || offset < 0) throw new LocalStateError("Invalid offset");
     const after = publicationCursor(cursor);
     const total = (this.db.prepare("SELECT count(*) n FROM adit_shares WHERE workspace_id=? AND status='published'").get(w.id) as Row).n;
-    const rows = this.db.prepare("SELECT id,title,provider,status,published_at,created_at,remote_url,viewer_url,prompt_count,commit_count FROM adit_shares WHERE workspace_id=? AND status='published' AND (? IS NULL OR published_at<? OR (published_at=? AND id>?)) ORDER BY published_at DESC,id LIMIT 41 OFFSET ?").all(w.id, after?.at ?? null, after?.at ?? null, after?.at ?? null, after?.id ?? null, after ? 0 : offset) as ShareItem[];
-    const items = rows.slice(0, 40), last = items.at(-1);
-    return { total, items, nextOffset: rows.length > 40 ? offset + items.length : null, nextCursor: rows.length > 40 && last ? nextPublicationCursor(last.published_at!, last.id) : null };
+    const rows = this.db.prepare("SELECT id,title,provider,status,published_at,created_at,remote_url,viewer_url,prompt_count,commit_count FROM adit_shares WHERE workspace_id=? AND status='published' AND (? IS NULL OR published_at<? OR (published_at=? AND id>?)) ORDER BY published_at DESC,id LIMIT ? OFFSET ?").all(w.id, after?.at ?? null, after?.at ?? null, after?.at ?? null, after?.id ?? null, PUBLICATION_PAGE_SIZE + 1, after ? 0 : offset) as ShareItem[];
+    const items = rows.slice(0, PUBLICATION_PAGE_SIZE), last = items.at(-1);
+    return { total, items, nextOffset: rows.length > PUBLICATION_PAGE_SIZE ? offset + items.length : null, nextCursor: rows.length > PUBLICATION_PAGE_SIZE && last ? nextPublicationCursor(last.published_at!, last.id) : null };
   }
   private record(w: LocalWorkspace, id: string) {
     const r = this.db.prepare("SELECT s.*,v.source_revision,v.snapshot_digest,v.snapshot_json,v.markdown,v.options_json,v.review_json FROM adit_shares s JOIN adit_share_versions v ON v.id=s.current_version_id WHERE s.workspace_id=? AND s.id=?").get(w.id, id) as Row | undefined;

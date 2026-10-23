@@ -527,6 +527,7 @@ export const messages = {
   "代码来源：": "Code sources: ",
   未分析: "Not analyzed",
   加载更多: "Load more",
+  "正在加载…": "Loading…",
   选中提交的详情: "Selected commit details",
   个文件: "files",
   提交记录: "Commit record",

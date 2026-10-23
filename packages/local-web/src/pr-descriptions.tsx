@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ListLoadMore, usePagedList, type ListPage } from "./paged-list";
 import { ArrowLeft, GitBranch, GitPullRequest, Loader2 } from "lucide-react";
 import { defaultPrOptions, type PrDescription, type PrItem, type PrOptions, type PrScope } from "../../core/src/local-history/pr-types";
 import { p, publicationDate, repoName, PublicationCopy, PublicationError, PublicationMarkdown, type PublicationApi } from "./publication-ui";
@@ -15,17 +16,19 @@ export function PrDescriptionsPage({ workspace, api, create, onNavigate }: { wor
     for (const key of ["template", "title"] as const) if (query.get(key)) initial[key] = query.get(key)!;
     return initial;
   });
-  const [list, setList] = useState<{ total: number; items: PrItem[]; nextOffset: number | null; nextCursor?: string | null }>(), [detail, setDetail] = useState<PrDescription>();
+  const [detail, setDetail] = useState<PrDescription>();
   const [error, setError] = useState(""), [busy, setBusy] = useState(false), [loading, setLoading] = useState(!create), [scope, setScope] = useState<PrScope>();
   const serial = useRef(0), mounted = useRef(true), generating = useRef(false);
   const endpoint = (path: string) => path + (path.includes("?") ? "&" : "?") + new URLSearchParams({ workspaceId: workspace.id });
   const choose = async (id: string) => { const current = ++serial.current; setLoading(true); setError(""); try { const d = await api<PrDescription>(endpoint(`/pr-descriptions/${id}`)); if (current === serial.current) setDetail(d); } catch (e) { if (current === serial.current) setError(String(e)); } finally { if (current === serial.current) setLoading(false); } };
-  const load = async (offset = 0) => {
-    const d = await api<NonNullable<typeof list>>(endpoint(`/pr-descriptions?offset=${offset}${offset && list?.nextCursor ? `&cursor=${list.nextCursor}` : ""}`));
-    setList(old => ({ ...d, items: offset ? [...(old?.items || []), ...d.items] : d.items }));
-    if (!offset) { const id = query.get("id") || d.items[0]?.id; if (id) await choose(id); else setLoading(false); }
-  };
-  useEffect(() => { mounted.current = true; if (!create) void load().catch(e => { setError(String(e)); setLoading(false); }); return () => { mounted.current = false; }; }, []);
+  const request = useCallback((offset: number, cursor: string | undefined, signal: AbortSignal) =>
+    api<ListPage<PrItem>>(`/pr-descriptions?${new URLSearchParams({ workspaceId: workspace.id, offset: String(offset), limit: "50", ...(cursor ? { cursor } : {}) })}`, "GET", undefined, signal), [api, workspace.id]);
+  const pagination = usePagedList<PrItem, ListPage<PrItem>>({ request, itemKey: item => item.id, enabled: !create,
+    onFirstPage: d => { const id = query.get("id") || d.items[0]?.id; if (id) void choose(id); else setLoading(false); },
+  });
+  const list = pagination.data;
+  useEffect(() => { if (pagination.error && !list) setLoading(false); }, [pagination.error, list]);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; serial.current++; }; }, []);
   useEffect(() => {
     if (!create || !repository) return;
     const controller = new AbortController(); setLoading(true); setError(""); setScope(undefined);
@@ -74,7 +77,7 @@ export function PrDescriptionsPage({ workspace, api, create, onNavigate }: { wor
         <div className="pr-form-footer"><button className="primary" type="submit" disabled={loading || !repository || (!query.getAll("commit").length && (!head || !base))}>{busy && <Loader2 className="spin" size={14} />}{busy ? p("正在生成说明…", "Generating…") : p("生成说明", "Generate description")}</button><button type="button" onClick={() => onNavigate(`/pr/${workspace.id}`)}>{p("取消", "Cancel")}</button><small className="publication-muted">{p("根据本地提交和会话生成，不需要已有 PR。", "Generated from local commits and sessions. No existing PR is required.")}</small></div>
       </fieldset>
     </form></div> : <div className="publication-work">
-      <aside className="publication-list pr-list">{list?.items.map((item, index) => <div key={item.id}>{(index === 0 || new Date(item.created_at).toDateString() !== new Date(list.items[index - 1].created_at).toDateString()) && <div className="publication-day">{publicationDate(item.created_at)} {p("生成", "generated")}</div>}<div className="publication-list-entry"><span className="publication-list-node"><GitPullRequest size={14} /></span><button className={`publication-choice ${detail?.id === item.id ? "on" : ""}`} onClick={() => void choose(item.id)}><span className="publication-choice-heading"><strong title={item.title}>{item.title}</strong><small className="publication-choice-meta"><span className="publication-repo" title={repoName(item.repository)}>{repoName(item.repository)}</span><code title={item.source_ref ? `${item.source_ref} → ${item.target_ref}` : p("明确提交列表", "Explicit commit list")}>{item.source_ref ? `${item.source_ref} → ${item.target_ref}` : p("明确提交列表", "Explicit commit list")}</code></small></span><small>{publicationDate(item.created_at, true)} {p("生成", "generated")} · {item.commit_count} {p("个提交", "commits")} · {item.session_count} {p("个关联会话", "linked conversations")} · <span className="publication-success">{p("已生成", "Generated")}</span></small></button></div></div>)}{list?.total === 0 && <div className="publication-empty">{p("还没有生成 PR 说明", "No PR descriptions yet")}</div>}{list?.nextOffset != null && <button onClick={() => void load(list.nextOffset!).catch(e => setError(String(e)))}>{p("加载更多", "Load more")}</button>}</aside>
+      <aside ref={pagination.scrollRef} className="publication-list pr-list" aria-busy={pagination.loading}>{list?.items.map((item, index) => <div key={item.id}>{(index === 0 || new Date(item.created_at).toDateString() !== new Date(list.items[index - 1].created_at).toDateString()) && <div className="publication-day">{publicationDate(item.created_at)} {p("生成", "generated")}</div>}<div className="publication-list-entry"><span className="publication-list-node"><GitPullRequest size={14} /></span><button className={`publication-choice ${detail?.id === item.id ? "on" : ""}`} onClick={() => void choose(item.id)}><span className="publication-choice-heading"><strong title={item.title}>{item.title}</strong><small className="publication-choice-meta"><span className="publication-repo" title={repoName(item.repository)}>{repoName(item.repository)}</span><code title={item.source_ref ? `${item.source_ref} → ${item.target_ref}` : p("明确提交列表", "Explicit commit list")}>{item.source_ref ? `${item.source_ref} → ${item.target_ref}` : p("明确提交列表", "Explicit commit list")}</code></small></span><small>{publicationDate(item.created_at, true)} {p("生成", "generated")} · {item.commit_count} {p("个提交", "commits")} · {item.session_count} {p("个关联会话", "linked conversations")} · <span className="publication-success">{p("已生成", "Generated")}</span></small></button></div></div>)}{list?.total === 0 && <div className="publication-empty">{p("还没有生成 PR 说明", "No PR descriptions yet")}</div>}<ListLoadMore pagination={pagination} /></aside>
       <div className="publication-preview pr-detail" aria-busy={loading}>{detail ? <><h1>{detail.title}</h1><div className="publication-meta"><span className="publication-repo">{repoName(detail.scope.repository)}</span><span>{publicationDate(detail.createdAt, true)} {p("生成", "generated")}</span><span>{detailLabel(detail.options.detail)} · {detail.options.language === "en" ? "English" : "中文"}</span></div><div className="publication-meta pr-branch"><span><GitBranch size={14} /><code>{detail.scope.kind === "branches" ? `${detail.scope.head} → ${detail.scope.base}` : p("明确提交列表", "Explicit commit list")}</code></span></div>
         <div className="pr-scope-summary">{[[detail.summary.commits, p("纳入的提交", "Included commits")], [detail.summary.sessions, p("关联会话 · 已去重", "Unique conversations")], [detail.summary.unmatched, p("未找到提交会话", "No submitting conversation")], [detail.summary.excludedMerges, p("已排除的合并提交", "Excluded merge commits")]].map(([value, label]) => <span key={label}><b>{value}</b>{label}</span>)}</div>
         {(detail.summary.excludedAuthors > 0 || detail.summary.pending > 0) && <p className="publication-help">{detail.summary.excludedAuthors > 0 && `${p("已排除的其他作者提交", "Excluded commits by other authors")}: ${detail.summary.excludedAuthors}. `}{detail.summary.pending > 0 && `${p("尚未分析", "Analysis pending")}: ${detail.summary.pending}`}</p>}

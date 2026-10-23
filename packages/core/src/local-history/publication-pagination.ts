@@ -1,4 +1,5 @@
 import { LocalStateError } from "../local-state.js";
+export const PUBLICATION_PAGE_SIZE = 50;
 export function publicationCursor(cursor?: string | null): { at: number; id: string } | null {
   if (!cursor) return null;
   try {

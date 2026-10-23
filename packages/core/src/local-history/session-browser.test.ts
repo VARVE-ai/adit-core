@@ -60,7 +60,8 @@ it("previews one real turn on either side, masks excerpts and opens the exact pa
   for (let i = 1; i <= 14; i++) {
     if (i === 10) messages.push(m("context", "user", "<environment_context>not a question</environment_context>"));
     messages.push(m(`q${i}`, "user", i === 9 ? [{ type: "input_image", image_url: "data:PRIVATE_IMAGE" }] : `question ${i}`));
-    if (i < 14) messages.push(m(`a${i}`, "assistant", `answer ${i}`, { finalReply: true }));
+    if (i < 14) messages.push(m(`a${i}`, "assistant", `answer ${i}`, { finalReply: true,
+      model: "preview-model", usage: { input_tokens: 100, output_tokens: 20 }, timestamp: "2026-10-20T10:00:30Z" }));
     if (i === 10) messages.push(m("compact", "assistant", "PRIVATE_CONTEXT", { raw: { metadata: { compaction_output: true } } }));
   }
   history.write({ provider: "codex", id: "nearby", cwd: root, metadata: { title: "Original session title" }, messages });
@@ -77,6 +78,8 @@ it("previews one real turn on either side, masks excerpts and opens the exact pa
   expect(result.turns.map(t => t.prompt)).toEqual(["", expect.stringContaining("edited question"), "question 11"]);
   expect(result.turns[0].imageCount).toBe(1);
   expect(result.turns[1].reply).toContain("edited answer");
+  expect(result.turns[1].replyAt).toBe(Date.parse("2026-10-20T10:00:30Z"));
+  expect(result.turns[1].usage).toMatchObject({ input: null, output: 20, requests: 1, models: ["preview-model"] });
   for (const hidden of [secret, "PRIVATE_IMAGE", "PRIVATE_CONTEXT", "not a question"])
     expect(JSON.stringify(result)).not.toContain(hidden);
   const opened = browser.detail(w, "codex", "nearby", "focused", undefined, "", target.id);
@@ -87,6 +90,7 @@ it("previews one real turn on either side, masks excerpts and opens the exact pa
   const last = browser.detail(w, "codex", "nearby", "normal", 8).turns.at(-1)!;
   expect(browser.preview(w, "codex", "nearby", last.id).turns.map(t => t.prompt)).toEqual(["question 13", "question 14"]);
   expect(browser.preview(w, "codex", "nearby", last.id).turns.at(-1)?.reply).toBeNull();
+  expect(browser.preview(w, "codex", "nearby", last.id).turns.at(-1)?.replyAt).toBeNull();
   const first = browser.detail(w, "codex", "nearby").turns[0];
   expect(browser.preview(w, "codex", "nearby", first.id).turns.map(t => t.prompt)).toEqual(["question 1", "question 2"]);
   const deletion = browser.editTurn(w, "codex", "nearby", target.id);
@@ -703,6 +707,57 @@ it("pages 50 day rows without repeating or losing days of one conversation", () 
   expect(rows.every(s => s.prompts === 1 && s.cost === null)).toBe(true);
   expect(rows.every((s, i) => s.dayCount === 105 && s.dayIndex === 105 - i)).toBe(true);
   expect(browser.list(w, { timezone: "UTC", sort: "oldest", limit: 1 }).items[0].dayIndex).toBe(1);
+  const beyond = browser.list(w, { timezone: "UTC", offset: 500 });
+  expect(beyond).toMatchObject({ total: 105, messages: 105, first: first.first, items: [], nextOffset: null });
+  expect(beyond.providers).toEqual(first.providers);
+});
+
+it("prices only visible day rows without multiplying timezone work by the page size", () => {
+  const { w, history, browser } = fixture();
+  const messages = Array.from({ length: 105 }, (_, i) => {
+    const timestamp = new Date(Date.UTC(2026, 0, i + 1, 12)).toISOString();
+    return [m(`p${i}`, "user", `question ${i}`, { timestamp }), m(`a${i}`, "assistant", "answer", {
+      timestamp, model: "test-model", usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    })];
+  }).flat();
+  history.write({ id: "priced-days", provider: "claude", cwd: root, messages });
+  let dateCalls = 0;
+  const original = store.db.function.bind(store.db);
+  const define = vi.spyOn(store.db, "function").mockImplementation((...args: any[]) => {
+    if (args[0] === "session_day") {
+      const format = args[args.length - 1];
+      args[args.length - 1] = (at: number | null) => { dateCalls++; return format(at); };
+    }
+    return Reflect.apply(original, store.db, args);
+  });
+  const estimate = vi.spyOn(analytics.prices, "estimate");
+  try {
+    const first = browser.list(w, { timezone: "UTC" });
+    expect(first.total).toBe(105);
+    expect(first.items).toHaveLength(50);
+    expect(first.items.every(s => s.cost === 600 && s.prompts === 1 && s.messages === 2)).toBe(true);
+    expect(estimate).toHaveBeenCalledTimes(50);
+    // Count actual SQL date conversions, not wall-clock time. The old correlated
+    // page lookup repeated this conversion for each candidate day of each request.
+    expect(dateCalls).toBeLessThan(messages.length * 5);
+    estimate.mockClear();
+    const last = browser.list(w, { timezone: "UTC", offset: 100 });
+    expect(last.items).toHaveLength(5);
+    expect(last.items.every(s => s.cost === 600 && s.prompts === 1)).toBe(true);
+    expect(estimate).toHaveBeenCalledTimes(5);
+    estimate.mockClear();
+    expect(browser.list(w, { timezone: "UTC", offset: 200 }).items).toEqual([]);
+    expect(estimate).not.toHaveBeenCalled();
+  } finally { define.mockRestore(); estimate.mockRestore(); }
+});
+
+it("returns empty list metadata without fabricating a day or pricing any usage", () => {
+  const { w, browser } = fixture();
+  const estimate = vi.spyOn(analytics.prices, "estimate");
+  try {
+    expect(browser.list(w)).toEqual({ items: [], providers: [], total: 0, messages: 0, first: null, nextOffset: null });
+    expect(estimate).not.toHaveBeenCalled();
+  } finally { estimate.mockRestore(); }
 });
 
 it("keeps undated messages separate and counts no new prompt for a reply-only day", () => {
