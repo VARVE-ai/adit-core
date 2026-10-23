@@ -10,7 +10,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  ensurePersistentCodexHooksInstalled,
   installCodexHooks,
 } from "./hooks-bootstrap.js";
 
@@ -198,10 +197,10 @@ describe("installCodexHooks", () => {
         marker: "from=adit-cloud-codex-test",
         persistent: true,
       });
-      await ensurePersistentCodexHooksInstalled({
-        cwd: dir,
-        aditHookBinary: "node /tmp/adit-hook",
-      });
+      mkdirSync(join(dir, ".codex"), { recursive: true });
+      const mixed = JSON.parse(readFileSync(join(dir,".codex","hooks.json"),"utf8"));
+      mixed.hooks.UserPromptSubmit.push({hooks:[{command:"node /tmp/adit-hook prompt-submit"}]});
+      writeFileSync(join(dir,".codex","hooks.json"),JSON.stringify(mixed));
 
       installCodexHooks({
         cwd: dir,
@@ -219,12 +218,6 @@ describe("installCodexHooks", () => {
       expect(hooksConfig.hooks.SessionStart).toBeUndefined();
 
       expect(existsSync(userConfigPath)).toBe(false);
-      // Approval status is advisory only, so an unapproved-but-installed
-      // set of hooks must not trigger a reinstall loop.
-      expect(await ensurePersistentCodexHooksInstalled({
-        cwd: dir,
-        aditHookBinary: "node /tmp/adit-hook",
-      })).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -343,59 +336,3 @@ describe("installCodexHooks", () => {
     }
   });
 });
-
-describe("ensurePersistentCodexHooksInstalled", () => {
-  it("installs persistent ADIT Codex hooks when missing", async () => {
-    const dir = tempDir();
-    try {
-      const installed = await ensurePersistentCodexHooksInstalled({
-        cwd: dir,
-        aditHookBinary: "node /tmp/adit-hook",
-      });
-
-      expect(installed).toBe(true);
-      const hooks = readFileSync(join(dir, ".codex", "hooks.json"), "utf8");
-      const fixedRootArg = `--project-root-b64 ${encodeProjectRoot(dir)}`;
-
-      expect(hooks).not.toContain(
-        `node /tmp/adit-hook --platform codex ${fixedRootArg} session-start`,
-      );
-      expect(hooks).toContain(
-        `node /tmp/adit-hook --platform codex ${fixedRootArg} prompt-submit`,
-      );
-      expect(hooks).toContain(`node /tmp/adit-hook --platform codex ${fixedRootArg} stop`);
-      // notification collection was retired — no PostToolUse hook installed
-      expect(hooks).not.toContain(
-        `node /tmp/adit-hook --platform codex ${fixedRootArg} notification`,
-      );
-      expect(existsSync(join(dir, ".codex", "config.toml"))).toBe(false);
-      expect(existsSync(userConfigPath)).toBe(false);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("does not duplicate persistent hooks when already installed", async () => {
-    const dir = tempDir();
-    try {
-      await ensurePersistentCodexHooksInstalled({
-        cwd: dir,
-        aditHookBinary: "node /tmp/adit-hook",
-      });
-      const installedAgain = await ensurePersistentCodexHooksInstalled({
-        cwd: dir,
-        aditHookBinary: "node /tmp/adit-hook",
-      });
-
-      const hooks = readFileSync(join(dir, ".codex", "hooks.json"), "utf8");
-      expect(installedAgain).toBe(false);
-      expect((hooks.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(5);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-function encodeProjectRoot(projectRoot: string): string {
-  return Buffer.from(projectRoot, "utf8").toString("base64url");
-}

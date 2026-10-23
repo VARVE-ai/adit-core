@@ -35,7 +35,7 @@ it("authenticates inspection, masks API output, scans asynchronously and preserv
     ],
   });
   const base = app.origin + "/api/local/inspection";
-  expect((await fetch(base + "?workspaceId=" + workspace.id)).status).toBe(401);
+  expect((await fetch(base + "?workspaceId=" + workspace.id)).status).toBe(403);
   const api = async (suffix = "", method = "GET", body?: unknown) =>
     fetch(
       base +
@@ -161,7 +161,7 @@ it("finishes shutdown with an incomplete browser request instead of retaining th
     socket.once("error", reject);
   });
   socket.write(
-    `POST /api/local/session HTTP/1.1\r\nHost: ${url.host}\r\nOrigin: ${url.origin}\r\nContent-Length: 100\r\n\r\n{`,
+    `POST /api/local/session HTTP/1.1\r\nHost: ${url.host}\r\nOrigin: ${url.origin}\r\nX-Adit-Local: 1\r\nContent-Length: 100\r\n\r\n{`,
   );
   await new Promise<void>((resolve) => setTimeout(resolve, 20));
   await app.close();

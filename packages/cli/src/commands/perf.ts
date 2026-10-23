@@ -1,7 +1,7 @@
 /**
  * `adit perf` — Performance stats for time-sensitive operations.
  *
- * Reads daily JSONL perf logs from .adit/perf-logs/ and generates
+ * Reads daily JSONL perf logs from the project runtime perf-logs directory and generates
  * an aggregated stats report showing call counts, timing distributions,
  * and failure rates.
  */
@@ -63,7 +63,7 @@ export function perfClearCommand(opts?: { json?: boolean }): void {
 function printReport(report: PerfStatsReport): void {
   if (report.totalEntries === 0) {
     printTitle("Performance");
-    printEnd(`${marks.skip} No performance data yet · logs are captured during hook events`);
+    printEnd(`${marks.skip} No performance data yet · logs are stored per project runtime`);
     return;
   }
 

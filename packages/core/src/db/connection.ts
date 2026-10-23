@@ -4,11 +4,12 @@
 
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, basename } from "node:path";
 import { migrations } from "./migrations.js";
 
 /** Open (or create) the SQLite database and run pending migrations */
 export function openDatabase(dbPath: string): Database.Database {
+  if (basename(dbPath).toLowerCase() === "local.sqlite") throw new Error("Use LocalStore for the shared database; legacy migrations are not allowed.");
   mkdirSync(dirname(dbPath), { recursive: true });
 
   const db = new Database(dbPath);

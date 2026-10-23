@@ -18,7 +18,7 @@ let root:string,store:LocalStore,history:StructuredHistory;
 const baseline:CloudBaseline={schemaVersion:1,accountId:"user",before:null,repositories:[],sessions:[],nextCursor:null};
 const at=(n:number)=>new Date(Date.UTC(2026,9,16,0,0,n)).toISOString();
 beforeEach(()=>{
-  root=mkdtempSync(join(tmpdir(),"adit-local-cloud-"));store=new LocalStore(join(root,"state"));new LocalHistory(store.db);createCloudSyncSchema(store);history=new StructuredHistory(store.db);
+  root=mkdtempSync(join(tmpdir(),"adit-local-cloud-"));mkdirSync(join(root,".git"));store=new LocalStore(join(root,"state"));new LocalHistory(store.db);createCloudSyncSchema(store);history=new StructuredHistory(store.db);
   vi.mocked(loadCredentials).mockReturnValue({clientId:"device",accountId:"user",credentialId:"credential",serverUrl:"http://localhost:3000",accessToken:"test",refreshToken:"",expiresAt:"",authType:"token"});
   vi.mocked(sendLocalRuntimeReport).mockReset().mockResolvedValue({});
 });
@@ -357,19 +357,18 @@ it("uploads separate writer/committer roles and recorded branch, but omits a del
   store.db.prepare("UPDATE adit_history_tool_results SET content_text=?,exit_code=0 WHERE tool_call_id=?").run(`[feature/work ${sha.slice(0,7)}] subject`,call.id);
   store.db.prepare(`UPDATE adit_attribution_commits SET submit_provider='codex',submit_session_id='native',submit_turn_id=?,submit_tool_call_id=?,
     match_method='hash',matched_sha=?,eligible_lines=1,certain_lines=1 WHERE sha=?`).run(call.turn_id,call.id,sha,sha);
-  store.db.prepare(`INSERT INTO adit_attribution_lines(id,run_id,repository,sha,file_path,line_number,hunk,line_hash,tier,provider,session_id)
-    VALUES ('line','run',?,?,'a.ts',1,1,'hash','certain','codex','writer')`).run(repo.path,sha);
+  store.db.prepare(`INSERT INTO adit_attribution_writers VALUES ('run',?,?,'codex','writer','a.ts',1,0,0)`).run(repo.path,sha);
   const p=new CloudProjection(store,w,"scope",baseline);
   for(const s of p.sessions())for(const events of p.sessionBatches(s.source,s.session!))p.confirm("event",events.map(e=>e.id));
   const item=[...p.commitBatches()][0];
   expect(item.commit.branch).toBe("feature/work");expect(item.events[0].commit?.branch).toBe("feature/work");
   expect(item.commit.attributions.map((a:any)=>[a.committed,a.certain])).toEqual([[false,1],[true,0]]);
   expect(item.events[0].parentEventId).not.toBeNull();
-  store.db.prepare("UPDATE adit_attribution_lines SET session_id='native'").run();
+  store.db.prepare("UPDATE adit_attribution_writers SET session_id='native'").run();
   const same=[...p.commitBatches()][0];
   expect(same.commit.attributions).toHaveLength(1);
   expect(same.commit.attributions[0]).toMatchObject({committed:true,certain:1,promptEventId:item.events[0].parentEventId});
-  store.db.prepare("UPDATE adit_attribution_lines SET session_id='writer'").run();
+  store.db.prepare("UPDATE adit_attribution_writers SET session_id='writer'").run();
   store.db.prepare("INSERT INTO adit_history_deleted_turns VALUES ('codex','native','p',1)").run();
   const deleted=[...p.commitBatches()][0];
   expect(deleted.commit.sha).toBe(sha);expect(deleted.events).toHaveLength(0);
@@ -386,9 +385,8 @@ it("adds writer evidence across native segments and sends one session reference 
   {key:"p",role:"user",content:"continued work",timestamp:at(6),raw:{}},
  ]});
  const {w,repos}=gitWorkspace(),sha="9".repeat(40);commit(repos[0].path,sha,8);
- const add=store.db.prepare(`INSERT INTO adit_attribution_lines(id,run_id,repository,sha,file_path,line_number,hunk,line_hash,tier,provider,session_id)
-   VALUES (?,'run',?,?,'a.ts',?,1,'hash',?,'codex',?)`);
- add.run("line1",repos[0].path,sha,1,"certain","native");add.run("line2",repos[0].path,sha,2,"certain","native_page");add.run("line3",repos[0].path,sha,3,"possible","native_page");
+ const add=store.db.prepare(`INSERT INTO adit_attribution_writers VALUES ('run',?,?,'codex',?,'a.ts',?,0,?)`);
+ add.run(repos[0].path,sha,"native",1,0);add.run(repos[0].path,sha,"native_page",1,1);
  const p=new CloudProjection(store,w,"scope",baseline);p.sessions();const item=[...p.commitBatches()][0];
  expect(item.sessions).toHaveLength(1);expect(item.commit.attributions).toHaveLength(1);
  expect(item.commit.attributions[0]).toMatchObject({certain:2,possible:1});

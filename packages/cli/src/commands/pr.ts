@@ -78,7 +78,7 @@ export async function prCommand(args: Record<string, any>) {
     if (action === "o") {
       const params = new URLSearchParams({ repository, ...Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)])) });
       if (explicit) for (const sha of args.commit) params.append("commit", sha); else { params.set("head", args.head); params.set("base", args.base); }
-      openBrowser(`${daemon.url}/pr-create/${workspaceId}?${params}#token=${daemon.token}`);
+      openBrowser(`${daemon.url}/pr-create/${workspaceId}?${params}`);
     } else if (action === "n") { options.aditLabel = false; result = await generate(); await copy(result.markdown); console.log("Copied without the ADIT label."); }
     else if (!action) { await copy(result.markdown); console.log("Copied."); }
   } finally { terminal.close(); }

@@ -23,6 +23,7 @@ vi.mock("react-dom", () => ({ createPortal: (children: React.ReactNode) => child
 let App: typeof import("./main").App;
 let i18n: typeof import("./i18n");
 let renderer: ReactTestRenderer | undefined;
+let gitAvailable=true;
 const storage = new Map<string, string>();
 const workspace = {
   id: "ws",
@@ -46,6 +47,8 @@ const account = {
 };
 const record = {
   provider: "claude",
+  sessionId: "session",
+  turnId: "turn",
   title: "用户会话标题",
   ordinal: 1,
   at: Date.UTC(2026, 9, 19),
@@ -185,6 +188,7 @@ const respond = (path: string, input?: any): unknown => {
   if (path === "/workspaces" && input) {
     savedWorkspace = { ...workspace, ...input, id: "original-flow-project", version: 1, started: false };
     empty = false;
+  gitAvailable=true;
     return savedWorkspace;
   }
   if (path === "/startup") {
@@ -236,9 +240,13 @@ const respond = (path: string, input?: any): unknown => {
     items:[{provider:"claude",id:"session",title:"用户会话标题",startedAt:Date.UTC(2026,9,19),lastActivityAt:Date.UTC(2026,9,19),messages:12,prompts:1,commits:1}],
     total:1,messages:12,first:Date.UTC(2026,9,19),providers:[{id:"claude",name:"Claude Code",count:1}],nextOffset:null,
   };
+  if (path.startsWith("/sessions/preview?")) return {
+    session: {provider:"claude",id:"session",title:"用户会话标题"}, targetTurnId:"turn",
+    turns: [{id:"turn",ordinal:1,prompt:"用户原始提问",reply:"Final response",imageCount:0,at:Date.UTC(2026,9,19)}],
+  };
   if (path.startsWith("/sessions/detail?")) return {
     session:{provider:"claude",id:"session",title:"用户会话标题",startedAt:Date.UTC(2026,9,19),lastActivityAt:Date.UTC(2026,9,19),messages:12,prompts:1,commits:1},
-    models:["model-name"],cost:1000000,unpriced:0,totalTurns:1,nextOffset:null,previousOffset:null,matchTurnId:null,children:[],parent:null,commits:[],context:[],contextNextOffset:null,
+    models:["model-name"],cost:1000000,unpriced:0,totalTurns:1,nextOffset:null,previousOffset:null,matchTurnId:new URLSearchParams(path.split("?")[1]).get("turnId"),children:[],parent:null,commits:[],context:[],contextNextOffset:null,
     turns:[{id:"turn",ordinal:1,prompt:"用户原始提问",promptBlockId:"prompt",promptTruncated:false,at:Date.UTC(2026,9,19),contextOnly:false,nextOffset:null,previousOffset:null,matchEventId:null,commits:[],
       usage:{input:2000,output:500,cache:10000,cacheWrite:0,requests:1,models:["model-name"],efforts:["high"]},
       events: path.includes("mode=focused")?[{id:"reply",kind:"reply",text:"Final response",at:null}]:[{id:"tool",kind:"tool",name:"Bash",text:"echo hello",at:null},{id:"reply",kind:"reply",text:"Final response",at:null}],
@@ -270,6 +278,7 @@ const respond = (path: string, input?: any): unknown => {
         },
       ],
     };
+  if (path.startsWith("/projects/git?")) return {available:gitAvailable,...(!gitAvailable?{error:"No Git repository found. Select a directory containing a Git repository to create the project or start organizing."}:{})};
   if (path === "/directories/list")
     return {
       path: workspace.path,
@@ -294,12 +303,14 @@ beforeAll(async () => {
     setItem: (key: string, value: string) => storage.set(key, value),
     removeItem: (key: string) => storage.delete(key),
   };
-  const location = { pathname: "/settings/workspaces", hash: "" };
+  const location = { pathname: "/settings/workspaces", search: "", hash: "" };
   vi.stubGlobal("localStorage", local);
   vi.stubGlobal("location", location);
   vi.stubGlobal("history", {
     pushState: (_: unknown, __: string, path: string) => {
-      location.pathname = path;
+      const url = new URL(path, "http://127.0.0.1");
+      location.pathname = url.pathname;
+      location.search = url.search;
     },
     replaceState: vi.fn(),
   });
@@ -349,6 +360,8 @@ beforeEach(() => {
   jobs = [];
   syncStartFails = false;
   storage.clear();
+  location.hash = "";
+  location.search = "";
   i18n.setLanguage("en");
 });
 afterEach(() => {
@@ -361,6 +374,7 @@ async function render(path: string) {
   await act(async () => {
     renderer = create(React.createElement(App));
   });
+  await act(async () => { await vi.advanceTimersByTimeAsync(200); });
   return renderer!.root;
 }
 function text(node: ReactTestInstance): string {
@@ -380,6 +394,23 @@ async function toggle() {
       .props.onClick();
   });
 }
+it("opens a copied local address without a browser login exchange", async () => {
+  vi.mocked(fetch).mockClear();
+  await render("/overview/ws");
+  expect(text(renderer!.root)).not.toContain("Cannot connect to the local service");
+  expect(vi.mocked(fetch).mock.calls.some(([url]) => url === "/api/local/state")).toBe(true);
+  expect(vi.mocked(fetch).mock.calls.some(([url]) => url === "/api/local/session")).toBe(false);
+});
+it("removes an old launch token without logging in or losing the page query", async () => {
+  location.hash = "#token=expired-launch-token";
+  location.search = "?range=7d";
+  vi.mocked(fetch).mockClear();
+  vi.mocked(history.replaceState).mockClear();
+  await render("/overview/ws");
+  expect(history.replaceState).toHaveBeenCalledWith(null, "", "/overview/ws?range=7d");
+  expect(vi.mocked(fetch).mock.calls.some(([url]) => url === "/api/local/session")).toBe(false);
+  expect(text(renderer!.root)).not.toContain("Cannot connect to the local service");
+});
 function expectEnglish() {
   const native = [
     "中文",
@@ -734,6 +765,7 @@ describe("language switching across the local workbench", () => {
       root.findByProps({id:"workspace-path"}).props.onChange({target:{value:"D:/flowworkerspace"}});
     });
     expect(button("Sync now").props.disabled).toBe(true);
+    await act(async()=>{await vi.advanceTimersByTimeAsync(200);});
     expect(text(root)).toContain("Select at least one Git repository or session source.");
     await act(async () => { root.findAllByProps({className:"selection-row"}).find(n=>text(n).includes("Claude Code"))!.findByType("input").props.onChange({target:{checked:true}}); });
     expect(button("Sync now").props.disabled).toBe(false);
@@ -831,9 +863,7 @@ describe("language switching across the local workbench", () => {
       "Code sources",
       "Compared:",
       "Matched:",
-      "Certain",
-      "Likely",
-      "Possible",
+      "View committed files",
       "View matched files",
       "Also wrote this content",
     ]) {
@@ -934,6 +964,24 @@ describe("language switching across the local workbench", () => {
     );
   });
 
+  it("opens the exact session turn from a commit's question and preserves the original title and reply", async () => {
+    const root = await render("/commits/ws");
+    const conversation = root.findByProps({ className: "commit-conversation" });
+    expect(text(conversation)).toContain("用户会话标题");
+    expect(text(conversation)).toContain("用户原始提问");
+    expect(text(conversation)).toContain("Final response");
+    expect(text(conversation)).not.toContain("Locate commit event");
+    const row = conversation.findAllByType("a").find(node => node.props.className === "commit-context-row prompt")!;
+    const preventDefault = vi.fn();
+    await act(async () => { row.props.onClick({button:0,preventDefault}); });
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(location.pathname).toBe("/sessions/ws");
+    expect(new URLSearchParams(location.search).get("turn")).toBe("turn");
+    const calls = vi.mocked(fetch).mock.calls.map(([url]) => String(url));
+    expect(calls.some(url => url.startsWith("/api/local/sessions/detail?") && new URLSearchParams(url.split("?")[1]).get("turnId") === "turn")).toBe(true);
+    expect(renderer!.root.findAll(node => node.props.className?.split?.(" ").includes("search-match"))).toHaveLength(1);
+  });
+
   it("shows the recorded branch after the file count as in the prototype", async () => {
     const root = await render("/commits/ws");
     const meta = root.findByProps({ className: "commit-detail-meta" });
@@ -967,4 +1015,13 @@ describe("language switching across the local workbench", () => {
       "工作轮次详情",
     );
   });
+});
+
+it("shows the no-Git reason in both languages, blocks organization, and rechecks changed paths",async()=>{
+ gitAvailable=false;savedWorkspace={...workspace,started:false};const root=await render("/settings/workspaces/ws");
+ expect(text(root)).toContain("No Git repository found.");expect(button("Start organizing").props.disabled).toBe(true);
+ await toggle();expect(text(root)).toContain("未检测到 Git 仓库");await toggle();
+ gitAvailable=true;await act(async()=>{root.findByProps({id:"workspace-path"}).props.onChange({target:{value:"D:/valid-git"}});});
+ expect(button("Start organizing").props.disabled).toBe(true);await act(async()=>{await vi.advanceTimersByTimeAsync(200);});
+ expect(text(root)).not.toContain("No Git repository found.");expect(button("Start organizing").props.disabled).toBe(false);
 });

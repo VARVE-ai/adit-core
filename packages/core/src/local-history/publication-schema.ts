@@ -20,6 +20,7 @@ export function createPublicationSchema(db: Database.Database) {
       snapshot_digest TEXT NOT NULL, snapshot_json TEXT NOT NULL, markdown TEXT NOT NULL,
       options_json TEXT NOT NULL, review_json TEXT NOT NULL, created_at INTEGER NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS adit_share_versions_share ON adit_share_versions(share_id);
     CREATE TABLE IF NOT EXISTS adit_share_turns (
       version_id TEXT NOT NULL REFERENCES adit_share_versions(id), turn_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
       PRIMARY KEY(version_id,turn_id)
@@ -37,6 +38,7 @@ export function createPublicationSchema(db: Database.Database) {
       idempotency_key TEXT PRIMARY KEY, version_id TEXT NOT NULL REFERENCES adit_share_versions(id),
       status TEXT NOT NULL, started_at INTEGER NOT NULL, finished_at INTEGER, remote_id TEXT, error_code TEXT
     );
+    CREATE INDEX IF NOT EXISTS adit_share_attempts_version ON adit_share_publish_attempts(version_id);
     CREATE TABLE IF NOT EXISTS adit_pr_descriptions (
       id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, repository TEXT NOT NULL, title TEXT NOT NULL,
       scope_kind TEXT NOT NULL, source_ref TEXT, target_ref TEXT, source_head_sha TEXT, target_head_sha TEXT,

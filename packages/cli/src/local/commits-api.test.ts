@@ -20,7 +20,7 @@ it("authenticates commit routes, returns empty data and rejects unconfigured Git
     expect(
       (await fetch(app.origin + "/api/local" + path + "?workspaceId=" + w.id))
         .status,
-    ).toBe(401);
+    ).toBe(403);
   const api = (path: string) =>
     fetch(app.origin + "/api/local" + path, {
       headers: { authorization: "Bearer " + app.token },

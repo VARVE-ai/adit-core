@@ -46,7 +46,7 @@ it("reports analyzed commits separately from matched commits and excludes failed
 });
 it("skips unavailable directories in automatic collection and applies the same guard to manual collection",async()=>{
   const root=mkdtempSync(join(tmpdir(),"adit-missing-directory-")),missing=join(root,"missing"),available=join(root,"available");
-  mkdirSync(missing);mkdirSync(available);
+  mkdirSync(join(missing,".git"),{recursive:true});mkdirSync(join(available,".git"),{recursive:true});
   const store=new LocalStore(join(root,"state"));
   const scan=vi.fn(async(_request: {workspaces?: {id:string}[]})=>({counts:{},errors:[],scanned:0,updated:0}));
   const collector=new Collector(store,undefined,undefined,undefined,scan);
@@ -93,6 +93,7 @@ it("retries failed post-processing but does not repeat successful processing for
   const collector=new Collector(store,undefined,undefined,inspect,async()=>({counts:{},errors:["codex: malformed native source"],scanned:1,updated:0}));
   collector.providers=async()=>[{id:"codex",name:"Codex",paths:[],homes:[],homesSupported:true,supported:true,format:"JSONL",enabled:true,version:0}];
   cleanup.push(async()=>{await collector.close();store.close();rmSync(root,{recursive:true,force:true});});
+  mkdirSync(join(root,".git"));
   const workspace=store.saveWorkspace({path:root,providers:["codex"],repositories:[]});
   const collect=async()=>{const job=collector.collect(workspace.id);await expect.poll(()=>store.jobs<CollectionJob>().find(j=>j.id===job.id)?.status).toBe("failed");};
   await collect();expect(inspect).toHaveBeenCalledTimes(1);

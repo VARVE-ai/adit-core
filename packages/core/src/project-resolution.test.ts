@@ -27,7 +27,7 @@ function manifest(path:string,id="original-project",repositoryId="original-repos
 it("imports exact old IDs, resolves child directories and preserves the old manifest unchanged",()=>{
   const {store,path,directory}=fixture();manifest(path);
   const before=readFileSync(join(path,".adit","project.json"),"utf8");
-  expect(resolveLocalProject({path:join(path,"repo","src"),directory})).toMatchObject({projectId:"original-project",source:"manifest"});
+  expect(()=>resolveLocalProject({path:join(path,"repo","src"),directory})).toThrow(/adit init/);
   expect(store.workspaces()).toEqual([]);
   const w=store.saveWorkspace({path,repositories:[join(path,"repo")]});
   expect(w.id).toBe("original-project");

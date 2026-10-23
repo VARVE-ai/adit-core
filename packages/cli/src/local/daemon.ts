@@ -131,11 +131,14 @@ export async function startDaemon(port?: number): Promise<Instance> {
     process.execPath,
     [worker, ...(port ? [String(port)] : [])],
     {
+      // Keep Windows from locking the caller's project or npm installation directory.
+      cwd: dir,
       detached: true,
       windowsHide: true,
       stdio: ["ignore", log, log],
       env: {
         ...process.env,
+        ADIT_LOCAL_DATA_DIR: dir,
         ADIT_CLI_ENTRY: process.env.ADIT_CLI_ENTRY ||
           (process.argv[1] && basename(process.argv[1]) === "index.js"
             ? resolve(process.argv[1]) : fileURLToPath(new URL("../index.js", import.meta.url))),
@@ -206,5 +209,5 @@ export async function serveCommand(options: {
   const daemon = await startDaemon(port);
   console.log(daemon.url);
   if (options.browser !== false)
-    openBrowser(`${daemon.url}/#token=${daemon.token}`);
+    openBrowser(daemon.url);
 }

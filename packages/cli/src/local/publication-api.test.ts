@@ -20,7 +20,7 @@ it("authenticates publication APIs and isolates drafts by workspace without publ
   const request = (path: string, method = "GET", body?: unknown, workspaceId = w.id, auth = true) => fetch(`${app.origin}/api/local${path}?workspaceId=${workspaceId}`, {
     method, headers: { "content-type": "application/json", ...(auth ? { authorization: `Bearer ${app.token}` } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  expect((await request("/shares", "GET", undefined, w.id, false)).status).toBe(401);
+  expect((await request("/shares", "GET", undefined, w.id, false)).status).toBe(403);
   const created = await request("/share-drafts", "POST", { provider: "claude", sessionId: "fixture" }); expect(created.status).toBe(201);
   const draft = await created.json() as any; expect(draft.snapshot.promptCount).toBe(2); expect(draft.gistConfigured).toBe(false);
   expect((await request(`/share-drafts/${draft.id}`, "GET", undefined, other.id)).status).toBe(404);

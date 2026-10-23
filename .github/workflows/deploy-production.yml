@@ -106,7 +106,6 @@ jobs:
           const packageJsonPaths = [
             "packages/core/package.json",
             "packages/engine/package.json",
-            "packages/hooks/package.json",
             "packages/cli/package.json",
             "packages/cloud/package.json",
           ];
@@ -139,14 +138,12 @@ jobs:
           const internalPackageNames = new Set([
             "@varveai/adit-core",
             "@varveai/adit-engine",
-            "@varveai/adit-hooks",
             "@varveai/adit-cli",
             "@varveai/adit-cloud",
           ]);
           const packageJsonPaths = [
             "packages/core/package.json",
             "packages/engine/package.json",
-            "packages/hooks/package.json",
             "packages/cli/package.json",
             "packages/cloud/package.json",
           ];

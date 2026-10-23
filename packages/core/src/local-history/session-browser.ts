@@ -1,4 +1,6 @@
 import type Database from "better-sqlite3";
+import { registerHistoryRedaction } from "./inspection-schema.js";
+import { historyTextMatch } from "./history-search.js";
 import { LocalStateError, type LocalWorkspace } from "../local-state.js";
 import { analyticsSessions } from "./analytics-scope.js";
 import { conversationSegments } from "./session-identity.js";
@@ -98,6 +100,11 @@ export type SessionDetail = {
   matchTurnId: string | null;
 };
 export type SessionContent = { text: string; nextOffset: number | null };
+export type SessionTurnPreview = {
+  session: { provider: string; id: string; title: string };
+  targetTurnId: string | null;
+  turns: { id: string; ordinal: number; prompt: string; imageCount: number; reply: string | null; at: number | null }[];
+};
 export type SessionTurnEdit = {
   turnId: string;
   revision: number;
@@ -129,7 +136,7 @@ export class LocalSessionBrowser {
   constructor(
     private db: Database.Database,
     private prices?: Pick<LocalPrices, "estimate">,
-  ) {}
+  ) { registerHistoryRedaction(db); }
 
   private scope(w: LocalWorkspace) {
     return analyticsSessions(this.db, w);
@@ -199,18 +206,25 @@ export class LocalSessionBrowser {
       );
       const query = (options.query || "").trim().slice(0, 300);
       const pattern = "%" + query.replace(/[\\%_]/g, "\\$&") + "%";
-      // Keep FTS on the outer side of this join. Joining its unindexed message_id
-      // once per transcript message turns an ordinary search into a quadratic scan.
+      // Search stored bodies only inside the selected project and filters.
+      // EXISTS stops at the first visible hit per session; no text is copied.
       const matches = query
         ? this.db
             .prepare(
-              `SELECT DISTINCT m.provider,m.session_id id
-        FROM adit_history_text_fts f CROSS JOIN adit_history_messages m ON m.id=f.message_id
-        WHERE ${query.length >= 3 ? "adit_history_text_fts MATCH @fts" : "f.text_content LIKE @pattern ESCAPE '\\'"}
-        UNION SELECT provider,session_id id FROM adit_history_tool_calls
-        WHERE command_text LIKE @pattern ESCAPE '\\' OR input_json LIKE @pattern ESCAPE '\\'`,
+              `WITH members AS (
+          SELECT json_extract(value,'$.provider') provider,json_extract(value,'$.id') id,
+            json_extract(value,'$.conversation_id') conversation_id FROM json_each(@scope)
+        ), eligible AS (
+          SELECT q.provider,q.conversation_id FROM members q JOIN adit_history_sessions s ON s.provider=q.provider AND s.id=q.id
+          WHERE @provider='all' OR q.provider=@provider GROUP BY q.provider,q.conversation_id
+          HAVING (@from IS NULL OR max(s.last_activity_at)>=@from) AND (@to IS NULL OR min(s.started_at)<=@to)
+        ) SELECT q.provider,q.id FROM members q JOIN eligible e ON e.provider=q.provider AND e.conversation_id=q.conversation_id
+        WHERE EXISTS(SELECT 1 FROM adit_history_messages m JOIN adit_history_blocks b ON b.message_id=m.id
+          WHERE m.provider=q.provider AND m.session_id=q.id AND ${historyTextMatch("b.text_content")})
+        OR EXISTS(SELECT 1 FROM adit_history_tool_calls t WHERE t.provider=q.provider AND t.session_id=q.id
+          AND (${historyTextMatch("t.command_text")} OR ${historyTextMatch("t.input_json")}))`,
             )
-            .all({ fts: '"' + query.replace(/"/g, '""') + '"', pattern })
+            .all({ scope, pattern, masked: Number(query.includes("•")), provider: options.provider || "all", from: options.from ?? null, to: options.to ?? null })
         : [];
       const cte = `WITH scope AS (SELECT json_extract(value,'$.provider') provider,json_extract(value,'$.id') id,json_extract(value,'$.conversation_id') conversation_id FROM json_each(@scope)),
         matched AS (SELECT q.provider,q.conversation_id id FROM json_each(@matches) m JOIN scope q
@@ -226,7 +240,7 @@ export class LocalSessionBrowser {
           LEFT JOIN linked l ON l.provider=s.provider AND l.id=s.id GROUP BY s.provider,q.conversation_id),
         filtered AS (SELECT s.* FROM visible s WHERE (@provider='all' OR s.provider=@provider) AND (@only=0 OR s.commits>0)
           AND (@from IS NULL OR s.last_activity_at>=@from) AND (@to IS NULL OR s.started_at<=@to)
-          AND (@query='' OR s.title LIKE @pattern ESCAPE '\\' OR s.first_prompt LIKE @pattern ESCAPE '\\'
+          AND (@query='' OR ${historyTextMatch("s.title")} OR ${historyTextMatch("s.first_prompt")}
             OR EXISTS(SELECT 1 FROM matched m WHERE m.provider=s.provider AND m.id=s.id)))`;
       const params = {
         scope,
@@ -235,6 +249,7 @@ export class LocalSessionBrowser {
         provider: options.provider || "all",
         only: options.onlyCommits ? 1 : 0,
         query,
+        masked: Number(query.includes("•")),
         pattern,
         matches: JSON.stringify(matches),
         from: options.from ?? null,
@@ -308,11 +323,11 @@ export class LocalSessionBrowser {
       .prepare(
         `SELECT turn_id,text,eventId FROM (
       SELECT m.turn_id,m.ordinal,b.text_content text,coalesce((SELECT t.id FROM adit_history_tool_calls t WHERE t.message_id=m.id LIMIT 1),(SELECT r.tool_call_id FROM adit_history_tool_results r WHERE r.message_id=m.id AND r.tool_call_id IS NOT NULL LIMIT 1),b.id) eventId FROM adit_history_messages m JOIN adit_history_blocks b ON b.message_id=m.id
-        WHERE m.provider=@provider AND m.session_id IN (SELECT value FROM json_each(@ids)) AND b.text_content LIKE @pattern ESCAPE '\\'
+        WHERE m.provider=@provider AND m.session_id IN (SELECT value FROM json_each(@ids)) AND ${historyTextMatch("b.text_content")}
       UNION ALL SELECT t.turn_id,m.ordinal,coalesce(t.command_text,t.input_json) text,t.id eventId FROM adit_history_tool_calls t JOIN adit_history_messages m ON m.id=t.message_id
-        WHERE t.provider=@provider AND t.session_id IN (SELECT value FROM json_each(@ids)) AND (t.command_text LIKE @pattern ESCAPE '\\' OR t.input_json LIKE @pattern ESCAPE '\\')) ORDER BY ordinal LIMIT 1`,
+        WHERE t.provider=@provider AND t.session_id IN (SELECT value FROM json_each(@ids)) AND (${historyTextMatch("t.command_text")} OR ${historyTextMatch("t.input_json")})) ORDER BY ordinal LIMIT 1`,
       )
-      .get({ provider, ids:this.segments(provider,id), pattern }) as Row | undefined;
+      .get({ provider, ids:this.segments(provider,id), pattern, masked: Number(query.includes("•")) }) as Row | undefined;
     if (!found) return null;
     const text = redactSecrets(found.text || ""),
       position = text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase());
@@ -332,6 +347,7 @@ export class LocalSessionBrowser {
     mode: TranscriptMode = "normal",
     offset?: number,
     query = "",
+    targetTurnId?: string,
   ): SessionDetail {
     return this.db.transaction(() => {
       this.session(w,provider,id);
@@ -343,8 +359,11 @@ export class LocalSessionBrowser {
         .get(provider,JSON.stringify(ids)) as Row;
       const allTurns=this.turnRows(provider,id).map((t,index):Row=>({...t,ordinal:index+1}));
       const match = this.findMatch(provider, id, query);
-      if (offset === undefined && match?.turnId) {
-        const found = allTurns.find(t=>t.id===match.turnId);
+      if (targetTurnId && !allTurns.some(t => t.id === targetTurnId))
+        throw new LocalStateError("Turn not found", 404);
+      const selectedTurnId = targetTurnId || match?.turnId;
+      if (offset === undefined && selectedTurnId) {
+        const found = allTurns.find(t=>t.id===selectedTurnId);
         if (found) offset = Math.floor((found.ordinal - 1) / 8) * 8;
       }
       offset = offsetOf(offset);
@@ -408,8 +427,39 @@ export class LocalSessionBrowser {
         context: context.events,
         contextNextOffset: context.nextOffset,
         previousOffset: offset > 0 ? Math.max(0, offset - 8) : null,
-        matchTurnId: match?.turnId || null,
+        matchTurnId: selectedTurnId || null,
       };
+    })();
+  }
+  /** Small, on-demand conversation excerpts; no tool bodies, usage calculation or persisted copies. */
+  preview(w: LocalWorkspace, provider: string, id: string, turnId: string): SessionTurnPreview {
+    return this.db.transaction(() => {
+      this.session(w, provider, id);
+      const canonical = conversationSegments(this.db, provider, id)[0];
+      const session = item(this.session(w, provider, canonical));
+      const rows = this.turnRows(provider, id).map((t, index): Row => ({ ...t, ordinal: index + 1 }));
+      const center = rows.findIndex(t => t.id === turnId);
+      const result: SessionTurnPreview = {
+        session: { provider, id: canonical, title: session.title },
+        targetTurnId: center < 0 ? null : turnId,
+        turns: [],
+      };
+      if (center < 0) return result;
+      const excerpt = (text: string) => redactSecrets(text).replace(/\s+/g, " ").trim().slice(0, 600);
+      const read = (index: number) => {
+        const turn = rows[index], prompt = this.readPrompt(turn);
+        if (prompt.contextOnly && index !== center) return null;
+        const answer = historyFinalReply(this.db, turn.id, index < rows.length - 1);
+        const blocks = answer ? this.db.prepare(`SELECT text_content FROM adit_history_blocks
+          WHERE message_id=? AND kind IN (${textKinds}) ORDER BY block_index`).all(answer.id) as Row[] : [];
+        return { id: turn.id, ordinal: turn.ordinal, prompt: excerpt(prompt.displayed), imageCount: prompt.imageCount,
+          reply: answer ? excerpt(blocks.map(b => b.text_content || "").join("\n")) || null : null, at: turn.started_at };
+      };
+      const before: SessionTurnPreview["turns"] = [], after: SessionTurnPreview["turns"] = [];
+      for (let i = center - 1; i >= 0 && before.length < 1; i--) { const turn = read(i); if (turn) before.unshift(turn); }
+      for (let i = center + 1; i < rows.length && after.length < 1; i++) { const turn = read(i); if (turn) after.push(turn); }
+      result.turns = [...before, read(center)!, ...after];
+      return result;
     })();
   }
   turn(
@@ -519,13 +569,7 @@ export class LocalSessionBrowser {
       user_prompt_count=(SELECT count(*) FROM adit_history_turns WHERE provider=@provider AND session_id=@id),
       transcript_revision=transcript_revision+1 WHERE provider=@provider AND id=@id`).run({ provider, id, first });
   }
-  private readTurn(
-    turn: Row,
-    mode: TranscriptMode,
-    offset: number,
-    commits: SessionCommit[],
-    matchEventId?: string,
-  ): SessionTurn {
+  private readPrompt(turn: Row) {
     const prompt = this.db
       .prepare(
         `SELECT id,kind,text_content FROM adit_history_blocks WHERE message_id=? ORDER BY block_index`,
@@ -537,6 +581,16 @@ export class LocalSessionBrowser {
     const contextOnly =
       hasCodexPromptContext(turn.provider, original) && !clean && !imageCount;
     const displayed = redactSecrets(clean || (imageCount ? "" : original));
+    return { prompt, imageCount, contextOnly, displayed };
+  }
+  private readTurn(
+    turn: Row,
+    mode: TranscriptMode,
+    offset: number,
+    commits: SessionCommit[],
+    matchEventId?: string,
+  ): SessionTurn {
+    const { prompt, imageCount, contextOnly, displayed } = this.readPrompt(turn);
     const usageRows = this.db
       .prepare(
         "SELECT * FROM adit_history_usage_entries WHERE turn_id=? AND ledger_role='canonical'",

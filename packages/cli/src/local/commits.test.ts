@@ -199,7 +199,7 @@ it("saves hunk-majority attribution and candidates without changing any original
   expect(
     store.db
       .prepare(
-        "SELECT count(*) n FROM adit_attribution_candidates WHERE selected=0",
+        "SELECT sum(certain_lines+likely_lines+possible_lines) n FROM adit_attribution_alternatives",
       )
       .get(),
   ).toMatchObject({ n: 1 });
@@ -329,13 +329,13 @@ it("rechecks a selected SHA atomically while keeping other commits and native hi
     .run(second, sha);
   await analyzeAttribution(store, workspace);
   const old = await queryCommitSources(store, workspace, root, sha);
-  const otherLines = () =>
+  const otherSummary = () =>
     store.db
       .prepare(
-        "SELECT id,tier,evidence_id FROM adit_attribution_lines WHERE sha=? ORDER BY id",
+        "SELECT sha,eligible_lines,certain_lines,likely_lines,possible_lines,moved_lines,unknown_lines FROM adit_attribution_commits WHERE sha=?",
       )
       .all(second);
-  const before = otherLines();
+  const before = otherSummary();
   history.write({
     provider: "claude",
     id: "late-evidence",
@@ -375,13 +375,13 @@ it("rechecks a selected SHA atomically while keeping other commits and native hi
   expect(
     (await queryCommitSources(store, workspace, root, sha)).sources,
   ).toEqual(old.sources);
-  expect(otherLines()).toEqual(before);
+  expect(otherSummary()).toEqual(before);
   await analyzeAttribution(store, workspace, { recheck });
   expect(
     (await queryCommitSources(store, workspace, root, sha)).sources[0]
       .sessionId,
   ).toBe("late-evidence");
-  expect(otherLines()).toEqual(before);
+  expect(otherSummary()).toEqual(before);
   expect(
     JSON.stringify(
       store.db.prepare("SELECT * FROM adit_history_sessions").all(),
@@ -455,15 +455,7 @@ it("stores JSON-value matches and ninety-percent token matches, while ignoring t
     likely: 0,
     possible: 1,
   });
-  const methods = store.db
-    .prepare(
-      "SELECT match_method FROM adit_attribution_lines WHERE provider IS NOT NULL ORDER BY match_method",
-    )
-    .all();
-  expect(methods).toEqual([
-    { match_method: "json_value" },
-    { match_method: "token_overlap" },
-  ]);
+  expect(saved.sources[0].files).toEqual([{ path: "code.ts", lines: 2 }]);
 });
 it("saves weaker submission bases for quiet commits and rewritten hashes instead of labelling them hash matches", async () => {
   const { sha, now, workspace, history } = fixture();
@@ -860,39 +852,18 @@ it("analyzes only newly collected SHAs and atomically carries forward historical
         "SELECT * FROM adit_attribution_commits WHERE sha=? AND run_id IN (SELECT id FROM adit_attribution_runs WHERE status='done')",
       )
       .get(commitSha);
-    const lines = store.db
-      .prepare(
-        "SELECT * FROM adit_attribution_lines WHERE sha=? AND run_id IN (SELECT id FROM adit_attribution_runs WHERE status='done') ORDER BY id",
-      )
-      .all(commitSha) as any[];
-    const candidates = lines.flatMap((l) =>
-      store.db
-        .prepare(
-          "SELECT * FROM adit_attribution_candidates WHERE line_id=? ORDER BY provider,session_id",
-        )
-        .all(l.id),
-    ) as any[];
-    const evidenceIds = [
-      ...new Set(
-        [...lines, ...candidates].map((l) => l.evidence_id).filter(Boolean),
-      ),
-    ];
-    const evidence = evidenceIds.map((id) =>
-      withoutRun(
-        store.db
-          .prepare("SELECT * FROM adit_attribution_evidence WHERE id=?")
-          .get(id),
-      ),
-    );
-    return {
-      commit: withoutRun(commit),
-      lines: lines.map(withoutRun),
-      candidates,
-      evidence,
-    };
+    const summaries = Object.fromEntries(["writers", "alternatives", "turns"].map(table => [table,
+      store.db.prepare(`SELECT * FROM adit_attribution_${table} WHERE sha=? AND run_id IN
+        (SELECT id FROM adit_attribution_runs WHERE status='done') ORDER BY provider,session_id`)
+        .all(commitSha).map(withoutRun),
+    ]));
+    return { commit: withoutRun(commit), ...summaries };
+
   };
   const original = stored(sha);
-  expect(original.candidates).toHaveLength(2);
+  expect(original.alternatives).toHaveLength(1);
+  expect(original.writers).toHaveLength(1);
+  expect(original.turns).toHaveLength(1);
   expect(original.commit.unknown_lines).toBe(1);
 
   // New transcript content would change the old answer if it were recomputed.
@@ -986,15 +957,8 @@ it("analyzes only newly collected SHAs and atomically carries forward historical
     store.db.prepare("SELECT count(*) n FROM adit_attribution_commits").get(),
   ).toEqual({ n: 3 });
   expect(store.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
-  expect(
-    store.db
-      .prepare(
-        "SELECT count(*) n FROM adit_attribution_candidates c LEFT JOIN adit_attribution_evidence e ON e.id=c.evidence_id WHERE e.id IS NULL",
-      )
-      .get(),
-  ).toEqual({ n: 0 });
-  // Only evidence actually cited by new results is appended, not every session again.
-  expect(
-    store.db.prepare("SELECT count(*) n FROM adit_attribution_evidence").get(),
-  ).toEqual({ n: 3 });
+  // No per-line detail or duplicated evidence text is persisted.
+  expect(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('adit_attribution_lines','adit_attribution_candidates','adit_attribution_evidence')").all()).toEqual([]);
+  expect(store.db.prepare("SELECT count(*) n FROM adit_attribution_turns").get()).toEqual({ n: 2 });
+
 });

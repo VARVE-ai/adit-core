@@ -7,6 +7,7 @@ import {
   Search,
 } from "lucide-react";
 import "./commits.css";
+import { CommitConversation, SessionLink, sessionHref, type CommitRecord } from "./commit-conversation";
 
 type Commit = {
   repository: string;
@@ -22,16 +23,7 @@ type Commit = {
     deletions: number | null;
     binary: number;
   }[];
-  record: null | {
-    provider: string;
-    title: string;
-    ordinal: number | null;
-    at: number | null;
-    command: string;
-    prompt: string;
-    method: string;
-    matchedSha: string | null;
-  };
+  record: CommitRecord | null;
 };
 type Analysis = {
   runId: string | null;
@@ -86,8 +78,10 @@ const date = (at: number | null, full = false) =>
 export function CommitsPage({
   workspace,
   api,
+  onNavigate,
 }: {
   workspace: { id: string; providers: string[] };
+  onNavigate?: (url: string) => void;
   api: <T = any>(
     path: string,
     method?: string,
@@ -105,7 +99,6 @@ export function CommitsPage({
     return params.get("sha") ? `${params.get("repository") || ""}@${params.get("sha")}` : "";
   });
   const [limit, setLimit] = useState(50);
-  const [event, setEvent] = useState(false);
   useEffect(() => {
     const controller = new AbortController();
     const load = () =>
@@ -277,7 +270,6 @@ export function CommitsPage({
                       aria-controls="commit-detail-panel"
                       onClick={() => {
                         setSelected(c.repository + "@" + c.sha);
-                        setEvent(false);
                       }}
                     >
                       <div className="commit-heading">
@@ -365,49 +357,9 @@ export function CommitsPage({
               <section>
                 <h4>{t("提交记录")}</h4>
                 {current.record ? (
-                  <>
-                    <div className="commit-session">
-                      <b><AgentLabel provider={current.record.provider} name={agents[current.record.provider]} /></b>
-                      <strong>{current.record.title}</strong>
-                    </div>
-                    <p className="commit-note">
-                      {current.record.ordinal
-                        ? t("第 {0} 轮提问 · ", current.record.ordinal)
-                        : ""}
-                      {date(current.record.at, true)}
-                    </p>
-                    <button
-                      onClick={() => {
-                        setEvent(true);
-                        requestAnimationFrame(() => {
-                          const element =
-                            document.getElementById("commit-event");
-                          element?.scrollIntoView({
-                            block: "nearest",
-                            behavior: "smooth",
-                          });
-                          element?.focus({ preventScroll: true });
-                        });
-                      }}
-                    >
-                      <ChevronRight size={12} />
-                      {t("定位提交事件")}
-                    </button>
-                    {(event || current.record.prompt) && (
-                      <blockquote
-                        id="commit-event"
-                        tabIndex={-1}
-                        className={event ? "located" : ""}
-                      >
-                        {current.record.prompt ||
-                          t("在会话记录中找到关联的提交操作")}
-                      </blockquote>
-                    )}
-                    <details open={event || undefined}>
-                      <summary>{t("查看提交命令")}</summary>
-                      <pre>{current.record.command}</pre>
-                    </details>
-                  </>
+                  <CommitConversation key={current.repository + current.sha}
+                    workspaceId={workspace.id} record={current.record} sha={current.sha} subject={current.subject}
+                    api={api} onNavigate={onNavigate} />
                 ) : (
                   <>
                     <p>
@@ -430,12 +382,19 @@ export function CommitsPage({
                     </small>
                   )}
                 </h4>
-                <div className="commit-source-scope">
-                  {t("纳入比对")} <b>{sources?.eligible ?? "—"}</b> {t("行")}{" "}
-                  <span>
-                    {t("匹配到")} <b>{sources?.matched ?? "—"}</b> {t("行")}
-                  </span>
-                </div>
+                <details className="commit-submitted-files">
+                  <summary>{t("查看提交文件")}</summary>
+                  {current.files.map((f) => (
+                    <div className="commit-file" key={f.path}>
+                      <code>{f.path}</code>
+                      <span>
+                        {f.binary
+                          ? t("二进制")
+                          : `+${f.additions ?? "—"} −${f.deletions ?? "—"}`}
+                      </span>
+                    </div>
+                  ))}
+                </details>
                 <div className="commit-source-empty">
                   {sourceError ? (
                     <span role="alert">
@@ -460,24 +419,7 @@ export function CommitsPage({
                             {s.certain + s.likely + s.possible} {t("行")}
                           </strong>
                         </div>
-                        <div className="commit-source-title">{s.title}</div>
-                        <div className="commit-source-levels">
-                          {!!s.certain && (
-                            <em>
-                              {t("确定")} {s.certain} {t("行")}
-                            </em>
-                          )}
-                          {!!s.likely && (
-                            <em>
-                              {t("较确定")} {s.likely} {t("行")}
-                            </em>
-                          )}
-                          {!!s.possible && (
-                            <em className="possible">
-                              {t("可能")} {s.possible} {t("行")}
-                            </em>
-                          )}
-                        </div>
+                        <SessionLink className="commit-source-title" href={sessionHref(workspace.id, s.provider, s.sessionId)} onNavigate={onNavigate}>{s.title}<ChevronRight size={13} /></SessionLink>
                         <details>
                           <summary>{t("查看匹配文件")}</summary>
                           {s.files.map((f) => (
@@ -507,18 +449,6 @@ export function CommitsPage({
                     ))
                   )}
                 </div>
-                <div className="commit-other">
-                  <span>{t("复制或挪动")}</span>
-                  <span>
-                    {sources?.moved ?? "—"} {t("行")}
-                  </span>
-                </div>
-                <div className="commit-other">
-                  <span>{t("来源不明")}</span>
-                  <span>
-                    {sources?.unknown ?? "—"} {t("行")}
-                  </span>
-                </div>
                 <p className="commit-note">
                   {t(
                     "仅统计纳入比对的新增代码行；生成文件和过短的行不参与。来源不明不代表人工编写。",
@@ -529,19 +459,10 @@ export function CommitsPage({
                     {systemMessage(sources.coverage)}
                   </p>
                 )}
-                <details>
-                  <summary>{t("查看提交文件")}</summary>
-                  {current.files.map((f) => (
-                    <div className="commit-file" key={f.path}>
-                      <code>{f.path}</code>
-                      <span>
-                        {f.binary
-                          ? t("二进制")
-                          : `+${f.additions ?? "—"} −${f.deletions ?? "—"}`}
-                      </span>
-                    </div>
-                  ))}
-                </details>
+                <div className="commit-source-scope">
+                  <span>{t("纳入比对")} <b>{sources?.eligible ?? "—"}</b> {t("行")}</span>
+                  <span>{t("匹配到")} <b>{sources?.matched ?? "—"}</b> {t("行")}</span>
+                </div>
               </section>
               <section>
                 <h4>{t("关联依据")}</h4>

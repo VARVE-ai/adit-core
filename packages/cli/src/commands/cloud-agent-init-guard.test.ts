@@ -31,6 +31,7 @@ vi.mock("@varveai/adit-core", () => ({
   projectNameFromRoot: mocks.projectNameFromRoot,
   readWorkspaceManifest: mocks.readWorkspaceManifest,
   resolveLocalProject: mocks.resolveLocalProject,
+  projectRuntimeDirectory: (id: string) => join(tmpdir(), "adit-test-runtime", id),
 }));
 
 vi.mock("@varveai/adit-cloud", () => {

@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
-import { copyFileSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -25,9 +25,14 @@ it.skipIf(process.getuid?.()===0)("runs npm postinstall to update Skills and rep
   const setup=async()=>{
     writeFileSync(join(packageDir,"package.json"),JSON.stringify({name:"adit-installation-test",version:`1.0.${++version}`,type:"module",scripts:{postinstall:"node install-skill.cjs"}}));
     const installEnv={...env,CI:"false",ADIT_DEFER_INSTALL_SETUP:"",npm_config_ignore_scripts:"false",npm_config_foreground_scripts:"true"};
-    const packed=await exec("npm",["pack",packageDir,"--ignore-scripts","--json","--pack-destination",root,"--cache",join(root,"cache")],{env:installEnv,timeout:30000});
+    // Windows npm is a .cmd shim; invoke its JavaScript entry without a shell.
+    const npmCli=process.platform==="win32"?[dirname(process.execPath),...(process.env.PATH||"").split(delimiter)]
+      .map(directory=>join(directory,"node_modules/npm/bin/npm-cli.js")).find(existsSync):undefined;
+    if(process.platform==="win32"&&!npmCli)throw new Error("Cannot locate npm's JavaScript entry for the installation test");
+    const npm=(args:string[])=>exec(npmCli?process.execPath:"npm",npmCli?[npmCli,...args]:args,{env:installEnv,timeout:30000,windowsHide:true});
+    const packed=await npm(["pack",packageDir,"--ignore-scripts","--json","--pack-destination",root,"--cache",join(root,"cache")]);
     const tarball=join(root,JSON.parse(packed.stdout)[0].filename);
-    return exec("npm",["install","--global","--prefix",join(root,"prefix"),"--cache",join(root,"cache"),"--no-audit","--no-fund",tarball],{env:installEnv,timeout:30000});
+    return npm(["install","--global","--prefix",join(root,"prefix"),"--cache",join(root,"cache"),"--no-audit","--no-fund",tarball]);
   };
   const cli=(...args:string[])=>exec(process.execPath,[fileURLToPath(new URL("../dist/index.js",import.meta.url)),...args],{env,timeout:30000});
   const info=()=>JSON.parse(readFileSync(join(data,"daemon.json"),"utf8")) as {url:string;instance:string;token:string};

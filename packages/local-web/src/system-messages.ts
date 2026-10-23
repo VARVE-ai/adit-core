@@ -1,6 +1,8 @@
 // Local service messages can come from saved jobs as well as new requests.
 // Translate these known messages at display time, keeping paths and details intact.
 export const systemMessages: Record<string, string> = {
+  "未检测到 Git 仓库，无法创建项目或开始整理。请选择包含 Git 仓库的目录。": "No Git repository found. Select a directory containing a Git repository to create the project or start organizing.",
+  "正在检查 Git 仓库…": "Checking Git repositories…",
   "未安装 GitHub 命令行工具，请安装并登录，或手动输入令牌。": "GitHub CLI is not installed. Install it and sign in, or enter a token manually.",
   "无法读取本机 GitHub 账号，请通过 GitHub 命令行工具登录 github.com 后重试。": "Could not read the local GitHub account. Sign in to github.com with GitHub CLI and try again.",
   "本机 GitHub 凭据不可用，请重新登录或手动输入令牌。": "The local GitHub credential is unavailable. Sign in again or enter a token manually.",

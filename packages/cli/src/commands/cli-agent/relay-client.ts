@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { loadConfig, recordAgentRuntime } from "@varveai/adit-core";
+import { resolveLocalProject, projectRuntimeDirectory, recordAgentRuntime } from "@varveai/adit-core";
 import { CLI_VERSION } from "../../version.js";
 import type {
   CliAgentConnectionState,
@@ -133,8 +133,8 @@ export class CliAgentRelayWebSocket {
     if (this.intentionalClose) return;
     if (!this.stopRuntimeRecord) {
       try {
-        const config = loadConfig(this.opts.register.projectRoot);
-        if (config.initialization === "initialized") this.stopRuntimeRecord = recordAgentRuntime(config.dataDir, CLI_VERSION);
+        const config = resolveLocalProject({path:this.opts.register.projectRoot});
+        this.stopRuntimeRecord = recordAgentRuntime(projectRuntimeDirectory(config.projectId), CLI_VERSION);
       }
       catch { /* Local diagnostics are optional. */ }
     }

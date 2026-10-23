@@ -64,9 +64,14 @@ export function deleteProjectData(db: Database.Database, workspace: LocalWorkspa
   for (const table of ["adit_local_cloud_sessions","adit_local_cloud_receipts"])
     remove(table,"scope IN (SELECT id FROM adit_local_cloud_scopes WHERE workspace_id=?)",workspace.id);
 
+  // Delete results before their calls. Otherwise ON DELETE SET NULL rewrites
+  // large result bodies which the same operation immediately deletes again.
+  // Results in retained sessions still follow the normal FK behavior.
+  for (const s of plan.sessions)
+    remove("adit_history_tool_results","provider=? AND session_id=?",s.provider,s.id);
   for (const s of plan.sessions) {
     remove("adit_history_secret_dispositions","finding_id IN (SELECT id FROM adit_history_secret_findings WHERE provider=? AND session_id=?)",s.provider,s.id);
-    // Foreign-key cascades remove messages, blocks, FTS entries, turns, usage,
+    // Foreign-key cascades remove messages, blocks, turns, usage,
     // source references, edit overrides, findings and command evidence.
     remove("adit_history_sessions","provider=? AND id=?",s.provider,s.id);
   }
@@ -93,6 +98,7 @@ export function deleteProjectData(db: Database.Database, workspace: LocalWorkspa
       plan.roots.some(root=>row.key===`repository-info:${process.platform==="win32"?root.toLowerCase():root}`)) remove("adit_local_settings","key=?",row.key);
   }
   remove("adit_local_jobs","json_extract(data,'$.workspaceId') IN (?,?)",workspace.id,workspace.path);
+  remove("adit_local_cloud_link_cache","project_id=?",workspace.id);
   remove("adit_local_workspaces","id=?",workspace.id);
   return { sharedSessions:plan.sharedSessions, sharedRepositories:plan.sharedRepositories };
 }

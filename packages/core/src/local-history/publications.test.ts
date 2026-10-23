@@ -218,15 +218,15 @@ it("retains unmatched commits, distinguishes writer from submitter and snapshots
   db.prepare("INSERT INTO adit_attribution_runs(id,workspace_id,algorithm_version,input_fingerprint,status,started_at) VALUES (?,?,1,'x','done',1)").run("run", w.id);
   db.prepare("INSERT INTO adit_attribution_commits VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run("run", root, a, "claude", "original-session-12345", null, null, "sha", a, 10, 2, 7, 1, 0, 1, 1);
   db.prepare("INSERT INTO adit_attribution_commits VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run("run", root, b, null, null, null, null, null, null, 2, 0, 0, 0, 0, 0, 2);
-  db.prepare("INSERT INTO adit_attribution_lines VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run("line", "run", root, a, "src/a.ts", 1, 0, "h", "certain", "codex", "writer", null, "exact", null);
-  db.prepare("INSERT INTO adit_attribution_candidates VALUES (?,?,?,?,?,?,?)").run("line", "claude", "alternative", "evidence", 1, 0, 0);
+  db.prepare("INSERT INTO adit_attribution_writers VALUES (?,?,?,?,?,?,?,?,?)").run("run", root, a, "codex", "writer", "src/a.ts", 7, 1, 0);
+  db.prepare("INSERT INTO adit_attribution_alternatives VALUES (?,?,?,?,?,?,?,?,?,?)").run("run", root, a, "codex", "writer", "claude", "alternative", 0, 1, 0);
   const scope: PrScope = { repository: root, kind: "commits", head: null, base: null, headSha: null, baseSha: null, mergeBase: null, author: "me@example.org", digest: "scope", commits: [
     { sha: a, subject: "first", included: true, reason: null }, { sha: b, subject: "second", included: true, reason: null }, { sha: merge, subject: "merge", included: false, reason: "merge" },
   ] };
   const pr = new LocalPrDescriptions(db), result = pr.generate(w, scope, {});
   expect(result.summary).toMatchObject({ commits: 2, sessions: 2, unmatched: 1, excludedMerges: 1, lines: { eligible: 12, certain: 7, likely: 1, moved: 1, unknown: 3 } });
   expect(result.commits[0].submitter?.provider).toBe("claude"); expect(result.commits[0].writers[0].provider).toBe("codex");
-  expect(result.commits[0].alternatives[0].sessionId).toBe("alternative");
+  expect(result.commits[0].alternatives[0]).toMatchObject({sessionId:"alternative",certain:0,likely:1,possible:0});
   expect(db.prepare("SELECT role FROM adit_pr_description_commit_sessions WHERE session_id='alternative'").get()).toEqual({ role: "alternative" });
   expect(result.markdown).toContain("| Total | 2 conversations | 8 of 12 (66.7%) | 3 (25.0%) |");
   expect(result.markdown).toContain("No submitting conversation found"); expect(result.markdown).toContain("not the net PR diff");
@@ -237,6 +237,30 @@ it("retains unmatched commits, distinguishes writer from submitter and snapshots
   expect(() => pr.generate(w, scope, {})).toThrow("not been analyzed");
   const pending = pr.generate(w, scope, { lines: false, assistedBy: false, aditLabel: false });
   expect(pending.summary.pending).toBe(2); expect(pending.summary.unmatched).toBe(0); expect(pending.markdown).not.toContain("Assisted-by:"); expect(pending.markdown).not.toContain("by ADIT");
+});
+it("reads original evidence turns from compact summaries when the writer is an analysis representative", () => {
+  const { w, history } = fixture(); w.repositories = [root];
+  history.write({ provider:"codex", id:"representative", cwd:root, messages:[
+    {key:"p",role:"user",content:"REPRESENTATIVE PROMPT MUST NOT BE INCLUDED",raw:{}},
+  ] });
+  const db=store.db, sha="e".repeat(40);
+  const turn=db.prepare("SELECT id FROM adit_history_turns WHERE provider='claude' AND session_id='original-session-12345' ORDER BY ordinal LIMIT 1").get() as {id:string};
+  db.prepare("INSERT INTO adit_attribution_runs(id,workspace_id,algorithm_version,input_fingerprint,status,started_at) VALUES ('run',?,4,'x','done',1)").run(w.id);
+  db.prepare("INSERT INTO adit_attribution_commits VALUES ('run',?,?,NULL,NULL,NULL,NULL,NULL,NULL,1,0,1,0,0,0,0)").run(root,sha);
+  db.prepare("INSERT INTO adit_attribution_writers VALUES ('run',?,?,'codex','representative','a.ts',1,0,0)").run(root,sha);
+  db.prepare("INSERT INTO adit_attribution_turns VALUES ('run',?,?,'claude','original-session-12345',?)").run(root,sha,turn.id);
+  const scope:PrScope={repository:root,kind:"commits",head:null,base:null,headSha:null,baseSha:null,mergeBase:null,author:"me@example.org",digest:"turn-scope",
+    commits:[{sha,subject:"change",included:true,reason:null}]};
+  const result=new LocalPrDescriptions(db).generate(w,scope,{prompts:true});
+  expect(result.commits[0].writers[0].sessionId).toBe("representative");
+  expect(result.sessions.find(s=>s.sessionId==="original-session-12345")?.rangeModels).toEqual(["model-a"]);
+  expect(db.prepare("SELECT session_id,turn_id FROM adit_pr_description_prompts WHERE description_id=?").all(result.id)).toEqual([
+    {session_id:"original-session-12345",turn_id:turn.id},
+  ]);
+  expect(result.markdown).not.toContain("UNSELECTED TURN");
+  expect(result.markdown).not.toContain("REPRESENTATIVE PROMPT MUST NOT BE INCLUDED");
+  expect(result.summary).toMatchObject({commits:1,unmatched:1,sessions:2});
+  expect(db.prepare("SELECT count(*) n FROM adit_history_sessions").get()).toEqual({n:2});
 });
 it("deduplicates request usage across native sessions and excludes child totals without merging identities", () => {
   const { w, history } = fixture(); w.repositories = [root];

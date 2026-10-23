@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { request } from "node:http";
 import { startLocalServer } from "./server.js";
-import { BROWSER_SESSION_MAX_AGE } from "./browser-sessions.js";
 import * as githubCredential from "./github-credential.js";
 import { LocalStateError } from "@varveai/adit-core";
 
@@ -12,6 +11,7 @@ let app: Awaited<ReturnType<typeof startLocalServer>>;
 let root: string;
 beforeEach(async () => {
   root = mkdtempSync(join(tmpdir(), "adit-api-test-"));
+  mkdirSync(join(root,".git"));
   // Discovery must not inspect the test runner's real agent logs.
   for (const name of [
     "CLAUDE_PROJECTS_DIR",
@@ -53,16 +53,20 @@ function api(
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
-it("imports a local GitHub account only after an authenticated explicit POST", async () => {
+it("imports a local GitHub account only after an explicit protected local POST", async () => {
   const imported = vi.spyOn(githubCredential, "importGitHubCredential").mockResolvedValue({ configured: true, account: "test-user" });
   const workspace = app.store.saveWorkspace({ path: root, providers: [] });
   const endpoint = `/workspaces/${workspace.id}/gist-credential`;
   await api("/state");
   expect((await api(endpoint)).status).toBe(405);
-  expect((await fetch(app.origin + "/api/local" + endpoint, { method: "POST" })).status).toBe(401);
+  expect((await fetch(app.origin + "/api/local" + endpoint, { method: "POST" })).status).toBe(403);
   expect((await api("/workspaces/missing/gist-credential", "POST", {})).status).toBe(404);
   expect(imported).not.toHaveBeenCalled();
-  const result = await api(endpoint, "POST", {});
+  const result = await fetch(app.origin + "/api/local" + endpoint, {
+    method: "POST",
+    headers: { origin: app.origin, "x-adit-local": "1", "content-type": "application/json" },
+    body: "{}",
+  });
   expect(result.status).toBe(200);
   expect(await result.json()).toEqual({ configured: true, account: "test-user" });
   expect(imported).toHaveBeenCalledWith(expect.anything(), workspace.id);
@@ -83,7 +87,7 @@ it("prevents concurrent credential changes or deletion while importing and unloc
   expect((await api(endpoint, "POST", {})).status).toBe(200);
 });
 it("checks directory availability on page state and repairs the path without replacing project identity",async()=>{
-  const original=join(root,"original"),moved=join(root,"moved");mkdirSync(original);
+  const original=join(root,"original"),moved=join(root,"moved");mkdirSync(join(original,".git"),{recursive:true});
   const w=app.store.saveWorkspace({path:original,providers:["codex"]});
   renameSync(original,moved);
   const state=await (await api("/state")).json() as any;
@@ -97,7 +101,7 @@ it("checks directory availability on page state and repairs the path without rep
 it("requires local authentication and validates device token input without changing the account", async () => {
   expect((await fetch(app.origin + "/api/local/account/token", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: "adit_test" }),
-  })).status).toBe(401);
+  })).status).toBe(403);
   const response = await api("/account/token", "POST", { token: "wrong_test_token" });
   expect(response.status).toBe(400);
   expect(await response.text()).not.toContain("wrong_test_token");
@@ -106,7 +110,7 @@ it("requires local authentication and validates device token input without chang
 it("authenticates achievement reads and validates workspace-scoped preferences", async () => {
   const workspace = app.store.saveWorkspace({ path: root, providers: [], repositories: [] });
   const query = `?workspaceId=${workspace.id}`;
-  expect((await fetch(app.origin + "/api/local/achievements" + query)).status).toBe(401);
+  expect((await fetch(app.origin + "/api/local/achievements" + query)).status).toBe(403);
   const response = await api("/achievements" + query);
   const data = await response.json() as { status: string; items: unknown[] };
   expect(data.status).toBe("pending"); expect(data.items).toHaveLength(8);
@@ -120,7 +124,7 @@ it("requires authenticated explicit login startup before automatic sync, includi
   const automatic = { enabled: true, mode: "automatic", interval: 5 };
   expect((await fetch(app.origin + "/api/local/startup", {
     method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true, version: 0 }),
-  })).status).toBe(401);
+  })).status).toBe(403);
   expect((await api("/workspaces", "POST", { path: root, cloud: automatic })).status).toBe(409);
   expect(app.store.workspaces()).toHaveLength(0);
   expect((await api("/startup", "PATCH", { enabled: true, version: 0 })).status).toBe(200);
@@ -169,7 +173,7 @@ it("authenticates workspace deletion, removes collected history and cancels futu
   const credential = join(secrets, `${workspace.id}.${process.platform === "win32" ? "dpapi" : "keychain"}`);
   if (process.platform === "win32") writeFileSync(credential, "test-encrypted-placeholder");
   const endpoint = `/workspaces/${workspace.id}`;
-  expect((await fetch(app.origin + "/api/local" + endpoint, { method: "DELETE" })).status).toBe(401);
+  expect((await fetch(app.origin + "/api/local" + endpoint, { method: "DELETE" })).status).toBe(403);
   expect((await api(endpoint, "DELETE", { version: workspace.version + 1 })).status).toBe(409);
   app.store.job({ id: "active", workspaceId: workspace.id, kind: "collect", status: "running" });
   expect((await api(endpoint, "DELETE", { version: workspace.version })).status).toBe(409);
@@ -198,7 +202,7 @@ it("authenticates overview, validates scope and returns real empty structured me
         app.origin + "/api/local/overview?workspaceId=" + workspace.id,
       )
     ).status,
-  ).toBe(401);
+  ).toBe(403);
   const response = await api(
     `/overview?workspaceId=${workspace.id}&range=7d&timezone=Asia%2FShanghai&year=2026`,
   );
@@ -226,7 +230,7 @@ it("authenticates overview, validates scope and returns real empty structured me
 });
 it("imports a selected local export into an explicit workspace through the authenticated API", async () => {
   const workspacePath = join(root, "import-work");
-  mkdirSync(workspacePath);
+  mkdirSync(join(workspacePath,".git"),{recursive:true});
   const created = await api("/workspaces", "POST", {
     path: workspacePath,
     name: "import target",
@@ -255,7 +259,7 @@ it("imports a selected local export into an explicit workspace through the authe
         }),
       })
     ).status,
-  ).toBe(401);
+  ).toBe(403);
   const imported = await api("/imports", "POST", {
     workspaceId: workspace.id,
     path,
@@ -267,156 +271,87 @@ it("imports a selected local export into an explicit workspace through the authe
     counts: { "claude-ai": 1 },
   });
 });
-it("requires authorization and rejects hostile Host or Origin", async () => {
-  expect((await fetch(app.origin + "/api/local/state")).status).toBe(401);
+it("opens local pages without browser cookies or a launch token", async () => {
+  const response = await fetch(app.origin + "/api/local/state", {
+    headers: { "x-adit-local": "1", "sec-fetch-site": "same-origin" },
+  });
+  expect(response.status).toBe(200);
+  expect(response.headers.get("set-cookie")).toBeNull();
+  expect(await response.json()).toMatchObject({ workspaces: [] });
+  expect(app.store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='adit_local_browser_sessions'").get()).toBeUndefined();
+  const changes = app.store.db.prepare("SELECT total_changes() n").get();
+  expect((await fetch(app.origin + "/api/local/state", {
+    headers: { "x-adit-local": "1", cookie: "adit_local=expired-cookie" },
+  })).status).toBe(200);
+  expect(app.store.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
+});
+it("rejects hostile Host, Origin, fetch metadata and requests without an intentional local header", async () => {
+  expect((await fetch(app.origin + "/api/local/state")).status).toBe(403);
   const status = await new Promise<number | undefined>((resolve, reject) => {
-    const req = request(
-      app.origin + "/api/local/state",
-      {
-        headers: {
-          host: "foreign.example",
-          authorization: `Bearer ${app.token}`,
-        },
-      },
-      (res) => {
-        res.resume();
-        resolve(res.statusCode);
-      },
-    );
-    req.on("error", reject);
-    req.end();
+    const req = request(app.origin + "/api/local/state", {
+      headers: { host: "foreign.example", authorization: `Bearer ${app.token}` },
+    }, res => { res.resume(); resolve(res.statusCode); });
+    req.on("error", reject); req.end();
   });
   expect(status).toBe(403);
-  expect(
-    (
-      await fetch(app.origin + "/api/local/session", {
-        method: "POST",
-        headers: {
-          origin: "https://foreign.example",
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ token: app.token }),
-      })
-    ).status,
-  ).toBe(403);
+  for (const headers of [
+    { origin: "https://foreign.example" },
+    { origin: "null" },
+    { "sec-fetch-site": "cross-site" },
+    { "sec-fetch-site": "same-site" },
+    { origin: "http://127.0.0.1:1", authorization: `Bearer ${app.token}` },
+  ]) {
+    const response = await fetch(app.origin + "/api/local/state", {
+      headers: { "x-adit-local": "1", ...headers } as Record<string, string>,
+    });
+    expect(response.status).toBe(403);
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
+  }
+  expect((await fetch(app.origin + "/api/local/state", {
+    method: "OPTIONS", headers: { origin: "https://foreign.example", "access-control-request-headers": "x-adit-local" },
+  })).status).toBe(403);
 });
-it("handles non-ASCII invalid tokens without timingSafeEqual exceptions", async () => {
-  expect(
-    (
-      await fetch(app.origin + "/api/local/session", {
-        method: "POST",
-        headers: { origin: app.origin, "content-type": "application/json" },
-        body: JSON.stringify({ token: "\u00e9".repeat(app.token.length) }),
-      })
-    ).status,
-  ).toBe(401);
-});
-it("requires same-origin headers for cookie-authenticated writes", async () => {
-  const login = await fetch(app.origin + "/api/local/session", {
-    method: "POST",
-    headers: { origin: app.origin, "content-type": "application/json" },
-    body: JSON.stringify({ token: app.token }),
+it("allows same-origin browser writes without login and rejects cross-origin writes", async () => {
+  const input = JSON.stringify({ ...app.store.schedule(), enabled: false });
+  for (const headers of [
+    { "x-adit-local": "1" },
+    { origin: app.origin },
+    { origin: "https://foreign.example", "x-adit-local": "1" },
+  ]) {
+    expect((await fetch(app.origin + "/api/local/collection/schedule", {
+      method: "PATCH", headers: { "content-type": "application/json", ...headers } as Record<string, string>, body: input,
+    })).status).toBe(403);
+  }
+  const response = await fetch(app.origin + "/api/local/collection/schedule", {
+    method: "PATCH", headers: { origin: app.origin, "x-adit-local": "1", "content-type": "application/json" }, body: input,
   });
-  const cookie = login.headers.get("set-cookie")!.split(";")[0];
-  expect(
-    (await fetch(app.origin + "/api/local/state", { headers: { cookie } }))
-      .status,
-  ).toBe(200);
-  expect(
-    (
-      await fetch(app.origin + "/api/local/collection/run", {
-        method: "POST",
-        headers: { cookie, "content-type": "application/json" },
-        body: "{}",
-      })
-    ).status,
-  ).toBe(403);
+  expect(response.status).toBe(200);
+  expect(app.store.schedule().enabled).toBe(false);
 });
-it("preserves browser authorization across service restarts while rotating the CLI token", async () => {
+it("keeps old page startup requests compatible without issuing browser credentials", async () => {
+  const response = await fetch(app.origin + "/api/local/session", {
+    method: "POST", headers: { origin: app.origin, "x-adit-local": "1", "content-type": "application/json" },
+    body: JSON.stringify({ token: "old-launch-token" }),
+  });
+  expect(response.status).toBe(200);
+  expect(response.headers.get("set-cookie")).toBeNull();
+});
+it("allows fresh browsers after restart while keeping CLI token validation", async () => {
   const previousToken = app.token;
-  const login = await fetch(app.origin + "/api/local/session", {
-    method: "POST",
-    headers: { origin: app.origin, "content-type": "application/json" },
-    body: JSON.stringify({ token: previousToken }),
-  });
-  expect(login.status).toBe(200);
-  const header = login.headers.get("set-cookie")!;
-  expect(header).toContain("HttpOnly; SameSite=Strict");
-  expect(header).toContain(`Max-Age=${BROWSER_SESSION_MAX_AGE}`);
-  const cookie = header.split(";")[0];
-  const persisted = JSON.stringify(
-    app.store.db.prepare("SELECT * FROM adit_local_browser_sessions").all(),
-  );
-  expect(persisted).not.toContain(cookie.split("=")[1]);
   await app.close();
   app = await startLocalServer({ directory: join(root, "state") });
   expect(app.token).not.toBe(previousToken);
-  expect(
-    (await fetch(app.origin + "/api/local/state", { headers: { cookie } }))
-      .status,
-  ).toBe(200);
-  expect(
-    (
-      await fetch(app.origin + "/api/local/state", {
-        headers: { authorization: `Bearer ${previousToken}` },
-      })
-    ).status,
-  ).toBe(401);
-  expect(
-    (
-      await fetch(app.origin + "/api/local/state", {
-        headers: { cookie: "adit_local=" + "a".repeat(64) },
-      })
-    ).status,
-  ).toBe(401);
-  expect(
-    (
-      await fetch(app.origin + "/api/local/collection/run", {
-        method: "POST",
-        headers: { cookie, "content-type": "application/json" },
-        body: "{}",
-      })
-    ).status,
-  ).toBe(403);
-  const changes = app.store.db.prepare("SELECT total_changes() n").get();
-  await fetch(app.origin + "/api/local/state", { headers: { cookie } });
-  expect(app.store.db.prepare("SELECT total_changes() n").get()).toEqual(
-    changes,
-  );
-  const expiresAt = (
-    app.store.db
-      .prepare("SELECT expires_at FROM adit_local_browser_sessions")
-      .get() as { expires_at: number }
-  ).expires_at;
-  const clock = vi.spyOn(Date, "now").mockReturnValue(expiresAt);
-  try {
-    expect(
-      (await fetch(app.origin + "/api/local/state", { headers: { cookie } }))
-        .status,
-    ).toBe(401);
-  } finally {
-    clock.mockRestore();
+  expect((await fetch(app.origin + "/api/local/state", { headers: { "x-adit-local": "1" } })).status).toBe(200);
+  for (const token of [previousToken, "\u00e9".repeat(previousToken.length)]) {
+    expect((await fetch(app.origin + "/api/local/state", { headers: { authorization: `Bearer ${token}` } })).status).toBe(401);
   }
-});
-it("does not authorize browser cookies issued by a different local data directory", async () => {
-  const login = await fetch(app.origin + "/api/local/session", {
-    method: "POST",
-    headers: { origin: app.origin, "content-type": "application/json" },
-    body: JSON.stringify({ token: app.token }),
-  });
-  const cookie = login.headers.get("set-cookie")!.split(";")[0];
-  await app.close();
-  app = await startLocalServer({ directory: join(root, "other-state") });
-  expect(
-    (await fetch(app.origin + "/api/local/state", { headers: { cookie } }))
-      .status,
-  ).toBe(401);
+  expect((await api("/state")).status).toBe(200);
 });
 it("validates repository scope on create and update", async () => {
   await api("/startup", "PATCH", { enabled: true, version: 0 });
   const path = join(root, "workspace"),
     outside = join(root, "outside");
-  mkdirSync(path);
+  mkdirSync(join(path,".git"),{recursive:true});
   mkdirSync(outside);
   mkdirSync(join(outside, ".git"));
   expect(
@@ -465,7 +400,7 @@ it("rejects unsupported sources and returns no credentials", async () => {
 it("runs local collection with no external engine and deduplicates requests", async () => {
   const path = join(root, "workspace"),
     source = join(root, "source");
-  mkdirSync(path);
+  mkdirSync(join(path,".git"),{recursive:true});
   mkdirSync(source);
   vi.stubEnv("CODEX_SESSIONS_DIR", source);
   writeFileSync(
@@ -483,6 +418,7 @@ it("runs local collection with no external engine and deduplicates requests", as
   const workspace = app.store.saveWorkspace({ path, providers: ["codex"] });
   const first = app.collector.collect(workspace.id);
   expect(app.collector.collect(workspace.id).id).toBe(first.id);
+  expect(await (await api(`/jobs/${first.id}`)).json()).toMatchObject({id:first.id,kind:"collect",workspaceId:workspace.id});
   for (let i = 0; i < 100; i++) {
     const job = app.store
       .jobs<{ id: string; status: string }>()
@@ -493,4 +429,27 @@ it("runs local collection with no external engine and deduplicates requests", as
   expect(app.store.jobs<{ status: string }>()[0].status).toBe("done");
   expect(app.collector.snapshot(workspace)).toEqual({ codex: 1 });
   expect(app.store.workspace(workspace.id).started).toBe(true);
+  expect(await (await api(`/jobs/${first.id}`)).json()).toMatchObject({id:first.id,status:"done",providers:{codex:1}});
+});
+
+it("reads a specific saved job without generating whole-page state or starting collection",async()=>{
+  const job={id:"init-discovery",workspaceId:root,kind:"discover",status:"done",startedAt:new Date().toISOString(),providers:{codex:2},pending:{claude:1}};
+  app.store.job(job);
+  const snapshot=vi.spyOn(app.collector,"snapshot");
+  const collect=vi.spyOn(app.collector,"collect");
+  expect(await (await api(`/jobs/${job.id}`)).json()).toEqual(job);
+  expect((await api("/jobs/missing")).status).toBe(404);
+  expect(snapshot).not.toHaveBeenCalled();expect(collect).not.toHaveBeenCalled();
+  expect(app.store.workspaces()).toEqual([]);
+});
+
+it("rejects Git-less creation and collection, exposes the reason, and preserves old history",async()=>{
+ const path=join(root,"no-git");mkdirSync(path);
+ const response=await api("/workspaces","POST",{path,providers:["codex"]});expect(response.status).toBe(409);expect(await response.json()).toMatchObject({error:expect.stringContaining("No Git repository")});expect(app.store.workspaces()).toEqual([]);
+ expect(await (await api(`/projects/git?path=${encodeURIComponent(path)}`)).json()).toMatchObject({available:false,error:expect.stringContaining("No Git repository")});
+ mkdirSync(join(path,".git"));const created=await (await api("/workspaces","POST",{path,repositories:[]})).json() as any;
+ rmSync(join(path,".git"),{recursive:true});expect((await api(`/workspaces/${created.id}/collect`,"POST",{})).status).toBe(409);
+ expect(app.store.jobs()).toEqual([]);expect(app.store.workspace(created.id).id).toBe(created.id);
+ const state=await (await api("/state")).json() as any;expect(state.workspaces[0].git.available).toBe(false);
+ expect(existsSync(join(path,".adit"))).toBe(false);
 });

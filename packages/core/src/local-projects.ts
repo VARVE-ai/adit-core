@@ -3,6 +3,7 @@ import { statSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve } from "node:path";
 import { computeLocalRepositoryId, generateRepositoryId, resolveManifestRepositories, type LocalRepository, type ProjectManifest } from "./config/project.js";
 import { LocalStateError, type LocalWorkspace } from "./local-state.js";
+import { ATTRIBUTION_RESULT_TABLES } from "./local-history/attribution-schema.js";
 
 export const directoryUnavailable = "Workspace directory is unavailable. Update its path in Settings.";
 export function directoryAvailable(path: string): boolean {
@@ -47,6 +48,15 @@ export function projectRepositories(db: Database.Database, workspace: LocalWorks
     const row = rows.find(r => r.relative_path === rel);
     if (!row) throw new LocalStateError("Project repository identity is missing. Save the workspace in Settings.", 409);
     return { localRepositoryId: row.repository_id, relativePath: rel, path, displayName: basename(path), repositoryUrl: null, canonicalRepoKey: null };
+  });
+}
+
+/** Cloud exclusions never hide locally collected history. */
+export function projectUploadRepositories(db: Database.Database, workspace: LocalWorkspace): LocalRepository[] {
+  if (workspace.cloudDeletedAt) return [];
+  return projectRepositories(db,workspace).filter(r => {
+    const policy=workspace.repositoryPolicies?.[r.relativePath];
+    return !policy?.cloudDeletedAt && policy?.syncEnabled !== false;
   });
 }
 export function saveProjectRepositories(db: Database.Database, workspace: LocalWorkspace, manifest: ProjectManifest | null, legacyIdentity = false): void {
@@ -97,7 +107,7 @@ export function relocateProjectHistory(db: Database.Database, old: LocalWorkspac
       const columns = (db.prepare(`PRAGMA table_info(${table})`).all() as {name:string}[]).map(c => c.name);
       db.prepare(`INSERT OR IGNORE INTO ${table} SELECT ${columns.map(c => c === column ? "?" : `"${c}"`).join(",")} FROM ${table} WHERE ${column}=?`).run(to,from);
     }
-    for (const table of ["adit_attribution_commits","adit_attribution_lines"]) if (tables.has(table))
+    for (const table of ATTRIBUTION_RESULT_TABLES.map(name => `adit_attribution_${name}`)) if (tables.has(table))
       db.prepare(`UPDATE ${table} SET repository=? WHERE repository=? AND run_id IN (SELECT id FROM adit_attribution_runs WHERE workspace_id=?)`).run(to,from,old.id);
     for (const table of ["adit_pr_descriptions","adit_achievement_evidence"]) if (tables.has(table))
       db.prepare(`UPDATE ${table} SET repository=? WHERE repository=? AND workspace_id=?`).run(to,from,old.id);

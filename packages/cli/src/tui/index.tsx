@@ -1,11 +1,2 @@
-/**
- * TUI entry point — renders the Ink app.
- */
-
-import React from "react";
-import { render } from "ink";
-import { App } from "./App.js";
-
-export function launchTui(): void {
-  render(React.createElement(App));
-}
+/** The event-database TUI was replaced by the shared local workbench. */
+export async function launchTui():Promise<void>{const {serveCommand}=await import("../local/daemon.js");await serveCommand({});}

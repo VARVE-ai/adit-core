@@ -57,6 +57,7 @@ vi.mock("@varveai/adit-core", () => ({
     }
   },
   loadConfig: (...args: unknown[]) => mocks.loadConfig(...args),
+  LocalStore: class { db=mocks.openDatabase(); close(){mocks.closeDatabase(this.db);} },
   openDatabase: (...args: unknown[]) => mocks.openDatabase(...args),
   closeDatabase: (...args: unknown[]) => mocks.closeDatabase(...args),
 }));
@@ -217,22 +218,12 @@ describe("projectLinkCliHandler", () => {
   });
 
   it("stops before auth, health check, or database open when the current project is not initialized", async () => {
-    mocks.loadConfig.mockReturnValue({
-      projectType: "repo",
-      projectRoot: "/workspace/repo",
-      projectId: "",
-      dbPath: "/workspace/repo/.adit/adit.sqlite",
-      initialization: "uninitialized",
-      repositories: [],
-    });
+    mocks.loadConfig.mockImplementation(()=>{throw new Error("Project not found. Run adit init or open Settings.");});
 
     await projectLinkCliHandler({});
 
     expect(process.exitCode).toBe(1);
-    expect(textOutput(console.error)).toEqual([
-      `${stripVTControlCharacters(marks.fail)} link: ADIT is not initialized in this project`,
-      "  run adit init, then retry adit cloud link",
-    ]);
+    expect(textOutput(console.error).join(" ")).toContain("Run adit init");
     expect(mocks.loadCredentials).not.toHaveBeenCalled();
     expect(mocks.healthGet).not.toHaveBeenCalled();
     expect(mocks.openDatabase).not.toHaveBeenCalled();

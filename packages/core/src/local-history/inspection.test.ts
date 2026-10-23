@@ -334,7 +334,7 @@ it("scans tools only once, includes children, persists dispositions across sourc
     ),
   ).not.toContain(secret);
   expect(
-    JSON.stringify(db.prepare("SELECT * FROM adit_history_text_fts").all()),
+    JSON.stringify(db.prepare("SELECT adit_history_redact(text_content) FROM adit_history_blocks").all()),
   ).not.toContain(secret);
   expect(JSON.stringify(history.read("claude", "main"))).toContain(secret);
   expect(() =>
@@ -485,17 +485,16 @@ it("reuses full scans, backfills definite-only scans, retains results on cancell
   expect(inspection.read(workspace).run?.status).toBe("cancelled");
   expect(inspection.read(workspace).counts.pending).toBe(1);
 });
-it("rebuilds pre-existing unsafe search entries without modifying original evidence", async () => {
+it("keeps display masking ready without storing a search copy or changing original evidence", async () => {
   const { db, history, inspection } = fixture();
   history.write(session());
-  db.prepare("UPDATE adit_history_text_fts SET text_content=?").run(secret);
-  expect(inspection.maskReady()).toBe(false);
-  await inspection.rebuildSafeIndex();
+  await inspection.run(workspace, inspection.start(workspace));
   expect(
-    JSON.stringify(db.prepare("SELECT * FROM adit_history_text_fts").all()),
+    JSON.stringify(db.prepare("SELECT adit_history_redact(text_content) FROM adit_history_blocks").all()),
   ).not.toContain(secret);
   expect(JSON.stringify(history.read("claude", "main"))).toContain(secret);
   expect(inspection.maskReady()).toBe(true);
+  expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'adit_history_text_fts%'").all()).toEqual([]);
 });
 it("lists repeated occurrences independently, filters candidates and paginates findings", async () => {
   const { history, inspection } = fixture();

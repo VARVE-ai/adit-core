@@ -1,6 +1,17 @@
 // Chinese keys preserve the prototype copy. Only interface text belongs here;
 // native session titles, commit subjects, paths and account names are never keys.
 export const messages = {
+  "第 {0} 轮提问": "Turn {0}",
+  "前后各 1 轮问答": "1 turn before and after",
+  "提交前后的问答": "Conversation around this commit",
+  "打开第 {0} 轮提问": "Open question in turn {0}",
+  "打开第 {0} 轮回复": "Open reply in turn {0}",
+  "在会话中查看提交 {0}": "View commit {0} in the session",
+  "未找到对应轮次，可打开会话查看原始记录。": "The linked turn is unavailable. Open the session to view its history.",
+  "正在读取附近问答…": "Loading nearby conversation…",
+  "图片提问": "Image question",
+  "未记录提问正文": "No question text recorded",
+  "未记录最终回复": "No final reply recorded",
   "本地采集": "Local collection",
   "重新采集": "Collect again",
   "仅更新本机的会话与提交记录，不会上传到云端。": "Updates sessions and commits on this computer only, without uploading to the cloud.",
@@ -113,7 +124,7 @@ export const messages = {
   关闭提示: "Dismiss notification",
   无法连接本地服务: "Cannot connect to the local service",
   正在连接: "Connecting",
-  "请通过 adit serve 打开此页面。": "Open this page using adit serve.",
+  "请确认本地服务已启动，然后刷新页面。可运行 adit server 启动服务。": "Make sure the local service is running, then refresh this page. Run adit server to start it.",
   添加工作目录: "Add workspace",
   "管理这台电脑上的工作目录，选择一个目录查看和调整它的设置。":
     "Manage workspaces on this computer. Select a directory to view and adjust its settings.",

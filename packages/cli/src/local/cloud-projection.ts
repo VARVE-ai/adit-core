@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
-import { analyticsSessions, nativeConversationId, projectRepositories, submittedPromptText, redactSecrets, nativeContextKind, nativeContextSql, historyFinalReply, replyCompleted, NON_MERGE_COMMIT_SQL, type LocalStore, type LocalWorkspace } from "@varveai/adit-core";
+import { analyticsSessions, nativeConversationId, projectUploadRepositories, submittedPromptText, redactSecrets, nativeContextKind, nativeContextSql, historyFinalReply, replyCompleted, NON_MERGE_COMMIT_SQL, type LocalStore, type LocalWorkspace } from "@varveai/adit-core";
 import { branchFromCommitOutput } from "./commits.js";
 
 type Row = Record<string, any>;
@@ -35,7 +35,7 @@ export interface CloudSession { id: string; nativeId: string; provider: string; 
 
 /** Shared by upload and the read-only pending summary. Never confirm history while counting it. */
 export function cloudCommitSelection(store: LocalStore, scope: string, baseline: CloudBaseline,
-  repo: ReturnType<typeof projectRepositories>[number]) {
+  repo: ReturnType<typeof projectUploadRepositories>[number]) {
   const db = store.db;
   const boundary = baseline.repositories.find(r => r.localRepositoryId === repo.localRepositoryId);
   if (!boundary && baseline.repositories.some(r => r.legacy && r.before)) return null;
@@ -279,7 +279,7 @@ export class CloudProjection {
   *commitBatches(): Generator<{commit:Row; events:CloudEvent[]; sessions:CloudSession[]}> {
     const db=this.store.db;
     const run=db.prepare("SELECT id FROM adit_attribution_runs WHERE workspace_id=? AND status='done' ORDER BY started_at DESC LIMIT 1").get(this.workspace.id) as Row|undefined;
-    for (const repo of projectRepositories(db,this.workspace)) {
+    for (const repo of projectUploadRepositories(db,this.workspace)) {
       const selection=cloudCommitSelection(this.store,this.scope,this.baseline,repo);
       if(!selection) {
         this.warnings.add("Cloud has legacy Git history without a verified repository identity; new commits remain pending to avoid reuploading old history.");
@@ -290,8 +290,8 @@ export class CloudProjection {
         const a=run?db.prepare("SELECT * FROM adit_attribution_commits WHERE run_id=? AND repository=? AND sha=?").get(run.id,repo.path,c.sha) as Row|undefined:undefined;
         if (!a) { this.warnings.add("New commits awaiting local attribution analysis remain pending."); continue; }
         if (!iso(c.authored_at)) { this.warnings.add("Commits without a reliable timestamp remain pending."); continue; }
-        const groups=db.prepare(`SELECT provider,session_id,sum(tier='certain') certain,sum(tier='likely') likely,sum(tier='possible') possible
-          FROM adit_attribution_lines WHERE run_id=? AND repository=? AND sha=? AND provider IS NOT NULL GROUP BY provider,session_id`).all(run!.id,repo.path,c.sha) as Row[];
+        const groups=db.prepare(`SELECT provider,session_id,sum(certain_lines) certain,sum(likely_lines) likely,sum(possible_lines) possible
+          FROM adit_attribution_writers WHERE run_id=? AND repository=? AND sha=? AND provider IS NOT NULL GROUP BY provider,session_id`).all(run!.id,repo.path,c.sha) as Row[];
         const missingSource = [...groups, ...(a.submit_session_id ? [{provider:a.submit_provider,session_id:a.submit_session_id}] : [])]
           .some(g => !this.mappings.has(this.nativeKey(g.provider,g.session_id)) &&
             db.prepare("SELECT 1 FROM adit_history_turns WHERE provider=? AND session_id=? LIMIT 1").get(g.provider,g.session_id));

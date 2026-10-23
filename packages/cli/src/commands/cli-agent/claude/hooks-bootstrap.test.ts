@@ -14,7 +14,6 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   cleanupStaleClaudeCloudSettings,
-  ensurePersistentClaudeHooksInstalled,
   installClaudeHooks,
 } from "./hooks-bootstrap.js";
 
@@ -296,60 +295,3 @@ describe("cleanupStaleClaudeCloudSettings", () => {
     }
   });
 });
-
-describe("ensurePersistentClaudeHooksInstalled", () => {
-  it("installs persistent ADIT Claude hooks when missing", async () => {
-    const dir = tempDir();
-    try {
-      const installed = await ensurePersistentClaudeHooksInstalled({
-        cwd: dir,
-        aditHookBinary: "node /tmp/adit-hook",
-      });
-
-      expect(installed).toBe(true);
-      const settings = readFileSync(join(dir, ".claude", "settings.local.json"), "utf8");
-      const fixedRootArg = `--project-root-b64 ${encodeProjectRoot(dir)}`;
-
-      for (const hookType of ["prompt-submit", "stop"]) {
-        expect(settings).toContain(
-          `node /tmp/adit-hook --platform claude ${fixedRootArg} ${hookType}`,
-        );
-      }
-      expect(settings).not.toContain(` ${fixedRootArg} session-end`);
-      // notification / task-completed / subagent collection was retired
-      expect(settings).not.toContain(` ${fixedRootArg} task-completed`);
-      expect(settings).not.toContain(` ${fixedRootArg} notification`);
-      expect(settings).not.toContain(` ${fixedRootArg} subagent-start`);
-      expect(settings).not.toContain(` ${fixedRootArg} subagent-stop`);
-      expect(existsSync(join(dir, ".claude", "commands", "adit.md"))).toBe(true);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("does not duplicate persistent Claude hooks when already installed", async () => {
-    const dir = tempDir();
-    try {
-      await ensurePersistentClaudeHooksInstalled({
-        cwd: dir,
-        aditHookBinary: "node /tmp/adit-hook",
-      });
-      const installedAgain = await ensurePersistentClaudeHooksInstalled({
-        cwd: dir,
-        aditHookBinary: "node /tmp/adit-hook",
-      });
-
-      const settings = readFileSync(join(dir, ".claude", "settings.local.json"), "utf8");
-      expect(installedAgain).toBe(false);
-      // 5 hook mappings: prompt-submit, stop (Stop + StopFailure),
-      // pre-tool-use + post-tool-use (Bash working-tree snapshots)
-      expect((settings.match(/node \/tmp\/adit-hook/gu) ?? []).length).toBe(5);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-function encodeProjectRoot(projectRoot: string): string {
-  return Buffer.from(projectRoot, "utf8").toString("base64url");
-}

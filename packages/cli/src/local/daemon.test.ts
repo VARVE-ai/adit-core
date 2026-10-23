@@ -23,7 +23,7 @@ it("keeps one detached instance and resumes collection after restart without a b
   const data = join(root, "data"),
     workspace = join(root, "workspace"),
     source = join(root, "source");
-  mkdirSync(workspace);
+  mkdirSync(join(workspace,".git"),{recursive:true});
   mkdirSync(source);
   const env = {
     ...process.env,
@@ -90,13 +90,6 @@ it("keeps one detached instance and resumes collection after restart without a b
     ]);
     expect(started[0].stdout.trim()).toBe(started[1].stdout.trim());
     const originalPid = info().pid;
-    const login = await fetch(info().url + "/api/local/session", {
-      method: "POST",
-      headers: { origin: info().url, "content-type": "application/json" },
-      body: JSON.stringify({ token: info().token }),
-    });
-    expect(login.status).toBe(200);
-    const browserCookie = login.headers.get("set-cookie")!.split(";")[0];
     expect((await cli("daemon", "status")).stdout).toContain("Running:");
     await cli("daemon", "start");
     expect(info().pid).toBe(originalPid);
@@ -127,7 +120,7 @@ it("keeps one detached instance and resumes collection after restart without a b
     expect(
       (
         await fetch(info().url + "/api/local/state", {
-          headers: { cookie: browserCookie },
+          headers: { "x-adit-local": "1" },
         })
       ).status,
     ).toBe(200);

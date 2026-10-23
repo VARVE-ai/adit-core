@@ -49,7 +49,7 @@ function readCommits(store: Pick<LocalStore, "db">, w: LocalWorkspace, options: 
     WHERE c.repository IN (SELECT value FROM json_each(@repositories)) AND ${NON_MERGE_COMMIT_SQL}
       AND (@sha IS NULL OR c.sha LIKE @sha) AND (@repository IS NULL OR c.repository=@repository)
       AND (@provider IS NULL OR (a.submit_provider=@provider AND a.submit_session_id IN (SELECT value FROM json_each(@sessions)))
-        OR EXISTS(SELECT 1 FROM adit_attribution_lines l WHERE l.run_id=@run AND l.repository=c.repository AND l.sha=c.sha
+        OR EXISTS(SELECT 1 FROM adit_attribution_writers l WHERE l.run_id=@run AND l.repository=c.repository AND l.sha=c.sha
           AND l.provider=@provider AND l.session_id IN (SELECT value FROM json_each(@sessions))))`;
   const params = { run: analysis.runId, repositories: JSON.stringify(w.repositories), sha: options.sha ? options.sha + "%" : null,
     repository: options.repository ?? null, provider: options.session?.provider ?? null, sessions: JSON.stringify(options.session?.ids ?? []) };
@@ -94,7 +94,7 @@ function readCommits(store: Pick<LocalStore, "db">, w: LocalWorkspace, options: 
             : (
                 db
                   .prepare(
-                    "SELECT count(*) n FROM (SELECT provider,session_id FROM adit_attribution_lines WHERE run_id=? AND repository=? AND sha=? AND provider IS NOT NULL GROUP BY provider,session_id)",
+                    "SELECT count(*) n FROM (SELECT provider,session_id FROM adit_attribution_writers WHERE run_id=? AND repository=? AND sha=? AND provider IS NOT NULL GROUP BY provider,session_id)",
                   )
                   .get(analysis.runId, c.repository, c.sha) as Row
               ).n;

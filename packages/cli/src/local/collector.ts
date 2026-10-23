@@ -1,3 +1,4 @@
+import { assertWorkspaceGit, workspaceGitStatus } from "@varveai/adit-core";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -190,6 +191,13 @@ export class Collector {
     return this.store.jobs<CollectionJob>().map(job=>job.kind==="collect"&&["running","queued"].includes(job.status)
       ? {...job,repositoryProgress:this.repositoryProgress(job)}:job);
   }
+  job(id: string): CollectionJob {
+    const row = this.store.db.prepare("SELECT data FROM adit_local_jobs WHERE id=?").get(id) as {data:string}|undefined;
+    if (!row) throw new LocalStateError("Job not found",404);
+    const job = JSON.parse(row.data) as CollectionJob;
+    return job.kind === "collect" && ["running","queued"].includes(job.status)
+      ? {...job,repositoryProgress:this.repositoryProgress(job)} : job;
+  }
   private repositoryProgress(job:CollectionJob):NonNullable<CollectionJob["repositoryProgress"]> {
     const rows=this.store.db.prepare(`SELECT repository,count(*) AS completed,sum(matched) AS matched FROM (
       SELECT c.repository,c.sha,max(c.submit_session_id IS NOT NULL) AS matched
@@ -218,13 +226,14 @@ export class Collector {
   collect(id: string): CollectionJob {
     const w = this.store.workspace(id);
     if (!directoryAvailable(w.path)) throw new LocalStateError(directoryUnavailable,409);
+    assertWorkspaceGit(w.path);
     if (!w.providers.length && !w.repositories.length)
       throw new LocalStateError("Select at least one source or repository");
     return this.enqueue(id, "collect");
   }
   collectAll(): CollectionJob[] {
     return this.store.workspaces()
-      .filter(w => w.started && directoryAvailable(w.path) && (w.providers.length || w.repositories.length))
+      .filter(w => w.started && workspaceGitStatus(w.path).available && (w.providers.length || w.repositories.length))
       .map(w => this.collect(w.id));
   }
   private enqueue(id: string, kind: "collect" | "discover"): CollectionJob {
@@ -271,8 +280,9 @@ export class Collector {
   private async runBatch(jobs: CollectionJob[]): Promise<void> {
     // Recheck at execution time as directories can disappear after enqueueing.
     jobs = jobs.filter(job => {
-      if (directoryAvailable(this.store.workspace(job.workspaceId).path)) return true;
-      job.status="interrupted"; job.error=directoryUnavailable; job.endedAt=new Date().toISOString();
+      const git = workspaceGitStatus(this.store.workspace(job.workspaceId).path);
+      if (git.available) return true;
+      job.status="interrupted"; job.error=git.error; job.endedAt=new Date().toISOString();
       this.store.job(job);this.activeJobs.delete(`collect:${job.workspaceId}`);return false;
     });
     if (!jobs.length) return;
@@ -344,6 +354,7 @@ export class Collector {
           ? shared?.workspace ?? this.store.workspace(job.workspaceId)
           : undefined;
       const path = workspace?.path ?? job.workspaceId;
+      if (workspace) assertWorkspaceGit(path);
       if(!workspace) {
         job.phase="git";this.store.job(job);
         job.repositories=await repositories(path);

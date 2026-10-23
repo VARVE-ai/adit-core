@@ -50,6 +50,7 @@ const SessionsPage = lazy(() => import("./sessions").then(module => ({ default: 
 
 type RepositoryInfo = { path: string; count: number | null; error?: string; skipReason?: "missing-git-email" };
 type Workspace = {
+  git?: { available: boolean; error?: string };
   id: string;
   name: string;
   path: string;
@@ -429,10 +430,10 @@ export function App() {
     void (async () => {
       try {
         const hash = new URLSearchParams(location.hash.slice(1));
-        const token = hash.get("token");
-        if (token) {
-          history.replaceState(null, "", location.pathname);
-          await api("/session", "POST", { token });
+        if (hash.has("token")) {
+          hash.delete("token");
+          const fragment = hash.toString();
+          history.replaceState(null, "", location.pathname + location.search + (fragment ? `#${fragment}` : ""));
         }
         await refresh();
         if (alive) setReady(true);
@@ -698,7 +699,7 @@ export function App() {
               <Settings size={32} />
               <h2>{error ? t("无法连接本地服务") : t("正在连接")}</h2>
               {error ? (
-                <p>{t("请通过 adit serve 打开此页面。")}</p>
+                <p>{t("请确认本地服务已启动，然后刷新页面。可运行 adit server 启动服务。")}</p>
               ) : (
                 <Loader2 className="spin" />
               )}
@@ -714,7 +715,7 @@ export function App() {
           ) : isAchievements && selected ? (
             <AchievementsPage key={selected.id} workspace={selected} api={api} onOverview={() => go(`/overview/${selected.id}`)} onTab={(tab) => go(`/${tab}/${selected.id}`)} />
           ) : isCommits && selected ? (
-            <CommitsPage key={selected.id} workspace={selected} api={api} />
+            <CommitsPage key={selected.id} workspace={selected} api={api} onNavigate={go} />
           ) : isSessions && selected ? (
             <Suspense fallback={<div className="empty"><Loader2 className="spin" /></div>}>
             <SessionsPage key={selected.id} workspace={selected} api={api} revision={state.jobs.find(job=>job.workspaceId===selected.id&&job.kind==='collect'&&['done','partial'].includes(job.status))?.id} onCommit={(commit) => go(`/commits/${selected.id}?${new URLSearchParams({repository:commit.repository,sha:commit.sha})}`)} onShare={(session) => go(`/share-review/${selected.id}?${new URLSearchParams({provider:session.provider,session:session.id})}`)} />
@@ -1171,6 +1172,18 @@ function WorkspaceEditor({
       setStartupBusy(false);
     }
   };
+  const [gitCheck,setGitCheck]=useState<{path:string;pending:boolean;available:boolean;error?:string}>({path:"",pending:true,available:false});
+  useEffect(()=>{
+    let cancelled=false;
+    setGitCheck({path:form.path,pending:true,available:false});
+    if(!form.path.trim()){setGitCheck({path:form.path,pending:false,available:false});return;}
+    const timer=setTimeout(()=>void api<{available:boolean;error?:string}>(`/projects/git?path=${encodeURIComponent(form.path)}`)
+      .then(result=>{if(!cancelled)setGitCheck({...result,path:form.path,pending:false});})
+      .catch(error=>{if(!cancelled)setGitCheck({path:form.path,pending:false,available:false,error:error instanceof Error?error.message:String(error)});}),150);
+    return()=>{cancelled=true;clearTimeout(timer);};
+  },[form.path,state.jobs.length,workspace?.directoryAvailable,workspace?.git?.available,workspace?.git?.error]);
+  const gitBlocked=gitCheck.path!==form.path||gitCheck.pending||!gitCheck.available;
+  const gitHint=gitCheck.pending?systemMessage("Checking Git repositories…"):gitCheck.error?systemMessage(gitCheck.error):"";
   const [discovery, setDiscovery] = useState("");
   const discoverySelection = useRef({id:"",repositories:false,providers:false,choices:new Map<string,boolean>()});
   const [providerLimit, setProviderLimit] = useState(6);
@@ -1261,6 +1274,7 @@ function WorkspaceEditor({
     setDiscovery(result.id);
   };
   const save = async (collect = false, navigate = true) => {
+    if(gitBlocked)throw new Error(gitCheck.error || "Git repository check is not complete");
     const result = await api<Workspace>(
       fresh ? "/workspaces" : `/workspaces/${form.id}`,
       fresh ? "POST" : "PATCH",
@@ -1293,6 +1307,7 @@ function WorkspaceEditor({
     : account.auth === "expired" ? t("云端登录已失效，请重新登录。")
     : account.auth !== "valid" ? t("请先连接云端账号。")
     : fresh && (!form.name.trim() || !form.path.trim()) ? t("请先填写工作目录的名称和路径。")
+    : gitBlocked ? gitHint || systemMessage("Checking Git repositories…")
     : fresh && !form.providers.length && !form.repositories.length ? t("请至少选择一个 Git 仓库或会话来源。")
     : fresh && ["queued", "running"].includes(job?.status || "") ? t("请等待发现完成后再同步。")
     : workspace?.directoryAvailable === false ? t("工作目录不可用，请在设置中更新目录。") : "";
@@ -1362,7 +1377,7 @@ function WorkspaceEditor({
         {editing && workspace?.started && (
           <button
             className="primary"
-            disabled={!form.path || !form.name.trim() || collectionRunning}
+            disabled={!form.path || !form.name.trim() || collectionRunning || gitBlocked}
             onClick={() => void act(async () => { await save(); })}
           >
             {t("保存")}
@@ -1450,6 +1465,7 @@ function WorkspaceEditor({
           <div className={`selection-summary${showCollectionProgress?" collection-summary":""}`}>
             {showCollectionProgress?<><span>{t("比对 {0} 个仓库的提交来源",form.repositories.length)}</span><span>{progressCount(repositorySummary,"commits")}</span></>:<>{form.repositories.length} {t("个已选")}</>}
           </div>
+          {gitHint && <p role="status" className="muted">{gitHint}</p>}
           {knownRepos.length ? (
             (showCollectionProgress?knownRepos.filter(r=>form.repositories.includes(r.path)||r.skipReason):knownRepos).map((r) => (
               <label className={`selection-row repository-row${showCollectionProgress?" collection-item":""}`} key={r.path}>
@@ -1779,6 +1795,7 @@ function WorkspaceEditor({
           <button
             className="primary"
             disabled={
+              gitBlocked ||
               !form.path ||
               !form.name.trim() ||
               (!form.providers.length && !form.repositories.length) ||
