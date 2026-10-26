@@ -437,46 +437,6 @@ export function CommitsPage({
                   <span>{t("匹配到")} <b>{sources?.matched ?? "—"}</b> {t("行")}</span>
                 </div>
               </section>
-              <section>
-                <h4>{t("关联依据")}</h4>
-                <div className="commit-basis">
-                  <span>{t("提交会话")}</span>
-                  {current.record ? (
-                    <>
-                      <em>
-                        {current.record.method === "hash"
-                          ? t("编号一致")
-                          : current.record.method === "subject_time"
-                            ? t("说明与时间相近")
-                            : t("历史编号变更")}
-                      </em>
-                      <span>
-                        {current.record.method === "hash"
-                          ? t(
-                              "会话中的提交编号与仓库记录 {0} 一致。",
-                              current.sha.slice(0, 7),
-                            )
-                          : current.record.method === "subject_time"
-                            ? t("提交说明相同，提交操作时间与仓库记录相近。")
-                            : t(
-                                "提交说明相同，原编号 {0} 已不在当前提交历史中。",
-                                current.record.matchedSha || "—",
-                              )}
-                      </span>
-                    </>
-                  ) : (
-                    <span>{t("尚无可用的提交操作匹配依据。")}</span>
-                  )}
-                </div>
-                <div className="commit-basis">
-                  <span>{t("代码来源")}</span>
-                  <span>
-                    {t(
-                      "按写入内容匹配；逐字匹配、多个候选和近似匹配分别标注，不用提交编号判断代码来源。",
-                    )}
-                  </span>
-                </div>
-              </section>
             </>
           ) : (
             <p className="commits-empty">{t("选择提交查看详情")}</p>

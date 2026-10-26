@@ -61,8 +61,9 @@ function readCommits(store: Pick<LocalStore, "db">, w: LocalWorkspace, options: 
       executions = submissionExecutions(calls, outputs);
       executionsBySession.set(key, executions);
     }
-    const execution = executions.get(call);
-    return execution && !execution.failed && !execution.ambiguous ? execution.output : "";
+    return [...executions.values()]
+      .filter(e => e.call.id === call && !e.failed && !e.ambiguous)
+      .map(e => e.output).join("\n");
   };
   const base = `FROM adit_local_commits c LEFT JOIN adit_attribution_commits a ON a.repository=c.repository AND a.sha=c.sha AND a.run_id=@run
     LEFT JOIN adit_history_sessions s ON s.provider=a.submit_provider AND s.id=a.submit_session_id

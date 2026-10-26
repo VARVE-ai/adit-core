@@ -95,7 +95,7 @@ function invocation(call: Row) {
   let source = commandOf(call);
   const name = (call.tool_name || "").replace(/^(?:tools|functions)\./, "");
   const wrapper = /^(exec|js)$/.test(name);
-  if (wrapper && /\b(?:cmd|session_id|cell_id)["']?\s*:\s*\\"/.test(source)) source = decodeEscapes(source);
+  if (wrapper && /\b(?:cmd|session_id|cell_id)(?:\\?["'])?\s*:\s*\\"/.test(source)) source = decodeEscapes(source);
   const names = wrapper ? [...source.matchAll(/\btools\.(exec_command|write_stdin|wait)\s*\(/g)].map(m => m[1]) : [name];
   const single = names.length === 1;
   const field = (key: string): any => {
@@ -116,6 +116,57 @@ function invocation(call: Row) {
 }
 
 export const submissionCommand = (call: Row) => invocation(call).command;
+
+/** Split only fully recorded, sequential text(await tools.*(...)) calls. Output
+ * order is not a command identity for parallel or arbitrary scripts. Keep the
+ * original call/turn IDs for persisted links; these steps exist only in memory.
+ * This normalization is shared by all providers and never executes log text.
+ */
+function sequentialSteps(call: Row, outputs: Row[]) {
+  const parsed = invocation(call);
+  if (parsed.single || !/^(exec|js)$/.test((call.tool_name || "").replace(/^(?:tools|functions)\./, ""))) return null;
+  const source = parsed.source;
+  let masked = source;
+  for (const literal of literals(source).reverse()) {
+    if (source[literal.start] === "`" && literal.text.includes("${")) return null;
+    masked = masked.slice(0, literal.start) + "0" + " ".repeat(literal.end - literal.start - 1) + masked.slice(literal.end);
+  }
+  const pattern = /\s*text\s*\(\s*await\s+tools\.(exec_command|write_stdin|wait)\s*\(\s*\{([^{}()]*)\}\s*\)\s*\)\s*;?/gy;
+  // Quoted keys/values are masked as zero. Reject spreads, variables, computed
+  // keys and expressions: they could change the command or printed result count.
+  const fields = /^\s*(?:(?:[a-zA-Z_$][\w$]*|0)\s*:\s*(?:-?\d+(?:\.\d+)?|true|false|null)\s*(?:,\s*|$))*$/;
+  const steps: ReturnType<typeof invocation>[] = [];
+  let end = 0, match: RegExpExecArray | null;
+  while ((match = pattern.exec(masked))) {
+    if (!fields.test(match[2])) return null;
+    const script = source.slice(match.index, pattern.lastIndex);
+    steps.push(invocation({ ...call, command_text: script, input_json: JSON.stringify(script) }));
+    end = pattern.lastIndex;
+  }
+  if (steps.length < 2 || masked.slice(end).trim()) return null;
+
+  const records: Row[] = [];
+  for (const output of outputs) {
+    if (["error", "failed"].includes(output.status) || (output.exit_code != null && output.exit_code !== 0)) return null;
+    const body = (output.content_text || "").replace(/^Script completed\r?\n(?:Wall time[^\n]*\r?\n)?Output:\s*/, "").trim();
+    let values: any[];
+    try {
+      const value = JSON.parse(body);
+      values = Array.isArray(value) ? value : [value];
+    } catch {
+      try { values = body.split(/\r?\n/).filter(Boolean).map((line: string) => JSON.parse(line)); }
+      catch { return null; }
+    }
+    for (const value of values) {
+      // Only tool envelopes delimit results. Never split JSON printed inside stdout.
+      if (!value || typeof value !== "object" || typeof value.output !== "string" ||
+        !(typeof value.exit_code === "number" || value.session_id != null || value.cell_id != null)) return null;
+      records.push({ ...output, content_text: JSON.stringify(value), exit_code: value.exit_code, status: "unknown" });
+    }
+  }
+  if (records.length !== steps.length) return null;
+  return steps.map((parsed, index) => ({ parsed, outputs: [records[index]], index }));
+}
 
 function resultState(result: Row) {
   const text = result.content_text || "";
@@ -151,31 +202,34 @@ export function submissionExecutions(calls: Row[], results: Row[]) {
   for (const r of results) { const list = byCall.get(r.tool_call_id) || []; list.push(r); byCall.set(r.tool_call_id, list); }
   const ordered = [...calls].sort((a,b) => (a.occurred_at ?? Infinity) - (b.occurred_at ?? Infinity) || (a.message_ordinal ?? 0) - (b.message_ordinal ?? 0) || (a.call_index ?? 0) - (b.call_index ?? 0) || a.id.localeCompare(b.id));
   for (const call of ordered) {
-    const parsed = invocation(call);
-    const scoped = (kind: string, id: string) => JSON.stringify([call.provider, call.session_id, kind, id]);
-    let execution: Execution | undefined;
-    if (parsed.poll) {
-      execution = active.get(scoped(parsed.poll.kind, parsed.poll.id));
-      if (!execution || call.occurred_at == null || execution.lastAt > call.occurred_at) continue;
-    } else {
-      execution = { call, command: parsed.command, cwd: parsed.cwd, output: "", pending: false, failed: false, ambiguous: false, batch: !parsed.single && /\btools\.exec_command\s*\(/.test(parsed.source), lastAt: call.occurred_at ?? Infinity, resultCount: 0 };
-      executions.set(call.id, execution);
-    }
     const outputs = (byCall.get(call.id) || []).sort((a,b) => (a.occurred_at ?? Infinity) - (b.occurred_at ?? Infinity));
-    for (const result of outputs) {
-      const state = resultState(result);
-      execution.output += "\n" + state.text;
-      execution.failed ||= state.failed;
-      execution.resultCount++;
-      execution.lastAt = result.occurred_at ?? Infinity;
-      execution.pending = state.refs.length > 0;
-      // A completed poll closes its handle; a later process may safely reuse the number.
-      if (parsed.poll) active.delete(scoped(parsed.poll.kind, parsed.poll.id));
-      for (const ref of state.refs) {
-        if (result.occurred_at == null || execution.ambiguous || execution.batch) continue;
-        const key = scoped(ref.kind, ref.id), existing = active.get(key);
-        if (existing && existing !== execution) { existing.ambiguous = execution.ambiguous = true; }
-        active.set(key, execution);
+    const split = sequentialSteps(call, outputs);
+    for (const { parsed, outputs: stepOutputs, index } of split || [{ parsed: invocation(call), outputs, index: 0 }]) {
+      const scoped = (kind: string, id: string) => JSON.stringify([call.provider, call.session_id, kind, id]);
+      const at = split && call.occurred_at != null ? Math.max(call.occurred_at, stepOutputs[0].occurred_at ?? call.occurred_at) : call.occurred_at;
+      let execution: Execution | undefined;
+      if (parsed.poll) {
+        execution = active.get(scoped(parsed.poll.kind, parsed.poll.id));
+        if (!execution || at == null || execution.lastAt > at) continue;
+      } else {
+        execution = { call, command: parsed.command, cwd: parsed.cwd, output: "", pending: false, failed: false, ambiguous: false, batch: !parsed.single && /\btools\.exec_command\s*\(/.test(parsed.source), lastAt: call.occurred_at ?? Infinity, resultCount: 0 };
+        executions.set(index ? JSON.stringify([call.id, index]) : call.id, execution);
+      }
+      for (const result of stepOutputs) {
+        const state = resultState(result);
+        execution.output += "\n" + state.text;
+        execution.failed ||= state.failed;
+        execution.resultCount++;
+        execution.lastAt = result.occurred_at ?? Infinity;
+        execution.pending = state.refs.length > 0;
+        // A completed poll closes its handle; a later process may safely reuse the number.
+        if (parsed.poll) active.delete(scoped(parsed.poll.kind, parsed.poll.id));
+        for (const ref of state.refs) {
+          if (result.occurred_at == null || execution.ambiguous || execution.batch) continue;
+          const key = scoped(ref.kind, ref.id), existing = active.get(key);
+          if (existing && existing !== execution) { existing.ambiguous = execution.ambiguous = true; }
+          active.set(key, execution);
+        }
       }
     }
   }

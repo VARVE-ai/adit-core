@@ -1028,3 +1028,48 @@ it("repairs cached missing submissions from late async results without changing 
   expect(store.db.prepare("SELECT total_changes() n").get()).toEqual(changes);
   expect(store.db.pragma("foreign_key_check")).toEqual([]);
 });
+
+it.each(["codex", "claude", "deepseek-harness"].flatMap(provider => [false, true].map(pending => ({provider, pending}))))(
+  "repairs mixed-operation submission links and preserves provenance: %j", async ({provider, pending}) => {
+    const {sha, now, workspace, history} = fixture();
+    const selected = store.saveWorkspace({...workspace, providers:[provider]}, workspace.id);
+    const wrap = (name: string, input: unknown) => `text(await tools.${name}(${JSON.stringify(input)}));`;
+    const output = (...items: unknown[]) => "Script completed\nWall time 0.2 seconds\nOutput:\n\n" + items.map(item => JSON.stringify(item)).join("\n");
+    const success = {exit_code:0, output:`[feature/fixture ${sha.slice(0,7)}] fixture`};
+    const failure = {exit_code:1, output:"configuration not set"};
+    const script = wrap("write_stdin", {session_id:59492,chars:""}) + "\n" + wrap("exec_command", {cmd:'git commit -m "fixture"',workdir:root});
+    const messages: any[] = [
+      {key:"u",role:"user",timestamp:new Date(now-3000).toISOString(),content:"Commit only these changes",raw:{}},
+      {key:"write",role:"assistant",timestamp:new Date(now-2000).toISOString(),raw:{},content:[{type:"tool_use",id:"write",name:"Write",input:{file_path:join(root,"code.ts"),content:"export const originalValue = 123;"}}]},
+      {key:"start",role:"assistant",timestamp:new Date(now-1000).toISOString(),raw:{},content:[{type:"tool_use",id:"batch",name:"exec",input:script}]},
+      {key:"result",role:"tool",timestamp:new Date(now).toISOString(),raw:{},content:[{type:"tool_result",tool_use_id:"batch",content:output(failure,pending ? {session_id:7711,output:""} : success)}]},
+    ];
+    history.write({provider,id:"mixed-submitter",cwd:root,messages});
+    await analyzeAttribution(store, selected);
+    if (pending) {
+      expect(queryCommits(store,selected).commits[0].record).toBeNull();
+      messages.push(
+        {key:"u2",role:"user",timestamp:new Date(now+1000).toISOString(),content:"Check completion",raw:{}},
+        {key:"poll",role:"assistant",timestamp:new Date(now+2000).toISOString(),raw:{},content:[{type:"tool_use",id:"poll",name:"exec",input:wrap("write_stdin",{session_id:7711,chars:""})+"\n"+wrap("exec_command",{cmd:"git config --get core.hooksPath",workdir:root})}]},
+        {key:"done",role:"tool",timestamp:new Date(now+3000).toISOString(),raw:{},content:[{type:"tool_result",tool_use_id:"poll",content:output(success,failure)}]},
+      );
+      history.write({provider,id:"mixed-submitter",cwd:root,messages});
+    } else {
+      expect(queryCommits(store,selected).commits[0].record).toMatchObject({provider,method:"hash"});
+      // Simulate a saved result produced by the old all-or-nothing parser.
+      store.db.prepare("UPDATE adit_attribution_commits SET submit_provider=NULL,submit_session_id=NULL,submit_turn_id=NULL,submit_tool_call_id=NULL,match_method=NULL,matched_sha=NULL WHERE sha=?").run(sha);
+    }
+    const before = await queryCommitSources(store,selected,root,sha);
+    expect(before.matched).toBe(1);
+    const native = JSON.stringify(history.read(provider,"mixed-submitter"));
+    renameSync(join(root,".git"),join(root,"git-unavailable"));
+    try { expect((await analyzeAttribution(store,selected)).cached).toBe(false); }
+    finally { renameSync(join(root,"git-unavailable"),join(root,".git")); }
+    expect(queryCommits(store,selected).commits[0]).toMatchObject({branch:"feature/fixture",record:{provider,sessionId:"mixed-submitter",ordinal:1,prompt:"Commit only these changes",method:"hash"}});
+    const after = await queryCommitSources(store,selected,root,sha);
+    for (const key of ["eligible","matched","unknown","sources"] as const) expect(after[key]).toEqual(before[key]);
+    expect(JSON.stringify(history.read(provider,"mixed-submitter"))).toBe(native);
+    expect((await analyzeAttribution(store,selected)).cached).toBe(true);
+    expect(store.db.pragma("foreign_key_check")).toEqual([]);
+  },
+);
