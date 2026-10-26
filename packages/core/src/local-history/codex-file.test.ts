@@ -95,7 +95,7 @@ it("ignores only an unfinished final record and reports malformed complete recor
 it("discovers Cursor's direct database without descending into unrelated extension directories",async()=>{
  const root=fixture(),path=join(root,"state.vscdb");writeFileSync(path,"");mkdirSync(join(root,...Array(15).fill("extension-cache")),{recursive:true});const paths=[];for await(const file of sourceFiles("cursor-ide",root))paths.push(file);expect(paths).toEqual([path]);const explicit=[];for await(const file of sourceFiles("cursor-ide",path))explicit.push(file);expect(explicit).toEqual([path]);
 });
-it("updates complete Cursor composers while retaining an unfinished composer's previous archive",async()=>{
+it("updates Cursor composers while retaining archived content for empty bubbles without blocking collection",async()=>{
  const root=fixture(),path=join(root,"state.vscdb"),source=new Database(path),db=new Database(":memory:");
  try{
   source.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY,value TEXT)");
@@ -104,10 +104,26 @@ it("updates complete Cursor composers while retaining an unfinished composer's p
   const history=new LocalHistory(db),sources=[{id:"cursor-ide",paths:[root]}];
   expect((await history.scan(root,sources)).counts).toEqual({"cursor-ide":2});
   set("bubbleId:complete:u",{type:1,text:"updated"});set("bubbleId:unfinished:u",{type:1,text:""});
-  const result=await history.scan(root,sources);expect(result.errors).toHaveLength(1);expect(result.updated).toBe(1);
+  const result=await history.scan(root,sources);expect(result.errors).toHaveLength(0);expect(result.updated).toBe(1);
   expect(history.session("cursor-ide","complete")?.messages[0].content).toBe("updated");
   expect(history.session("cursor-ide","unfinished")?.messages[0].content).toBe("original");
-  expect((await history.scan(root,sources)).errors).toHaveLength(1);
+  expect((await history.scan(root,sources)).errors).toHaveLength(0);
   expect(history.session("cursor-ide","unfinished")?.messages[0].content).toBe("original");
+ }finally{source.close();db.close();}
+});
+it("skips empty Cursor placeholders and collects their content after it becomes available",async()=>{
+ const root=fixture(),path=join(root,"state.vscdb"),source=new Database(path),db=new Database(":memory:");
+ try{
+  source.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY,value TEXT)");
+  const set=(key:string,value:unknown)=>source.prepare("INSERT OR REPLACE INTO cursorDiskKV VALUES (?,?)").run(key,JSON.stringify(value));
+  set("composerData:session",{workspaceIdentifier:{uri:{fsPath:root}},fullConversationHeadersOnly:[{bubbleId:"u",type:1},{bubbleId:"empty",type:2},{bubbleId:"a",type:2}]});
+  set("bubbleId:session:u",{type:1,text:"question"});set("bubbleId:session:empty",{type:2,text:"  \n"});set("bubbleId:session:a",{type:2,text:"answer"});
+  const history=new LocalHistory(db),sources=[{id:"cursor-ide",paths:[root]}];
+  expect(await history.scan(root,sources)).toMatchObject({errors:[],counts:{"cursor-ide":1}});
+  expect(history.session("cursor-ide","session")?.messages.map(message=>message.key)).toEqual(["u","a"]);
+  expect(await history.scan(root,sources)).toMatchObject({errors:[],updated:0});
+  set("bubbleId:session:empty",{type:2,text:"completed later"});
+  expect(await history.scan(root,sources)).toMatchObject({errors:[],updated:1});
+  expect(history.session("cursor-ide","session")?.messages.map(message=>message.key)).toEqual(["u","empty","a"]);
  }finally{source.close();db.close();}
 });

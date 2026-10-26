@@ -118,6 +118,7 @@ export function readCursorIDE(
   workspace: string | string[],
   signal?: AbortSignal,
   onMemberError?: (id:string,error:unknown)=>void,
+  previous?: (id:string)=>HistorySession|undefined,
 ): HistorySession[] {
   return databaseSnapshot(path, (db) => {
     if (!hasTable(db, "cursorDiskKV")) return [];
@@ -146,6 +147,7 @@ export function readCursorIDE(
       if (!cwd || !(Array.isArray(workspace) ? workspace : [workspace]).some(scope => insideDirectory(scope, cwd))) continue;
       if (!Array.isArray(data.fullConversationHeadersOnly)) continue;
       const messages: HistoryMessage[] = [];
+      let previousMessages: Map<string, HistoryMessage> | undefined;
       for (const value of data.fullConversationHeadersOnly) {
         signal?.throwIfAborted();
         const header = record(value);
@@ -168,10 +170,12 @@ export function readCursorIDE(
               : "";
         if (!role) continue;
         const tool = record(b.toolFormerData);
-        if (!string(b.text) && !Object.keys(tool).length)
-          throw new HistoryFormatError(
-            "Cursor IDE transcript contains an unfinished bubble; retry on the next collection",
-          );
+        if (!string(b.text).trim() && !Object.keys(tool).length) {
+          previousMessages ??= new Map(previous?.(id)?.messages.map(message=>[message.key,message]) ?? []);
+          const archived = previousMessages.get(key);
+          if (archived) messages.push(archived);
+          continue;
+        }
         // Composer documents contain encryption keys. Persist only transcript fields, never the document.
         const raw = {
           text: b.text,
