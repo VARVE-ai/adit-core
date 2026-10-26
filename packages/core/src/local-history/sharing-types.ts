@@ -1,6 +1,7 @@
 export type ShareOptions = {
   scope: "all" | "selected";
   turnIds: string[];
+  mode: "normal" | "focused";
   dialogue: boolean;
   commands: boolean;
   commits: boolean;
@@ -10,7 +11,7 @@ export type ShareOptions = {
   names: string[];
 };
 export const defaultShareOptions: ShareOptions = {
-  scope: "all", turnIds: [], dialogue: true, commands: true, commits: true,
+  scope: "all", turnIds: [], mode: "focused", dialogue: true, commands: false, commits: false,
   outputs: false, thinking: false, cost: false, names: [],
 };
 export type SharedCommit = { sha: string; subject: string; repository: string; files: number; additions: number | null; deletions: number | null };

@@ -57,3 +57,19 @@ export function historyFinalReply(db: Database.Database, turnId: string, hasNext
     FROM candidate`).get(turnId,turnId) as Candidate | undefined;
   if(candidate && replyCompleted(candidate.phase,candidate.stop,!!candidate.explicit,hasNextTurn,!!candidate.tool_after))return candidate;
 }
+
+/** Shared by session browsing and share previews: keep the same closing reply. */
+export function focusedReplyId(db: Database.Database, provider: string, turnId: string | null,
+  rows: Iterable<{ message_id: string; role: string; kind: string; text_length: number | null; tool_id?: unknown; native_context?: unknown }>): string | null {
+  const keepBeforeTools = ["codex", "traex", "augure-code"].includes(provider);
+  let last: string | null = null;
+  for (const row of rows) {
+    if (row.native_context) continue;
+    if (row.tool_id || /tool|function_call/.test(row.kind) || row.role === "tool") {
+      if (!keepBeforeTools) last = null;
+    } else if (row.role === "assistant" && ["text", "output_text"].includes(row.kind) && row.text_length)
+      last = row.message_id;
+  }
+  // Browsing supports older logs without explicit completion annotations.
+  return keepBeforeTools && turnId ? historyFinalReply(db, turnId, true)?.id || last : last;
+}

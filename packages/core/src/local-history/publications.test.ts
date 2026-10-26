@@ -68,8 +68,11 @@ it("shares both native segments and invalidates review when either segment chang
  const original={provider:"codex",id:"native",cwd:root,messages:[{key:"p",role:"user",content:"first part",raw:{}}]};
  const page={...original,id:"native_page",parentId:"native",relationship:"continuation" as const,messages:[{key:"p",role:"user",content:"continued part",raw:{}}]};
  history.write(original);history.write(page);
+ history.write({...original,id:"unrelated",messages:[{key:"p",role:"user",content:"UNRELATED SESSION",raw:{}}]});
+ history.write({...original,provider:"claude",messages:[{key:"p",role:"user",content:"OTHER PROVIDER",raw:{}}]});
  const draft=sharing.create(w,"codex","native");expect(draft.snapshot.promptCount).toBe(2);
  expect(draft.snapshot.turns.map(t=>t.prompt)).toEqual(["first part","continued part"]);
+ expect(draft.markdown).not.toContain("UNRELATED SESSION");expect(draft.markdown).not.toContain("OTHER PROVIDER");
  const second=sharing.create(w,"codex","native",{options:{scope:"selected",turnIds:[draft.turns[1].id]}});
  expect(second.snapshot.promptCount).toBe(1);expect(second.snapshot.turns[0].prompt).toBe("continued part");
  history.write({...page,messages:[...page.messages,{key:"p2",role:"user",content:"new question",raw:{}}]});
@@ -160,7 +163,7 @@ it("exports the complete selected turn, excludes private categories and never ex
   expect(draft.memoryActions).toBe(1);
   expect(draft.snapshot.turns[0].input).toBe(10);
   expect(sharing.list(w).total).toBe(0);
-  const withOutput = sharing.update(w, draft.id, { options: { outputs: true, thinking: true } });
+  const withOutput = sharing.update(w, draft.id, { options: { mode: "normal", outputs: true, thinking: true } });
   expect(JSON.stringify(withOutput.snapshot)).toContain("PRIVATE OUTPUT");
   expect(JSON.stringify(withOutput.snapshot)).toContain("private thought");
 });
@@ -185,6 +188,63 @@ it("skips Codex bootstrap context and derives the title from the first actual pr
   const draft = sharing.create(w, "codex", "context");
   expect(draft.snapshot.title).toBe("Please fix the app"); expect(draft.snapshot.promptCount).toBe(1);
   expect(JSON.stringify(draft.snapshot)).not.toContain("BOOTSTRAP");
+});
+it("uses the conversation title across segments and preserves a manually edited share title", () => {
+  const { w, sharing, history } = fixture();
+  const prompt = '# Files mentioned by the user:\nattachment.png\n\n## My request:\nChange the default to twelve months';
+  history.write({ provider: 'codex', id: 'titled', cwd: root, metadata: { title: 'Twelve-month statistics' }, messages: [
+    { key: 'p', role: 'user', content: prompt, raw: {} },
+  ] });
+  history.write({ provider: 'codex', id: 'page', cwd: root, parentId: 'titled', relationship: 'continuation', messages: [
+    { key: 'p2', role: 'user', content: 'Follow-up question', raw: {} },
+  ] });
+  const draft = sharing.create(w, 'codex', 'page');
+  expect(draft.snapshot.title).toBe(new LocalSessionBrowser(store.db).detail(w, 'codex', 'page').session.title);
+  expect(draft.snapshot.title).toBe('Twelve-month statistics');
+  const selected = sharing.update(w, draft.id, { title: draft.snapshot.title, options: { scope: 'selected', turnIds: [draft.turns[1].id], mode: 'focused' } });
+  expect(selected.snapshot.title).toBe(draft.snapshot.title);
+  expect(selected.snapshot.promptCount).toBe(1);
+  sharing.update(w, draft.id, { title: 'My explanation' });
+  expect(sharing.update(w, draft.id, { options: { mode: 'normal' } }).snapshot.title).toBe('My explanation');
+  history.write({ provider: 'codex', id: 'untitled', cwd: root, messages: [{ key: 'p', role: 'user', content: prompt, raw: {} }] });
+  const fallback = sharing.create(w, 'codex', 'untitled');
+  expect(fallback.snapshot.title).toBe('Change the default to twelve months');
+  expect(fallback.snapshot.turns[0].prompt).toBe(prompt);
+});
+it.each(['codex', 'claude'])('shares the same focused replies as the %s session view while keeping other switches independent', provider => {
+  const { w, sharing, history } = fixture();
+  history.write({ provider, id: 'modes', cwd: root, messages: [
+    { key: 'p', role: 'user', content: 'First question', raw: {} },
+    { key: 'progress', role: 'assistant', content: [{ type: 'text', text: 'Intermediate progress' }], raw: { payload: { phase: 'commentary' } } },
+    { key: 'tool', role: 'assistant', content: [{ type: 'tool_use', id: 'command', name: 'Bash', input: { command: 'git status' } }], raw: {} },
+    { key: 'output', role: 'tool', content: 'PRIVATE OUTPUT', raw: { tool_call_id: 'command' } },
+    { key: 'final', role: 'assistant', finalReply: true, content: [{ type: 'text', text: 'Final answer' }, { type: 'text', text: 'Second paragraph' }], raw: {} },
+    { key: 'p2', role: 'user', content: 'Second question', raw: {} },
+    { key: 'answer', role: 'assistant', content: [{ type: 'text', text: 'Last reply' }], raw: {} },
+  ] });
+  const initial = sharing.create(w, provider, 'modes');
+  expect(initial.options).toMatchObject({ mode: 'focused', dialogue: true, commands: false, commits: false, outputs: false, thinking: false, cost: false });
+  expect(initial.markdown).not.toContain('Intermediate progress');
+  expect(initial.snapshot.commandCount).toBe(0);
+  expect(initial.snapshot.commitCount).toBe(0);
+  expect(initial.snapshot.costMicrousd).toBeUndefined();
+  const all = sharing.update(w, initial.id, { options: { mode: 'normal', commands: true, commits: true } });
+  expect(all.markdown).toContain('Intermediate progress');
+  const focused = sharing.update(w, all.id, { options: { mode: 'focused', commands: false, cost: true } });
+  const browsed = new LocalSessionBrowser(store.db).detail(w, provider, 'modes', 'focused');
+  expect(focused.snapshot.turns.map(t => t.events.filter(e => e.kind === 'reply').map(e => e.text)))
+    .toEqual(browsed.turns.map(t => t.events.filter(e => e.kind === 'reply').map(e => e.text)));
+  expect(focused.markdown).not.toContain('Intermediate progress');
+  expect(focused.markdown).not.toContain('git status');
+  expect(focused.markdown).not.toContain('PRIVATE OUTPUT');
+  expect(focused.snapshot.costMicrousd).toBeNull();
+  const withCommands = sharing.update(w, all.id, { options: { commands: true, cost: false } });
+  expect(withCommands.options.mode).toBe('focused');
+  expect(withCommands.snapshot.commandCount).toBe(1);
+  expect(withCommands.markdown).toContain('git status');
+  expect(withCommands.snapshot.costMicrousd).toBeUndefined();
+  expect(sharing.update(w, all.id, { options: { mode: 'normal' } }).markdown).toContain('Intermediate progress');
+  expect(() => sharing.update(w, all.id, { options: { mode: 'invalid' as any } })).toThrow('Invalid share mode');
 });
 it("does not duplicate Codex native tool payloads as replies or leak them when commands are excluded", () => {
   const { w, sharing, history } = fixture();

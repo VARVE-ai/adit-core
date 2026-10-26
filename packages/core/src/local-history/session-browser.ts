@@ -11,7 +11,7 @@ import { sourceDefinitions } from "./sources.js";
 import { hasCodexPromptContext, promptText, promptSummary, promptImageCount } from "./prompt-summary.js";
 import { replaceTextBlock } from "./transcript-edits.js";
 import { cursorUserQuery } from "./cursor-prompt.js";
-import { nativeContextSql, historyFinalReply } from "./message-semantics.js";
+import { nativeContextSql, historyFinalReply, focusedReplyId } from "./message-semantics.js";
 import {
   sessionToolDisplay,
   type SessionToolDisplay,
@@ -807,30 +807,7 @@ export class LocalSessionBrowser {
       .all(segmentIds,provider, turnId, promptId) as Row[];
     // Determine the closing reply across the complete event index, including
     // when its body falls beyond the current page of intermediate activity.
-    const keepBeforeTools = ["codex", "traex", "augure-code"].includes(
-      provider,
-    );
-    let last: string | null = null;
-    for (const row of index) {
-      if(row.native_context)continue;
-      if (
-        row.tool_id ||
-        /tool|function_call/.test(row.kind) ||
-        row.role === "tool"
-      ) {
-        if (!keepBeforeTools) last = null;
-      } else if (
-        row.role === "assistant" &&
-        ["text", "output_text"].includes(row.kind) &&
-        row.text_length
-      )
-        last = row.message_id;
-    }
-    if(keepBeforeTools && turnId) {
-      // Browsing may show the latest unannotated reply in older logs; upload
-      // still requires completion evidence or an actual subsequent prompt.
-      last=historyFinalReply(this.db,turnId,true)?.id || last;
-    }
+    const last = focusedReplyId(this.db, provider, turnId, index as Parameters<typeof focusedReplyId>[3]);
     const closingRows = last
       ? index.filter(
           (b) =>

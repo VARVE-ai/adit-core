@@ -26,7 +26,12 @@ export function SharingPage({ workspace, api, review, onNavigate }: { workspace:
       try {
         if (review) {
           const id = query.get("draft");
-          const d = id ? await api<Detail>(endpoint(`/share-drafts/${id}`)) : await api<Detail>(endpoint("/share-drafts"), "POST", { provider: query.get("provider"), sessionId: query.get("session") });
+          let d = id ? await api<Detail>(endpoint(`/share-drafts/${id}`)) : await api<Detail>(endpoint("/share-drafts"), "POST", {
+            provider: query.get("provider"), sessionId: query.get("session"),
+          });
+          // Refresh older editable previews with the current title and visible content controls.
+          if (!d.options.mode && ["ready", "failed"].includes(d.status))
+            d = await api<Detail>(endpoint(`/share-drafts/${d.id}`), "PATCH", { options: { mode: "normal", dialogue: true, outputs: false, thinking: false } });
           accept(d); history.replaceState(null, "", `/share-review/${workspace.id}?draft=${d.id}`); setLoading(false);
         }
       } catch (e) { setError(String(e)); setLoading(false); }
@@ -74,14 +79,15 @@ export function SharingPage({ workspace, api, review, onNavigate }: { workspace:
         {detail ? <><SharedSessionView snapshot={detail.snapshot} review={review} />{review && detail.memoryActions > 0 && <p className="publication-muted share-memory-note"><LockKeyhole size={13} />{p(`写入个人记忆的 ${detail.memoryActions} 次操作已去掉，不会出现在分享页里`, `${detail.memoryActions} personal memory writes were removed and will not appear in the shared page.`)}</p>}{!review && detail.remoteUrl && <a className="share-open-gist" href={detail.viewerUrl || detail.remoteUrl} target="_blank" rel="noreferrer"><ExternalLink size={13} />{p("打开分享链接", "Open share link")}</a>}</> : <div className="publication-empty">{review ? loading ? <><Loader2 className="spin" />{p("正在检查分享内容…", "Checking share content…")}</> : p("内容检查失败，请重试", "Content check failed. Please try again.") : loading ? <Loader2 className="spin" /> : p("选择一个分享查看内容", "Select a shared session")}</div>}
       </div>
       {review && detail && options && <div className="share-settings"><div className="share-settings-scroll">
-        <section><h4>{p("标题", "Title")}</h4><input aria-label={p("标题", "Title")} value={title} maxLength={500} onChange={e => setTitle(e.target.value)} /><p className="publication-help">{p("默认用第一句提问，可以改成别人一眼能看懂的说法", "Starts with the first prompt. Give it a title others can understand at a glance.")}</p></section>
+        <section><h4>{p("标题", "Title")}</h4><input aria-label={p("标题", "Title")} value={title} maxLength={500} onChange={e => setTitle(e.target.value)} /><p className="publication-help">{p("默认使用会话标题，可以改成别人一眼能看懂的说法", "Starts with the session title. Give it a title others can understand at a glance.")}</p></section>
         <section><h4>{p("分享范围", "Share scope")}</h4><label><input type="radio" checked={options.scope === "all"} onChange={() => toggle("scope", "all")} />{p("整个会话", "Entire session")}<small>{detail.turns.length} {p("轮提问", "prompts")}</small></label><label><input type="radio" checked={options.scope === "selected"} onChange={() => setOptions({ ...options, scope: "selected", turnIds: options.turnIds.length ? options.turnIds : detail.turns.slice(0, 1).map(t => t.id) })} />{p("只分享选中的轮次", "Selected prompts only")}</label>{options.scope === "selected" && <div className="share-turn-options">{detail.turns.map(t => <label key={t.id}><input type="checkbox" checked={options.turnIds.includes(t.id)} onChange={e => toggle("turnIds", e.target.checked ? [...options.turnIds, t.id] : options.turnIds.filter(id => id !== t.id))} /><span>{t.ordinal}. {t.prompt}</span></label>)}</div>}</section>
-        <section><h4>{p("包含的内容", "Include")}</h4>{([
-          ["dialogue", p("提问和回复", "Prompts and replies"), `${detail.snapshot.promptCount} ${p("轮", "prompts")}`],
-          ["commands", p("执行过的命令", "Executed commands"), `${detail.snapshot.commandCount} ${p("条，本机信息已遮盖", "commands, local details redacted")}`],
-          ["commits", p("关联的提交", "Linked commits"), `${detail.snapshot.commitCount}`],
-          ["outputs", p("命令输出", "Command output"), p("可能含本机数据，默认不分享", "May contain local data; excluded by default")],
-          ["thinking", p("思考过程", "Thinking"), ""], ["cost", p("花费", "Cost"), p("默认不公开", "Excluded by default")],
+        <section><h4>{p("包含的内容", "Include")}</h4>
+          <label><input type="radio" name="share-dialogue-mode" checked={options.mode === "focused"} onChange={() => toggle("mode", "focused")} />{p("聚焦", "Focused")}<small>{p("每轮提问和最后回复", "Each prompt and its closing reply")}</small></label>
+          <label><input type="radio" name="share-dialogue-mode" checked={options.mode !== "focused"} onChange={() => toggle("mode", "normal")} />{p("所有提问和回复", "All prompts and replies")}<small>{detail.snapshot.promptCount} {p("轮", "prompts")}</small></label>
+          {([
+          ["commands", p("执行命令", "Executed commands"), `${detail.snapshot.commandCount} ${p("条，本机信息已遮盖", "commands, local details redacted")}`],
+          ["commits", p("关联提交", "Linked commits"), `${detail.snapshot.commitCount}`],
+          ["cost", p("花费", "Cost"), p("默认不公开", "Excluded by default")],
         ] as const).map(([key, label, hint]) => <label key={key}><input type="checkbox" checked={options[key]} onChange={e => toggle(key, e.target.checked)} />{label}<small>{hint}</small></label>)}</section>
         <section><h4>{p("自动遮盖", "Automatic redaction")}</h4>{([
           ["path", p("带用户名的本机路径", "Local paths containing usernames")], ["identifier", p("本机会话文件名和调用编号", "Local session filenames and call IDs")], ["installation", p("本机安装目录", "Local installation directories")],

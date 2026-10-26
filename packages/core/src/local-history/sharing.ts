@@ -6,7 +6,7 @@ import { analyticsSessions } from "./analytics-scope.js";
 import { conversationSegments,conversationRevision } from "./session-identity.js";
 import { LocalPrices, type CostUsage } from "./pricing.js";
 import { submittedPromptText } from "./prompt-summary.js";
-import { nativeContextSql } from "./message-semantics.js";
+import { nativeContextSql, focusedReplyId } from "./message-semantics.js";
 import { sourceDefinitions } from "./sources.js";
 import { sessionToolDisplay } from "./session-tool-display.js";
 import { PublicationPrivacy, SHARE_POLICY_VERSION, isPersonalMemoryWrite } from "./publication-privacy.js";
@@ -22,6 +22,7 @@ const textKinds = new Set(["text", "input_text", "output_text"]);
 function shareOptions(value: Partial<ShareOptions>): ShareOptions {
   const o = { ...defaultShareOptions, ...value };
   if (!["all", "selected"].includes(o.scope)) throw new LocalStateError("Invalid share scope");
+  if (!["normal", "focused"].includes(o.mode)) throw new LocalStateError("Invalid share mode");
   for (const k of ["dialogue", "commands", "commits", "outputs", "thinking", "cost"] as const)
     if (typeof o[k] !== "boolean") throw new LocalStateError("Invalid share option");
   for (const k of ["turnIds", "names"] as const)
@@ -71,13 +72,15 @@ export class LocalSharing {
       const o = shareOptions(input.options || {});
       const session = this.db.prepare("SELECT * FROM adit_history_sessions WHERE provider=? AND id=?").get(provider, sessionId) as Row;
       const segments=conversationSegments(this.db,provider,sessionId),segmentJSON=JSON.stringify(segments);
+      const conversation = this.db.prepare("SELECT title FROM adit_history_sessions WHERE provider=? AND id=?").get(provider, segments[0]) as Row;
       session.transcript_revision=conversationRevision(this.db,provider,sessionId);
       const nativeTurns = (this.db.prepare("SELECT t.* FROM adit_history_turns t JOIN json_each(?) q ON q.value=t.session_id WHERE t.provider=? ORDER BY CAST(q.key AS INTEGER),t.ordinal")
         .all(segmentJSON,provider) as Row[]).map((t,i):Row=>({...t,ordinal:i+1}));
       const calls = this.db.prepare("SELECT * FROM adit_history_tool_calls WHERE provider=? AND session_id IN (SELECT value FROM json_each(?)) ORDER BY occurred_at,call_index").all(provider, segmentJSON) as Row[];
       const ids = [...segments, ...calls.flatMap(c => [c.id, c.source_call_id]).filter(Boolean)];
       const privacy = new PublicationPrivacy(ids, o.names), choicesPrivacy = new PublicationPrivacy(ids, o.names);
-      const blocks = this.db.prepare(`SELECT b.*,m.role,m.turn_id,m.ordinal,m.id owner_id FROM adit_history_blocks b JOIN adit_history_messages m ON m.id=b.message_id JOIN json_each(?) q ON q.value=m.session_id WHERE m.provider=? AND NOT ${nativeContextSql()} ORDER BY CAST(q.key AS INTEGER),m.ordinal,b.block_index`).all(segmentJSON,provider) as Row[];
+      // Constrain the indexed message lookup before inspecting bodies; the JSON join preserves segment order.
+      const blocks = this.db.prepare(`SELECT b.*,m.role,m.turn_id,m.ordinal,m.id owner_id FROM adit_history_blocks b JOIN adit_history_messages m ON m.id=b.message_id JOIN json_each(?) q ON q.value=m.session_id WHERE m.provider=? AND m.session_id IN (SELECT value FROM json_each(?)) AND NOT ${nativeContextSql()} ORDER BY CAST(q.key AS INTEGER),m.ordinal,b.block_index`).all(segmentJSON,provider,segmentJSON) as Row[];
       const getPrompt = (turn: Row) => submittedPromptText(provider, blocks.filter(b => b.owner_id === turn.prompt_message_id).map(b=>({type:b.kind,text:b.text_content||""}))) || "";
       const turns = nativeTurns.filter(t => getPrompt(t).trim());
       const chosen = turns.filter(t => o.scope === "all" || o.turnIds.includes(t.id));
@@ -87,6 +90,7 @@ export class LocalSharing {
       const memoryIds = new Set(memoryCalls.map(c => c.id));
       const memoryMessages = new Set(memoryCalls.map(c => c.message_id));
       const nativeToolMessages = new Set(["codex", "traex", "augure-code"].includes(provider) ? calls.map(c => c.message_id) : []);
+      const toolMessages = new Set(calls.map(c => c.message_id));
       const memoryTexts: string[] = [];
       const collectMemoryText = (v: unknown) => {
         if (typeof v === "string" && v.length >= 12) memoryTexts.push(v);
@@ -110,12 +114,17 @@ export class LocalSharing {
       const usage = this.db.prepare("SELECT * FROM adit_history_usage_entries WHERE provider=? AND session_id IN (SELECT value FROM json_each(?)) AND ledger_role='canonical'").all(provider, segmentJSON) as (Row & CostUsage)[];
       let commandCount = 0;
       const exportedTurns: SharedTurn[] = chosen.map((turn, index) => {
+        const turnBlocks = blocks.filter(b => b.turn_id === turn.id && b.owner_id !== turn.prompt_message_id);
+        const focusedReply = o.mode === "focused" ? focusedReplyId(this.db, provider, turn.id, turnBlocks.map(b => ({
+          message_id: b.owner_id, role: b.role, kind: b.kind, text_length: b.text_content?.length ?? 0, tool_id: toolMessages.has(b.owner_id),
+        }))) : null;
         const u = usage.filter(v => v.turn_id === turn.id);
         const sum = (field: string) => u.length && u.every(v => v[field] != null) ? u.reduce((n, v) => n + v[field], 0) : null;
         const meta = this.db.prepare("SELECT DISTINCT model,effort FROM adit_history_messages WHERE turn_id=?").all(turn.id) as Row[];
         const events: { ordinal: number; index: number; kind: "reply" | "thinking" | "command" | "output"; text: string; name?: string; summary?: string; icon?: string }[] = [];
-        for (const b of blocks.filter(b => b.turn_id === turn.id && b.owner_id !== turn.prompt_message_id && !memoryMessages.has(b.owner_id) && !nativeToolMessages.has(b.owner_id))) {
+        for (const b of turnBlocks.filter(b => !memoryMessages.has(b.owner_id) && !nativeToolMessages.has(b.owner_id))) {
           if (b.role !== "assistant") continue;
+          if (o.mode === "focused" && (b.owner_id !== focusedReply || !["text", "output_text"].includes(b.kind))) continue;
           const thinking = ["thinking", "reasoning", "analysis"].includes(b.kind);
           if ((thinking && o.thinking) || (textKinds.has(b.kind) && o.dialogue))
             events.push({ ordinal: b.ordinal, index: b.block_index, kind: thinking ? "thinking" : "reply", text: safe(b.text_content || "", `turn.${index}.block.${b.id}`) });
@@ -142,7 +151,11 @@ export class LocalSharing {
           input: sum("uncached_input_tokens"), output: sum("output_tokens"), cache: sum("cache_read_tokens"),
           events: events.map(({ ordinal: _o, index: _i, ...event }) => event), commits: commits.filter(c => c.turn_id === turn.id).map(exportCommit) };
       });
-      const rawTitle = input.title === undefined ? getPrompt(chosen[0]).trim().split("\n")[0].slice(0, 240) : input.title;
+      const firstPrompt = getPrompt(chosen[0]).trim();
+      // Attachment envelopes are not a useful fallback title; preserve the full prompt in the share.
+      const request = ["codex", "traex", "augure-code"].includes(provider) && firstPrompt.startsWith("# Files mentioned by the user:")
+        ? firstPrompt.split(/\r?\n## My request:\s*\r?\n/)[1]?.trim() || firstPrompt : firstPrompt;
+      const rawTitle = input.title === undefined ? conversation.title?.trim().slice(0, 500) || request.split(/\r?\n/)[0].slice(0, 240) : input.title;
       if (typeof rawTitle !== "string" || !rawTitle.trim() || rawTitle.length > 500) throw new LocalStateError("A share title of 1–500 characters is required");
       const snapshot: ShareSnapshot = { schemaVersion: 1, title: safe(rawTitle.trim(), "title"), agent: sourceDefinitions().find(p => p.id === provider)?.name || provider,
         provider, models: [...new Set(exportedTurns.flatMap(t => t.models))], date: chosen[0].started_at, promptCount: chosen.length,
@@ -185,7 +198,7 @@ export class LocalSharing {
     const r = this.record(w, id);
     const review = JSON.parse(r.review_json), previous = JSON.parse(r.snapshot_json) as ShareSnapshot;
     const wasCustom = review.titleCustom ?? (r.title !== previous.turns[0]?.prompt?.trim().split("\n")[0].slice(0, 240));
-    // Default titles follow the first selected prompt; an excluded prompt must not leak through the title.
+    // Keep custom titles; otherwise use the conversation title, falling back to a selected prompt.
     const title = input.title !== undefined && input.title !== r.title ? input.title : wasCustom ? r.title : undefined;
     return this.create(w, r.provider, r.session_id, { title, options: { ...JSON.parse(r.options_json), ...input.options } }, id);
   }
