@@ -219,6 +219,10 @@ it("authenticates overview, validates scope and returns real empty structured me
   });
   expect(data.activity.hours).toHaveLength(24);
   expect(data.activity.days).toHaveLength(365);
+  const recent = await api(`/overview?workspaceId=${workspace.id}&activityRange=12m&timezone=UTC`);
+  expect(recent.status).toBe(200);
+  expect((await recent.json() as any).scope.activityRange).toBe("12m");
+  expect((await api(`/overview?workspaceId=${workspace.id}&activityRange=invalid`)).status).toBe(400);
   expect(
     (await api(`/overview?workspaceId=${workspace.id}&range=invalid`)).status,
   ).toBe(400);

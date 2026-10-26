@@ -9,6 +9,7 @@
     "icons:prepare": "node scripts/prepare-agent-icons.mjs public/agent-icons.svg src/agent-brands.generated.ts"
   },
   "dependencies": {
+    "badge-maker": "6.0.0",
     "fflate": "^0.8.3",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",

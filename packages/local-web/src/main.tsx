@@ -730,6 +730,7 @@ export function App() {
               onAchievements={() => go(`/achievements/${selected.id}`)}
               onInspection={() => go(`/inspection/${selected.id}`)}
               onProfileCards={() => go(`/profile-cards/${selected.id}`)}
+              onNavigate={go}
             />
           ) : (
             <fieldset

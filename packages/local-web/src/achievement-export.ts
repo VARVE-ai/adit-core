@@ -1,3 +1,4 @@
+import { makeBadge } from "badge-maker";
 import type {
   AchievementsData,
   AchievementItem,
@@ -173,10 +174,13 @@ export function badgeSvg(
   const title = `${name} · ${level} · ${detail}`;
   const font = "system-ui,Segoe UI,Arial,sans-serif";
   if (style === "plain") {
-    const left = Math.ceil(width(name) + 42),
-      right = Math.ceil(width(detail) + 24),
-      w = left + right;
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="20" viewBox="0 0 ${w} 20" role="img"><title>${xml(title)}</title><clipPath id="r"><rect width="${w}" height="20" rx="3"/></clipPath><g clip-path="url(#r)"><path fill="#292929" d="M0 0h${left}v20H0z"/><path fill="#c67400" d="M${left} 0h${right}v20H${left}z"/></g><g font-family="${font}" font-size="11"><text x="7" y="14" fill="#e2e8f0" font-size="9">{&gt;&lt;}</text><text x="34" y="14" fill="#ffffff">${xml(name)}</text><text x="${left + 12}" y="14" fill="#ffffff">${xml(detail)}</text></g></svg>`;
+    return makeBadge({
+      label: `{><} ${name}`,
+      message: detail,
+      labelColor: "#383326",
+      color: "#bf9749",
+      style: "flat",
+    });
   }
   const lines = [detail];
   if (width(detail) * 1.5 > 282) {
@@ -211,31 +215,13 @@ export function badgeSvg(
 }
 export const svgUrl = (svg: string) =>
   "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
-export const readmeCode = (items: AchievementItem[], format: "png" = "png") =>
+export const readmeCode = (items: AchievementItem[]) =>
   items
     .slice(0, 1)
     .map(
-      (i) => `![${ruleFor(i.key).name}](.github/adit/achv-${i.key}.${format})`,
+      (i) => `![${ruleFor(i.key).name}](.github/adit/achv-${i.key}.svg)`,
     )
     .join("\n");
-export async function pngBytes(svg: string): Promise<Uint8Array> {
-  const img = new Image();
-  img.src = svgUrl(svg);
-  await img.decode();
-  const canvas = document.createElement("canvas");
-  canvas.width = img.width * 2;
-  canvas.height = img.height * 2;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("Canvas unavailable");
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-  const blob = await new Promise<Blob>((resolve, reject) =>
-    canvas.toBlob(
-      (b) => (b ? resolve(b) : reject(new Error("PNG unavailable"))),
-      "image/png",
-    ),
-  );
-  return new Uint8Array(await blob.arrayBuffer());
-}
 export async function achievementDownload(
   data: AchievementsData,
   expectedKey: AchievementKey,
@@ -243,12 +229,11 @@ export async function achievementDownload(
   const items = data.items.filter((i) => i.tier && i.options.selected);
   if (data.status !== "ready" || items.length !== 1 || items[0].key !== expectedKey)
     throw new Error("No current unlocked selection");
-  const bytes = await pngBytes(badgeSvg(data, items[0]));
-  const blob = new Blob([new Uint8Array(bytes)], { type: "image/png" });
+  const blob = new Blob([badgeSvg(data, items[0])], { type: "image/svg+xml;charset=utf-8" });
   const url = URL.createObjectURL(blob),
     link = document.createElement("a");
   link.href = url;
-  link.download = `achv-${items[0].key}.png`;
+  link.download = `achv-${items[0].key}.svg`;
   document.body.append(link);
   link.click();
   link.remove();

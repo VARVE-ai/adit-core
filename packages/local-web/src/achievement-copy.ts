@@ -53,8 +53,8 @@ export const achievementCopy = {
   请选择已解锁的成就: "Select an unlocked achievement first",
   "将下载的图片放到项目的 .github/adit/ 目录，再粘贴下面的代码。":
     "Place the downloaded images in your project's .github/adit/ folder, then paste the code below.",
-  "导出选中的成就，格式为 PNG。":
-    "Export the selected achievement as PNG.",
+  "导出选中的成就，格式为 SVG。":
+    "Export the selected achievement as SVG.",
   导出格式: "Export format",
   "第 {0} 级，三级是 {1}": "Level {0}; thresholds: {1}",
   "尚未解锁；三级是 {0}": "Locked; thresholds: {0}",

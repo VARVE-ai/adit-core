@@ -252,7 +252,7 @@ export async function startLocalServer(
         }
         if (route === "/overview" && req.method === "GET") {
           const workspace=store.workspace(url.searchParams.get("workspaceId")||"");
-          const query={range:url.searchParams.get("range")||"all",provider:url.searchParams.get("provider")||"all",year:url.searchParams.has("year")?Number(url.searchParams.get("year")):undefined,timezone:url.searchParams.get("timezone")||undefined};
+          const query={range:url.searchParams.get("range")||"all",provider:url.searchParams.get("provider")||"all",year:url.searchParams.has("year")?Number(url.searchParams.get("year")):undefined,activityRange:url.searchParams.get("activityRange")||undefined,timezone:url.searchParams.get("timezone")||undefined};
           const data=overviewService?await overviewService.query(workspace,query):analytics.overview(workspace,query);
           data.costs.prices.error=analytics.prices.status().error;
           return json(res,data);

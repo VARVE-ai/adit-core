@@ -50,6 +50,7 @@ export class LocalAnalytics {
       range?: string;
       provider?: string;
       year?: number;
+      activityRange?: string;
       timezone?: string;
       now?: number;
     } = {},
@@ -71,6 +72,7 @@ export class LocalAnalytics {
       options.range || "all",
       options.provider || "all",
       options.year ?? Number(today.slice(0, 4)),
+      options.activityRange || "year",
       zone,
       today,
     ]);
@@ -118,6 +120,7 @@ export class LocalAnalytics {
       range?: string;
       provider?: string;
       year?: number;
+      activityRange?: string;
       timezone?: string;
       now?: number;
     },
@@ -139,6 +142,16 @@ export class LocalAnalytics {
       year = options.year ?? Number(today.slice(0, 4));
     if (!Number.isInteger(year) || year < 1970 || year > 9998)
       throw new LocalStateError("Invalid year");
+    const activityRange = options.activityRange || "year";
+    if (!["year", "12m"].includes(activityRange))
+      throw new LocalStateError("Invalid activity range");
+    // Include the current calendar month and the preceding eleven, through today.
+    const activityFrom =
+        activityRange === "12m"
+          ? new Date(Date.UTC(Number(today.slice(0, 4)), Number(today.slice(5, 7)) - 12, 1))
+              .toISOString().slice(0, 10)
+          : `${year}-01-01`,
+      activityTo = activityRange === "12m" ? today : `${year}-12-31`;
     const from =
         range === "all"
           ? "0000-01-01"
@@ -441,7 +454,7 @@ export class LocalAnalytics {
         (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
       )[0];
       const yearDays = [];
-      for (let d = `${year}-01-01`; d <= `${year}-12-31`; d = shift(d, 1))
+      for (let d = activityFrom; d <= activityTo; d = shift(d, 1))
         yearDays.push({
           date: d,
           count: daily.get(d) || 0,
@@ -452,12 +465,20 @@ export class LocalAnalytics {
                 ? "recorded"
                 : "unknown",
         });
+      const periodBusiest = [...daily]
+        .filter(([d]) => d >= activityFrom && d <= activityTo)
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
+      const periodStart = coverageStart &&
+          (coverageStart > activityFrom ? coverageStart : activityFrom),
+        periodEnd = coverageEnd &&
+          (coverageEnd < activityTo ? coverageEnd : activityTo);
       return {
         scope: {
           workspaceId: workspace.id,
           range,
           provider,
           year,
+          activityRange,
           timezone: zone,
           from,
           to,
@@ -524,6 +545,13 @@ export class LocalAnalytics {
         },
         activity: {
           days: yearDays,
+          period: {
+            activeDays: prompts.filter((p) => p.date >= activityFrom && p.date <= activityTo).length,
+            recordDays: periodStart && periodEnd && periodStart <= periodEnd
+              ? Math.round((Date.parse(periodEnd) - Date.parse(periodStart)) / 86_400_000) + 1
+              : 0,
+            busiest: periodBusiest ? { date: periodBusiest[0], count: periodBusiest[1] } : null,
+          },
           hours,
           peakHours: hours
             .filter((h) => h.total > 0)

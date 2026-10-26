@@ -1,6 +1,6 @@
 import { strToU8 } from "fflate";
+import { makeBadge } from "badge-maker";
 import type { OverviewData } from "../../core/src/local-history/analytics";
-import { pngBytes } from "./achievement-export";
 
 export type ProfileData = OverviewData;
 export const profileItems = [
@@ -12,14 +12,24 @@ export const profileItems = [
   "badge-agents",
   "badge-model",
   "card-commits",
+  "card-sessions",
+  "card-prompts",
   "card-activity",
   "card-agents",
   "card-model",
 ] as const;
 export type ProfileItem = (typeof profileItems)[number];
+export const profileBadgePairs = [
+  ["badge-commits", "card-commits"],
+  ["badge-sessions", "card-sessions"],
+  ["badge-prompts", "card-prompts"],
+  ["badge-days", "card-activity"],
+  ["badge-agents", "card-agents"],
+  ["badge-model", "card-model"],
+] as const;
 export type ProfilePreferences = {
+  badgeStyle: "plain" | "rich";
   range: "all" | "30d";
-  language: "en" | "zh";
   show: {
     activity: boolean;
     sessions: boolean;
@@ -32,8 +42,8 @@ export type ProfilePreferences = {
 };
 export function defaultProfilePreferences(): ProfilePreferences {
   return {
+    badgeStyle: "plain",
     range: "all",
-    language: "en",
     show: {
       activity: true,
       sessions: true,
@@ -50,22 +60,39 @@ export function readProfilePreferences(raw: string | null): ProfilePreferences {
   try {
     const p = JSON.parse(raw || "null");
     if (!p || typeof p !== "object") return defaults;
-    return {
+    const selected = Array.isArray(p.selected)
+      ? profileItems.find((k) => p.selected.includes(k)) || "card"
+      : "card";
+    const badgeStyle = p.badgeStyle === "plain" || p.badgeStyle === "rich"
+      ? p.badgeStyle
+      : selected.startsWith("card-") ? "rich" : "plain";
+    return withProfileBadgeStyle({
+      badgeStyle,
       range: p.range === "30d" ? "30d" : "all",
-      language: p.language === "zh" ? "zh" : "en",
       show: Object.fromEntries(
         Object.entries(defaults.show).map(([key, value]) => [
           key,
           typeof p.show?.[key] === "boolean" ? p.show[key] : value,
         ]),
       ) as ProfilePreferences["show"],
-      selected: Array.isArray(p.selected)
-        ? [profileItems.find((k) => p.selected.includes(k)) || "card"]
-        : defaults.selected,
-    };
+      selected: [selected],
+    }, badgeStyle);
   } catch {
     return defaults;
   }
+}
+export function withProfileBadgeStyle(
+  preferences: ProfilePreferences,
+  badgeStyle: ProfilePreferences["badgeStyle"],
+): ProfilePreferences {
+  return {
+    ...preferences,
+    badgeStyle,
+    selected: preferences.selected.map((item) => {
+      const pair = profileBadgePairs.find(([plain, rich]) => item === plain || item === rich);
+      return pair ? pair[badgeStyle === "rich" ? 1 : 0] : item;
+    }),
+  };
 }
 export const xml = (text: string) =>
   text.replace(
@@ -104,11 +131,11 @@ export function profileDate(day: string | null, language: "en" | "zh" = "en") {
 export function profileStart(data: ProfileData) {
   return data.scope.range === "all" ? data.scope.first : data.scope.from;
 }
-function profileRange(data: ProfileData, language: "en" | "zh", short = false) {
+function profileRange(data: ProfileData, short = false) {
   const from = profileStart(data),
     to = data.profile.through;
   const format = (day: string, year: boolean) =>
-    new Intl.DateTimeFormat(language === "zh" ? "zh-CN" : "en-US", {
+    new Intl.DateTimeFormat("en-US", {
       timeZone: "UTC",
       month: "short",
       day: "numeric",
@@ -216,77 +243,81 @@ export function profileSvg(
   item: ProfileItem,
 ) {
   const s = data.summary,
-    p = data.profile,
-    zh = preferences.language === "zh";
-  const tr = (en: string, cn: string) => (zh ? cn : en);
+    p = data.profile;
   const linked = p.submissionAnalyzed ? number(s.linkedCommits) : "—";
   const commits = `${linked} / ${number(s.totalCommits)}`;
   const top = p.models[0];
   const agents = p.agents.map((a) => a.name).join(" · ") || "—";
-  const range = profileRange(data, preferences.language);
+  const range = profileRange(data);
   const values = {
-    commits: [tr("commits in AI sessions", "AI 会话中的提交"), commits],
-    sessions: [tr("AI sessions", "AI 会话"), number(s.sessions)],
-    prompts: [tr("AI prompts", "AI 提问"), number(s.prompts)],
-    days: [tr("AI active days", "AI 活跃天数"), number(s.activeDays)],
-    agents: [tr("AI agents", "AI Agent"), agents],
-    model: [tr("top model", "最常用模型"), top?.model || "—"],
+    commits: ["commits in AI sessions", commits],
+    sessions: ["AI sessions", number(s.sessions)],
+    prompts: ["AI prompts", number(s.prompts)],
+    days: ["AI active days", number(s.activeDays)],
+    agents: ["AI agents", agents],
+    model: ["top model", top?.model || "—"],
   };
   if (item.startsWith("badge-")) {
     const [label, value] = values[item.slice(6) as keyof typeof values];
-    const left = Math.ceil(textWidth(label, 11) + 39),
-      right = Math.ceil(textWidth(value, 11) + 16),
-      w = left + right;
-    return svg(
-      w,
-      20,
-      `${label}: ${value}`,
-      `<clipPath id="r"><rect width="${w}" height="20" rx="3"/></clipPath><g clip-path="url(#r)"><path fill="#4b5563" d="M0 0h${left}v20H0z"/><path fill="${colors.blue}" d="M${left} 0h${right}v20H${left}z"/></g>${text(7, 14, "{><}", 9, "#e2e8f0")}${text(31, 14, label, 11, "#fff")}${text(left + 8, 14, value, 11, "#fff")}`,
-    );
+    return makeBadge({
+      label: `{><} ${label}`,
+      message: value,
+      labelColor: "#4b5563",
+      color: colors.blue,
+      style: "flat",
+    });
   }
   if (item !== "card") {
     const kind = item.slice(5);
     const label =
       kind === "commits"
-        ? tr("COMMITS MADE IN AI SESSIONS", "在 AI 会话里完成的提交")
-        : kind === "activity"
-          ? tr("AI ACTIVITY", "AI 活跃度")
-          : kind === "agents"
-            ? tr("AI AGENTS USED", "用过的 AI AGENT")
-            : tr("MOST-USED MODEL", "最常用模型");
+        ? "COMMITS MADE IN AI SESSIONS"
+        : kind === "sessions"
+          ? "AI SESSIONS"
+          : kind === "prompts"
+            ? "AI PROMPTS"
+            : kind === "activity"
+              ? "AI ACTIVE DAYS"
+              : kind === "agents"
+                ? "AI AGENTS USED"
+                : "MOST-USED MODEL";
     const value =
       kind === "commits"
         ? commits
-        : kind === "activity"
-          ? `${number(s.activeDays)} ${tr("active days", "天活跃")}`
-          : kind === "agents"
-            ? agents
-            : top?.model || "—";
+        : kind === "sessions"
+          ? number(s.sessions)
+          : kind === "prompts"
+            ? number(s.prompts)
+            : kind === "activity"
+              ? `${number(s.activeDays)} active days`
+              : kind === "agents"
+                ? agents
+                : top?.model || "—";
     const secondary =
       kind === "commits"
         ? p.submissionAnalyzed
           ? pct(s.linkedCommits, s.totalCommits)
           : "—"
-        : kind === "activity"
+        : kind === "activity" || kind === "sessions"
           ? number(s.prompts)
-          : kind === "agents"
+          : kind === "prompts" || kind === "agents"
             ? number(s.sessions)
             : top
               ? pct(top.count, s.prompts)
               : "—";
     const sublabel =
       kind === "commits"
-        ? tr("of commits", "提交占比")
-        : kind === "activity"
-          ? tr("prompts", "次提问")
-          : kind === "agents"
-            ? tr("sessions", "个会话")
-            : tr("of prompts", "提问占比");
+        ? "of commits"
+        : kind === "activity" || kind === "sessions"
+          ? "prompts"
+          : kind === "prompts" || kind === "agents"
+            ? "sessions"
+            : "of prompts";
     const heat = heatmap(data, 12, 10, true),
       x = kind === "activity" ? 16 + Math.min(60, heat.width) : 56;
     const labelText =
       kind === "activity"
-        ? `${label} · ${profileRange(data, preferences.language, true).toUpperCase()}`
+        ? `${label} · ${profileRange(data, true).toUpperCase()}`
         : label;
     const valueSize = kind === "agents" ? 13 : 18;
     const contentWidth = Math.max(
@@ -315,19 +346,19 @@ export function profileSvg(
   if (show.commits)
     metrics.push([
       commits,
-      tr("commits made in AI sessions", "在 AI 会话里完成的提交"),
+      "commits made in AI sessions",
     ]);
   if (show.sessions)
     metrics.push(
-      [number(s.sessions), tr("sessions", "会话")],
-      [number(s.prompts), tr("prompts", "提问")],
+      [number(s.sessions), "sessions"],
+      [number(s.prompts), "prompts"],
     );
   if (show.activity)
-    metrics.push([number(s.activeDays), tr("active days", "活跃天数")]);
+    metrics.push([number(s.activeDays), "active days"]);
   if (show.cost)
     metrics.push([
       s.estimatedCost === null ? "—" : `$${(s.estimatedCost / 1e6).toFixed(2)}`,
-      tr("estimated cost", "折算花费"),
+      "estimated cost",
     ]);
   let body =
     text(24, 37, "{><}", 13, colors.muted) +
@@ -346,7 +377,7 @@ export function profileSvg(
   body += text(
     subX,
     37,
-    `${tr("AI-assisted development", "AI 辅助开发")} · ${p.repositories} ${tr("repositories", "个仓库")}`,
+    `AI-assisted development · ${p.repositories} repositories`,
     13,
     colors.muted,
   );
@@ -354,7 +385,7 @@ export function profileSvg(
   body += text(876 - textWidth(range, 12), rangeY, range, 12, colors.muted);
   const topY = rangeY === 57 ? 89 : 71;
   if (show.activity && profileDays(data).length) {
-    body += `<g transform="translate(0,${topY - 71})">${heat.body}${text(24, 71 + heat.height + 18, tr("Less", "少"), 10, colors.muted)}${heatColors.map((color, i) => `<rect x="${52 + i * 13}" y="${71 + heat.height + 9}" width="10" height="10" rx="2" fill="${color}"/>`).join("")}${text(120, 71 + heat.height + 18, tr("More", "多"), 10, colors.muted)}</g>`;
+    body += `<g transform="translate(0,${topY - 71})">${heat.body}${text(24, 71 + heat.height + 18, "Less", 10, colors.muted)}${heatColors.map((color, i) => `<rect x="${52 + i * 13}" y="${71 + heat.height + 9}" width="10" height="10" rx="2" fill="${color}"/>`).join("")}${text(120, 71 + heat.height + 18, "More", 10, colors.muted)}</g>`;
   }
   let x = mainX,
     y = topY + 22;
@@ -377,19 +408,16 @@ export function profileSvg(
     .map((m) => `${m.model} ${pct(m.count, s.prompts)}`);
   if (p.models.length > 3)
     modelParts.push(
-      tr(`${p.models.length - 3} others`, `其余 ${p.models.length - 3} 个`),
+      `${p.models.length - 3} others`,
     );
   if (p.unknownModelPrompts)
     modelParts.push(
-      tr(
-        `Unknown ${pct(p.unknownModelPrompts, s.prompts)}`,
-        `未知 ${pct(p.unknownModelPrompts, s.prompts)}`,
-      ),
+      `Unknown ${pct(p.unknownModelPrompts, s.prompts)}`,
     );
   for (const [enabled, label, parts] of [
     [
       show.agents,
-      tr("Agents", "Agent"),
+      "Agents",
       p.agents.map((a) => ({
         label: `${a.name} ${pct(a.count, s.prompts)}`,
         color: agentColor(a.id),
@@ -397,7 +425,7 @@ export function profileSvg(
     ],
     [
       show.models,
-      tr("Models", "模型"),
+      "Models",
       modelParts.map((label) => ({ label, color: "" })),
     ],
   ] as const)
@@ -432,22 +460,18 @@ export function profileSvg(
       ? topY + heat.height + 24
       : topY + 30,
   );
-  const footer = tr(
-    "Generated by ADIT from the author's local session history · counts the author's own commits on this machine",
-    "由 ADIT 根据作者本地会话历史生成 · 只统计作者在这台电脑上的提交",
-  );
+  const footer = "Generated by ADIT from the author's local session history · counts the author's own commits on this machine";
   body += text(24, y + 20, footer, 11, colors.muted);
   return svg(
     900,
     y + 40,
-    `${workspaceName} · ${tr("AI-assisted development", "AI 辅助开发")}`,
+    `${workspaceName} · AI-assisted development`,
     `<rect x=".5" y=".5" width="899" height="${y + 39}" rx="8" fill="${colors.bg}" stroke="${colors.border}"/>${body}`,
   );
 }
 export function profileReadme(
   preferences: ProfilePreferences,
   workspaceName: string,
-  format: "png" = "png",
 ) {
   const selected = profileItems.filter((k) => preferences.selected.includes(k)).slice(0, 1);
   const alt = xml(workspaceName).replace(/[\[\]\r\n]/g, " ");
@@ -455,18 +479,18 @@ export function profileReadme(
     .filter((k) => k.startsWith("badge-"))
     .map(
       (k) =>
-        `![${k === "badge-commits" ? "commits in AI sessions" : k.slice(6)}](.github/adit/${k}.${format})`,
+        `![${k === "badge-commits" ? "commits in AI sessions" : k.slice(6)}](.github/adit/${k}.svg)`,
     )
     .join("\n");
   const rich = selected
     .filter((k) => k.startsWith("card-"))
     .map(
       (k) =>
-        `<img src=".github/adit/${k}.${format}" height="56" alt="${k.slice(5)}">`,
+        `<img src=".github/adit/${k}.svg" height="56" alt="${k.slice(5)}">`,
     )
     .join(" ");
   const wide = selected.includes("card")
-    ? `## AI-assisted development\n\n![${alt} AI-assisted development](.github/adit/card.${format})`
+    ? `## AI-assisted development\n\n![${alt} AI-assisted development](.github/adit/card.svg)`
     : "";
   return [plain, rich, wide].filter(Boolean).join("\n\n");
 }
@@ -474,27 +498,25 @@ export async function profileFiles(
   data: ProfileData,
   name: string,
   preferences: ProfilePreferences,
-  format: "png" = "png",
 ) {
   const items = profileItems.filter((k) => preferences.selected.includes(k)).slice(0, 1);
   if (!items.length) throw new Error("No images selected");
   const files: Record<string, Uint8Array> = {};
   for (const item of items) {
     const source = profileSvg(data, name, preferences, item);
-    files[`.github/adit/${item}.${format}`] = await pngBytes(source);
+    files[`.github/adit/${item}.svg`] = strToU8(source);
   }
-  files["README.md"] = strToU8(profileReadme(preferences, name, format));
+  files["README.md"] = strToU8(profileReadme(preferences, name));
   return files;
 }
 export async function profileDownload(
   data: ProfileData,
   name: string,
   preferences: ProfilePreferences,
-  format: "png" = "png",
 ) {
-  const files = await profileFiles(data, name, preferences, format),
+  const files = await profileFiles(data, name, preferences),
     images = Object.keys(files).filter((k) => k !== "README.md");
-  const blob = new Blob([new Uint8Array(files[images[0]])], { type: "image/png" });
+  const blob = new Blob([new Uint8Array(files[images[0]])], { type: "image/svg+xml;charset=utf-8" });
   const url = URL.createObjectURL(blob),
     link = document.createElement("a");
   link.href = url;

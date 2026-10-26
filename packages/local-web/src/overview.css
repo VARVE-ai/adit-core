@@ -151,44 +151,20 @@
 .overview-badge-row {
   gap: 6px;
 }
-.overview-badge {
-  display: inline-flex;
-  height: 21px;
-  align-items: stretch;
+.overview-badge-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
   min-width: 0;
+  height: 20px;
+  overflow: hidden;
+}
+.overview-badge {
+  display: block;
   flex-shrink: 0;
-  border: 1px solid hsl(var(--border));
-  border-radius: 3px;
-  overflow: hidden;
-  font:
-    10px/19px ui-sans-serif,
-    system-ui,
-    sans-serif;
-  white-space: nowrap;
-}
-.overview-badge > span {
-  padding: 0 6px;
-  background: hsl(var(--muted) / 0.45);
-  color: hsl(var(--muted-foreground));
-}
-.overview-badge strong {
-  padding: 0 6px;
-  font-weight: 500;
-  background: #3b82f619;
-  color: #487ac4;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.dark .overview-badge strong {
-  color: #9abdf6;
-}
-.overview-badge:nth-child(5) {
-  max-width: 220px;
-  flex-shrink: 1;
-}
-.overview-badge:nth-child(6) {
-  max-width: 210px;
-  flex-shrink: 1;
+  max-width: none;
+  height: 20px;
 }
 .overview-badge-actions {
   display: flex;
@@ -693,17 +669,6 @@
   .overview-toolbar {
     gap: 7px;
   }
-  .overview-badge {
-    font-size: 9px;
-  }
-  .overview-badge > span,
-  .overview-badge strong {
-    padding-inline: 4px;
-  }
-  .overview-badge:nth-child(5),
-  .overview-badge:nth-child(6) {
-    max-width: 185px;
-  }
   .overview-year-footer {
     gap: 14px;
     font-size: 9px;
@@ -785,12 +750,6 @@
   }
   .overview-tools {
     flex-wrap: wrap;
-    margin-left: 0;
-  }
-  .overview-badge-row {
-    flex-wrap: wrap;
-  }
-  .overview-badge-actions {
     margin-left: 0;
   }
   .overview-cards {

@@ -107,6 +107,7 @@ const overview = {
     topModel: "model-name",
   },
   activity: {
+    period: { activeDays: 1, recordDays: 1, busiest: { date: "2026-10-19", count: 12 } },
     days: [{ date: "2026-01-01", state: "recorded", count: 12 }],
     hours: Array.from({ length: 24 }, (_, hour) => ({
       hour,
@@ -409,6 +410,25 @@ it("opens a copied local address without a browser login exchange", async () => 
   expect(text(renderer!.root)).not.toContain("Cannot connect to the local service");
   expect(vi.mocked(fetch).mock.calls.some(([url]) => url === "/api/local/state")).toBe(true);
   expect(vi.mocked(fetch).mock.calls.some(([url]) => url === "/api/local/session")).toBe(false);
+});
+it("defaults daily activity to twelve months and allows selecting a year and switching back", async () => {
+  vi.mocked(fetch).mockClear();
+  const root = await render("/overview/ws");
+  const select = root.findByProps({ "aria-label": "Activity period" });
+  const latestQuery = () => new URLSearchParams(String(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).startsWith("/api/local/overview?")).at(-1)![0]).split("?")[1]);
+  expect(select.props.value).toBe("12m");
+  expect(text(select)).toContain("Last 12 months");
+  expect(latestQuery().get("activityRange")).toBe("12m");
+  expect(latestQuery().has("year")).toBe(false);
+  await act(async () => select.props.onChange({ target: { value: "2026" } }));
+  expect(latestQuery().get("activityRange")).toBe("year");
+  expect(latestQuery().get("year")).toBe("2026");
+  await toggle();
+  expect(select.props.value).toBe("2026");
+  expect(text(select)).toContain("近 12 个月");
+  await act(async () => select.props.onChange({ target: { value: "12m" } }));
+  expect(latestQuery().get("activityRange")).toBe("12m");
+  expect(latestQuery().has("year")).toBe(false);
 });
 it("removes an old launch token without logging in or losing the page query", async () => {
   location.hash = "#token=expired-launch-token";
@@ -1090,22 +1110,31 @@ describe("language switching across the local workbench", () => {
     );
   });
 
-  it("preserves the overview filter and open turn details", async () => {
+  it("preserves the overview filter across language changes and opens the exact session turn", async () => {
     const root = await render("/overview/ws");
     await act(async () => {
       button("Last 7 days").props.onClick();
     });
+    await toggle();
+    expect(button("最近 7 天").props["aria-pressed"]).toBe(true);
+    vi.mocked(fetch).mockClear();
     await act(async () => {
       root.findByProps({ className: "overview-turn" }).props.onClick();
     });
-    await toggle();
-    expect(button("最近 7 天").props["aria-pressed"]).toBe(true);
-    expect(text(root.findByProps({ role: "dialog" }))).toContain(
-      "用户原始提问",
-    );
-    expect(root.findByProps({ role: "dialog" }).props["aria-label"]).toBe(
-      "工作轮次详情",
-    );
+    expect(location.pathname).toBe("/sessions/ws");
+    expect(Object.fromEntries(new URLSearchParams(location.search))).toEqual({
+      provider: "claude", session: "session", turn: "turn",
+    });
+    const calls = vi.mocked(fetch).mock.calls.map(([url]) => String(url));
+    expect(calls.some(url => {
+      if (!url.startsWith("/api/local/sessions/detail?")) return false;
+      const query = new URLSearchParams(url.split("?")[1]);
+      return query.get("provider") === "claude" && query.get("id") === "session" && query.get("turnId") === "turn";
+    })).toBe(true);
+    expect(root.findAllByProps({ role: "dialog" })).toHaveLength(0);
+    const matched = root.findAll(node => node.props.className?.split?.(" ").includes("search-match"));
+    expect(matched).toHaveLength(1);
+    expect(text(matched[0])).toContain("用户原始提问");
   });
 });
 

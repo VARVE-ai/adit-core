@@ -206,11 +206,14 @@ export function AchievementsPage({
           }}
         >
           <span className="ach-mini">
-            <span>
-              {i.tier ? "{><}" : <LockKeyhole size={12} />}{" "}
-              {rule.name.toLowerCase()}
-            </span>
-            <b>{badgeMetric(i.key, i.tier ? i.value : rule.thresholds[0])}</b>
+            {!i.tier && <LockKeyhole size={12} />}
+            <img
+              src={svgUrl(badgeSvg(data!, {
+                ...i,
+                options: { ...i.options, showValue: true, showDate: false, showAgent: false, showPrompt: false },
+              }, "plain"))}
+              alt={`${rule.name.toLowerCase()}: ${badgeMetric(i.key, i.tier ? i.value : rule.thresholds[0])}`}
+            />
           </span>
           <span className="ach-row-copy">
             <strong>{achievementName(i.key)}</strong>
@@ -580,7 +583,7 @@ export function AchievementsPage({
                 <small role="status">
                   {feedback === "download"
                     ? ac("已生成下载文件")
-                    : ac("导出选中的成就，格式为 PNG。")}
+                    : ac("导出选中的成就，格式为 SVG。")}
                 </small>
               </footer>
             </>

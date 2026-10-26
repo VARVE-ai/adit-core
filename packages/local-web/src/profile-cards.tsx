@@ -16,7 +16,8 @@ import {
   profileDate,
   profileDays,
   profileDownload,
-  profileItems,
+  profileBadgePairs,
+  withProfileBadgeStyle,
   profileReadme,
   profileStart,
   profileSvg,
@@ -51,6 +52,8 @@ const itemLabel: Record<ProfileItem, string> = {
   "badge-agents": "AI agents",
   "badge-model": "top model",
   "card-commits": "COMMITS MADE IN AI SESSIONS",
+  "card-sessions": "AI SESSIONS",
+  "card-prompts": "AI PROMPTS",
   "card-activity": "AI ACTIVITY",
   "card-agents": "AI AGENTS USED",
   "card-model": "MOST-USED MODEL",
@@ -185,11 +188,22 @@ export function ProfileCardsPage({
         className={item === "card" ? "profile-wide" : undefined}
       />
     ) : null;
+  const previewPair = profileBadgePairs.find(([plain, rich]) =>
+    preferences.selected.includes(plain) || preferences.selected.includes(rich),
+  ) || profileBadgePairs[0];
   const selected = preferences.selected.length;
   const code = profileReadme(preferences, workspace.name);
   const since = data
     ? profileDate(profileStart(data), getLanguage())
     : undefined;
+  const badgeDescriptions = [
+    [pc("在 AI 会话里完成的提交"), pc("能关联到 AI 会话的提交数 / 全部提交数")],
+    [pc("AI 会话"), pc("你自己开启的会话，不含子任务")],
+    [pc("AI 提问"), pc("向 Agent 发起的提问总次数")],
+    [pc("AI 活跃天数"), pc("有 AI 会话活动的天数")],
+    [pc("用了哪些 Agent"), pc("统计范围内使用过的 Agent")],
+    [pc("最常用模型"), pc("按提问次数统计，使用最多的模型")],
+  ];
   const options: [keyof ProfilePreferences["show"], string, string][] = [
     [
       "activity",
@@ -283,43 +297,27 @@ export function ProfileCardsPage({
                 {pc("选择一个徽章，放在项目名下面")}
               </span>
             </div>
-            <p className="profile-group">
-              {pc("普通样式 · 和许可证、版本这类徽章同一个样子，排在同一行")}
-            </p>
             <div className="profile-badges">
-              {profileItems
-                .filter((k) => k.startsWith("badge-"))
-                .map((item) => (
-                  <label key={item}>
+              {profileBadgePairs.map((pair, index) => {
+                const item = pair[preferences.badgeStyle === "rich" ? 1 : 0];
+                const checked = preferences.selected.includes(item);
+                return (
+                  <label key={pair[0]} className={`profile-badge-row${checked ? " focused" : ""}`}>
                     <input
                       type="radio"
                       name="profile-export-item"
-                      aria-label={itemLabel[item]}
-                      checked={preferences.selected.includes(item)}
+                      aria-label={badgeDescriptions[index][0]}
+                      checked={checked}
                       onChange={() => select(item)}
                     />
-                    {image(item) || <span>{itemLabel[item]}</span>}
+                    <span className="profile-badge-preview">{image(pair[0])}</span>
+                    <span className="ach-row-copy">
+                      <strong>{badgeDescriptions[index][0]}</strong>
+                      <span>{badgeDescriptions[index][1]}</span>
+                    </span>
                   </label>
-                ))}
-            </div>
-            <p className="profile-group rich">
-              {pc("精美样式 · 大一号，带标志和两个数字，适合单独放一行")}
-            </p>
-            <div className="profile-badges rich">
-              {profileItems
-                .filter((k) => k.startsWith("card-"))
-                .map((item) => (
-                  <label key={item}>
-                    <input
-                      type="radio"
-                      name="profile-export-item"
-                      aria-label={itemLabel[item]}
-                      checked={preferences.selected.includes(item)}
-                      onChange={() => select(item)}
-                    />
-                    {image(item) || <span>{itemLabel[item]}</span>}
-                  </label>
-                ))}
+                );
+              })}
             </div>
           </section>
           <aside className="ach-sidebar profile-sidebar">
@@ -365,6 +363,26 @@ export function ProfileCardsPage({
                 </small>
               </section>
               <section>
+                <h2>{ac("两种样式")}</h2>
+                <div className="ach-styles" role="group" aria-label={pc("徽章样式")}>
+                  {(["plain", "rich"] as const).map((style, index) => (
+                    <label key={style}>
+                      <span>
+                        <input
+                          type="radio"
+                          name="profile-badge-style"
+                          aria-label={style === "plain" ? pc("普通") : pc("精美")}
+                          checked={preferences.badgeStyle === style}
+                          onChange={() => save(withProfileBadgeStyle(preferences, style))}
+                        />
+                        {style === "plain" ? pc("普通") : pc("精美")}
+                      </span>
+                      {image(previewPair[index])}
+                    </label>
+                  ))}
+                </div>
+              </section>
+              <section>
                 <h2>{pc("宽卡片上显示")}</h2>
                 {options.map(([key, label, hint]) => (
                   <label className="ach-option" key={key}>
@@ -386,25 +404,7 @@ export function ProfileCardsPage({
                   </label>
                 ))}
               </section>
-              <section className="profile-inline">
-                <h2>{pc("图片文字")}</h2>
-                <div className="ach-tabs">
-                  {(["en", "zh"] as const).map((language) => (
-                    <button
-                      key={language}
-                      aria-pressed={preferences.language === language}
-                      onClick={() => save({ ...preferences, language })}
-                    >
-                      {language === "en" ? "English" : "中文"}
-                    </button>
-                  ))}
-                </div>
-                <small>
-                  {preferences.language === "en"
-                    ? pc("要放进的首页说明是英文")
-                    : pc("要放进的首页说明是中文")}
-                </small>
-              </section>
+
               <section>
                 <h2>{ac("怎么算的")}</h2>
                 <p>
@@ -455,7 +455,7 @@ export function ProfileCardsPage({
                 </pre>
                 <p className="ach-muted">
                   {pc(
-                    "只导出选中的一张 PNG 图片；放进仓库后由你自己提交，数字变了再导出一次覆盖",
+                    "只导出选中的一张 SVG 图片；放进仓库后由你自己提交，数字变了再导出一次覆盖",
                   )}
                 </p>
               </section>

@@ -3,6 +3,19 @@ const copy = {
   预览: "Preview",
   宽卡片: "Wide card",
   小徽章: "Small badges",
+  徽章样式: "Badge style",
+  普通: "Plain",
+  精美: "Rich",
+  "AI 会话": "AI sessions",
+  "AI 提问": "AI prompts",
+  "AI 活跃天数": "AI active days",
+  最常用模型: "Most-used model",
+  "能关联到 AI 会话的提交数 / 全部提交数": "Commits linked to AI sessions / all commits",
+  "你自己开启的会话，不含子任务": "Sessions you started, excluding subtasks",
+  "向 Agent 发起的提问总次数": "Total prompts sent to Agents",
+  "有 AI 会话活动的天数": "Days with AI session activity",
+  "统计范围内使用过的 Agent": "Agents used within the selected range",
+  "按提问次数统计，使用最多的模型": "The most-used model by prompt count",
   "放进 README 的单独一节": "Place in its own README section",
   花费没有放进图里: "Cost is not included in the images",
   "选择一个徽章，放在项目名下面":
@@ -33,15 +46,12 @@ const copy = {
   "前 3 个，其余合并": "Top 3, others combined",
   花费: "Cost",
   默认不显示: "Off by default",
-  图片文字: "Image text",
-  要放进的首页说明是英文: "The target README is in English",
-  要放进的首页说明是中文: "The target README is in Chinese",
   "会话：你自己开的会话，不含 Agent 派出去的 {0} 个子任务":
     "Sessions: sessions you started, excluding {0} subtasks delegated by Agents",
   "提交：{0} 个仓库里你在这台电脑上的提交，能找到提交它的会话才算":
     "Commits: your own commits on this machine across {0} repositories; counted as linked only when the submitting session is found",
-  "只导出选中的一张 PNG 图片；放进仓库后由你自己提交，数字变了再导出一次覆盖":
-    "Export the selected image as PNG; commit it yourself, then export again when figures change",
+  "只导出选中的一张 SVG 图片；放进仓库后由你自己提交，数字变了再导出一次覆盖":
+    "Export the selected image as SVG; commit it yourself, then export again when figures change",
   导出图片: "Export image",
   请选择要导出的图片: "Select an image to export first",
   "浅色与深色背景 · 同一套卡片和徽章":

@@ -16,14 +16,15 @@ import {
   ChartNoAxesCombined,
   GitCommitHorizontal,
   ChevronRight,
-  X,
   Award,
   ShieldCheck,
 } from "lucide-react";
 import type { OverviewData } from "../../core/src/local-history/analytics";
 import "./overview.css";
+import { OverviewBadges } from "./overview-badges";
 import { dailyCostWindow, costAxisMaximum } from "./overview-chart-data";
 import { type CloudSyncSummary } from "./overview-cloud-push";
+import { sessionHref } from "./commit-conversation";
 
 type Workspace = {
   id: string;
@@ -102,7 +103,7 @@ function Legend() {
 }
 function Heatmap({ data }: { data: OverviewData }) {
   const year = data.scope.year,
-    start = new Date(Date.UTC(year, 0, 1)),
+    start = new Date(`${data.activity.days[0]?.date || `${year}-01-01`}T00:00:00Z`),
     offset = (start.getUTCDay() + 6) % 7,
     weeks = Math.ceil((offset + data.activity.days.length) / 7),
     max = Math.max(1, ...data.activity.days.map((d) => d.count));
@@ -110,7 +111,9 @@ function Heatmap({ data }: { data: OverviewData }) {
     <div
       className="overview-year"
       style={{ gridTemplateColumns: `18px repeat(${weeks},minmax(0,1fr))` }}
-      aria-label={t("{0} 年每天的活跃度", year)}
+      aria-label={data.scope.activityRange === "12m"
+        ? t("近 12 个月每天的活跃度")
+        : t("{0} 年每天的活跃度", year)}
     >
       <span />
       {Array.from({ length: weeks }, (_, week) => {
@@ -152,6 +155,7 @@ export function OverviewPage({
   onAchievements,
   onInspection,
   onProfileCards,
+  onNavigate,
 }: {
   workspace: Workspace;
   jobs: Job[];
@@ -160,15 +164,15 @@ export function OverviewPage({
   onAchievements?: () => void;
   onInspection?: () => void;
   onProfileCards?: () => void;
+  onNavigate: (url: string) => void;
 }) {
   const [range, setRange] = useState("all"),
     [provider, setProvider] = useState("all"),
-    [year, setYear] = useState(new Date().getFullYear()),
+    [activityPeriod, setActivityPeriod] = useState("12m"),
     [data, setData] = useState<OverviewData>(),
     [error, setError] = useState(""),
     [loading, setLoading] = useState(true),
-    [tick, setTick] = useState(0),
-    [detail, setDetail] = useState<OverviewData["work"]["longest"][number]>();
+    [tick, setTick] = useState(0);
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const latest = jobs.find(
       (j) => j.workspaceId === workspace.id && j.kind === "collect",
@@ -188,9 +192,10 @@ export function OverviewPage({
       workspaceId: workspace.id,
       range,
       provider,
-      year: String(year),
+      activityRange: activityPeriod === "12m" ? "12m" : "year",
       timezone: zone,
     });
+    if (activityPeriod !== "12m") query.set("year", activityPeriod);
     void api<OverviewData>(
       `/overview?${query}`,
       "GET",
@@ -210,7 +215,7 @@ export function OverviewPage({
       alive = false;
       controller.abort();
     };
-  }, [workspace.id, range, provider, year, tick, latest?.id, latest?.status]);
+  }, [workspace.id, range, provider, activityPeriod, tick, latest?.id, latest?.status]);
   useEffect(() => {
     const timer = setInterval(
       () => setTick((t) => t + 1),
@@ -218,24 +223,6 @@ export function OverviewPage({
     );
     return () => clearInterval(timer);
   }, [workspace.id, active]);
-  useEffect(() => {
-    if (!detail) return;
-    const previous = document.activeElement as HTMLElement | null;
-    const key = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setDetail(undefined);
-      if (e.key === "Tab") {
-        e.preventDefault();
-        document
-          .querySelector<HTMLButtonElement>(".overview-turn-detail .icon")
-          ?.focus();
-      }
-    };
-    document.addEventListener("keydown", key);
-    return () => {
-      document.removeEventListener("keydown", key);
-      previous?.focus();
-    };
-  }, [detail]);
   const names = new Map(data?.agents.map((a) => [a.id, a.name]) || []),
     colors = new Map(
       (data?.agents || []).map((a, i) => [
@@ -356,43 +343,13 @@ export function OverviewPage({
           </button>
         </div>
       </div>
-      <div className="overview-badge-row">
-        {[
-          [
-            "commits in AI sessions",
-            s ? `${number(s.linkedCommits)}/${number(s.totalCommits)}` : "—",
-          ],
-          ["AI sessions", number(s?.sessions)],
-          ["AI prompts", number(s?.prompts)],
-          ["AI active days", number(s?.activeDays)],
-          [
-            "AI agents",
-            data?.agents
-              .filter((a) => provider === "all" || provider === a.id)
-              .map((a) => a.name)
-              .join(" · ") || "—",
-          ],
-          ["top model", s?.topModel || "—"],
-        ].map(([label, value]) => (
-          <span
-            key={label}
-            className="overview-badge"
-            title={`${label}: ${value}${label === "commits in AI sessions" ? t("；已确认关联，其他提交仍可能未完成分析") : ""}`}
-          >
-            <span>{label}</span>
-            <strong>{label === "AI agents" && value !== "—"
-              ? data?.agents.filter((a) => provider === "all" || provider === a.id).map((a, index) => (
-                  <React.Fragment key={a.id}>{index > 0 && " · "}{agent(a.id)}</React.Fragment>
-                ))
-              : value}</strong>
-          </span>
-        ))}
-        <div className="overview-badge-actions">
-          <button onClick={onProfileCards}>
-            {t("看看所有样式")}
-          </button>
-        </div>
-      </div>
+      <OverviewBadges
+        workspace={workspace}
+        data={data}
+        api={api}
+        refresh={`${tick}:${latest?.id || ""}:${latest?.status || ""}`}
+        onProfileCards={onProfileCards}
+      />
       <div className="overview-cards">
         <Stat
           icon={<Terminal />}
@@ -460,11 +417,12 @@ export function OverviewPage({
           <Heading title={t("每天的活跃度")}>
             <span>{t("按消息数")}</span>
             <select
-              value={year}
-              aria-label={t("活跃度年份")}
-              onChange={(e) => setYear(Number(e.target.value))}
+              value={activityPeriod}
+              aria-label={t("活跃度时间范围")}
+              onChange={(e) => setActivityPeriod(e.target.value)}
             >
-              {(data?.activity.years || [year]).map((y) => (
+              <option value="12m">{t("近 12 个月")}</option>
+              {(data?.activity.years || [new Date().getFullYear()]).map((y) => (
                 <option key={y} value={y}>
                   {y} {t("年")}
                 </option>
@@ -483,11 +441,11 @@ export function OverviewPage({
             <span>
               {t("最忙的一天")}{" "}
               <b>
-                {data?.activity.busiest
+                {data?.activity.period.busiest
                   ? t(
                       "{0} · {1} 条消息",
-                      fmtDay(data.activity.busiest.date),
-                      number(data.activity.busiest.count),
+                      fmtDay(data.activity.period.busiest.date),
+                      number(data.activity.period.busiest.count),
                     )
                   : "—"}
               </b>
@@ -495,8 +453,8 @@ export function OverviewPage({
             <span>
               {t(
                 "{0} 天活跃，共记录 {1} 天",
-                number(s?.activeDays),
-                number(s?.recordDays),
+                number(data?.activity.period.activeDays),
+                number(data?.activity.period.recordDays),
               )}
             </span>
           </div>
@@ -697,7 +655,7 @@ export function OverviewPage({
                 <button
                   key={turn.id}
                   className="overview-turn"
-                  onClick={() => setDetail(turn)}
+                  onClick={() => onNavigate(sessionHref(workspace.id, turn.provider, turn.session_id, turn.id))}
                 >
                   <span>{i + 1}</span>
                   {agent(turn.provider)}
@@ -760,42 +718,6 @@ export function OverviewPage({
           </div>
         </article>
       </div>
-      {detail && (
-        <div className="modal-backdrop" role="presentation">
-          <section
-            className="overview-turn-detail"
-            role="dialog"
-            aria-modal="true"
-            aria-label={t("工作轮次详情")}
-          >
-            <button
-              className="icon"
-              autoFocus
-              onClick={() => setDetail(undefined)}
-              aria-label={t("关闭详情")}
-            >
-              <X size={18} />
-            </button>
-            <h2>{t("连续干得最久的几次")}</h2>
-            <p>
-              {agent(detail.provider)} · {date(detail.started_at, zone)} ·{" "}
-              {duration(detail.duration)}
-            </p>
-            <p>{detail.prompt}</p>
-            <p>
-              {number(detail.messages)} {t("条消息 ·")}{" "}
-              {detail.duration_status === "observed"
-                ? t("时间完整")
-                : t("时间可能不完整")}
-            </p>
-            <small>
-              {t("会话：")}
-              {detail.session_id}
-              {t("；完整会话页面尚未开放。")}
-            </small>
-          </section>
-        </div>
-      )}
     </section>
   );
 }

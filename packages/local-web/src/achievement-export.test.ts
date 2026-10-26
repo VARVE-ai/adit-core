@@ -52,14 +52,14 @@ it("exports standalone snapshots with safe XML and no prompt or Agent by default
   expect(opted).toContain("&lt;script&gt;");
   expect(opted).not.toContain("<script>");
 });
-it("omits disabled fields and generates relative README paths in the chosen format", () => {
+it("omits disabled fields and generates relative README paths as SVG", () => {
   const svg = badgeSvg(data, {
     ...item,
     options: { ...item.options, showValue: false, showDate: false },
   });
   expect(svg).not.toContain("1970");
   expect(svg).not.toContain("1h 0m");
-  expect(readmeCode([item], "png")).toBe(
-    "![Marathon](.github/adit/achv-marathon.png)",
+  expect(readmeCode([item])).toBe(
+    "![Marathon](.github/adit/achv-marathon.svg)",
   );
 });

@@ -76,6 +76,42 @@ const scope = {
   now: Date.parse("2026-10-19T12:00:00Z"),
   year: 2026,
 };
+it("shows the latest twelve calendar months and scopes the heatmap footer without changing overview totals", () => {
+  const { root, history, analytics, workspace } = fixture();
+  const dates = ["2025-10-31", "2025-11-01", "2026-10-18"];
+  for (const date of dates) {
+    const record = session(root, date);
+    record.messages.forEach((m, i) => { m.timestamp = `${date}T12:0${i}:00Z`; });
+    history.write(record);
+  }
+  const result = analytics.overview(workspace, { ...scope, activityRange: "12m" });
+  expect(result.activity.days[0].date).toBe("2025-11-01");
+  expect(result.activity.days.at(-1)?.date).toBe("2026-10-19");
+  expect(result.activity.days.filter((d) => d.count > 0).map((d) => d.date)).toEqual(dates.slice(1));
+  expect(result.activity.period).toEqual({ activeDays: 2, recordDays: 352, busiest: { date: "2025-11-01", count: 2 } });
+  const previousYear = analytics.overview(workspace, { ...scope, year: 2025 });
+  expect(previousYear.activity.days[0].date).toBe("2025-01-01");
+  expect(previousYear.activity.days.at(-1)?.date).toBe("2025-12-31");
+  expect(previousYear.summary).toEqual(result.summary);
+  expect(previousYear.activity.period).toEqual({ activeDays: 2, recordDays: 62, busiest: { date: "2025-10-31", count: 2 } });
+  expect(analytics.overview(workspace, { ...scope, activityRange: "12m" })).toBe(result);
+  const week = analytics.overview(workspace, { ...scope, activityRange: "12m", range: "7d" });
+  expect(week.activity.period).toEqual({ activeDays: 1, recordDays: 6, busiest: { date: "2026-10-18", count: 2 } });
+  expect(week.activity.days[0].state).toBe("outside");
+});
+it("uses the local month boundary, includes leap day and keeps empty activity empty", () => {
+  const { analytics, workspace } = fixture();
+  const options = { activityRange: "12m", now: Date.parse("2024-02-29T16:00:00Z") };
+  const utc = analytics.overview(workspace, { ...options, timezone: "UTC" });
+  expect(utc.activity.days[0].date).toBe("2023-03-01");
+  expect(utc.activity.days.at(-1)?.date).toBe("2024-02-29");
+  expect(utc.activity.days).toHaveLength(366);
+  const local = analytics.overview(workspace, { ...options, timezone: "Asia/Shanghai" });
+  expect(local.activity.days[0].date).toBe("2023-04-01");
+  expect(local.activity.days.at(-1)?.date).toBe("2024-03-01");
+  expect(local.activity.period).toEqual({ activeDays: 0, recordDays: 0, busiest: null });
+  expect(() => analytics.overview(workspace, { activityRange: "invalid" })).toThrow("Invalid activity range");
+});
 it("counts a continued native conversation once and includes usage/messages from both segments",()=>{
  const {root,history,analytics,workspace}=fixture();history.write(session(root));
  const first=analytics.overview(workspace,scope);

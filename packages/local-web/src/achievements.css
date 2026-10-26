@@ -182,40 +182,25 @@
 }
 .ach-mini {
   display: inline-flex;
-  align-items: stretch;
-  justify-self: start;
-  font-family: Verdana, "DejaVu Sans", sans-serif;
-  font-size: 11px;
-  height: 20px;
-  line-height: 20px;
-  max-width: 100%;
-  border-radius: 3px;
-  overflow: hidden;
-  white-space: nowrap;
-}
-.ach-mini > span {
-  padding: 0 7px;
-  background: #383326;
-  color: #edd39a;
-  display: flex;
   align-items: center;
   gap: 5px;
+  justify-self: start;
+  height: 20px;
+  max-width: 100%;
 }
-.ach-mini > b {
-  padding: 0 7px;
-  background: #bf9749;
-  color: #211b10;
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.ach-mini > img {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  max-height: 20px;
+  height: auto;
 }
-.locked .ach-mini > span {
-  background: hsl(var(--muted));
-  color: hsl(var(--muted-foreground));
+.ach-mini > svg {
+  flex-shrink: 0;
 }
-.locked .ach-mini > b {
-  background: color-mix(in srgb, hsl(var(--muted)) 60%, hsl(var(--background)));
-  color: hsl(var(--muted-foreground));
+.locked .ach-mini {
+  filter: grayscale(1);
+  opacity: 0.55;
 }
 .ach-row-copy {
   display: flex;
