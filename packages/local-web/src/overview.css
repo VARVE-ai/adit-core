@@ -33,7 +33,7 @@
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-rows: 46px 24px 76px minmax(148px, 1.38fr) minmax(
+  grid-template-rows: minmax(46px, auto) 24px 76px minmax(148px, 1.38fr) minmax(
       156px,
       1.38fr
     ) minmax(116px, 1fr);
@@ -64,6 +64,7 @@
 }
 .overview-toolbar {
   position: relative;
+  flex-wrap: wrap;
   min-height: 46px;
   flex-shrink: 0;
   margin-inline: -12px;
@@ -662,7 +663,8 @@
   .overview-tools > span {
     font-size: 9px;
   }
-  .overview-segment button {
+  .overview-segment button,
+  .overview-page .agent-filters button {
     padding-inline: 5px;
     font-size: 10px;
   }
@@ -701,7 +703,7 @@
   .overview-page {
     gap: 9px;
     padding: 0 12px 10px;
-    grid-template-rows: 46px 22px 68px minmax(145px, 1.38fr) minmax(
+    grid-template-rows: minmax(46px, auto) 22px 68px minmax(145px, 1.38fr) minmax(
         152px,
         1.38fr
       ) minmax(116px, 1fr);

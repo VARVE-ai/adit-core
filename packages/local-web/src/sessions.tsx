@@ -1,4 +1,5 @@
 import { AgentLabel } from "./agent-label";
+import { AgentFilters } from "./agent-filters";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -929,25 +930,7 @@ export function SessionsPage({
       aria-label={sc("会话")}
     >
       <div className="sessions-toolbar">
-        <div className="sessions-segment session-agent-filters">
-          <button
-            className={provider === "all" ? "on" : ""}
-            aria-pressed={provider === "all"}
-            onClick={() => setProvider("all")}
-          >
-            {sc("全部")}
-          </button>
-          {(list?.providers || []).map((p) => (
-            <button
-              key={p.id}
-              className={provider === p.id ? "on" : ""}
-              aria-pressed={provider === p.id}
-              onClick={() => setProvider(p.id)}
-            >
-              <AgentLabel provider={p.id} name={p.name} />
-            </button>
-          ))}
-        </div>
+        <AgentFilters providers={list?.providers || []} value={provider} onChange={setProvider} />
         <label className="sessions-search">
           <Search size={14} />
           <input

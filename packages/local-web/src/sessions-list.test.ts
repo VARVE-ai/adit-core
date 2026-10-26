@@ -28,7 +28,7 @@ beforeEach(() => {
   });
   setLanguage("en");
 });
-afterEach(() => { act(() => renderer?.unmount()); vi.unstubAllGlobals(); });
+afterEach(() => { act(() => renderer?.unmount()); vi.unstubAllGlobals(); vi.useRealTimers(); });
 const row = (i: number): SessionDayItem => {
   const at = Date.UTC(2026, 9, 23 - i, 9);
   return { provider: "claude", id: "same-conversation", day: new Date(at).toISOString().slice(0, 10), dayIndex: 101 - i, dayCount: 101,
@@ -56,7 +56,7 @@ async function mount(api: ReturnType<typeof apiWithList>) {
     renderer = create(React.createElement(SessionsPage, {
       workspace: { id: "workspace", name: "Project" }, api: api as any, onCommit: () => {},
     }), { createNodeMock: element => element.props.className === "sessions-list" ? listNode : element.props.className === "session-events-scroll" ? detailNode : {
-      closest: () => detailNode, dataset: {}, style: { setProperty() {} },
+      closest: () => detailNode, dataset: {}, style: { setProperty() {} }, focus() {},
       getBoundingClientRect: () => ({ width: 100 }),
     } });
   });
@@ -117,10 +117,34 @@ it("discards a pending page when filters change", async () => {
   });
   await mount(apiWithList(read));
   await act(async () => activeObserver().fire());
-  await act(async () => renderer.root.findByProps({ className: "sessions-segment session-agent-filters" }).findAllByType("button")[1].props.onClick());
+  await act(async () => renderer.root.findByProps({ className: "overflow-filters agent-filters" }).findAllByType("button")[1].props.onClick());
   expect(rows()).toHaveLength(1);
   await act(async () => resolvePage(page(50)));
   expect(rows()).toHaveLength(1);
+});
+
+it("applies an overflow agent while preserving search, sorting and the commit filter", async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal("document", new EventTarget());
+  const read = vi.fn(async (_params: URLSearchParams) => ({ ...page(0, 1), providers: [
+    { id: "claude", name: "Claude Code", count: 10 },
+    { id: "codex", name: "Codex", count: 20 },
+    { id: "cursor", name: "Cursor", count: 5 },
+    { id: "deepseek-tui", name: "DeepSeek Harness", count: 1 },
+  ] }));
+  await mount(apiWithList(read));
+  await act(async () => {
+    renderer.root.findByType("input").props.onChange({ target: { value: "commit" } });
+    renderer.root.findByType("select").props.onChange({ target: { value: "messages" } });
+    renderer.root.findByProps({ className: "session-commits-filter " }).props.onClick();
+  });
+  await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+  await act(async () => renderer.root.findByProps({ "aria-haspopup": "menu" }).props.onClick());
+  await act(async () => renderer.root.findByProps({ role: "menuitemradio" }).props.onClick());
+  expect(Object.fromEntries(read.mock.calls.at(-1)![0])).toMatchObject({
+    provider: "deepseek-tui", q: "commit", sort: "messages", commits: "1", offset: "0",
+  });
+  expect(renderer.root.findByProps({ "aria-haspopup": "menu" }).props["aria-expanded"]).toBe(false);
 });
 
 

@@ -404,6 +404,8 @@ export const messages = {
   起: " onward",
   "全部 Agent": "All agents",
   "筛选 Agent": "Filter agents",
+  "更多 Agent": "More agents",
+  "更多 · {0}": "More · {0}",
   查看成就: "Achievements",
   查看体检结果: "History check",
   "实际云端推送尚未接入；不受日期和 Agent 筛选影响":
@@ -509,6 +511,8 @@ export const messages = {
   时间未知: "Unknown time",
   已接入: "Connected:",
   全部仓库: "All repositories",
+  筛选仓库: "Filter repositories",
+  更多仓库: "More repositories",
   有提交会话: "With commit session",
   未找到提交会话: "No commit session found",
   搜索提交说明或编号: "Search commit message or hash",

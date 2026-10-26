@@ -1,4 +1,5 @@
 import { AgentLabel } from "./agent-label";
+import { OverflowFilters } from "./overflow-filters";
 import { PlatformIcon } from "./platform-icon";
 import { agentName } from "./achievement-export";
 import { t, locale, systemMessage } from "./i18n";
@@ -147,20 +148,10 @@ export function CommitsPage({
   return (
     <section className="commits-page" aria-label={t("提交")}>
       <div className="commits-toolbar">
-        <div className="commits-segment">
-          <button className={!repo ? "on" : ""} onClick={() => setRepo("")}>
-            {t("全部仓库")}
-          </button>
-          {data?.repositories.map((r) => (
-            <button
-              key={r}
-              className={repo === r ? "on" : ""}
-              onClick={() => setRepo(r)}
-            >
-              {name(r)}
-            </button>
-          ))}
-        </div>
+        <OverflowFilters className="commits-segment repository-filters"
+          items={(data?.repositories || []).map(r => ({ id: r, label: name(r), title: r }))}
+          value={repo} onChange={setRepo} allValue="" allLabel={t("全部仓库")}
+          label={t("筛选仓库")} moreLabel={t("更多仓库")} />
         <div className="commits-segment">
           {[
             ["all", t("全部")],

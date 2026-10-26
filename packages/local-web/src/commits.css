@@ -40,6 +40,22 @@
   background: hsl(var(--background));
   box-shadow: 0 1px 3px #0001;
 }
+.commits-segment.repository-filters {
+  height: auto;
+  overflow: visible;
+  border: 0;
+}
+.repository-filters > button {
+  color: hsl(var(--foreground));
+  border-radius: 6px;
+  height: auto;
+}
+.repository-filters .overflow-filter-menu button {
+  height: auto;
+  min-height: 30px;
+  padding: 4px 8px;
+  color: hsl(var(--foreground));
+}
 .commits-search {
   display: flex;
   align-items: center;

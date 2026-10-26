@@ -11,6 +11,7 @@
 .sessions-toolbar {
   min-height: 46px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   padding: 8px 12px;
   gap: 8px;
@@ -43,14 +44,6 @@
   background: hsl(var(--muted));
   color: hsl(var(--foreground));
   box-shadow: none;
-}
-.session-agent-filters {
-  flex-shrink: 1;
-  max-width: 35%;
-  overflow-x: auto;
-}
-.session-agent-filters button {
-  flex-shrink: 0;
 }
 .session-agent-icon {
   width: 12px;
@@ -942,12 +935,6 @@
   overflow-wrap: anywhere;
 }
 @media (max-width: 1500px) {
-  .sessions-toolbar {
-    flex-wrap: wrap;
-  }
-  .session-agent-filters {
-    max-width: 46%;
-  }
   .sessions-toolbar-right {
     gap: 8px;
   }
@@ -957,17 +944,11 @@
   .sessions-search {
     flex-basis: 300px;
   }
-  .session-agent-filters {
-    max-width: 32%;
-  }
 }
 @media (max-width: 1000px) {
   .sessions-toolbar-right {
     width: 100%;
     justify-content: flex-end;
-  }
-  .session-agent-filters {
-    max-width: 56%;
   }
   .sessions-list {
     width: 42%;
@@ -988,7 +969,7 @@
   .sessions-toolbar {
     padding: 6px 10px;
   }
-  .session-agent-filters {
+  .sessions-toolbar > .agent-filters {
     max-width: 100%;
     width: 100%;
   }

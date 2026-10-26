@@ -1,4 +1,5 @@
 import { AgentLabel } from "./agent-label";
+import { AgentFilters } from "./agent-filters";
 import { t, locale, systemMessage } from "./i18n";
 import {
   number,
@@ -298,40 +299,7 @@ export function OverviewPage({
             </button>
           ))}
         </div>
-        <div className="overview-segment agent-filters">
-          <button
-            className={provider === "all" ? "on" : ""}
-            aria-pressed={provider === "all"}
-            onClick={() => setProvider("all")}
-          >
-            {t("全部 Agent")}
-          </button>
-          {(data?.agents || []).length <= 4 ? (
-            (data?.agents || []).map((a) => (
-              <button
-                key={a.id}
-                className={provider === a.id ? "on" : ""}
-                aria-pressed={provider === a.id}
-                onClick={() => setProvider(a.id)}
-              >
-                {agent(a.id)}
-              </button>
-            ))
-          ) : (
-            <select
-              aria-label={t("筛选 Agent")}
-              value={provider}
-              onChange={(e) => setProvider(e.target.value)}
-            >
-              <option value="all">{t("全部 Agent")}</option>
-              {data?.agents.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
+        <AgentFilters key={workspace.id} providers={data?.agents || []} value={provider} onChange={setProvider} />
         <div className="overview-tools">
           <button disabled={!onAchievements} onClick={onAchievements}>
             <Award size={12} />

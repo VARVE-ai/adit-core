@@ -8,7 +8,7 @@ import { setLanguage } from "./i18n";
 
 let renderer: ReactTestRenderer;
 const observers: { fire: () => void; disconnected: boolean; root: unknown }[] = [];
-const scroll = { scrollTop: 0 };
+const scroll = { scrollTop: 0, focus() {} };
 const workspace = { id: "w", providers: [], repositories: ["repo"] };
 const analysis = { runId: "run", status: "done", finishedAt: 1, completed: 101, total: 101, stale: false, error: null };
 type Menu = "commits" | "shares" | "pr-descriptions";
@@ -103,7 +103,7 @@ it("discards a pending commit page when repository or search changes", async () 
   await mount("commits", read);
   await act(async () => active().fire());
   scroll.scrollTop = 1000;
-  await act(async () => renderer.root.findAllByProps({ className: "commits-segment" })[0].findAllByType("button")[1].props.onClick());
+  await act(async () => renderer.root.findByProps({ "aria-label": "Filter repositories" }).findAllByType("button")[1].props.onClick());
   expect(rows()).toHaveLength(1); expect(scroll.scrollTop).toBe(0);
   await act(async () => resolve(page("commits", 50)));
   expect(rows()).toHaveLength(1);
@@ -111,6 +111,43 @@ it("discards a pending commit page when repository or search changes", async () 
   await act(async () => { vi.advanceTimersByTime(250); });
   expect(rows()).toHaveLength(0);
   expect(read.mock.calls.at(-1)![0].get("offset")).toBe("0");
+});
+
+it("keeps three repositories visible and selects overflow paths without resetting other commit filters", async () => {
+  vi.stubGlobal("document", new EventTarget());
+  const repositories = ["/work/adit-core", "/work/adit-cloud", "/work/adit-site", "/other/adit-core", "/work/cloudcode-docker"];
+  const read = vi.fn(async (_params: URLSearchParams) => ({ ...page("commits", 0, 1), repositories }));
+  await mount("commits", read);
+  const filters = () => renderer.root.findByProps({ "aria-label": "Filter repositories" });
+  expect(filters().findAllByType("button").map(b => b.props.title).filter(Boolean)).toEqual(repositories.slice(0, 3));
+  act(() => renderer.root.findByType("input").props.onChange({ target: { value: "fix" } }));
+  await act(async () => { vi.advanceTimersByTime(250); });
+  await act(async () => renderer.root.findByProps({ className: "commits-segment" }).findAllByType("button")[1].props.onClick());
+  await act(async () => filters().findByProps({ "aria-haspopup": "menu" }).props.onClick());
+  const options = filters().findAllByProps({ role: "menuitemradio" });
+  expect(options.map(b => b.props.title)).toEqual(repositories.slice(3));
+  await act(async () => options[0].props.onClick());
+  expect(Object.fromEntries(read.mock.calls.at(-1)![0])).toMatchObject({
+    repository: "/other/adit-core", q: "fix", filter: "linked", offset: "0",
+  });
+  const trigger = filters().findByProps({ "aria-haspopup": "menu" });
+  expect(trigger.props.title).toBe("/other/adit-core");
+  expect(trigger.props["aria-expanded"]).toBe(false);
+  await act(async () => trigger.props.onClick());
+  expect(filters().findByProps({ role: "menuitemradio", "aria-checked": true }).props.title).toBe("/other/adit-core");
+  await act(async () => filters().findAllByType("button")[0].props.onClick());
+  expect(read.mock.calls.at(-1)![0].get("repository")).toBe("");
+});
+
+it("shows a deep-linked overflow repository as selected before opening the menu", async () => {
+  vi.stubGlobal("location", { search: "?repository=%2Fwork%2Ffourth" });
+  const repositories = ["/work/first", "/work/second", "/work/third", "/work/fourth"];
+  const read = vi.fn(async (_params: URLSearchParams) => ({ ...page("commits", 0, 0), repositories }));
+  await mount("commits", read);
+  const trigger = renderer.root.findByProps({ "aria-haspopup": "menu" });
+  expect(trigger.props.title).toBe("/work/fourth");
+  expect(trigger.props.className).toContain(" on");
+  expect(read.mock.calls[0][0].get("repository")).toBe("/work/fourth");
 });
 
 it("refreshes already loaded commit pages without collapsing the list or losing selection", async () => {
