@@ -60,7 +60,7 @@ type Workspace = {
   providers: string[];
   repositories: string[];
   repositoryInfo?: RepositoryInfo[];
-  counts: Record<string, number>;
+  counts?: Record<string, number>;
   gistConfigured: boolean;
   achievements?: { unread: number };
   cloud: { enabled: boolean; mode: "manual" | "automatic"; interval: number };
@@ -783,7 +783,7 @@ export function App() {
                             <span className="workspace-list-stat">
                               {w.started ? (
                                 <>
-                                  {Object.entries(w.counts)
+                                  {Object.entries(w.counts ?? {})
                                     .filter(
                                       ([p]) => w.providers.includes(p) ||
                                         ["claude-ai", "chatgpt", "gemini-apps"].includes(p),
@@ -1323,7 +1323,7 @@ function WorkspaceEditor({
       "cursor-ide: Cursor IDE transcript contains an unfinished bubble; retry on the next collection",
       "cursor-ide: Cursor IDE transcript has missing bubbles; previous archive retained",
     ].includes(job.error);
-  const providerCounts = job?.providers || form.counts;
+  const providerCounts = job?.providers ?? workspace?.counts ?? form.counts ?? {};
   const showCollectionProgress=!editing&&job?.kind==="collect"&&!!(job.sourceProgress||job.repositoryProgress);
   const progressActive=!!job&&["queued","running"].includes(job.status);
   const selectedRepos=knownRepos.filter(r=>form.repositories.includes(r.path));

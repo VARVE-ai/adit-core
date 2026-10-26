@@ -830,6 +830,53 @@ describe("language switching across the local workbench", () => {
       expect(vi.mocked(fetch).mock.calls.slice(retryFrom).filter(([,options])=>options?.method==="POST").map(([url])=>url)).toEqual(["/api/local/workspaces/original-flow-project/sync"]);
     }
   });
+  it.each([false, true])("keeps the first cloud sync visible through collection and first acknowledgement (organized: %s)", async (started) => {
+    savedWorkspace = { ...workspace, started, cloud: { ...workspace.cloud, enabled: true }, cloudSync: { pending: { state: "uninitialized", sessions: null, commits: null } } };
+    await render("/settings/workspaces/ws");
+    expect(text(renderer!.root)).toContain("Not linked yet");
+    await act(async () => { button("Sync now").props.onClick(); });
+    for (const phase of ["sessions", "analysis", "achievements"]) {
+      savedWorkspace = { ...savedWorkspace, cloudSync: { status: "running", pending: { state: "uninitialized", sessions: null, commits: null } } };
+      jobs = [{ id: "first-sync-collection", workspaceId: "ws", kind: "collect", status: "running", phase,
+        sourceProgress: { claude: { completed: 2, total: 2, status: "done" } },
+        repositoryProgress: { [workspace.path]: { completed: 3, total: 3, status: "done", matched: 1 } } }];
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(button("Sync now").props.disabled).toBe(true);
+      expect(text(renderer!.root)).toContain(workspace.name);
+    }
+    savedWorkspace = { ...savedWorkspace, started: true, cloudSync: { status: "running", pending: { state: "ready", sessions: 2, commits: 3 } } };
+    jobs = [{ ...jobs[0], status: "done" }];
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(location.pathname).toBe(started ? "/settings/workspaces/ws" : "/overview/ws");
+    savedWorkspace = { ...savedWorkspace, cloudSync: { status: "done", endedAt: "2026-10-26T01:00:00Z", pending: { state: "ready", sessions: 0, commits: 0 } } };
+    await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+    expect(text(renderer!.root)).toContain(workspace.name);
+    expect(renderer!.root.findByProps({ "aria-label": "Cloud storage · Sync complete" })).toBeTruthy();
+  });
+  it("renders an initial sync before provider counts are available", async () => {
+    savedWorkspace = Object.assign({ ...workspace, started: false }, { counts: undefined });
+    jobs = [{ id: "first", workspaceId: "ws", kind: "collect", status: "queued" }];
+    const originalFetch = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (...args) => {
+      if (args[0] === "/api/local/providers") return {
+        ok: true, json: async () => [
+          { id: "claude", name: "Claude Code", enabled: true, supported: true },
+          { id: "antigravity", name: "Antigravity", enabled: true, supported: true },
+        ],
+      } as Response;
+      return originalFetch(...args);
+    });
+    try {
+      await render("/settings/workspaces/ws");
+      expect(text(renderer!.root)).toContain("Antigravity");
+      expect(text(renderer!.root)).toContain("Not found");
+      savedWorkspace = { ...workspace, started: false, counts: Object.assign({ claude: 2 }, { antigravity: 1 }) };
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(text(renderer!.root)).toContain("1 sessions");
+    } finally {
+      vi.mocked(fetch).mockImplementation(originalFetch);
+    }
+  });
   it("shows the cloud storage switch outside settings and saves it immediately", async () => {
     const root = await render("/settings/workspaces/ws");
     const storageSwitch = () => root.findByProps({ "aria-label": "Enable cloud storage" });
