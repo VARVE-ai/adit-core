@@ -17,7 +17,7 @@ export function completeUpgradedInstallation(expectedVersion?: string): boolean 
   try {
     const env = { ...process.env };
     delete env.ADIT_DEFER_INSTALL_SETUP;
-    execFileSync(process.execPath, [resolve(dirname(realpathSync(process.argv[1])), "install-skills.js"),
+    execFileSync(process.execPath, [resolve(dirname(realpathSync(process.argv[1])), "install-skills.js"), "--open-browser",
       ...(expectedVersion ? ["--expected-version", expectedVersion] : [])], { stdio: "inherit", env });
     return true;
   } catch (error) {

@@ -14,7 +14,7 @@ afterEach(() => { process.exitCode = originalExitCode; vi.restoreAllMocks(); vi.
 describe("upgraded skill installation", () => {
   it("runs the freshly installed script instead of the old in-memory template", () => {
     expect(completeUpgradedInstallation()).toBe(true);
-    expect(mocks.execFileSync).toHaveBeenCalledWith(process.execPath, [resolve(dirname(realpathSync(process.argv[1])), "install-skills.js")], { stdio: "inherit", env: process.env });
+    expect(mocks.execFileSync).toHaveBeenCalledWith(process.execPath, [resolve(dirname(realpathSync(process.argv[1])), "install-skills.js"), "--open-browser"], { stdio: "inherit", env: process.env });
   });
   it("reports installation failures without pretending the skill was installed", () => {
     mocks.execFileSync.mockImplementation(() => { throw new Error("denied"); });
@@ -26,7 +26,7 @@ describe("upgraded skill installation", () => {
     await selfUpdateCommand();
     expect(mocks.execSync).toHaveBeenCalledWith(expect.stringContaining("@varveai/adit-cli@999.0.0"), expect.objectContaining({ env: expect.objectContaining({ ADIT_DEFER_INSTALL_SETUP: "1" }) }));
     expect(mocks.execFileSync).toHaveBeenCalledOnce();
-    expect(mocks.execFileSync.mock.calls[0][1]).toEqual([expect.stringContaining("install-skills.js"),"--expected-version","999.0.0"]);
+    expect(mocks.execFileSync.mock.calls[0][1]).toEqual([expect.stringContaining("install-skills.js"),"--open-browser","--expected-version","999.0.0"]);
     expect(mocks.execSync.mock.invocationCallOrder[0]).toBeLessThan(mocks.execFileSync.mock.invocationCallOrder[0]);
     const success = vi.mocked(console.log).mock.calls.findIndex(args => String(args[0]).includes("Updated successfully"));
     expect(mocks.execFileSync.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(console.log).mock.invocationCallOrder[success]);
@@ -37,12 +37,13 @@ describe("upgraded skill installation", () => {
     expect(process.exitCode).toBe(1);
     expect(vi.mocked(console.log).mock.calls.flat().join("\n")).not.toContain("Updated successfully");
   });
-  it("retries setup even on the latest version, but leaves --check read-only", async () => {
+  it("retries setup and opens the workbench even on the latest version, but leaves --check read-only", async () => {
     mocks.latest.mockResolvedValue(CLI_VERSION);
     await selfUpdateCommand({ check: true });
     expect(mocks.execFileSync).not.toHaveBeenCalled();
     await selfUpdateCommand();
     expect(mocks.execFileSync).toHaveBeenCalledOnce();
+    expect(mocks.execFileSync.mock.calls[0][1]).toEqual([expect.stringContaining("install-skills.js"), "--open-browser"]);
     expect(mocks.execSync).not.toHaveBeenCalled();
   });
   it("clears the internal deferral flag for the final setup process", () => {
