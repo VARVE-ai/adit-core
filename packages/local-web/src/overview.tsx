@@ -404,7 +404,7 @@ export function OverviewPage({
           icon={<MessageSquare />}
           label={t("消息")}
           value={number(s?.messages)}
-          foot={t("{0}最忙那天", number(data?.activity.busiest?.count))}
+          foot={t("最忙：{0}", data?.activity.busiest?.date || "—")}
         />
         <Stat
           icon={<ChartNoAxesCombined />}

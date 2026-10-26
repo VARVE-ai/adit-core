@@ -423,7 +423,7 @@ export const messages = {
   放进项目首页: "Add to README",
   "{0}个子任务未计入": "{0} subtasks excluded",
   消息: "Messages",
-  "{0}最忙那天": "{0} on the busiest day",
+  "最忙：{0}": "Busiest: {0}",
   活跃天数: "Active days",
   "{0} 天": "{0} days",
   "{0}天有记录": "{0} days recorded",
