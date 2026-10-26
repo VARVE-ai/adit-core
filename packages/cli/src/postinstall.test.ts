@@ -18,7 +18,7 @@ function fixture(options: { source?: boolean; missing?: boolean; failure?: boole
   const run=(extra: NodeJS.ProcessEnv={})=>spawnSync(process.execPath,["--require",join(root,"user.cjs"),join(root,"install-skill.cjs")],{encoding:"utf8",env:{...process.env,CI:"false",ADIT_DEFER_INSTALL_SETUP:"",...extra}});
   return {root,run,called:()=>existsSync(join(root,"called.json"))?JSON.parse(readFileSync(join(root,"called.json"),"utf8")):null};
 }
-it("runs complete user setup for a published package",()=>{const f=fixture();expect(f.run().status).toBe(0);expect(f.called()).toEqual([]);});
+it("runs complete user setup and requests the local page for a published package",()=>{const f=fixture();expect(f.run().status).toBe(0);expect(f.called()).toEqual(["--open-browser"]);});
 it("propagates setup failure to the package manager",()=>{const f=fixture({failure:true});expect(f.run().status).toBe(1);});
 it("rejects a published package missing the setup entry",()=>{const f=fixture({missing:true});const r=f.run();expect(r.status).toBe(1);expect(r.stderr).toContain("missing its installer");});
 it("allows an unbuilt workspace and keeps built workspace hooks limited to Skills",()=>{

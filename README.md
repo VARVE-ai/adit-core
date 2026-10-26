@@ -13,9 +13,12 @@ npm install -g @varveai/adit-cli
 ```
 
 Installation updates the bundled Skills, then starts the local background service
-or restarts an existing instance and verifies its version. It does not open a
-browser or enable login startup. `adit update` follows the same steps and also
-retries incomplete setup when the package is already current. Skill or service
+or restarts an existing instance and verifies its version, then opens the local
+workbench in your browser. Click **Add working directory** to select a project
+and start organizing. First service startup enables login startup on supported
+systems; an existing disabled preference is preserved. `adit update` performs
+the same setup without opening a browser and also retries incomplete setup when
+the package is already current. Skill or service
 failures are reported as incomplete setup, not a successful upgrade.
 
 Root installations (including `sudo npm install`) report incomplete setup instead

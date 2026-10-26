@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ skills: vi.fn(), status: vi.fn(), stop: vi.fn(), start: vi.fn() }));
+const mocks = vi.hoisted(() => ({ skills: vi.fn(), status: vi.fn(), stop: vi.fn(), start: vi.fn(), open: vi.fn() }));
 vi.mock("./commands/skills.js", () => ({ installSkillsCommand: mocks.skills }));
-vi.mock("./local/daemon.js", () => ({ daemonStatus: mocks.status, stopDaemon: mocks.stop, startDaemon: mocks.start }));
+vi.mock("./local/daemon.js", () => ({ daemonStatus: mocks.status, stopDaemon: mocks.stop, startDaemon: mocks.start, openBrowser: mocks.open }));
 import { completeInstallation } from "./installation.js";
 import { CLI_VERSION } from "./version.js";
 beforeEach(() => {
@@ -20,6 +20,17 @@ it("installs Skills before starting a new service", async () => {
   expect(mocks.stop).not.toHaveBeenCalled();
   expect(mocks.skills.mock.invocationCallOrder[0]).toBeLessThan(mocks.start.mock.invocationCallOrder[0]);
   expect(console.log).toHaveBeenCalledWith(expect.stringContaining("setup complete"));
+  expect(mocks.open).not.toHaveBeenCalled();
+});
+it("opens the local workbench only after the new service is ready", async () => {
+  let ready!: (value: unknown) => void;
+  mocks.start.mockImplementation(() => new Promise(resolve => { ready=resolve; }));
+  const task=completeInstallation({ openBrowser: true });
+  await vi.waitFor(() => expect(mocks.start).toHaveBeenCalledOnce());
+  expect(mocks.open).not.toHaveBeenCalled();
+  ready({ version: CLI_VERSION, instance: "new", url: "http://127.0.0.1:1234" });
+  await task;
+  expect(mocks.open).toHaveBeenCalledExactlyOnceWith("http://127.0.0.1:1234");
 });
 it("waits for the old service to stop before starting the new one", async () => {
   mocks.status.mockResolvedValue({ instance: "old" });
@@ -34,7 +45,8 @@ it("waits for the old service to stop before starting the new one", async () => 
 });
 it("keeps the old service running if Skills cannot be updated", async () => {
   mocks.skills.mockReturnValue({ errors: ["permission denied"] });
-  await expect(completeInstallation()).rejects.toThrow("Skill installation is incomplete");
+  await expect(completeInstallation({ openBrowser: true })).rejects.toThrow("Skill installation is incomplete");
+  expect(mocks.open).not.toHaveBeenCalled();
   expect(mocks.status).not.toHaveBeenCalled();
   expect(mocks.stop).not.toHaveBeenCalled();
   expect(mocks.start).not.toHaveBeenCalled();
@@ -46,13 +58,15 @@ it("does not touch Skills or the running service if the requested version was no
 it.each(["stop", "start"] as const)("does not claim success on %s failure", async stage => {
   mocks.status.mockResolvedValue({ instance: "old" });
   mocks[stage].mockRejectedValue(new Error(`${stage} failed`));
-  await expect(completeInstallation()).rejects.toThrow(`${stage} failed`);
+  await expect(completeInstallation({ openBrowser: true })).rejects.toThrow(`${stage} failed`);
+  expect(mocks.open).not.toHaveBeenCalled();
   expect(console.log).not.toHaveBeenCalled();
   if(stage==="stop")expect(mocks.start).not.toHaveBeenCalled();
 });
 it.each([{ version: "old-version", instance: "new" }, { version: CLI_VERSION, instance: "old" }])("rejects an old or unexpected running service (%j)", async service => {
   mocks.status.mockResolvedValue({ instance: "old" }); mocks.start.mockResolvedValue(service);
-  await expect(completeInstallation()).rejects.toThrow("could not be verified");
+  await expect(completeInstallation({ openBrowser: true })).rejects.toThrow("could not be verified");
+  expect(mocks.open).not.toHaveBeenCalled();
   expect(console.log).not.toHaveBeenCalled();
 });
 it("reports preserved custom Skills instead of claiming every Skill was updated", async () => {
@@ -62,7 +76,8 @@ it("reports preserved custom Skills instead of claiming every Skill was updated"
   expect(vi.mocked(console.log).mock.calls.flat().join("\n")).not.toContain("setup complete");
 });
 it("does not start a service for workspace dependency installation", async () => {
-  await completeInstallation({ skillsOnly: true });
+  await completeInstallation({ skillsOnly: true, openBrowser: true });
+  expect(mocks.open).not.toHaveBeenCalled();
   expect(mocks.skills).toHaveBeenCalledOnce();expect(mocks.start).not.toHaveBeenCalled();
 });
 it.skipIf(!process.getuid)("does not write Skills or start a daemon in the root account", async () => {

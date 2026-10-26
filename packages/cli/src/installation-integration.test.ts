@@ -14,7 +14,21 @@ it.skipIf(process.getuid?.()===0)("runs npm postinstall to update Skills and rep
   const root=mkdtempSync(join(tmpdir(),"adit-install-integration-")),data=join(root,"data"),home=join(root,"home"),preload=join(root,"home.cjs");
   // Redirect only these child processes; no user configuration or environment
   // variables such as HOME are changed. The daemon inherits this preload.
-  writeFileSync(preload,`require('node:os').homedir=()=>${JSON.stringify(home)};require('node:module').syncBuiltinESMExports();`);
+  const browserLog=join(root,"browser.jsonl");
+  // Record browser launches without opening windows on the developer's desktop.
+  writeFileSync(preload,`
+    require('node:os').homedir=()=>${JSON.stringify(home)};
+    const children=require('node:child_process'),spawn=children.spawn;
+    children.spawn=(command,args,options)=>{
+      if(['open','xdg-open','rundll32.exe'].includes(command)){
+        require('node:fs').appendFileSync(${JSON.stringify(browserLog)},JSON.stringify(args)+'\\n');
+        return Object.assign(new (require('node:events').EventEmitter)(),{unref(){}});
+      }
+      return spawn(command,args,options);
+    };
+    require('node:module').syncBuiltinESMExports();
+  `);
+  const openedPages=()=>readFileSync(browserLog,"utf8").trim().split("\n").map(line=>JSON.parse(line).at(-1));
   const env={...process.env,ADIT_LOCAL_DATA_DIR:data,APPDATA:join(root,"appdata"),XDG_CONFIG_HOME:join(root,"config"),NODE_OPTIONS:`${process.env.NODE_OPTIONS||""} --require ${JSON.stringify(preload)}`};
   // A temporary npm package uses the real published hook and compiled setup.
   // Its prefix/cache/home are isolated; no global user installation is replaced.
@@ -39,6 +53,8 @@ it.skipIf(process.getuid?.()===0)("runs npm postinstall to update Skills and rep
   try{
     expect((await setup()).stdout).toContain("background service started");
     const original=info();
+    expect(openedPages()).toEqual([original.url]);
+    expect((await fetch(original.url)).status).toBe(200);
     const health=await fetch(original.url+"/health").then(r=>r.json());
     expect(health).toMatchObject({version:CLI_VERSION,instance:original.instance});
     const state=await fetch(original.url+"/api/local/state",{headers:{authorization:`Bearer ${original.token}`}}).then(r=>r.json()) as {startup:{enabled:boolean};workspaces:unknown[]};
@@ -48,10 +64,12 @@ it.skipIf(process.getuid?.()===0)("runs npm postinstall to update Skills and rep
     writeFileSync(join(directory,".adit-managed.json"),JSON.stringify({owner:"adit",sha256:createHash("sha256").update(old).digest("hex")}));
     expect((await setup()).stdout).toContain("background service restarted");
     const current=info();expect(current.instance).not.toBe(original.instance);expect(current.url).toBe(original.url);
+    expect(openedPages()).toEqual([original.url,current.url]);
     for(const base of [".agents",".claude"])for(const skill of SKILLS)expect(readFileSync(join(home,base,"skills",skill.name,"SKILL.md"),"utf8")).toBe(skill.content);
     renameSync(join(home,".agents"),join(home,"agents-backup"));writeFileSync(join(home,".agents"),"blocked directory");
     await expect(setup()).rejects.toMatchObject({code:1,stderr:expect.stringContaining("Skill installation is incomplete")});
     expect(info().instance).toBe(current.instance);
+    expect(openedPages()).toEqual([original.url,current.url]);
     expect((await fetch(current.url+"/health")).status).toBe(200);
   }finally{
     await cli("daemon","stop");

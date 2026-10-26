@@ -2,7 +2,7 @@ import { installSkillsCommand } from "./commands/skills.js";
 import { CLI_VERSION } from "./version.js";
 
 /** Finish in the user's account, using the newly installed package's code. */
-export async function completeInstallation(options: { skillsOnly?: boolean; expectedVersion?: string } = {}): Promise<void> {
+export async function completeInstallation(options: { skillsOnly?: boolean; expectedVersion?: string; openBrowser?: boolean } = {}): Promise<void> {
   if (process.getuid?.() === 0 || process.geteuid?.() === 0) {
     throw new Error("User setup cannot run as root. Run 'adit update' from your regular user account, without sudo.");
   }
@@ -17,7 +17,7 @@ export async function completeInstallation(options: { skillsOnly?: boolean; expe
 
   // Load service dependencies before stopping the old process. A broken new
   // package must not stop a working service merely because an import failed.
-  const { daemonStatus, stopDaemon, startDaemon } = await import("./local/daemon.js");
+  const { daemonStatus, stopDaemon, startDaemon, openBrowser } = await import("./local/daemon.js");
   const previous = await daemonStatus();
   if (previous) {
     try { await stopDaemon(); }
@@ -35,4 +35,5 @@ export async function completeInstallation(options: { skillsOnly?: boolean; expe
   } else {
     console.log("ADIT setup complete: Skills are current and the background service is ready.");
   }
+  if (options.openBrowser) openBrowser(current.url);
 }

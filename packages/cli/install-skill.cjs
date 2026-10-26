@@ -22,7 +22,7 @@ if (process.env.ADIT_DEFER_INSTALL_SETUP !== "1") {
       process.exitCode = 1;
     }
   } else {
-    const result = spawnSync(process.execPath, [entry, ...(source ? ["--skills-only"] : [])], {
+    const result = spawnSync(process.execPath, [entry, ...(source ? ["--skills-only"] : ["--open-browser"])], {
       stdio: "inherit", env: process.env, windowsHide: true,
     });
     if (result.error) console.error(`ADIT setup incomplete: ${result.error.message}`);
