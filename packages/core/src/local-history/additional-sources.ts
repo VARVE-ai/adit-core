@@ -21,6 +21,7 @@ import {profileStoreProviders,readProfileStore} from "./profile-stores.js";
 import {readVisualStudio,visualStudioSource} from "./visualstudio.js";
 import {antigravitySource,readAntigravity} from "./antigravity.js";
 import {readHermesTranscript} from "./hermes-transcripts.js";
+import {isQoderDesktopTranscript,readQoderDesktop} from "./qoder-desktop.js";
 
 export function additionalSourceDefinitions(home: string, env: NodeJS.ProcessEnv): SourceDefinition[] {
   const specs: [string, string, string, string[]][] = [
@@ -52,7 +53,7 @@ export function additionalSourceDefinitions(home: string, env: NodeJS.ProcessEnv
     ["vscode-copilot","VSCode Copilot","VSCODE_COPILOT_DIR",[...['Code','Code - Insiders','VSCodium'].flatMap(name=>[`AppData/Roaming/${name}/User`,`Library/Application Support/${name}/User`,`.config/${name}/User`])]],
     ["positron","Positron Assistant","POSITRON_DIR",["Library/Application Support/Positron/User"]],
     ["iflow","iFlow","IFLOW_DIR",[".iflow/projects"]],
-    ["qoder","Qoder","QODER_PROJECTS_DIR",[".qoder/projects",".qoderwork/projects",".qoder-cn/projects","Library/Application Support/Qoder/SharedClientCache/cli/projects",".config/Qoder/SharedClientCache/cli/projects","AppData/Roaming/Qoder/SharedClientCache/cli/projects"]],
+    ["qoder","Qoder","QODER_PROJECTS_DIR",[".qoder/projects",".qoderwork/projects",".qoder-cn/projects",".qoder/cache/projects","Library/Application Support/Qoder/SharedClientCache/cli/projects",".config/Qoder/SharedClientCache/cli/projects","AppData/Roaming/Qoder/SharedClientCache/cli/projects"]],
     ["copilot","Copilot","COPILOT_DIR",[".copilot"]],
     ["qwenpaw","QwenPaw","QWENPAW_DIR",[".copaw/workspaces"]],
     ["reasonix","Reasonix","REASONIX_DIR",[".reasonix","AppData/Roaming/reasonix"]],
@@ -134,6 +135,7 @@ export function additionalSourceFile(provider: string, path: string): boolean {
 }
 export const additionalProviders = [...databaseProviders, ...semanticProviders, ...eventDirectoryProviders,...nativeMessageProviders,...projectRecordProviders,...copilotPawProviders,...claudeLineageProviders,...vscodeChatProviders,...companionChatProviders,...kiroProviders,...desktopDatabaseProviders,...runtimeEventProviders,...legacyExtensionProviders,...reviewEventProviders,...profileStoreProviders,"aider","visualstudio-copilot","antigravity","antigravity-cli"];
 export async function readAdditionalSource(path: string, provider: string, signal?: AbortSignal) {
+  if(provider==="qoder" && isQoderDesktopTranscript(path))return readQoderDesktop(path,signal);
   if(provider==="hermes" && /\.jsonl?$/.test(path))return readHermesTranscript(path,signal);
   if(["antigravity","antigravity-cli"].includes(provider))return readAntigravity(path,provider,signal);
   if(provider === "visualstudio-copilot")return readVisualStudio(path,signal);

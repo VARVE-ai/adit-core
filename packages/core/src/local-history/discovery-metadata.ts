@@ -8,6 +8,7 @@ import { readDatabaseMetadata } from "./discovery-databases.js";
 import { isCodexInternalReview } from "./codex.js";
 import {codexFileRows} from "./codex-file.js";
 import {record,string} from "./types.js";
+import {isQoderDesktopTranscript,qoderDesktopMetadata} from "./qoder-desktop.js";
 
 export interface SessionMetadata {
   id: string;
@@ -87,6 +88,7 @@ const result=(id:string,cwd:string,parentId?:string,relationship="subagent"):Met
 });
 
 export async function readSessionMetadata(path:string,provider:string,root:string,workspace:string,signal?:AbortSignal):Promise<MetadataResult> {
+  if(provider==="qoder" && isQoderDesktopTranscript(path))return qoderDesktopMetadata(path,signal);
   const dir=dirname(path), stem=baseID(path);
   const fields=(file:string,keys:readonly string[])=>metadataFields(file,keys,signal);
   if(/\.(db|sqlite|sqlite3|vscdb)$/.test(path))return readDatabaseMetadata(path,provider,signal);

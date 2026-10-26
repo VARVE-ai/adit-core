@@ -27,6 +27,7 @@ const fields = [
   "cache_read_input_token_cost",
   "cache_creation_input_token_cost",
 ];
+const pricingFields = [...fields, "cache_creation_input_token_cost_above_1hr"];
 // Bare model names use the official API's reference price. Explicit channel
 // IDs keep their own prices; never select an arbitrary matching suffix.
 const officialModelIds = new Map([
@@ -246,7 +247,7 @@ export class LocalPrices {
     if (!price) return null;
     let rules = this.compiled.get(price);
     if (!rules) {
-      rules = fields.map((field) => {
+      rules = pricingFields.map((field) => {
         const pattern = new RegExp(`^${field}_above_(\\d+)k_tokens$`);
         const thresholds = Object.entries(price.rates).flatMap(
           ([key, value]) => {
@@ -273,11 +274,19 @@ export class LocalPrices {
     }
     if (record.provider === "codex" && (record.cache_write_tokens ?? 0) > 0)
       return null;
+    const write1h = record.cache_write_1h_tokens ?? 0;
+    const write = record.provider === "codex" ? 0 : record.cache_write_tokens;
+    const write5m = write === null ? null : write - write1h;
+    // The total already includes both TTLs. Price the 1h portion separately,
+    // without counting it again at the ordinary cache-write rate.
+    if (write1h > 0 && record.cache_write_5m_tokens !== null &&
+        record.cache_write_5m_tokens !== write5m) return null;
     const counts = [
       record.uncached_input_tokens,
       record.output_tokens,
       record.cache_read_tokens,
-      record.provider === "codex" ? 0 : record.cache_write_tokens,
+      write5m,
+      write1h,
     ];
     let numerator = 0n,
       denominator = 1n;
@@ -286,8 +295,6 @@ export class LocalPrices {
       if (count === null || !Number.isSafeInteger(count) || count < 0)
         return null;
       if (!count) continue;
-      // A known TTL split needs an exact matching price; do not apply generic creation pricing.
-      if (i === 3 && (record.cache_write_1h_tokens ?? 0) > 0) return null;
       const rule = rules[i].find(
         ({ threshold }) =>
           threshold < 0 ||

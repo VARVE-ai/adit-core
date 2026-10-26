@@ -107,6 +107,28 @@ it.each(["Native title", "   ", undefined])("uses a native title when present an
   expect(browser.list(w, { query: expected }).total).toBe(1);
   expect(browser.detail(w, "claude", "titled").turns[0].prompt).toBe("First question");
 });
+it("shows saved Claude 1h cache usage costs in both the session list and detail", () => {
+  const { w, history, browser } = fixture();
+  analytics.prices.install({
+    "claude-fable-5-1": {
+      mode: "chat", input_cost_per_token: 0.00001, output_cost_per_token: 0.00005,
+      cache_read_input_token_cost: 0.00000025, cache_creation_input_token_cost: 0.0000125,
+      cache_creation_input_token_cost_above_1hr: 0.00002,
+    },
+  });
+  history.write({ id: "cache-ttl", provider: "claude", cwd: root, messages: [
+    m("u", "user", "Question"), m("a", "assistant", "Answer", {
+      model: "claude-fable-5-1", usage: {
+        input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 400, cache_creation_input_tokens: 30,
+        cache_creation: { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 20 },
+      },
+    }),
+  ] });
+  expect(browser.list(w).items[0]).toMatchObject({ cost: 2625, unpriced: 0 });
+  for (const mode of ["normal", "focused"] as const)
+    expect(browser.detail(w, "claude", "cache-ttl", mode)).toMatchObject({ cost: 2625, unpriced: 0 });
+});
+
 it("keeps image-only turns visible in both modes without exposing binary data as text",()=>{
  const {w,history,browser}=fixture();
  history.write({id:'images',provider:'codex',cwd:root,messages:[
