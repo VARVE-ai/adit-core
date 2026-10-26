@@ -30,7 +30,7 @@ export type {SourceScanProgress,SourceProgressListener} from "./scan-progress.js
 
 const PARSER_VERSION = 6;
 // Recollect existing archives once for native titles and blank-title normalization.
-const parserVersion = (provider: string) => ["codex", "traex", "augure-code"].includes(provider) ? 9 :
+const parserVersion = (provider: string) => provider==="qoder" ? 8 : ["codex", "traex", "augure-code"].includes(provider) ? 9 :
   ["claude","cowork","qoder","icodemate","opencode","kilo","mimocode","copilot","vscode-copilot","positron","roocode","kilo-legacy","junie","muse","poolside","visualstudio-copilot","kimi","kimi-work"].includes(provider)?7:PARSER_VERSION;
 export interface ScanSource {
   id: string;

@@ -27,7 +27,7 @@ export async function discoverHistory(db:Database.Database,workspace:string,sour
     DO UPDATE SET version=excluded.version,manifest_json=excluded.manifest_json,metadata_json=excluded.metadata_json`);
   const assigned=db.prepare("SELECT workspace FROM adit_history_assignments WHERE provider=? AND session_id=?");
   for(const source of sources) {
-    const version=["codex","traex","augure-code"].includes(source.id)?2:VERSION;
+    const version=["codex","traex","augure-code","qoder"].includes(source.id)?2:VERSION;
     options.signal?.throwIfAborted();options.beforeSource?.(source.id);
     for(const root of source.paths) {
       try {

@@ -569,9 +569,6 @@ export function SessionTurnView({
       </div>
       </>}
       {activity}
-      {mode === "focused" && !events.length && !turn.hasMoreEvents && (
-        <p className="session-muted">{sc("该轮尚无最后回复")}</p>
-      )}
     </article>
   );
 }

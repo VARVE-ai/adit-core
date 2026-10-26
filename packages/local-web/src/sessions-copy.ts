@@ -85,7 +85,6 @@ const copy = {
   加载更多内容: "Load more content",
   加载更多过程: "Load more activity",
   加载更多提问: "Load more prompts",
-  该轮尚无最后回复: "No final reply for this prompt yet",
   加载之前的提问: "Load earlier prompts",
   加载之前的过程: "Load earlier activity",
   会话上下文: "Session context",
