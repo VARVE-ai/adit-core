@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { LocalStore, LocalHistory, projectRepositories } from "@varveai/adit-core";
 import { createAttributionSchema } from "../../../core/src/local-history/attribution-schema.js";
 import { StructuredHistory } from "../../../core/src/local-history/structured-store.js";
-import { CloudProjection, cloudFinalReply, cloudTurnUsage, createCloudSyncSchema, finalReply, syncKey, type CloudBaseline } from "./cloud-projection.js";
+import { CloudProjection, CloudSessionIndex, cloudFinalReply, cloudTurnUsage, createCloudSyncSchema, finalReply, syncKey, type CloudBaseline } from "./cloud-projection.js";
 import { cloudPending } from "./cloud-pending.js";
 import { LocalCloudSync } from "./cloud-sync.js";
 import { loadCredentials } from "@varveai/adit-cloud";
@@ -33,6 +33,39 @@ function write(extra=false){history.write({id:"native",provider:"codex",cwd:root
   ...(extra?[{key:"p2",role:"user",content:"next question",timestamp:at(6),raw:{}},{key:"f2",role:"assistant",content:"next answer",timestamp:at(7),raw:{payload:{phase:"final"}}}]:[]),
 ]});}
 function project(b=baseline){const w=workspace();return new CloudProjection(store,w,"scope",structuredClone(b));}
+it("indexes sources once per provider while preserving identity precedence, ambiguity and baseline order",()=>{
+  const paths=[['native','C:/sessions/own.jsonl'],['fork','C:/sessions/shared.jsonl'],['other','C:/sessions/shared.jsonl']];
+  for(const [id,path] of paths) {
+    history.write({id,provider:'codex',cwd:root,messages:[]});
+    store.db.prepare("INSERT INTO adit_history_sources VALUES (?,?,?,?,8)").run('codex',`${path}#${id}`,id,'hash');
+  }
+  const metadata=[{transcriptPath:'c:\\SESSIONS\\own.jsonl'},{nativeId:'native',platformSessionId:'native'},
+    {nativeId:'elsewhere',transcriptPath:'C:/sessions/own.jsonl'},{platformSessionId:'native'},
+    {transcriptPath:'C:/sessions/shared.jsonl'},{nativeId:'native',provider:'claude'},{nativeId:'native'}];
+  const sessions=metadata.map((meta,ordinal)=>({id:`cloud-${ordinal}`,platform:'codex',metadata:JSON.stringify(meta),startedAt:at(1),deleted:false,sequence:ordinal,lastEventAt:at(5)}));
+  const b={...baseline,sessions},prepare=vi.spyOn(store.db,'prepare'),index=new CloudSessionIndex(store,b);
+  for(let attempt=0;attempt<100;attempt++) {
+    expect(index.matches('codex','native').map(session=>session.id)).toEqual(['cloud-0','cloud-1','cloud-3','cloud-6']);
+    expect(index.matches('codex','fork')).toEqual([]);
+    expect(index.matches('codex','missing')).toEqual([]);
+  }
+  expect(prepare.mock.calls.filter(([sql])=>sql==='SELECT path,session_id FROM adit_history_sources WHERE provider=?')).toHaveLength(1);
+  prepare.mockRestore();
+  history.write({id:'new-owner',provider:'codex',cwd:root,messages:[]});
+  store.db.prepare("INSERT INTO adit_history_sources VALUES (?,?,?,?,8)").run('codex','C:/sessions/own.jsonl#new-owner','new-owner','hash');
+  expect(new CloudSessionIndex(store,b).matches('codex','native').map(session=>session.id)).toEqual(['cloud-1','cloud-3','cloud-6']);
+});
+it("reads sources only once per pending summary and upload projection",()=>{
+  write(true);
+  history.write({id:'second',provider:'codex',cwd:root,messages:[{key:'p',role:'user',content:'another',timestamp:at(8),raw:{}}]});
+  const w=workspace(),prepare=vi.spyOn(store.db,'prepare');
+  expect(cloudPending(store,w,'scope',baseline).sessions).toBe(2);
+  const scans=()=>prepare.mock.calls.filter(([sql])=>sql==='SELECT path,session_id FROM adit_history_sources WHERE provider=?').length;
+  expect(scans()).toBe(1);
+  const projection=new CloudProjection(store,w,'scope',baseline);
+  expect(projection.sessions()).toHaveLength(2);expect(scans()).toBe(2);
+  prepare.mockRestore();
+});
 it("excludes native approval reviews from pending counts and uploads after archive cleanup",async()=>{
  write();
  const path=join(root,"rollout-review.jsonl");
@@ -221,6 +254,22 @@ it("continues a historical native session without changing its Cloud identity or
   expect(events.map(e=>e.text)).toEqual(["next question","next answer"]);
   expect(events.every(e=>e.sessionId==="old-session"&&e.sequence>90)).toBe(true);
 });
+it("uses each historical session's boundary instead of another session's latest event",()=>{
+  write(true);
+  const b:CloudBaseline={...baseline,before:at(10),sessions:[{id:"old-session",platform:"codex",metadata:JSON.stringify({nativeId:"native"}),startedAt:at(1),deleted:false,sequence:90,lastEventAt:at(5)}]};
+  const p=project(b);
+  expect(cloudPending(store,p.workspace,p.scope,b).sessions).toBe(1);
+  const source=p.sessions()[0];
+  const events=[];
+  for(const batch of p.sessionBatches(source.source,source.session!)) {
+    events.push(...batch);
+    p.confirm("event",batch.map(event=>event.id));
+  }
+  expect(events.map(event=>event.text)).toEqual(["next question","next answer"]);
+  expect(events.every(event=>event.sessionId==="old-session"&&event.sequence>90)).toBe(true);
+  expect([...p.sessionBatches(source.source,source.session!)].flat()).toEqual([]);
+  expect(cloudPending(store,p.workspace,p.scope,b).sessions).toBe(0);
+});
 it("keeps an ambiguous spanning session pending rather than duplicating old history",()=>{
   write(true);const p=project({...baseline,before:at(5)});expect(p.sessions()).toHaveLength(0);expect([...p.warnings].join(" ")).toContain("identity");
 });
@@ -252,6 +301,40 @@ it("uses edited text and omits a deleted turn before first upload",()=>{
   store.db.prepare("INSERT INTO adit_history_deleted_turns VALUES ('codex','native','p',1)").run();
   const p=new CloudProjection(store,w,"scope",baseline),s=p.sessions()[0],events=[...p.sessionBatches(s.source,s.session!)].flat();
   expect(events.map(e=>e.text)).toEqual(["edited question","next answer"]);
+});
+it("upgrades cached session boundaries without losing receipts or advancing the original boundary",async()=>{
+  write(true);const w=workspace(),scope=syncKey("http://localhost:3000","user",w.id);
+  const old={id:"old-session",platform:"codex",metadata:JSON.stringify({nativeId:"native"}),startedAt:at(1),deleted:false,sequence:90};
+  const cached={...baseline,before:at(10),sessions:[old,{...old,id:"other-session",metadata:null}]};
+  store.db.prepare("INSERT INTO adit_local_cloud_scopes VALUES (?,?,?)").run(scope,w.id,JSON.stringify(cached));
+  store.db.prepare("INSERT INTO adit_local_cloud_sessions VALUES (?,?,?,?,?,?)").run(scope,"codex","native","old-session",999,90);
+  const projection=new CloudProjection(store,w,scope,cached);
+  projection.confirm("event",["already-confirmed"]);
+  const fresh={...baseline,before:at(30),sessions:[{...old,lastEventAt:at(5)},{...old,id:"other-session",metadata:null,lastEventAt:at(20)}]};
+  const client={get:vi.fn().mockResolvedValue(fresh),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((event:any)=>event.id),commitIds:[]}))};
+  const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
+  sync.start(w.id);await sync.wait(w.id);
+  expect(sync.status(w.id).status).toBe("done");
+  expect(client.post.mock.calls.flatMap(([,payload])=>payload.events.map((event:any)=>event.text))).toEqual(["next question","next answer"]);
+  const saved=JSON.parse((store.db.prepare("SELECT baseline FROM adit_local_cloud_scopes WHERE id=?").get(scope) as any).baseline);
+  expect(saved.before).toBe(at(10));expect(saved.sessions.map((session:any)=>session.lastEventAt)).toEqual([at(5),at(10)]);
+  expect(projection.receipt("event","already-confirmed")).toBe(true);
+  sync.start(w.id);await sync.wait(w.id);expect(client.post).toHaveBeenCalledTimes(1);
+  await sync.close();
+});
+it("rejects legacy Cloud boundaries before uploading or changing cached checkpoints",async()=>{
+  write(true);const w=workspace(),scope=syncKey("http://localhost:3000","user",w.id);
+  const cached={...baseline,before:at(10),sessions:[{id:"old-session",platform:"codex",metadata:JSON.stringify({nativeId:"native"}),startedAt:at(1),deleted:false,sequence:90}]};
+  store.db.prepare("INSERT INTO adit_local_cloud_scopes VALUES (?,?,?)").run(scope,w.id,JSON.stringify(cached));
+  store.db.prepare("INSERT INTO adit_local_cloud_sessions VALUES (?,?,?,?,?,?)").run(scope,"codex","native","old-session",999,90);
+  const client={get:vi.fn().mockResolvedValue(structuredClone(cached)),post:vi.fn()};
+  const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
+  sync.start(w.id);await sync.wait(w.id);
+  expect(sync.status(w.id).status).toBe("failed");expect(sync.status(w.id).error).toContain("Update the Cloud server");
+  expect(client.post).not.toHaveBeenCalled();
+  expect(store.db.prepare("SELECT baseline FROM adit_local_cloud_scopes WHERE id=?").get(scope)).toEqual({baseline:JSON.stringify(cached)});
+  expect(store.db.prepare("SELECT revision FROM adit_local_cloud_sessions WHERE scope=?").get(scope)).toEqual({revision:999});
+  await sync.close();
 });
 it("retries stable identities after a missing acknowledgement and skips confirmed history",async()=>{
   write();const w=workspace();let attempts=0;const ids:string[][]=[];

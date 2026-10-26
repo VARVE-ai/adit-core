@@ -97,7 +97,9 @@ export class LocalCloudSync {
         const scope=syncKey(credentials.serverUrl,identity.accountId,workspace.id);
         const found=this.store.db.prepare("SELECT baseline FROM adit_local_cloud_scopes WHERE id=?").get(scope) as {baseline:string}|undefined;
         let baseline:CloudBaseline;
-        if(found)baseline=JSON.parse(found.baseline);
+        const cached:CloudBaseline|undefined=found?JSON.parse(found.baseline):undefined;
+        const needsSessionBoundaries=!!cached?.sessions.some(session=>session.lastEventAt===undefined);
+        if(cached&&!needsSessionBoundaries)baseline=cached;
         else {
           baseline=identity;
           const cursors=new Set<string>();
@@ -112,7 +114,22 @@ export class LocalCloudSync {
             baseline.nextCursor=page.nextCursor;
           }
           unchanged();
-          this.store.db.prepare("INSERT INTO adit_local_cloud_scopes VALUES (?,?,?)").run(scope,workspace.id,JSON.stringify(baseline));
+          if(baseline.sessions.some(session=>session.lastEventAt===undefined ||
+            session.lastEventAt!==null&&!Number.isFinite(Date.parse(session.lastEventAt))))
+            throw new Error("Update the Cloud server before syncing historical sessions: per-session sync boundaries are unavailable.");
+          if(cached) {
+            baseline={...cached,sessions:cached.sessions.map(session=>{
+              const current=baseline.sessions.find(candidate=>candidate.id===session.id);
+              if(!current)throw new Error("A historical session is missing from Cloud; its sync boundary could not be verified.");
+              const limit=cached.before?Date.parse(cached.before):Infinity;
+              return {...session,lastEventAt:current.lastEventAt===null?null:new Date(Math.min(Date.parse(current.lastEventAt!),limit)).toISOString()};
+            })};
+          }
+          this.store.db.transaction(()=>{
+            this.store.db.prepare("INSERT INTO adit_local_cloud_scopes VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET baseline=excluded.baseline")
+              .run(scope,workspace.id,JSON.stringify(baseline));
+            if(needsSessionBoundaries)this.store.db.prepare("UPDATE adit_local_cloud_sessions SET revision=0 WHERE scope=?").run(scope);
+          })();
         }
         const projection=new CloudProjection(this.store,workspace,scope,baseline);
         const repositories=await Promise.all(projectUploadRepositories(this.store.db,workspace).map(async r=>{
