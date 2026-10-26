@@ -36,6 +36,7 @@ export interface CloudCredentials {
   accountId?: string;
   accountName?: string;
   accountEmail?: string;
+  accountImage?: string;
   checkedAt?: string;
   reachable?: boolean;
   authStatus?: "valid" | "expired";
@@ -163,6 +164,7 @@ export type CloudAccountMetadata = Pick<
   | "accountId"
   | "accountName"
   | "accountEmail"
+  | "accountImage"
   | "checkedAt"
   | "reachable"
   | "authStatus"

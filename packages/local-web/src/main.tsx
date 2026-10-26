@@ -1,4 +1,5 @@
 import { AgentLabel } from "./agent-label";
+import { CloudAvatar } from "./cloud-avatar";
 import { WorkspacePicker } from "./workspace-picker";
 import { t, locale, useLanguage, systemMessage } from "./i18n";
 import React, { useEffect, useState, useCallback, useRef, lazy, Suspense } from "react";
@@ -29,7 +30,6 @@ import {
   ShieldCheck,
   Loader2,
   Trash2,
-  UserRound,
 } from "lucide-react";
 import "./style.css";
 import { AditMark } from "./adit-mark";
@@ -120,6 +120,7 @@ type AccountData = {
   server: string;
   auth: "valid" | "expired" | "disconnected";
   account?: string;
+  image?: string;
   reachable?: boolean | null;
   checkedAt?: string;
   attempt?: {
@@ -2095,13 +2096,7 @@ function Account({
         <div className="field">
           <span>{t("云端账号")}</span>
           <div className="account-value">
-            <span className="cloud-avatar" aria-hidden="true">
-              {data.account ? (
-                Array.from(data.account)[0].toUpperCase()
-              ) : (
-                <UserRound size={14} />
-              )}
-            </span>
+            <CloudAvatar key={`${data.server}:${data.account}:${data.image}`} account={data.account} image={data.image} />
             <span className="account-name">
               {data.account ||
                 (data.connected ? t("账号名称未返回") : t("未登录"))}

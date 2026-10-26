@@ -25,6 +25,7 @@ interface CloudAccountUser {
   id?: string;
   name?: string | null;
   email?: string | null;
+  image?: string | null;
 }
 
 function accountMetadata(user?: CloudAccountUser) {
@@ -32,6 +33,7 @@ function accountMetadata(user?: CloudAccountUser) {
     accountId: user?.id,
     accountName: user?.name ?? undefined,
     accountEmail: user?.email ?? undefined,
+    accountImage: user?.image ?? undefined,
   };
 }
 
@@ -96,6 +98,7 @@ export class LocalAccount {
           : "valid"
         : "disconnected",
       account: c?.accountName || c?.accountEmail,
+      image: c?.accountImage,
       checkedAt: c?.checkedAt,
       reachable: c?.reachable ?? null,
       attempt: this.attempt,
