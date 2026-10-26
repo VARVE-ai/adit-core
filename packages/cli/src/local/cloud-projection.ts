@@ -183,6 +183,7 @@ export class CloudProjection {
   private sessionIndex: CloudSessionIndex;
   readonly warnings = new Set<string>();
   readonly mappings = new Map<string, CloudSession>();
+  readonly commitBranches = new Map<string, string>();
   constructor(readonly store: LocalStore, readonly workspace: LocalWorkspace, readonly scope: string, readonly baseline: CloudBaseline) {
     this.sessionIndex = new CloudSessionIndex(store,baseline);
   }
@@ -360,7 +361,7 @@ export class CloudProjection {
         }
         const submit=a.submit_session_id?this.mappings.get(this.nativeKey(a.submit_provider,a.submit_session_id)):undefined;
         const outputs=a.submit_tool_call_id?(db.prepare("SELECT content_text FROM adit_history_tool_results WHERE tool_call_id=?").all(a.submit_tool_call_id) as Row[]).map(r=>r.content_text||""):[];
-        const branch=a.match_method==="hash"?branchFromCommitOutput(outputs,c.sha):null;
+        const branch=(a.match_method==="hash"?branchFromCommitOutput(outputs,c.sha):null) ?? this.commitBranches.get(`${repo.localRepositoryId}:${c.sha}`) ?? null;
         const events:CloudEvent[]=[];
         if(submit && a.submit_turn_id) {
           const turn=db.prepare("SELECT t.*,m.source_key FROM adit_history_turns t JOIN adit_history_messages m ON m.id=t.prompt_message_id WHERE t.id=?").get(a.submit_turn_id) as Row|undefined;

@@ -1,12 +1,13 @@
 import { assertWorkspaceGit } from "@varveai/adit-core";
 import { randomUUID } from "node:crypto";
 import { LocalStore, LocalStateError, localLoginStartupEnabled, projectUploadRepositories } from "@varveai/adit-core";
-import { CloudClient, loadCredentials, collectDefaultBranch, type UpgradeNotice } from "@varveai/adit-cloud";
+import { CloudClient, loadCredentials, collectDefaultBranch, collectRemoteBranchSnapshot, type UpgradeNotice } from "@varveai/adit-cloud";
 import { CloudProjection, createCloudSyncSchema, syncKey, type CloudBaseline, type CloudEvent, type CloudSession } from "./cloud-projection.js";
 import type { Collector } from "./collector.js";
 import { getRemoteUrl, runGit } from "@varveai/adit-engine";
 import { cloudPending, type CloudPending } from "./cloud-pending.js";
 import { sendLocalRuntimeReport } from "./cloud-runtime-report.js";
+import { localCommitBranches, type CommitBranch } from "./commit-branches.js";
 
 export interface LocalCloudJob {
   id:string; workspaceId:string; kind:"cloud-sync"; status:"queued"|"running"|"done"|"partial"|"failed";
@@ -132,6 +133,16 @@ export class LocalCloudSync {
           })();
         }
         const projection=new CloudProjection(this.store,workspace,scope,baseline);
+        const commitBranches:CommitBranch[]=[];
+        for(const repository of projectUploadRepositories(this.store.db,workspace)) {
+          try {
+            const branches=await localCommitBranches(this.store,repository);
+            commitBranches.push(...branches);
+            for(const branch of branches)projection.commitBranches.set(`${branch.localRepositoryId}:${branch.sha}`,branch.branch);
+          } catch {
+            job.warnings.push(`Unable to resolve commit branches for ${repository.relativePath}; existing branch information is preserved.`);
+          }
+        }
         const repositories=await Promise.all(projectUploadRepositories(this.store.db,workspace).map(async r=>{
           let repositoryUrl=await getRemoteUrl(r.path).catch(()=>null);
           if(repositoryUrl?.includes("://")) { try {const url=new URL(repositoryUrl);url.username="";url.password="";repositoryUrl=url.toString();}catch{repositoryUrl=null;} }
@@ -148,23 +159,36 @@ export class LocalCloudSync {
             collectDefaultBranch(r.path).catch(()=>null),
             runGit(["config","user.name"],{cwd:r.path}).then(result=>result.exitCode===0?result.stdout.trim():"").catch(()=>""),
           ]);
+          let remoteBranchSnapshot:{branches:{name:string;headSha:string}[]}|undefined;
+          if(repositoryUrl) {
+            try {
+              const snapshot=await collectRemoteBranchSnapshot(r.path);
+              remoteBranchSnapshot={branches:snapshot.branches.map(({name,headSha})=>({name,headSha}))};
+            } catch {
+              job.warnings.push(`Unable to refresh remote branches for ${r.relativePath}; Cloud keeps its previous branch snapshot.`);
+            }
+          }
           return {localRepositoryId:r.localRepositoryId,relativePath:r.relativePath,displayName:r.displayName??r.relativePath,repositoryUrl:repositoryUrl??null,
+            ...(remoteBranchSnapshot?{remoteBranchSnapshot}:{}),
             ...(defaultBranch?{defaultBranch}:{}),...(authorName?{gitAuthorName:authorName}:{}),
             ...(checkpoint?{branches,gitAuthorEmail:checkpoint.identity}: {})};
         }));
         const repositoryKey=syncKey(workspace.name,repositories);
-        let registered=projection.receipt("repositories",repositoryKey);
-        const push=async(sessions:CloudSession[],events:CloudEvent[],commits:Record<string,any>[]=[])=>{
+        let registered=projection.receipt("repositories",repositoryKey)&&!repositories.some(r=>r.remoteBranchSnapshot);
+        const push=async(sessions:CloudSession[],events:CloudEvent[],commits:Record<string,any>[]=[],branchUpdates:CommitBranch[]=[])=>{
           unchanged();
           const payload={schemaVersion:1,localProjectId:workspace.id,projectName:workspace.name,
-            repositories:registered?repositories.map(({branches,gitAuthorEmail,gitAuthorName,defaultBranch,...r})=>r):repositories,sessions,events,commits};
+            repositories:registered?repositories.map(({branches,remoteBranchSnapshot,gitAuthorEmail,gitAuthorName,defaultBranch,...r})=>r):repositories,sessions,events,commits,
+            ...(branchUpdates.length?{commitBranches:branchUpdates}:{})};
           if(Buffer.byteLength(JSON.stringify(payload))>8_000_000)throw new Error("A conversation turn exceeds the Cloud batch limit; it remains pending.");
-          const ack=await client.post<{schemaVersion:number;accountId:string;serverProjectId?:string;eventIds:string[];commitIds:string[]}>("/api/sync/local",payload);
+          const ack=await client.post<{schemaVersion:number;accountId:string;serverProjectId?:string;eventIds:string[];commitIds:string[];commitBranchIds?:string[]}>("/api/sync/local",payload);
           if(ack.schemaVersion!==1||ack.accountId!==identity.accountId||!Array.isArray(ack.eventIds)||!Array.isArray(ack.commitIds))throw new Error("Cloud did not acknowledge the uploaded records");
           const expectedEvents=events.map(e=>e.id),expectedCommits=commits.map(c=>`${c.localRepositoryId}:${c.sha}`);
           if(expectedEvents.some(id=>!ack.eventIds.includes(id))||expectedCommits.some(id=>!ack.commitIds.includes(id)))throw new Error("Cloud did not acknowledge every record; retry to continue.");
+          if(branchUpdates.some(branch=>!ack.commitBranchIds?.includes(`${branch.localRepositoryId}:${branch.sha}`)))throw new Error("Cloud did not acknowledge commit branch updates; update Cloud and retry.");
           // Persist only the exact requested and acknowledged identities, never a batch-time cursor.
           projection.confirm("event",expectedEvents);projection.confirm("commit",expectedCommits);
+          projection.confirm("commit-branch",branchUpdates.map(branch=>syncKey(branch)));
           projection.confirm("repositories",[repositoryKey]);registered=true;
           job.serverProjectId=ack.serverProjectId;job.events+=events.length;job.commits+=commits.length;save();
         };
@@ -172,6 +196,8 @@ export class LocalCloudSync {
           for(const events of projection.sessionBatches(source,session!)) await push([session!],events);
         }
         for(const item of projection.commitBatches())await push(item.sessions,item.events,[item.commit]);
+        const branchUpdates=commitBranches.filter(branch=>!projection.receipt("commit-branch",syncKey(branch)));
+        for(let offset=0;offset<branchUpdates.length;offset+=100)await push([],[],[],branchUpdates.slice(offset,offset+100));
         if(!registered)await push([],[]);
         unchanged();
         Object.assign(job,await sendLocalRuntimeReport(this.store,workspace,credentials));

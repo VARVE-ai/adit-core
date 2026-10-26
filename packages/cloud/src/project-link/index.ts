@@ -19,10 +19,12 @@ export {
   collectDefaultBranch,
   collectCurrentBranch,
   collectBranches,
+  collectRemoteBranchSnapshot,
   branchHeadMap,
   collectGitRefsFingerprint,
   collectCommitLogs,
   collectCommitsBetweenRefSnapshots,
+  resolveCommitBranches,
   collectCommitCount,
   projectNameFromRemoteUrl,
 } from "./git-collector.js";
