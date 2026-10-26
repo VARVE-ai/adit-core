@@ -137,6 +137,7 @@ export function readCredential(
     accountId: r.account_id ?? undefined,
     accountName: r.account_name ?? undefined,
     accountEmail: r.account_email ?? undefined,
+    accountImage: r.account_image ?? undefined,
     checkedAt: r.checked_at ?? undefined,
     reachable: r.reachable == null ? undefined : !!r.reachable,
     authStatus: r.auth_status ?? undefined,
@@ -161,6 +162,8 @@ export function writeCredential(
   directory: string,
   creds: CloudCredentials,
 ): void {
+  if (!(db.prepare("PRAGMA table_info(adit_cloud_credentials)").all() as { name: string }[]).some((column) => column.name === "account_image"))
+    db.exec("ALTER TABLE adit_cloud_credentials ADD COLUMN account_image TEXT");
   const server = normalizeServerUrl(creds.serverUrl),
     id = creds.credentialId || randomUUID();
   const key = encryptionKey(db, directory, true),
@@ -188,6 +191,7 @@ export function writeCredential(
       account_id: creds.accountId,
       account_name: creds.accountName,
       account_email: creds.accountEmail,
+      account_image: creds.accountImage,
       checked_at: creds.checkedAt,
       reachable: creds.reachable === undefined ? null : +creds.reachable,
       auth_status: creds.authStatus,

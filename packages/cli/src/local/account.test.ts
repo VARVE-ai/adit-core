@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { LocalStore } from "@varveai/adit-core";
 import {
   CloudAuthError,
   CloudClient,
@@ -224,15 +225,29 @@ it("uses the server directory even when the process default contains another log
   expect(loadCredentials()?.accessToken).toBe("test-access");
 });
 
+it("adds avatar storage to an existing credential database without replacing login", async () => {
+  const store = new LocalStore(directory);
+  try {
+    store.db.exec("ALTER TABLE adit_cloud_credentials DROP COLUMN account_image");
+  } finally {
+    store.close();
+  }
+  vi.spyOn(CloudClient.prototype, "get").mockResolvedValue({ user: { image: "https://example.test/avatar.png" } });
+  expect((await new LocalAccount().check()).image).toBe("https://example.test/avatar.png");
+  expect(loadCredentials()?.accessToken).toBe("test-access");
+});
+
 it("refreshes the account name and falls back to email when the name is removed", async () => {
   const get = vi.spyOn(CloudClient.prototype, "get").mockResolvedValue({
-    user: { id: "user-1", name: "Account name", email: "user@example.test" },
+    user: { id: "user-1", name: "Account name", email: "user@example.test", image: "https://example.test/avatar.png" },
   });
   const account = new LocalAccount();
   expect((await account.check()).account).toBe("Account name");
+  expect(new LocalAccount().status().image).toBe("https://example.test/avatar.png");
   get.mockResolvedValue({ user: { id: "user-1", name: null, email: "user@example.test" } });
   expect((await account.check()).account).toBe("user@example.test");
   expect(loadCredentials()?.accountName).toBeUndefined();
+  expect(new LocalAccount().status().image).toBeUndefined();
 });
 
 it("remembers a selected server after a failed login and restart without changing another directory", async () => {

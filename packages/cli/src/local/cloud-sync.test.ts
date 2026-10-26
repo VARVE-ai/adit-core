@@ -8,11 +8,12 @@ import { StructuredHistory } from "../../../core/src/local-history/structured-st
 import { CloudProjection, CloudSessionIndex, cloudFinalReply, cloudTurnUsage, createCloudSyncSchema, finalReply, syncKey, type CloudBaseline } from "./cloud-projection.js";
 import { cloudPending } from "./cloud-pending.js";
 import { LocalCloudSync } from "./cloud-sync.js";
-import { loadCredentials } from "@varveai/adit-cloud";
+import { loadCredentials, collectRemoteBranchSnapshot } from "@varveai/adit-cloud";
 import { runGit } from "@varveai/adit-engine";
 import { sendLocalRuntimeReport } from "./cloud-runtime-report.js";
+import { localCommitBranches } from "./commit-branches.js";
 
-vi.mock("@varveai/adit-cloud", async () => ({...(await import("../../../cloud/src/index.js")),loadCredentials:vi.fn()}));
+vi.mock("@varveai/adit-cloud", async () => ({...(await import("../../../cloud/src/index.js")),loadCredentials:vi.fn(),collectRemoteBranchSnapshot:vi.fn()}));
 vi.mock("./cloud-runtime-report.js",()=>({sendLocalRuntimeReport:vi.fn().mockResolvedValue({})}));
 let root:string,store:LocalStore,history:StructuredHistory;
 const baseline:CloudBaseline={schemaVersion:1,accountId:"user",before:null,repositories:[],sessions:[],nextCursor:null};
@@ -21,6 +22,7 @@ beforeEach(()=>{
   root=mkdtempSync(join(tmpdir(),"adit-local-cloud-"));mkdirSync(join(root,".git"));store=new LocalStore(join(root,"state"));new LocalHistory(store.db);createCloudSyncSchema(store);history=new StructuredHistory(store.db);
   vi.mocked(loadCredentials).mockReturnValue({clientId:"device",accountId:"user",credentialId:"credential",serverUrl:"http://localhost:3000",accessToken:"test",refreshToken:"",expiresAt:"",authType:"token"});
   vi.mocked(sendLocalRuntimeReport).mockReset().mockResolvedValue({});
+  vi.mocked(collectRemoteBranchSnapshot).mockReset().mockRejectedValue(new Error("Remote unavailable"));
 });
 afterEach(()=>{store.close();rmSync(root,{recursive:true,force:true});vi.restoreAllMocks();});
 function workspace(){return store.saveWorkspace({path:root,providers:["codex"],repositories:[],cloud:{enabled:true,mode:"manual",interval:5}});}
@@ -428,12 +430,82 @@ it("syncs configured Git author and default branch without new events, and refre
   expect(client.post.mock.calls[1][1].repositories[0].gitAuthorName).toBe("Updated Author");
   await sync.close();
 });
+it("refreshes remote-only branch changes, empty snapshots and repeated snapshots without new history",async()=>{
+  const {w,repos}=gitWorkspace(),repo=repos[0];
+  for(const args of [["init"],["remote","add","origin","https://example.invalid/test.git"]])
+    expect((await runGit(args,{cwd:repo.path})).exitCode).toBe(0);
+  const branch={name:"main",headSha:"a".repeat(40),isDefault:true};
+  const remote=vi.mocked(collectRemoteBranchSnapshot);
+  remote.mockResolvedValue({branches:[branch],fingerprint:"first"});
+  const client={get:vi.fn().mockResolvedValue(structuredClone(baseline)),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),commitIds:[]}))};
+  const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
+  try {
+    for(const branches of [[branch],[],[branch],[branch]]) {
+      remote.mockResolvedValue({branches,fingerprint:JSON.stringify(branches)});
+      sync.start(w.id);expect((await sync.wait(w.id))?.status).toBe("done");
+      expect(client.post.mock.calls.at(-1)![1].repositories[0].remoteBranchSnapshot).toEqual({branches:branches.map(({name,headSha})=>({name,headSha}))});
+    }
+    expect(client.post).toHaveBeenCalledTimes(4);
+    remote.mockRejectedValue(new Error("Remote unavailable"));
+    sync.start(w.id);const failed=await sync.wait(w.id);
+    expect(failed?.status).toBe("partial");expect(failed?.warnings.join(" ")).toContain("previous branch snapshot");
+    expect(client.post.mock.calls.at(-1)![1].repositories[0]).not.toHaveProperty("remoteBranchSnapshot");
+  } finally {await sync.close();}
+});
 function commit(repository:string,sha:string,time:number) {
   store.db.prepare("INSERT INTO adit_local_commits VALUES (?,?,?,?,'Test','test@example.invalid',?,'Test','test@example.invalid','subject','subject\n\nbody',1)")
     .run(repository,sha,"0".repeat(40),Date.parse(at(time)),Date.parse(at(time)));
   store.db.prepare(`INSERT INTO adit_attribution_commits(run_id,repository,sha,eligible_lines,excluded_lines,certain_lines,likely_lines,possible_lines,moved_lines,unknown_lines)
     VALUES ('run',?,?,0,0,0,0,0,0,0)`).run(repository,sha);
 }
+it("syncs Git-derived branches without sessions and repairs confirmed commits without reuploading history",async()=>{
+  const {w,repos}=gitWorkspace(),repo=repos[0];
+  const git=async(args:string[])=>{
+    const result=await runGit(args,{cwd:repo.path});expect(result.exitCode,result.stderr).toBe(0);return result.stdout.trim();
+  };
+  await git(["init","-b","develop"]);await git(["config","user.name","Test"]);await git(["config","user.email","test@example.invalid"]);
+  await git(["symbolic-ref","refs/remotes/origin/HEAD","refs/remotes/origin/develop"]);
+  await git(["-c","core.hooksPath=NUL","commit","--allow-empty","-m","First"]);
+  const old=await git(["rev-parse","HEAD"]);commit(repo.path,old,2);
+  await git(["checkout","-b","feature/test"]);
+  await git(["-c","core.hooksPath=NUL","commit","--allow-empty","-m","Second"]);
+  const fresh=await git(["rev-parse","HEAD"]);commit(repo.path,fresh,5);
+  const source={...structuredClone(baseline),knownCommits:[{localRepositoryId:repo.localRepositoryId,sha:old}]};
+  const client={get:vi.fn().mockResolvedValue(source),post:vi.fn(async(_url:string,payload:any)=>({
+    schemaVersion:1,accountId:"user",eventIds:payload.events.map((event:any)=>event.id),
+    commitIds:payload.commits.map((item:any)=>`${item.localRepositoryId}:${item.sha}`),
+    commitBranchIds:(payload.commitBranches??[]).map((item:any)=>`${item.localRepositoryId}:${item.sha}`),
+  }))};
+  const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
+  try {
+    sync.start(w.id);await sync.wait(w.id);
+    expect(sync.status(w.id).status).toBe("done");
+    const payloads=client.post.mock.calls.map(call=>call[1]);
+    expect(payloads.flatMap(payload=>payload.commits)).toMatchObject([{sha:fresh,branch:"feature/test",attributions:[]}]);
+    expect(payloads.flatMap(payload=>payload.commitBranches??[])).toEqual(expect.arrayContaining([
+      {localRepositoryId:repo.localRepositoryId,sha:old,branch:"develop"},
+      {localRepositoryId:repo.localRepositoryId,sha:fresh,branch:"feature/test"},
+    ]));
+    expect(payloads.every(payload=>!payload.sessions.length&&!payload.events.length)).toBe(true);
+    const cached=store.get(`commit-branches:${syncKey(repo.path)}`,null);
+    expect((await localCommitBranches(store,repo)).find(branch=>branch.sha===old)?.branch).toBe("develop");
+    expect(store.get(`commit-branches:${syncKey(repo.path)}`,null)).toEqual(cached);
+    const count=client.post.mock.calls.length;sync.start(w.id);await sync.wait(w.id);
+    expect(client.post).toHaveBeenCalledTimes(count);
+    await git(["branch","feature/tie","develop"]);
+    expect((await localCommitBranches(store,repo)).find(branch=>branch.sha===old)?.branch).toBe("feature/tie");
+    await git(["branch","-D","feature/tie"]);
+    client.post.mockImplementationOnce(async()=>{throw new Error("offline");});
+    store.db.prepare("DELETE FROM adit_local_cloud_receipts WHERE kind='commit-branch'").run();
+    sync.start(w.id);await sync.wait(w.id);expect(sync.status(w.id).status).toBe("failed");
+    expect(store.db.prepare("SELECT count(*) n FROM adit_local_cloud_receipts WHERE kind='commit-branch'").get()).toEqual({n:0});
+    client.post.mockImplementationOnce(async()=>({schemaVersion:1,accountId:"user",eventIds:[],commitIds:[],commitBranchIds:[]}));
+    sync.start(w.id);await sync.wait(w.id);expect(sync.status(w.id).status).toBe("failed");
+    expect(store.db.prepare("SELECT count(*) n FROM adit_local_cloud_receipts WHERE kind='commit-branch'").get()).toEqual({n:0});
+    sync.start(w.id);await sync.wait(w.id);expect(sync.status(w.id).status).toBe("done");
+    expect(client.post.mock.calls.at(-1)![1].commits).toEqual([]);
+  } finally {await sync.close();}
+});
 it("preserves unmatched commits and continues each repository from its own full Cloud coverage",()=>{
   const {w,repos}=gitWorkspace(),[a,b]=repos;
   const old="a".repeat(40),knownOtherBranch="b".repeat(40),freshA="c".repeat(40),freshB="d".repeat(40);
