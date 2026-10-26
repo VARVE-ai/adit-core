@@ -74,7 +74,7 @@ it.each(["fresh", "upgrade", "upgrade with local edits"])("excludes page events 
     });
     expect(db.prepare("SELECT count(*) n FROM adit_history_turns").get()).toEqual({ n: edited ? 1 : 2 });
     expect(db.prepare("SELECT count(*) n FROM adit_history_messages WHERE raw_json LIKE '%additional_content.codex_apps_open_page%'").get()).toEqual({ n: 0 });
-    expect(db.prepare("SELECT parser_version FROM adit_history_sources").get()).toEqual({ parser_version: 9 });
+    expect(db.prepare("SELECT parser_version FROM adit_history_sources").get()).toEqual({ parser_version: 10 });
     expect(await new LocalHistory(db).scan(root, sources)).toMatchObject({ errors: [], updated: 0 });
     expect(readFileSync(path, "utf8")).toBe(text);
   } finally { db.close(); }

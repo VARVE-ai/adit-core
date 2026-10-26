@@ -202,7 +202,13 @@ export class LocalInspection {
         ["function_call", "custom_tool_call"].includes(
           (nativeType.get(message.id) as Row | undefined)?.kind,
         );
+      const harnessCalls = new Set<string>();
       for (const b of blocks.all(message.id) as Row[]) {
+        // Keep the original native field identity when an older Harness block
+        // gains a normalized tool call, so existing dispositions remain attached.
+        const harnessCall = provider === "deepseek-harness" && b.kind === "tool-call"
+          ? c.find(call => call.source_call_id === decode(b.data_json)?.id) : undefined;
+        if (harnessCall) harnessCalls.add(harnessCall.id);
         if (
           inputProjection ||
           (toolKinds.has(b.kind) && (c.length || r.length)) ||
@@ -216,11 +222,12 @@ export class LocalInspection {
           yield {
             ...field,
             message,
-            tool: null,
-            location: message.role === "user" ? "prompt" : "response",
+            tool: harnessCall?.id ?? null,
+            location: harnessCall ? "tool_input" : message.role === "user" ? "prompt" : "response",
           };
       }
       for (const call of c) {
+        if (harnessCalls.has(call.id)) continue;
         let value = decode(call.input_json);
         if (typeof value === "string") {
           try {
@@ -237,7 +244,7 @@ export class LocalInspection {
         const value = decode(result.content_json) ?? result.content_text;
         for (const field of strings(
           value,
-          `result/${result.source_call_id || ""}/${result.event_index}`,
+          `result/${provider === "deepseek-harness" ? "" : result.source_call_id || ""}/${result.event_index}`,
         ))
           yield {
             ...field,
@@ -316,7 +323,7 @@ export class LocalInspection {
           .run(provider, id);
         const insert = this.db
           .prepare(`INSERT INTO adit_history_secret_findings VALUES (${Array(22).fill("?").join(",")}) ON CONFLICT(id) DO UPDATE SET
-        message_id=excluded.message_id,turn_id=excluded.turn_id,tool_call_id=excluded.tool_call_id,match_start=excluded.match_start,match_end=excluded.match_end,
+        message_id=excluded.message_id,turn_id=excluded.turn_id,tool_call_id=excluded.tool_call_id,location_kind=excluded.location_kind,match_start=excluded.match_start,match_end=excluded.match_end,
         line_number=excluded.line_number,masked_context=excluded.masked_context,masked_value=excluded.masked_value,transcript_revision=excluded.transcript_revision,
         rules_version=excluded.rules_version,occurred_at=excluded.occurred_at,last_seen_at=excluded.last_seen_at,active=1`);
         for (const f of found)

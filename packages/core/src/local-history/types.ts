@@ -1,3 +1,12 @@
+export interface HistoryUsageRecord {
+  key: string;
+  usage: Record<string, unknown>;
+  timestamp?: string;
+  model?: string;
+  requestId?: string;
+  responseId?: string;
+}
+
 export interface HistoryMessage {
   key: string;
   role: string;
@@ -6,6 +15,8 @@ export interface HistoryMessage {
   effort?: string;
   content: unknown;
   usage?: Record<string, unknown>;
+  /** Independent native requests, including requests without a visible reply. */
+  usageRecords?: HistoryUsageRecord[];
   parentKey?: string;
   raw: Record<string, unknown>;
   finalReply?: boolean;

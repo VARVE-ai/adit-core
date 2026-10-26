@@ -30,7 +30,7 @@ export type {SourceScanProgress,SourceProgressListener} from "./scan-progress.js
 
 const PARSER_VERSION = 6;
 // Recollect existing archives once for native titles and blank-title normalization.
-const parserVersion = (provider: string) => provider==="qoder" ? 8 : ["codex", "traex", "augure-code"].includes(provider) ? 9 :
+const parserVersion = (provider: string) => provider==="qoder" ? 8 : provider==="codex" ? 10 : provider==="deepseek-harness" ? 7 : ["traex", "augure-code"].includes(provider) ? 9 :
   ["claude","cowork","qoder","icodemate","opencode","kilo","mimocode","copilot","vscode-copilot","positron","roocode","kilo-legacy","junie","muse","poolside","visualstudio-copilot","kimi","kimi-work"].includes(provider)?7:PARSER_VERSION;
 export interface ScanSource {
   id: string;
@@ -243,6 +243,7 @@ export class LocalHistory {
                       fingerprint,
                       undefined,
                       path.endsWith(".db"),
+                      old !== undefined && old.parser_version !== version,
                     );
                     result.updated++; });
                   }
@@ -362,7 +363,7 @@ export class LocalHistory {
                   old.parser_version !== version)
               ) {
                 const snapshot=session;
-                writes.push(()=>{this.save(snapshot, pathKey, fingerprint, old?.session_id);result.updated++;});
+                writes.push(()=>{this.save(snapshot, pathKey, fingerprint, old?.session_id, false, old !== undefined && old.parser_version !== version);result.updated++;});
               }
               });
               options.signal?.throwIfAborted();
@@ -413,6 +414,7 @@ export class LocalHistory {
     fingerprint: string,
     previousId?: string,
     authoritativeDatabase = false,
+    rebuild = false,
   ): void {
     this.db.transaction(() => {
       if(["codex","traex","augure-code"].includes(session.provider)&&path.includes("#"))
@@ -440,24 +442,30 @@ export class LocalHistory {
         this.db.prepare("DELETE FROM adit_history_sources WHERE provider=? AND session_id=? AND path NOT LIKE '%state.db#%'").run(session.provider,session.id);
       const other = this.db
         .prepare(
-          "SELECT path FROM adit_history_sources WHERE provider=? AND session_id=? AND path<>? LIMIT 1",
+          "SELECT path,parser_version FROM adit_history_sources WHERE provider=? AND session_id=? AND path<>? LIMIT 1",
         )
-        .get(session.provider, session.id, path);
+        .get(session.provider, session.id, path) as {path:string;parser_version:number}|undefined;
       const current = other
         ? this.session(session.provider, session.id)
         : undefined;
       // Titles may change independently of identical transcript copies. All other
       // evidence must still agree, so an older copy cannot erase a newer transcript.
-      const comparable=(value:HistorySession)=>{
+      const comparable=(value:HistorySession,withoutUsage=false)=>{
         const copy=JSON.parse(JSON.stringify(value)) as HistorySession;
         if(copy.metadata){delete copy.metadata.title;if(!Object.keys(copy.metadata).length)delete copy.metadata;}
+        if(withoutUsage)for(const message of copy.messages){delete message.usage;delete message.usageRecords;}
         return copy;
       };
-      if (current && !isDeepStrictEqual(comparable(current),comparable(applyTranscriptEdits(this.db,session))))
+      const effective=applyTranscriptEdits(this.db,session);
+      // Parser upgrades can change usage on otherwise identical native copies.
+      // Keep the full transcript/raw-evidence conflict check in place.
+      const usageUpgrade=session.provider==="codex" && other && other.parser_version<parserVersion(session.provider);
+      if (current && !isDeepStrictEqual(comparable(current),comparable(effective)) &&
+        !(usageUpgrade && isDeepStrictEqual(comparable(current,true),comparable(effective,true))))
         throw new Error(
           "Conflicting copies of the same session; existing archive retained",
         );
-      new StructuredHistory(this.db).write(session);
+      new StructuredHistory(this.db).write(session,{rebuild});
       this.db
         .prepare(
           "INSERT INTO adit_history_sources VALUES (?,?,?,?,?) ON CONFLICT(provider,path) DO UPDATE SET session_id=excluded.session_id,fingerprint=excluded.fingerprint,parser_version=excluded.parser_version",

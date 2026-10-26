@@ -2,8 +2,9 @@ import { basename } from "node:path";
 import { isCompactedReply } from "./message-semantics.js";
 import { requireSession } from "./provider-common.js";
 import {codexUserContent} from "./native-user-content.js";
+import { CodexUsage, type CodexUsageState } from "./codex-usage.js";
 
-export interface CodexResume {model:string;effort:string;usageDigest:string;lastAssistantKey?:string;nextIndex:number;meta:Record<string,unknown>}
+export interface CodexResume {model:string;effort:string;usageDigest:string;lastAssistantKey?:string;nextIndex:number;meta:Record<string,unknown>;usage?:CodexUsageState}
 const resumeStates=new WeakMap<HistorySession,CodexResume>();
 export const codexResumeState=(session:HistorySession)=>resumeStates.get(session);
 
@@ -53,6 +54,7 @@ export function parseCodexRows(rows:Iterable<Record<string,unknown>>, parentTurn
     messages: [],
   };
   const archivedMessages=new Set(resume?.session.messages??[]);
+  const usage = provider === "codex" ? new CodexUsage(session.messages, resume?.state.usage, archivedMessages) : undefined;
   let model = resume?.state.model||"",
     effort = resume?.state.effort||"",
     usageDigest = resume?.state.usageDigest||"",
@@ -94,8 +96,10 @@ export function parseCodexRows(rows:Iterable<Record<string,unknown>>, parentTurn
     if (type === "turn_context") {
       model = string(payload.model);
       effort = string(payload.effort);
+      if (usage) usage.state.turnId = string(payload.turn_id) || usage.state.turnId;
       continue;
     }
+    if (usage?.collect(row, model)) continue;
     if (type === "event_msg") {
       if (payload.type === "task_started") usageDigest = "";
       if (["task_complete", "task_completed"].includes(string(payload.type)) && lastAssistant >= 0) {
@@ -168,6 +172,7 @@ export function parseCodexRows(rows:Iterable<Record<string,unknown>>, parentTurn
       session.messages.push(message);
     } else session.messages[index] = message;
     if (role === "assistant" && kind !== "reasoning") lastAssistant = index;
+    if (usage && (role === "assistant" || (role === "user" && !isPageContext(payload)))) usage.target(message);
   }
   // Assign native/fallback keys before filtering so existing edits and deletions
   // still target the same messages when an older archive is collected again.
@@ -211,6 +216,6 @@ export function parseCodexRows(rows:Iterable<Record<string,unknown>>, parentTurn
     }
   }
   const meta=Object.fromEntries(["id","cwd","source","forked_from_id","session_id","history_base","forked_from_ordinal_exclusive","agent_path","agent_nickname","parent_thread_id","thread_source"].filter(k=>nativeMeta[k]!==undefined).map(k=>[k,nativeMeta[k]]));
-  resumeStates.set(session,{model,effort,usageDigest,lastAssistantKey,nextIndex,meta});
+  resumeStates.set(session,{model,effort,usageDigest,lastAssistantKey,nextIndex,meta,...(usage ? {usage:usage.state} : {})});
   return requireSession(session);
 }

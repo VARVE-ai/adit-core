@@ -48,7 +48,8 @@ export class StructuredHistory {
     const session=this.db.prepare("SELECT * FROM adit_history_sessions WHERE provider=? AND id=?").get(provider,id) as Record<string,unknown>|undefined;
     if(!session)return;
     const rows=this.db.prepare(`SELECT m.*,o.raw_usage_json FROM adit_history_messages m
-      LEFT JOIN adit_history_usage_observations o ON o.message_id=m.id
+      LEFT JOIN adit_history_usage_observations o ON o.id=(SELECT first.id FROM adit_history_usage_observations first
+        WHERE first.message_id=m.id ORDER BY first.rowid LIMIT 1)
       WHERE m.provider=? AND m.session_id=? ORDER BY m.ordinal`).all(provider,id) as Record<string,unknown>[];
     const messages=rows.map(row=>({
       ...JSON.parse(row.extra_json as string),key:row.source_key,role:row.role,
@@ -65,11 +66,11 @@ export class StructuredHistory {
       ...(session.metadata_json!==null?{metadata:decode(session.metadata_json as string)}:{}),messages};
   }
 
-  write(session:HistorySession):void {
-    this.db.transaction(()=>this.replace(applyTranscriptEdits(this.db,session)))();
+  write(session:HistorySession, options:{rebuild?:boolean}={}):void {
+    this.db.transaction(()=>this.replace(applyTranscriptEdits(this.db,session),options.rebuild))();
   }
 
-  private replace(session:HistorySession):void {
+  private replace(session:HistorySession,rebuild=false):void {
     const {id,provider,cwd,parentId,relationship,metadata,messages,...extra}=session;
     if(new Set(messages.map(m=>m.key)).size!==messages.length)throw new Error("Duplicate native message identity in collected session");
     const digests=messages.map(message=>historyKey(message));
@@ -77,7 +78,7 @@ export class StructuredHistory {
       LEFT JOIN adit_history_message_digests d ON d.message_id=m.id
       WHERE m.provider=? AND m.session_id=? ORDER BY m.ordinal`).all(provider,id) as {id:string;ordinal:number;digest:string|null}[];
     let prefix=0;
-    while(prefix<messages.length && prefix<previous.length && previous[prefix].ordinal===prefix && previous[prefix].digest===digests[prefix])prefix++;
+    while(!rebuild && prefix<messages.length && prefix<previous.length && previous[prefix].ordinal===prefix && previous[prefix].digest===digests[prefix])prefix++;
     if(prefix===messages.length && previous.length>prefix && prefix>0)prefix--;
     // Rebuild only the affected turn and subsequent turns. Completed earlier turns retain
     // their blocks, FTS rows, tool evidence, usage/prices and identifiers.
@@ -166,7 +167,8 @@ export class StructuredHistory {
         const data=record(block),kind=string(data.type)||string(data.kind)||(typeof block==="string"?"text":"structured");
         const body=text(block)||string(data.thinking)||null;
         insertBlock.run(historyKey(mid,index),mid,index,kind,body,encode(block));
-        if(["tool_use","tool_result","toolCall","toolResult","function_call","function_call_output","custom_tool_call","custom_tool_call_output"].includes(kind))toolNodes.push(data);
+        if(["tool_use","tool_result","toolCall","toolResult","function_call","function_call_output","custom_tool_call","custom_tool_call_output"].includes(kind) ||
+          (provider==="deepseek-harness" && kind==="tool-call"))toolNodes.push(data);
       }
       if(["function_call","function_call_output","custom_tool_call","custom_tool_call_output"].includes(string(payload.type)))toolNodes.push(payload);
       const contentRecord=record(content);
@@ -174,7 +176,9 @@ export class StructuredHistory {
         if(Array.isArray(node.tool_calls))for(const call of node.tool_calls)toolNodes.push({...record(call),type:"function_call"});
         if(Object.keys(record(node.toolFormerData)).length)toolNodes.push({...record(node.toolFormerData),type:"function_call"});
       }
-      if(role==="tool" && !toolNodes.length)toolNodes.push({type:"tool_result",tool_use_id:wire.tool_call_id??contentRecord.tool_call_id??wire.toolCallId,content});
+      const harnessResult=provider==="deepseek-harness"?record(record(wire.data).message):{};
+      if(role==="tool" && !toolNodes.length)toolNodes.push({type:"tool_result",tool_use_id:wire.tool_call_id??contentRecord.tool_call_id??wire.toolCallId??harnessResult.toolCallId??record(harnessResult.source).callId,
+        ...(harnessResult.isError!==undefined?{is_error:harnessResult.isError}:{}),content});
       const seenNodes=new Set<string>();
       for(const [index,node] of toolNodes.entries()) {
         const type=string(node.type),nativeId=optional(node.call_id??node.tool_use_id??node.toolCallId??node.tool_call_id??node.id);
@@ -200,7 +204,10 @@ export class StructuredHistory {
             this.db.prepare("INSERT INTO adit_history_commit_operations VALUES (?,?,?,?,?,?,?,?)").run(toolId,toolId,provider,id,turn,occurred,command,"observed");
         }
       }
-      if(usage!==undefined)this.usage(session,mid,turn,message.key,usage,model??null,request,response,occurred,"message",usageGroups);
+      if(message.usageRecords?.length)for(const entry of message.usageRecords)
+        this.usage(session,mid,turn,entry.key,entry.usage,entry.model??model??null,entry.requestId??null,entry.responseId??null,
+          time(entry.timestamp)??occurred,"message",usageGroups);
+      else if(usage!==undefined)this.usage(session,mid,turn,message.key,usage,model??null,request,response,occurred,"message",usageGroups);
     }
     // Results can precede their calls in native container order. Resolve against collected identities afterwards.
     for(const [nativeId,toolId] of calls)
@@ -232,7 +239,7 @@ export class StructuredHistory {
     const write5=numberAt(cache,"ephemeral_5m_input_tokens"),write1h=numberAt(cache,"ephemeral_1h_input_tokens");
     const reasoning=numberAt(usage,"reasoning_output_tokens","reasoning_tokens","reasoningTokens","reasoning")??numberAt(record(usage.completion_tokens_details),"reasoning_tokens");
     const reportedTotal=numberAt(usage,"total_tokens","totalTokens","totalTokenCount");
-    const semantic=provider==="qoder"&&usage.adit_input_semantics==="includes_cache"?"includes_cache":["copilot","muse","poolside","junie","roocode","kilo-legacy","kimi","kimi-work"].includes(provider) && ["excludes_cache","unknown"].includes(string(usage.adit_input_semantics))?string(usage.adit_input_semantics):["claude","qoder","iflow","pi","omp","omo","prime-agent","stepcode","opencode","kilo","mimocode","icodemate","zcode"].includes(provider)?"excludes_cache":
+    const semantic=provider==="qoder"&&usage.adit_input_semantics==="includes_cache"?"includes_cache":["copilot","muse","poolside","junie","roocode","kilo-legacy","kimi","kimi-work"].includes(provider) && ["excludes_cache","unknown"].includes(string(usage.adit_input_semantics))?string(usage.adit_input_semantics):["claude","qoder","iflow","pi","omp","omo","prime-agent","stepcode","opencode","kilo","mimocode","icodemate","zcode","deepseek-harness"].includes(provider)?"excludes_cache":
       ["codex","traex","augure-code","gemini","deepseek"].includes(provider)?"includes_cache":"unknown";
     let inputTotal:number|null=null,uncached:number|null=null;
     if(semantic==="excludes_cache") {uncached=reported;inputTotal=sum(reported,read,write);}
