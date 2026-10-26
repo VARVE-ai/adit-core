@@ -23,6 +23,7 @@ export interface CloudBaseline {
   knownCommits?: { localRepositoryId: string; sha: string }[];
   repositories: { localRepositoryId: string; relativePath: string; before: string | null; sha: string | null; legacy?: boolean }[];
   sessions: { id: string; platform: string; metadata: string | null; startedAt: string; deleted: boolean; sequence: number;
+    lastEventAt?: string | null;
     lastPrompt?: {id:string;at:string;digest:string}|null }[];
   nextCursor: string | null;
 }
@@ -32,6 +33,73 @@ export interface CloudEvent {
   usage?: Row[]; usageRevision?: number; commit?: { sha: string; localRepositoryId: string; method: string | null; branch: string | null };
 }
 export interface CloudSession { id: string; nativeId: string; provider: string; startedAt: string; title: string | null }
+
+export class CloudSessionIndex {
+  private identities = new Map<string, number[]>();
+  private transcripts = new Map<string, number[]>();
+  private ids = new Map<string, CloudBaseline["sessions"]>();
+  private paths = new Map<string, Map<string, Set<string>>>();
+  constructor(private store: LocalStore, private baseline: CloudBaseline) {
+    baseline.sessions.forEach((session, ordinal) => {
+      const rows = this.ids.get(session.id) ?? [];
+      rows.push(session);this.ids.set(session.id,rows);
+      const meta = parse(session.metadata);
+      const provider = meta.provider ?? (session.platform.startsWith("claude") ? "claude" : session.platform);
+      if (meta.nativeId || meta.platformSessionId) {
+        for (const id of new Set([meta.nativeId,meta.platformSessionId])) {
+          if (id === undefined) continue;
+          this.add(this.identities,JSON.stringify([provider,id]),ordinal);
+        }
+      } else if (typeof meta.transcriptPath === "string") {
+        this.add(this.transcripts,JSON.stringify([provider,transcriptPath(meta.transcriptPath)]),ordinal);
+      }
+    });
+  }
+  private add(index: Map<string, number[]>, key: string, ordinal: number) {
+    const rows = index.get(key) ?? [];
+    rows.push(ordinal);index.set(key,rows);
+  }
+  byId(id: string) { return this.ids.get(id) ?? []; }
+  matches(provider: string, nativeId: string) {
+    let paths = this.paths.get(provider);
+    if (!paths) {
+      paths = new Map();
+      const owners = new Map<string, Set<string>>();
+      const sources = this.store.db.prepare("SELECT path,session_id FROM adit_history_sources WHERE provider=?").all(provider) as Row[];
+      for (const source of sources) {
+        const path = transcriptPath(source.path,source.session_id);
+        const ids = owners.get(path) ?? new Set<string>();
+        ids.add(source.session_id);owners.set(path,ids);
+      }
+      for (const [path,ids] of owners) if (ids.size === 1) {
+        const id = ids.values().next().value!;
+        const entries = paths.get(id) ?? new Set<string>();
+        entries.add(path);paths.set(id,entries);
+      }
+      this.paths.set(provider,paths);
+    }
+    const ordinals = new Set(this.identities.get(JSON.stringify([provider,nativeId])) ?? []);
+    for (const path of paths.get(nativeId) ?? [])
+      for (const ordinal of this.transcripts.get(JSON.stringify([provider,path])) ?? []) ordinals.add(ordinal);
+    return [...ordinals].sort((left,right)=>left-right).map(ordinal=>this.baseline.sessions[ordinal]);
+  }
+}
+
+export function historicalCloudSessions(store: LocalStore, baseline: CloudBaseline, provider: string, nativeId: string, index = new CloudSessionIndex(store,baseline)) {
+  return index.matches(provider,nativeId);
+}
+
+export function cloudSessionCutoff(store: LocalStore, scope: string, baseline: CloudBaseline, source: Row, cloudId?: string, index = new CloudSessionIndex(store,baseline)) {
+  const nativeId = nativeConversationId(source as {id:string;parent_id:string|null;relationship:string|null});
+  const saved = store.db.prepare("SELECT cloud_id FROM adit_local_cloud_sessions WHERE scope=? AND provider=? AND native_id=?")
+    .get(scope,source.provider,nativeId) as {cloud_id:string}|undefined;
+  const id = cloudId ?? saved?.cloud_id;
+  const matches = id ? index.byId(id) : index.matches(source.provider,nativeId);
+  if (matches.length === 1 && matches[0].lastEventAt !== undefined)
+    return matches[0].lastEventAt === null ? null : Date.parse(matches[0].lastEventAt);
+  if (id && !matches.length && (!baseline.before || source.started_at > Date.parse(baseline.before))) return null;
+  return baseline.before ? Date.parse(baseline.before) : null;
+}
 
 /** Shared by upload and the read-only pending summary. Never confirm history while counting it. */
 export function cloudCommitSelection(store: LocalStore, scope: string, baseline: CloudBaseline,
@@ -112,10 +180,12 @@ export function cloudFinalReply(store: LocalStore, turnId: string, hasNextTurn: 
 }
 
 export class CloudProjection {
+  private sessionIndex: CloudSessionIndex;
   readonly warnings = new Set<string>();
   readonly mappings = new Map<string, CloudSession>();
-  private sourceOwners?: Map<string, Set<string>>;
-  constructor(readonly store: LocalStore, readonly workspace: LocalWorkspace, readonly scope: string, readonly baseline: CloudBaseline) {}
+  constructor(readonly store: LocalStore, readonly workspace: LocalWorkspace, readonly scope: string, readonly baseline: CloudBaseline) {
+    this.sessionIndex = new CloudSessionIndex(store,baseline);
+  }
   private nativeKey(provider: string, id: string) { return `${provider}\0${id}`; }
   receipt(kind: string, id: string) {
     return !!this.store.db.prepare("SELECT 1 FROM adit_local_cloud_receipts WHERE scope=? AND kind=? AND id=?").get(this.scope, kind, id);
@@ -161,25 +231,7 @@ export class CloudProjection {
     const row = db.prepare("SELECT * FROM adit_local_cloud_sessions WHERE scope=? AND provider=? AND native_id=?").get(this.scope, s.provider, s.id) as Row | undefined;
     let id = row?.cloud_id, base = row?.sequence_base ?? 0;
     if (!id) {
-      if (!this.sourceOwners) {
-        this.sourceOwners = new Map();
-        for (const source of db.prepare("SELECT provider,path,session_id FROM adit_history_sources").all() as Row[]) {
-          const key = this.nativeKey(source.provider, transcriptPath(source.path,source.session_id));
-          const owners = this.sourceOwners.get(key) ?? new Set<string>();
-          owners.add(source.session_id); this.sourceOwners.set(key,owners);
-        }
-      }
-      const paths = (db.prepare("SELECT path FROM adit_history_sources WHERE provider=? AND session_id=?").all(s.provider, s.id) as Row[])
-        .map(r => transcriptPath(r.path,s.id)).filter(path => this.sourceOwners!.get(this.nativeKey(s.provider,path))?.size === 1);
-      const matches = this.baseline.sessions.filter(old => {
-        const meta = parse(old.metadata);
-        const provider = meta.provider ?? (old.platform.startsWith("claude") ? "claude" : old.platform);
-        if (provider !== s.provider) return false;
-        // Explicit IDs take priority. A shared archive or a resumed/forked file must
-        // never cause two different native sessions to be merged in Cloud.
-        if (meta.nativeId || meta.platformSessionId) return meta.nativeId === s.id || meta.platformSessionId === s.id;
-        return typeof meta.transcriptPath === "string" && paths.includes(transcriptPath(meta.transcriptPath));
-      });
+      const matches = this.sessionIndex.matches(s.provider,s.id);
       if (matches.length > 1 || matches[0]?.deleted) { this.warnings.add("A historical session identity is ambiguous or deleted in Cloud; its new content is pending."); return; }
       if (matches.length === 1) { id = matches[0].id; base = matches[0].sequence + 1; }
       else {
@@ -223,8 +275,9 @@ export class CloudProjection {
     if (db.prepare("SELECT 1 FROM adit_history_usage_entries WHERE provider=? AND session_id=? AND scope='session' AND ledger_role='canonical' LIMIT 1").get(s.provider,s.id))
       this.warnings.add("Some sources only provide a session-wide usage total. It remains local and is not counted as an individual turn's usage.");
     let pending = false;
+    const cutoff = cloudSessionCutoff(this.store,this.scope,this.baseline,s,session.id,this.sessionIndex);
     for (let index=0; index<turns.length; index++) {
-      const t = turns[index], cutoff = this.baseline.before ? Date.parse(this.baseline.before) : null;
+      const t = turns[index];
       const usageRows = cloudTurnUsage(this.store,t.id);
       const usageKey = syncKey(t.id,usageRows);
       if (cutoff !== null && t.ended_at !== null && t.ended_at <= cutoff) continue;

@@ -1,5 +1,5 @@
 import { analyticsSessions, projectUploadRepositories, nativeContextSql, type LocalStore, type LocalWorkspace } from "@varveai/adit-core";
-import { cloudCommitSelection, cloudFinalReply, cloudTurnUsage, syncKey, type CloudBaseline } from "./cloud-projection.js";
+import { CloudSessionIndex, cloudCommitSelection, cloudFinalReply, cloudTurnUsage, cloudSessionCutoff, syncKey, type CloudBaseline } from "./cloud-projection.js";
 
 export type CloudPending =
   | { state: "ready"; sessions: number; commits: number }
@@ -9,7 +9,7 @@ export type CloudPending =
  * No transcript parsing, Cloud requests, mapping creation or upload confirmations on a status read. */
 export function cloudPending(store: LocalStore, workspace: LocalWorkspace, scope: string, baseline: CloudBaseline): CloudPending {
   const db = store.db;
-  const cutoff = baseline.before ? Date.parse(baseline.before) : null;
+  const sessionIndex = new CloudSessionIndex(store,baseline);
   const revision = db.prepare("SELECT revision FROM adit_local_cloud_sessions WHERE scope=? AND provider=? AND native_id=?");
   const receipt = db.prepare("SELECT 1 FROM adit_local_cloud_receipts WHERE scope=? AND kind=? AND id=?");
   const turns = db.prepare(`SELECT t.id,t.prompt_message_id,m.occurred_at,
@@ -24,6 +24,7 @@ export function cloudPending(store: LocalStore, workspace: LocalWorkspace, scope
         (b.kind IN ('text','input_text','output_text') AND trim(coalesce(e.text_content,b.text_content,''),char(9)||char(10)||char(13)||' ')<>'')))`);
   const sessions=new Set<string>();let commits = 0;
   for (const s of analyticsSessions(db,workspace)) {
+    const cutoff = cloudSessionCutoff(store,scope,baseline,s,undefined,sessionIndex);
     const saved = revision.get(scope,s.provider,s.id) as {revision:number} | undefined;
     if (saved?.revision === s.transcript_revision) continue;
     const visible = turns.all(s.provider,s.id,cutoff,cutoff) as {id:string;prompt_message_id:string;occurred_at:number|null;has_next:number}[];
