@@ -1,5 +1,6 @@
 import { getLanguage } from "./i18n";
 export const inspectionCopy = {
+  日期未知: "Unknown date",
   重试: "Retry",
   "点击查看此类结果，再次点击恢复确定结果":
     "Show this rule's results; click again to return to definite findings",
@@ -53,8 +54,8 @@ export const inspectionCopy = {
   "输出里的这一行（第 {0} 行）": "This line in the output (line {0})",
   "记录里的这一行（第 {0} 行）": "This line in the record (line {0})",
   建议这样处理: "Suggested actions",
-  "去 {0} 控制台把这把密钥作废，换一把新的":
-    "Revoke this key in the {0} console and replace it",
+  "到对应平台作废并替换密钥。":
+    "Revoke and replace the key on the corresponding platform.",
   "请确认是否为凭据；如果是，到对应平台作废并替换。":
     "Confirm whether this is a credential. If so, revoke and replace it with its provider.",
   "替换这份私钥，并撤销对应的访问权限。":

@@ -1,4 +1,5 @@
 import { AgentLabel } from "./agent-label";
+import { PlatformIcon } from "./platform-icon";
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
@@ -8,6 +9,9 @@ import {
   ArrowUpFromLine,
   Database,
   Loader2,
+  ChevronRight,
+  Terminal,
+  MessageSquare,
 } from "lucide-react";
 import type {
   InspectionData,
@@ -49,6 +53,13 @@ const location = (item: InspectionFinding) =>
   ic(locations[item.location as keyof typeof locations] || "回复");
 const count = (n: number | null) =>
   n === null ? "—" : n.toLocaleString(locale());
+const day = (at: number | null) =>
+  at === null ? ic("日期未知") : new Date(at).toLocaleDateString(locale(), {
+    month: "short", day: "numeric",
+    ...(new Date(at).getFullYear() !== new Date().getFullYear() ? { year: "numeric" as const } : {}),
+  }).replace(/(\d)([年月日])/g, "$1 $2 ").trim();
+const clock = (at: number | null) =>
+  at === null ? "—" : new Date(at).toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 
 export function InspectionPage({
   workspace,
@@ -331,35 +342,40 @@ export function InspectionPage({
             ))}
           </div>
           <div className="inspection-session-list" role="tabpanel">
-            {sessions.map((session) => (
-              <button
-                key={inspectionSessionKey(session)}
-                className={`inspection-item ${selected === inspectionSessionKey(session) ? "selected" : ""}`}
-                aria-pressed={selected === inspectionSessionKey(session)}
-                disabled={busy}
-                onClick={() => setSelected(inspectionSessionKey(session))}
-              >
-                <span className="inspection-item-title" title={session.title}>
-                  <span
-                    className={`inspection-session-dot ${session.provider}`}
-                  />
-                  <strong>{session.title}</strong>
-                  <span className="inspection-session-count">
-                    {session.count}
+            {sessions.map((session, index) => (
+              <div key={inspectionSessionKey(session)}>
+                {(index === 0 || day(session.occurredAt) !== day(sessions[index - 1].occurredAt)) && (
+                  <div className="inspection-day">{day(session.occurredAt)}</div>
+                )}
+                <div className="inspection-session-entry">
+                  <span className="inspection-agent-node" aria-hidden="true">
+                    <PlatformIcon platform={session.provider} size={12} />
                   </span>
-                </span>
-                <span className="inspection-item-meta">
-                  <AgentLabel provider={session.provider} /> · {date(session.occurredAt)}
-                </span>
-                <span className="inspection-item-meta inspection-item-rules">
-                  <span
-                    className={`inspection-status ${status === "pending" ? "warn" : "ok"}`}
+                  <button
+                    className={`inspection-item ${selected === inspectionSessionKey(session) ? "selected" : ""}`}
+                    aria-pressed={selected === inspectionSessionKey(session)}
+                    disabled={busy}
+                    onClick={() => setSelected(inspectionSessionKey(session))}
                   >
-                    {ic(statusLabels[status])}
-                  </span>
-                  <span>{session.rules.map(label).join(" · ")}</span>
-                </span>
-              </button>
+                    <span className="inspection-item-title" title={session.title}>
+                      <strong>{session.title}</strong>
+                      <span className="inspection-session-count">
+                        {ic("{0} 处", session.count)}
+                      </span>
+                    </span>
+                    <span className="inspection-item-meta">
+                      <span>{agentName(session.provider)}</span>
+                      <span title={date(session.occurredAt)}>{clock(session.occurredAt)}</span>
+                      <span
+                        className={`inspection-status ${status === "pending" ? "warn" : "ok"}`}
+                      >
+                        {ic(statusLabels[status])}
+                      </span>
+                      <span className="inspection-item-rules" title={session.rules.map(label).join(" · ")}>{session.rules.map(label).join(" · ")}</span>
+                    </span>
+                  </button>
+                </div>
+              </div>
             ))}
           </div>
           <div className="inspection-empty">
@@ -638,6 +654,9 @@ function InspectionFindingCard({
       className="inspection-card"
       aria-label={ic("{0}出现在{1}里", label(finding.rule), location(finding))}
     >
+      <span className="inspection-finding-node" aria-hidden="true">
+        {finding.location.startsWith("tool_") ? <Terminal size={12} /> : <MessageSquare size={12} />}
+      </span>
       {failed ? (
         <div className="inspection-error" role="alert">
           {ic("读取失败，请重试")}
@@ -651,8 +670,11 @@ function InspectionFindingCard({
       ) : !detail ? (
         <div className="inspection-card-loading">{ic("读取中…")}</div>
       ) : (
-        <>
-          <h3>{ic("{0}出现在{1}里", label(detail.rule), location(detail))}</h3>
+        <details className="inspection-finding-content" open>
+          <summary>
+            <h3>{ic("{0}出现在{1}里", label(detail.rule), location(detail))}</h3>
+            <ChevronRight size={14} aria-hidden="true" />
+          </summary>
           <div className="inspection-meta">
             <span><AgentLabel provider={detail.provider} /></span>
             <span>{date(detail.occurredAt)}</span>
@@ -715,11 +737,7 @@ function InspectionFindingCard({
                     ? ic("请确认是否为凭据；如果是，到对应平台作废并替换。")
                     : detail.rule === "private-key-block"
                       ? ic("替换这份私钥，并撤销对应的访问权限。")
-                      : ic(
-                          "去 {0} 控制台把这把密钥作废，换一把新的",
-                          data?.rules.find((r) => r.id === detail.rule)
-                            ?.label || "",
-                        )}
+                      : ic("到对应平台作废并替换密钥。")}
                 </span>
                 <span className="inspection-status warn">
                   {ic("需要你自己操作")}
@@ -773,7 +791,7 @@ function InspectionFindingCard({
               )}
             </p>
           )}
-        </>
+        </details>
       )}
     </article>
   );
