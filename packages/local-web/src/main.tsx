@@ -1354,7 +1354,7 @@ function WorkspaceEditor({
       <div className="page-heading">
         <div>
           <h2>{t("工作目录")}</h2>
-          {workspace?.started && !discovery && (!job||job.status==="done") ? (
+          {workspace?.started && !discovery && (!job||["done","queued","running"].includes(job.status)) ? (
             <Badge status="done" />
           ) : job ? (
             collectionPending && job.status === "partial" ? (

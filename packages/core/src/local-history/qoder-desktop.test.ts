@@ -89,10 +89,14 @@ it("updates preview project matching when the catalog changes, and excludes othe
 it("leaves missing metadata pending and retries when the full identity arrives",async()=>{
   const f=fixture();f.db.prepare("DELETE FROM chat_session").run();
   expect(await qoderDesktopMetadata(f.path)).toEqual({sessions:[],pending:true});
-  expect((await f.history.scan(f.workspace,f.sources)).errors).toHaveLength(1);
+  const pending=await f.history.scan(f.workspace,f.sources);
+  expect(pending.errors).toEqual([]);
+  expect(pending.deferred).toEqual(["qoder: Qoder desktop session metadata is not available yet; retry on the next collection"]);
   expect(f.history.session("qoder",id)).toBeUndefined();
   f.db.prepare("INSERT INTO chat_session(session_id,project_uri) VALUES(?,?)").run(id,f.workspace);
-  expect(await f.history.scan(f.workspace,f.sources)).toMatchObject({counts:{qoder:1},errors:[]});
+  const recovered=await f.history.scan(f.workspace,f.sources);
+  expect(recovered).toMatchObject({counts:{qoder:1},errors:[]});
+  expect(recovered.deferred).toBeUndefined();
 });
 
 it("refuses colliding short identities instead of assigning the wrong session/project",async()=>{
@@ -107,10 +111,14 @@ it("retains original text on malformed replacement and does not bind metadata ac
   expect(f.history.session("qoder",id)?.messages).toHaveLength(2);
   writeFileSync(f.path,line("user","question only"));
   await expect(readQoderDesktop(f.path)).rejects.toThrow("not synchronized");
-  expect((await f.history.scan(f.workspace,f.sources)).errors).toHaveLength(1);
+  const unmatched=await f.history.scan(f.workspace,f.sources);
+  expect(unmatched.errors).toEqual([]);
+  expect(unmatched.deferred).toEqual(["qoder: Qoder desktop transcript and message metadata are not synchronized; retry on the next collection"]);
   expect(f.history.session("qoder",id)?.messages[1].usage?.output_tokens).toBe(132);
   writeFileSync(f.path,"");
-  expect((await f.history.scan(f.workspace,f.sources)).errors).toHaveLength(1);
+  const empty=await f.history.scan(f.workspace,f.sources);
+  expect(empty.errors).toEqual([]);
+  expect(empty.deferred).toHaveLength(1);
   expect(f.history.session("qoder",id)?.messages).toHaveLength(2);
 });
 

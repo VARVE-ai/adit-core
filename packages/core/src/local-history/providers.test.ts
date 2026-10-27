@@ -372,6 +372,7 @@ describe("independent provider readers", () => {
     const f = fixture("cursor-ide"),
       db = new Database(join(f.source, "state.vscdb"));
     cleanup.push(() => db.close());
+    db.pragma("journal_mode = WAL");
     db.exec(
       "CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY,value TEXT); CREATE TABLE ItemTable (key TEXT,value TEXT)",
     );
@@ -402,10 +403,18 @@ describe("independent provider readers", () => {
     set("bubbleId:c:a", { type: 2, text: "edited" });
     expect((await f.archive.scan(f.workspace, f.sources)).updated).toBe(1);
     db.prepare("DELETE FROM cursorDiskKV WHERE key='bubbleId:c:u'").run();
-    expect(
-      (await f.archive.scan(f.workspace, f.sources)).errors.length,
-    ).toBeGreaterThan(0);
+    const incomplete = await f.archive.scan(f.workspace, f.sources);
+    expect(incomplete.errors).toEqual([]);
+    expect(incomplete.deferred).toEqual([
+      "cursor-ide: Cursor IDE transcript has missing bubbles; previous archive retained",
+    ]);
     expect(f.archive.session("cursor-ide", "c")?.messages).toHaveLength(2);
+    expect(f.archive.session("cursor-ide", "c")?.messages[1].content).toBe("edited");
+    set("bubbleId:c:u", { type: 1, text: "restored" });
+    const recovered = await f.archive.scan(f.workspace, f.sources);
+    expect(recovered.errors).toEqual([]);
+    expect(recovered.deferred).toBeUndefined();
+    expect(f.archive.session("cursor-ide", "c")?.messages[0].content).toBe("restored");
   });
   it("deduplicates Gemini JSONL message revisions and differences cumulative input usage", () => {
     const s = parseGemini(
