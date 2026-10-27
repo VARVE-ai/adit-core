@@ -1,10 +1,10 @@
 import {openSync,readSync,closeSync,fstatSync,lstatSync} from "node:fs";
+import {createHash} from "node:crypto";
 import {basename,dirname,join,resolve} from "node:path";
 import {HistoryFormatError,record,string} from "./types.js";
 import {parseCodexRows,codexContinuationRoot,isCodexInternalReview} from "./codex.js";
 import {sourceFiles,insideDirectory} from "./sources.js";
-import {trackSource,sourceStamp} from "./source-checkpoints.js";
-import {readSource} from "./source-io.js";
+import {trackSource,sourceStamp,trackSourceSnapshot} from "./source-checkpoints.js";
 import type Database from "better-sqlite3";
 import {isCompactedReply} from "./message-semantics.js";
 import {ATTRIBUTION_RESULT_TABLES} from "./attribution-schema.js";
@@ -110,18 +110,21 @@ export function refreshCodexContinuations(db:Database.Database):number {
 }
 
 // Bound a single record rather than the total session: long sessions can exceed 128 MiB.
-export function* codexFileRows(path:string,signal?:AbortSignal,offset=0):Generator<Record<string,unknown>>{
+export function* codexFileRows(path:string,signal?:AbortSignal,offset=0,ignoreInvalid=false):Generator<Record<string,unknown>>{
  trackSource(path);
  signal?.throwIfAborted();if(lstatSync(path).isSymbolicLink())throw new HistoryFormatError("Symbolic sources are not collected");
  const fd=openSync(path,"r"),chunk=Buffer.allocUnsafe(1024*1024);let pending=Buffer.alloc(0),line=0;
  const decoded:Buffer[]=[];
  const decoder=path.endsWith(".zst")?new Decompress(bytes=>decoded.push(Buffer.from(bytes))):undefined;
- const parse=(bytes:Buffer)=>{line++;const text=bytes.toString("utf8").replace(/^\uFEFF/,"").trim();if(!text)return undefined;let value:unknown;try{value=JSON.parse(text);}catch{throw new HistoryFormatError(`Invalid JSON record at line ${line}`);}if(!value||typeof value!=="object"||Array.isArray(value))throw new HistoryFormatError(`Invalid JSON record at line ${line}`);return value as Record<string,unknown>;};
+ const parse=(bytes:Buffer)=>{line++;const text=bytes.toString("utf8").replace(/^\uFEFF/,"").trim();if(!text)return undefined;let value:unknown;try{value=JSON.parse(text);}catch{if(ignoreInvalid)return;throw new HistoryFormatError(`Invalid JSON record at line ${line}`);}if(!value||typeof value!=="object"||Array.isArray(value)){if(ignoreInvalid)return;throw new HistoryFormatError(`Invalid JSON record at line ${line}`);}return value as Record<string,unknown>;};
  try{
   const before=fstatSync(fd);if(!before.isFile())throw new HistoryFormatError("Source is not a regular file");
   if(decoder&&offset)throw new HistoryFormatError("Compressed rollouts require a full read");
+  const digest=createHash("sha256");
+  for(let prefix=0;prefix<offset;){signal?.throwIfAborted();const size=readSync(fd,chunk,0,Math.min(chunk.length,offset-prefix),prefix);if(!size)throw new HistoryFormatError("Source was truncated while reading");digest.update(chunk.subarray(0,size));prefix+=size;}
   let position=offset,done=false;
-  while(!done){signal?.throwIfAborted();const size=readSync(fd,chunk,0,chunk.length,position);position+=size;done=!size;
+  while(!done){signal?.throwIfAborted();const size=readSync(fd,chunk,0,Math.min(chunk.length,Math.max(0,before.size-position)),position);position+=size;done=position>=before.size||!size;
+   if(size)digest.update(chunk.subarray(0,size));
    // The decoder retains incomplete compressed blocks; the next read reuses chunk.
    if(decoder)decoder.push(Buffer.from(chunk.subarray(0,size)),done);else if(size)decoded.push(chunk.subarray(0,size));
    for(const bytes of decoded.splice(0)) {const data=pending.length?Buffer.concat([pending,bytes]):bytes;let start=0,end:number;
@@ -130,7 +133,22 @@ export function* codexFileRows(path:string,signal?:AbortSignal,offset=0):Generat
    }
   }
   if(pending.length){let valid=true;try{JSON.parse(pending.toString("utf8"));}catch{valid=false;}if(valid){const row=parse(pending);if(row)yield row;}}
-  const after=fstatSync(fd);if(before.size!==after.size||before.mtimeMs!==after.mtimeMs)throw new HistoryFormatError("Source changed while reading; retry on the next collection");
+  const expected=digest.digest("hex");
+  const validate=()=>{
+   signal?.throwIfAborted();
+   if(decoder)return false;
+   let check:number|undefined;
+   try{
+    if(lstatSync(path).isSymbolicLink())return false;
+    check=openSync(path,"r");const current=fstatSync(check);
+    if(current.dev!==before.dev||current.ino!==before.ino||current.birthtimeMs!==before.birthtimeMs||current.size<before.size)return false;
+    const hash=createHash("sha256"),buffer=Buffer.allocUnsafe(1024*1024);
+    for(let cursor=0;cursor<before.size;){signal?.throwIfAborted();const size=readSync(check,buffer,0,Math.min(buffer.length,before.size-cursor),cursor);if(!size)return false;hash.update(buffer.subarray(0,size));cursor+=size;}
+    return hash.digest("hex")===expected;
+   }catch{signal?.throwIfAborted();return false;}finally{if(check!==undefined)closeSync(check);}
+  };
+  const after=fstatSync(fd);if(position<before.size||((before.size!==after.size||before.mtimeMs!==after.mtimeMs)&&!validate()))throw new HistoryFormatError("Source changed while reading; retry on the next collection");
+  if(!decoder)trackSourceSnapshot(path,validate);
  }finally{closeSync(fd);}
 }
 export async function readCodexSession(path:string,provider:string,root:string,signal?:AbortSignal){
@@ -162,14 +180,12 @@ export async function codexThreadTitle(path:string,id:string,signal?:AbortSignal
   if(stamp==="missing"){titleIndexes.delete(index);return "";}
   let cached=titleIndexes.get(index);
   if(cached?.stamp!==stamp){
-   const text=(await readSource(index,signal)).toString("utf8"),titles=new Map<string,string>();
-   for(const line of text.split("\n")){
+   const titles=new Map<string,string>();
+   for(const row of codexFileRows(index,signal,0,true)){
     signal?.throwIfAborted();
     // A partially written or malformed index entry must not hide other titles.
-    let row:Record<string,unknown>;try{row=record(JSON.parse(line));}catch{continue;}
     if(string(row.id)&&typeof row.thread_name==="string")titles.set(string(row.id),row.thread_name.trim());
    }
-   if(sourceStamp(index)!==stamp)throw new HistoryFormatError("Codex title index changed while reading; retry on the next collection");
    if(titleIndexes.size>=16)titleIndexes.clear();
    cached={stamp,titles};titleIndexes.set(index,cached);
   }

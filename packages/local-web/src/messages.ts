@@ -1,6 +1,7 @@
 // Chinese keys preserve the prototype copy. Only interface text belongs here;
 // native session titles, commit subjects, paths and account names are never keys.
 export const messages = {
+  "部分记录或分析待补齐，将在后续整理重试；已整理内容可正常使用。": "Some records or analysis are pending and will be retried. Collected content remains available.",
   "第 {0} 轮提问": "Turn {0}",
   "前后各 1 轮问答": "1 turn before and after",
   "提交前后的问答": "Conversation around this commit",

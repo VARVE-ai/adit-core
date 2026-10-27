@@ -25,6 +25,7 @@ import {readCodexSession,refreshCodexContinuations,refreshCodexContexts,refreshC
 import {SourceCheckpoints, trackSourceReads} from "./source-checkpoints.js";
 import {collectIncrementalJSONL} from "./incremental-jsonl.js";
 import {discoverHistory} from "./discovery.js";
+import {isRetryableCollectionIssue} from "./collection-issues.js";
 import {ScanProgressTracker, type SourceProgressListener, type SourceScanProgress} from "./scan-progress.js";
 export type {SourceScanProgress,SourceProgressListener} from "./scan-progress.js";
 
@@ -39,6 +40,7 @@ export interface ScanSource {
 export interface ScanResult {
   counts: Record<string, number>;
   errors: string[];
+  deferred?: string[];
   scanned: number;
   updated: number;
   /** Discovery files whose workspace/identity needs full collection to confirm. */
@@ -135,12 +137,19 @@ export class LocalHistory {
       options.beforeSource?.(source.id);
       refreshCodexContexts(this.db,{provider:source.id,scopes,signal:options.signal});
       const sourceErrors=result.errors.length;
+      const sourceDeferred=result.deferred?.length || 0;
+      const recordIssue=(error:unknown)=>{
+        const detail=error instanceof Error?error.message:String(error);
+        const message=detail.startsWith(`${source.id}:`)?detail:`${source.id}: ${detail}`;
+        if(isRetryableCollectionIssue(error))(result.deferred??=[]).push(message);
+        else result.errors.push(message);
+      };
       const detail=options.sourceProgress?new ScanProgressTracker(this.db,source,scopes,(scope,provider,progress)=>{
         result.sourceProgress ??= {};result.sourceProgress[scope] ??= {};result.sourceProgress[scope][provider]=progress;
         options.sourceProgress!(scope,provider,progress);
       }):undefined;
       await detail?.plan({signal:options.signal,beforeSource:options.beforeSource});
-      if(detail)result.errors.push(...detail.errors);
+      if(detail)for(const error of detail.errors)recordIssue(error);
       for (const root of source.paths) {
         try {
           for await (const path of detail ? detail.files.get(root)||[] : sourceFiles(
@@ -158,15 +167,15 @@ export class LocalHistory {
             if (seenFiles.has(fileKey)) continue;
             seenFiles.add(fileKey);
             const previousUpdated=result.updated;
+            for(let attempt=0;attempt<2;attempt++) {
+            const previousErrors=result.errors.length,previousDeferred=result.deferred?.length||0;
             try {
               const scopeKey = JSON.stringify([resolve(root), [...scopes].sort()]);
               const cached = !options.preview ? checkpoints.unchanged(source.id, pathKey, scopeKey, version, insideDirectory) : undefined;
               if (cached) {
                 if(path.endsWith(".db"))for(const [provider,id] of cached)databaseSessions.add(`${provider}:${id}`);
-                result.scanned++;
                 detail?.processed(cached);
-                options.progress?.(result.scanned, result.updated);
-                continue;
+                break;
               }
               const references: [string, string][] = [];
               const writes: (() => void)[] = [];
@@ -191,7 +200,7 @@ export class LocalHistory {
                     ? readCursorIDE(path, scopes, options.signal,(id,error)=>{
                         failedMembers.add(id);
                         retry = true;
-                        result.errors.push(`cursor-ide: ${error instanceof Error?error.message:"Session could not be read"}`);
+                        recordIssue(error);
                       },id=>new StructuredHistory(this.db).read("cursor-ide",id))
                     : path.endsWith(".db")
                       ? readOpenCodeDatabase(
@@ -210,7 +219,7 @@ export class LocalHistory {
                 // A container/sidecar can change without the primary file changing.
                 // Check each logical session, using its own stable checkpoint.
                 for (const session of snapshots) {
-                  if (session.metadata?.lineageRetry) retry = true;
+                  if (session.metadata?.lineageRetry) {retry = true;(result.deferred??=[]).push(`${source.id}: Session ancestry is pending; retry on the next collection`);}
                   if (session.cwd && !accepts(session.cwd)) continue;
                   references.push([session.provider, session.id]);
                   const sessionKey = `${session.provider}:${session.id}`;
@@ -371,27 +380,32 @@ export class LocalHistory {
               if(!captured.stable)throw new Error("Source changed while reading; retry on the next collection");
               if (!options.preview) this.db.transaction(()=>{
                 for(const write of writes)write();
-                if(!retry){checkpoints.save(source.id, pathKey, scopeKey, version, captured.manifest, references);commitCursor?.();}
+                if(captured.changed)this.db.prepare("DELETE FROM adit_history_jsonl_cursors WHERE provider=? AND path=?").run(source.id,pathKey);
+                if(!retry&&!captured.changed){checkpoints.save(source.id, pathKey, scopeKey, version, captured.manifest, references);commitCursor?.();}
               })();
               detail?.processed(references);
+              break;
             } catch (error) {
               result.updated=previousUpdated;
               options.signal?.throwIfAborted();
-              result.errors.push(
-                `${source.id}: ${error instanceof Error ? error.message : "Source could not be read"}`,
-              );
+              if(attempt===0&&isRetryableCollectionIssue(error)){
+                result.errors.length=previousErrors;
+                if(result.deferred)result.deferred.length=previousDeferred;
+                continue;
+              }
+              recordIssue(error);
+              break;
+            }
             }
             result.scanned++;
             options.progress?.(result.scanned, result.updated);
           }
         } catch (error) {
           options.signal?.throwIfAborted();
-          result.errors.push(
-            `${source.id}: ${error instanceof Error ? error.message : "Source directory could not be read"}`,
-          );
+          recordIssue(error);
         }
       }
-      detail?.publish(result.errors.length>sourceErrors?"partial":"done");
+      detail?.publish(result.errors.length>sourceErrors||(result.deferred?.length||0)>sourceDeferred?"partial":"done");
     }
     for (const session of sessions.values()) {
       const assignment = !session.cwd ? this.db.prepare("SELECT workspace FROM adit_history_assignments WHERE provider=? AND session_id=?").get(session.provider,session.id) as {workspace:string}|undefined : undefined;

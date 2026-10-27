@@ -8,6 +8,7 @@ type Job = {
   status: string;
   endedAt?: string;
   error?: string;
+  warnings?: string[];
 };
 
 export function LocalSyncStatus({
@@ -49,6 +50,7 @@ export function LocalSyncStatus({
       <p role="status" className="header-status-summary">{summary}</p>
       <p className="muted">{t("上次采集")} {finishedAt}</p>
       {latest?.error && <p className="error">{systemMessage(latest.error)}</p>}
+      {!!latest?.warnings?.length && <p className="muted" title={latest.warnings.map(systemMessage).join("; ")}>{t("部分记录或分析待补齐，将在后续整理重试；已整理内容可正常使用。")}</p>}
       <p className="muted">{t("仅更新本机的会话与提交记录，不会上传到云端。")}</p>
       <div className="header-status-actions">
         <button

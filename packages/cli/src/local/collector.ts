@@ -16,6 +16,7 @@ import {
   sourceDefinitions,
   sourceHomePaths,
   insideDirectory,
+  isRetryableCollectionIssue,
   type LocalWorkspace,
   type SourceDefinition,
   type SourceScanProgress,
@@ -36,6 +37,7 @@ export interface Repository {
   path: string;
   count: number | null;
   error?: string;
+  deferred?: string;
   skipReason?: "missing-git-email";
 }
 export interface CollectionJob {
@@ -49,6 +51,7 @@ export interface CollectionJob {
   error?: string;
   providers?: Record<string, number>;
   pending?: Record<string, number>;
+  warnings?: string[];
   phase?: "git" | "sessions" | "inspection" | "analysis" | "achievements";
   activeRepository?:string;
   sourceProgress?:Record<string,SourceScanProgress>;
@@ -117,6 +120,7 @@ export class Collector {
   private timer?: ReturnType<typeof setTimeout>;
   private abort = new AbortController();
   private stopping = false;
+  private retries = new Map<string, {attempt:number;timer?:ReturnType<typeof setTimeout>}>();
   readonly history: LocalHistory;
   nextAt: string | null = null;
 
@@ -240,6 +244,10 @@ export class Collector {
     if (this.stopping) throw new LocalStateError("Collection is stopping", 409);
     const active = this.active(id, kind);
     if (active) return active;
+    if(kind==="collect"){
+      const retry=this.retries.get(id);
+      if(retry){clearTimeout(retry.timer);this.retries.set(id,{attempt:retry.attempt});}
+    }
     const job: CollectionJob = {
       id: randomUUID(),
       workspaceId: id,
@@ -326,8 +334,14 @@ export class Collector {
         if (!["running", "queued"].includes(job.status)) continue;
         const latest=this.store.jobs<CollectionJob>().find(saved=>saved.id===job.id);
         if(latest?.sourceProgress)job.sourceProgress=latest.sourceProgress;
-        job.status = "interrupted";
-        job.error = error instanceof Error ? error.message : "Collection interrupted";
+        const retryable=isRetryableCollectionIssue(error)&&!this.stopping;
+        job.status = retryable?"partial":"interrupted";
+        job.error = retryable?undefined:error instanceof Error ? error.message : "Collection interrupted";
+        if(retryable){
+          job.warnings=[error instanceof Error?error.message:String(error)];
+          for(const progress of Object.values(job.sourceProgress||{}))if(!["done","skipped"].includes(progress.status))progress.status="partial";
+          this.retryLater(job.workspaceId);
+        }
         job.endedAt = new Date().toISOString();
         this.store.job(job);
         this.activeJobs.delete(`collect:${job.workspaceId}`);
@@ -416,31 +430,41 @@ export class Collector {
         ...job.repositories.flatMap((r) => (r.error ? [r.error] : [])),
       ];
       const errors=[...sourceErrors];
+      const warnings=[...(result.deferred||[]).filter(error=>!workspace||workspace.providers.some(provider=>error.startsWith(`${provider}:`))),
+        ...job.repositories.flatMap(repo=>repo.deferred?[repo.deferred]:[])];
       const fingerprint=workspace ? this.processingFingerprint(workspace,sourceErrors) : undefined;
       const checkpoint=workspace ? this.store.db.prepare("SELECT fingerprint FROM adit_local_collection_checkpoints WHERE workspace_id=?").get(workspace.id) as {fingerprint:string}|undefined : undefined;
       const processChanges=!!workspace && checkpoint?.fingerprint!==fingerprint;
       let processed=true;
+      const processingIssue=(message:string,error:unknown)=>{
+        processed=false;
+        const code=(error as {code?:string}|null)?.code;
+        const detail=`${message}: ${error instanceof Error?error.message:String(error)}`;
+        if(["EACCES","EPERM","ENOSPC","EROFS","SQLITE_CORRUPT","SQLITE_NOTADB","SQLITE_FULL","SQLITE_READONLY","SQLITE_IOERR"].includes(code||""))errors.push(detail);
+        else warnings.push(detail);
+      };
       if(workspace && processChanges && this.inspect) {
         job.phase="inspection";this.store.job(job);
         unchanged();
         try { await this.inspect(workspace); }
-        catch { processed=false; errors.push("History inspection failed; previous results retained"); }
+        catch(error) { processingIssue("History inspection failed; previous results retained",error); }
       }
       if(workspace&&processChanges&&this.analyze){
         job.phase="analysis";this.store.job(job);
         unchanged();
-        try{await this.analyze(workspace,job);}catch(error){processed=false;errors.push(error instanceof Error?error.message:'提交分析失败');}
+        try{await this.analyze(workspace,job);}catch(error){processingIssue("Commit analysis pending; previous results retained",error);}
       }
       if (workspace && processChanges && this.evaluateAchievements) {
         job.phase="achievements";this.store.job(job);
         unchanged();
         try { await this.evaluateAchievements(workspace, errors.length); }
-        catch { processed=false; errors.push("Achievement evaluation failed; previous results retained"); }
+        catch(error) { processingIssue("Achievement evaluation failed; previous results retained",error); }
       }
       const success =
         Object.keys(job.providers).length > 0 ||
         job.repositories.some((r) => !r.error);
-      job.status = errors.length ? (success ? "partial" : "failed") : "done";
+      job.status = errors.length ? (success ? "partial" : "failed") : warnings.length?"partial":"done";
+      job.warnings=warnings.length?[...new Set(warnings)].slice(0,8):undefined;
       job.error = errors.length
         ? [...new Set(errors)].slice(0, 8).join("; ")
         : undefined;
@@ -449,12 +473,15 @@ export class Collector {
         if(processed && this.processingFingerprint(workspace,sourceErrors)===fingerprint)
           this.store.db.prepare(`INSERT INTO adit_local_collection_checkpoints VALUES (?,?) ON CONFLICT(workspace_id)
             DO UPDATE SET fingerprint=excluded.fingerprint`).run(workspace.id,fingerprint);
-        if(job.status==="done")this.store.markStarted(workspace.id);
+        this.store.markStarted(workspace.id);
+        if(warnings.length)this.retryLater(workspace.id);
+        else this.retries.delete(workspace.id);
       }
     } catch (error) {
-      job.status = "interrupted";
-      job.error =
-        error instanceof Error ? error.message : "Collection interrupted";
+      const retryable=job.kind==="collect"&&isRetryableCollectionIssue(error)&&!this.stopping;
+      job.status = retryable?"partial":"interrupted";
+      job.error = retryable?undefined:error instanceof Error ? error.message : "Collection interrupted";
+      if(retryable){job.warnings=[error instanceof Error?error.message:String(error)];this.retryLater(job.workspaceId);}
     } finally {
       job.endedAt = new Date().toISOString();
       if(job.kind==="collect")job.repositoryProgress=this.repositoryProgress(job);
@@ -473,6 +500,7 @@ export class Collector {
   }
 
   private async indexGit(repo: Repository): Promise<void> {
+    delete repo.deferred;
     try {
       const ownEmail = await authorEmail(repo.path);
       if (!ownEmail) {
@@ -540,10 +568,26 @@ export class Collector {
         repo.count = reachable.size;
         delete repo.error;
       })();
-    } catch {
+    } catch(error) {
       repo.count = null;
-      repo.error = "Git indexing failed";
+      if(isRetryableCollectionIssue(error)){delete repo.error;repo.deferred=error instanceof Error?error.message:String(error);}
+      else repo.error = "Git indexing failed";
     }
+  }
+
+  private retryLater(id:string):void {
+    if(this.stopping)return;
+    const previous=this.retries.get(id);
+    if(previous?.timer||previous&&previous.attempt>=3)return;
+    const attempt=(previous?.attempt||0)+1;
+    const timer=setTimeout(()=>{
+      this.retries.set(id,{attempt});
+      const workspace=this.store.workspaces().find(workspace=>workspace.id===id);
+      if(!workspace||!workspaceGitStatus(workspace.path).available||(!workspace.providers.length&&!workspace.repositories.length))return;
+      try{this.collect(id);}catch{}
+    },attempt*5000);
+    timer.unref();
+    this.retries.set(id,{attempt,timer});
   }
 
   schedule(initial = false): void {
@@ -568,6 +612,8 @@ export class Collector {
   }
   async close(): Promise<void> {
     this.stopping = true;
+    for(const retry of this.retries.values())clearTimeout(retry.timer);
+    this.retries.clear();
     clearTimeout(this.timer);
     this.abort.abort();
     await this.queue;
