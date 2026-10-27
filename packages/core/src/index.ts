@@ -151,6 +151,7 @@ export { insideDirectory } from "./local-history/sources.js";
 export { redactOverview } from "./local-history/analytics.js";
 export * from "./local-history/sources.js";
 export * from "./local-history/archive.js";
+export { isRetryableCollectionIssue } from "./local-history/collection-issues.js";
 export * from "./local-history/analytics.js";
 export * from "./local-history/achievements.js";
 export * from "./local-history/achievement-rules.js";

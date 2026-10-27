@@ -4,6 +4,7 @@ import type { ScanResult, ScanSource } from "./archive.js";
 import { insideDirectory, sourceFiles } from "./sources.js";
 import { sourceStamp, trackSourceReads } from "./source-checkpoints.js";
 import { readSessionMetadata, type MetadataResult } from "./discovery-metadata.js";
+import { isRetryableCollectionIssue } from "./collection-issues.js";
 
 const VERSION=1;
 export interface DiscoveryOptions {
@@ -54,13 +55,19 @@ export async function discoverHistory(db:Database.Database,workspace:string,sour
           } catch(error) {
             options.signal?.throwIfAborted();
             options.file?.(root,path,{sessions:[],pending:true});
-            result.errors.push(`${source.id}: ${error instanceof Error?error.message:"Metadata could not be read"}`);
+            const message=`${source.id}: ${error instanceof Error?error.message:"Metadata could not be read"}`;
+            if(isRetryableCollectionIssue(error)){
+              (result.deferred??=[]).push(message);
+              result.pending![source.id]=(result.pending![source.id]||0)+1;
+            }else result.errors.push(message);
           }
           result.scanned++;options.progress?.(result.scanned,0);
         }
       } catch(error) {
         options.signal?.throwIfAborted();const message=`${source.id}: ${error instanceof Error?error.message:"Source could not be discovered"}`;
-        result.errors.push(message);options.directoryError?.(message);
+        if(isRetryableCollectionIssue(error))(result.deferred??=[]).push(message);
+        else result.errors.push(message);
+        options.directoryError?.(message);
       }
     }
   }

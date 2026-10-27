@@ -93,6 +93,7 @@ type Job = {
   startedAt: string;
   endedAt?: string;
   error?: string;
+  warnings?: string[];
   providers?: Record<string, number>;
   pending?: Record<string, number>;
   phase?: "git" | "sessions" | "inspection" | "analysis" | "achievements";
@@ -1326,6 +1327,7 @@ function WorkspaceEditor({
       "cursor-ide: Cursor IDE transcript has missing bubbles; previous archive retained",
     ].includes(job.error);
   const providerCounts = job?.providers ?? workspace?.counts ?? form.counts ?? {};
+  const collectionPending=cursorPending||!!job?.warnings?.length&&!job.error;
   const showCollectionProgress=!editing&&job?.kind==="collect"&&!!(job.sourceProgress||job.repositoryProgress);
   const progressActive=!!job&&["queued","running"].includes(job.status);
   const selectedRepos=knownRepos.filter(r=>form.repositories.includes(r.path));
@@ -1352,10 +1354,10 @@ function WorkspaceEditor({
       <div className="page-heading">
         <div>
           <h2>{t("工作目录")}</h2>
-          {workspace?.started && !discovery ? (
+          {workspace?.started && !discovery && (!job||job.status==="done") ? (
             <Badge status="done" />
           ) : job ? (
-            cursorPending && job.status === "partial" ? (
+            collectionPending && job.status === "partial" ? (
               <span className="muted">{t("部分记录待重试")}</span>
             ) : (
               <Badge status={job.status}>{discoveryLabel || (showCollectionProgress&&progressActive?t("正在整理"):undefined)}</Badge>
@@ -1433,9 +1435,9 @@ function WorkspaceEditor({
           {!fresh && editing && <p className="repo-hint">{t("目录改名或移动后，在这里选择新目录并保存。项目身份和已有记录会保留，已选仓库按原相对位置更新。")}</p>}
         </div>
       </section>
-      {job && (!showCollectionProgress || job.error || (progressActive&&(["inspection","achievements"].includes(job.phase||"")||(job.phase==="analysis"&&!job.activeRepository)))) && (
+      {job && (!showCollectionProgress || job.error || job.warnings?.length || (progressActive&&(["inspection","achievements"].includes(job.phase||"")||(job.phase==="analysis"&&!job.activeRepository)))) && (
         <div className="progress-row">
-          {cursorPending && job.status === "partial" ? (
+          {collectionPending && job.status === "partial" ? (
             <span className="muted">{t("部分记录待重试")}</span>
           ) : (
             <Badge status={job.status}>{discoveryLabel}</Badge>
@@ -1451,6 +1453,7 @@ function WorkspaceEditor({
             </span>
           )}
           <span className="muted">{time(job.endedAt || job.startedAt)}</span>
+          {!!job.warnings?.length && <span className="muted" title={job.warnings.map(systemMessage).join("; ")}>{t("部分记录或分析待补齐，将在后续整理重试；已整理内容可正常使用。")}</span>}
           {job.error && (
             <span className={cursorPending ? "muted" : "error"}>
               {cursorPending

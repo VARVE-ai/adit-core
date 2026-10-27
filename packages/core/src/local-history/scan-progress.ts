@@ -35,7 +35,7 @@ export class ScanProgressTracker {
       this.uncertain ||= !!metadata.pending;
     }});
     // Branches require complete ancestry. Cursor path resolution is scope-specific.
-    this.uncertain ||= discovery.errors.length>0 || ["claude","qoder","cowork"].includes(this.source.id) || (this.source.id==="cursor"&&this.scopes.length>1);
+    this.uncertain ||= discovery.errors.length>0 || !!discovery.deferred?.length || ["claude","qoder","cowork"].includes(this.source.id) || (this.source.id==="cursor"&&this.scopes.length>1);
     this.publish("running");
   }
   processed(references:[string,string][]) {

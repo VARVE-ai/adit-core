@@ -77,6 +77,43 @@ function fixture() {
 }
 
 describe("Core-owned local history", () => {
+  it("retries a temporarily occupied file without losing other sessions or reporting failure",async()=>{
+    const f=fixture(),read=codexReader.readCodexSession;
+    const spy=vi.spyOn(codexReader,"readCodexSession").mockRejectedValueOnce(Object.assign(new Error("busy"),{code:"EBUSY"})).mockImplementation(read);
+    const result=await f.archive.scan(f.workspace,f.sources);
+    expect(result.errors).toEqual([]);expect(result.deferred).toBeUndefined();
+    expect(spy).toHaveBeenCalledTimes(2);expect(f.archive.session("codex","one")!.messages).toHaveLength(2);
+  });
+  it("defers changing files but preserves real format errors and continues other files",async()=>{
+    const f=fixture(),read=codexReader.readCodexSession;
+    writeFileSync(join(f.source,"rollout-second.jsonl"),lines({type:"session_meta",payload:{id:"second",cwd:f.workspace}},item("user","good")));
+    const spy=vi.spyOn(codexReader,"readCodexSession").mockImplementation(async(...args)=>{
+      if(args[0]===f.path)throw new Error("Source changed while reading; retry on the next collection");
+      return read(...args);
+    });
+    const deferred=await f.archive.scan(f.workspace,f.sources);
+    expect(deferred.errors).toEqual([]);expect(deferred.deferred).toHaveLength(1);
+    expect(f.archive.session("codex","second")).toBeDefined();
+    spy.mockRestore();writeFileSync(f.path,"{broken}\n");
+    const broken=await f.archive.scan(f.workspace,f.sources);
+    expect(broken.errors).toHaveLength(1);expect(broken.deferred).toBeUndefined();
+  });
+  it("collects active Codex sessions without advancing cursors past concurrent appends",async()=>{
+    const f=fixture();await f.archive.scan(f.workspace,f.sources);
+    appendFileSync(f.path,lines(item("user","second")));
+    const original=codexReader.codexThreadTitle;
+    const title=vi.spyOn(codexReader,"codexThreadTitle").mockImplementation(async(...args)=>{
+      appendFileSync(f.path,lines(item("assistant","concurrent")));
+      return original(...args);
+    });
+    expect((await f.archive.scan(f.workspace,f.sources)).errors).toEqual([]);
+    expect(f.archive.session("codex","one")!.messages).toHaveLength(3);
+    expect(f.store.db.prepare("SELECT count(*) total FROM adit_history_jsonl_cursors").get()).toEqual({total:0});
+    title.mockRestore();
+    expect((await f.archive.scan(f.workspace,f.sources)).errors).toEqual([]);
+    expect(f.archive.session("codex","one")!.messages).toHaveLength(4);
+    expect((await f.archive.scan(f.workspace,f.sources)).updated).toBe(0);
+  });
   it("skips unchanged source parsing after restart, retries failed changes and isolates selected scopes", async () => {
     const f=fixture(),read=vi.spyOn(codexReader,"readCodexSession");
     const other=join(f.root,"other");mkdirSync(other);

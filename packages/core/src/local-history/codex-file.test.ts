@@ -10,8 +10,34 @@ import {historyFinalReply,nativeContextSql} from "./message-semantics.js";
 import {StructuredHistory} from "./structured-store.js";
 import {parseCodex} from "./parsers.js";
 import {sourceFiles} from "./sources.js";
+import {trackSourceReads} from "./source-checkpoints.js";
 const roots:string[]=[];afterEach(()=>{for(const root of roots.splice(0))rmSync(root,{recursive:true,force:true});});
 function fixture(){const root=mkdtempSync(join(tmpdir(),"adit-stream-"));roots.push(root);return root;}
+it("reads a bounded snapshot while the writer appends and retries incomplete records next time",async()=>{
+ const path=join(fixture(),"rollout-live.jsonl");
+ writeFileSync(path,'{"id":1}\n{"id":');
+ const captured=await trackSourceReads(path,async()=>{
+  const rows=codexFileRows(path);expect(rows.next().value).toEqual({id:1});
+  appendFileSync(path,'2}\n{"id":3}\n');
+  return [...rows];
+ });
+ expect(captured.value).toEqual([]);expect(captured.stable).toBe(true);expect(captured.changed).toBe(true);
+ expect([...codexFileRows(path)]).toEqual([{id:1},{id:2},{id:3}]);
+});
+it("rejects rewritten or truncated snapshots even when more bytes were appended",async()=>{
+ for(const replacement of ['{"id":9}\n{"id":2}\n{"id":3}\n','']){
+  const path=join(fixture(),"rollout-changing.jsonl");writeFileSync(path,'{"id":1}\n{"id":2}\n');
+  const rows=codexFileRows(path);rows.next();writeFileSync(path,replacement);
+  expect(()=>[...rows]).toThrow("Source changed while reading");
+ }
+});
+it("validates snapshots again after parsing without rejecting subsequent appends",async()=>{
+ const path=join(fixture(),"rollout-after.jsonl");writeFileSync(path,'{"id":1}\n');
+ const appended=await trackSourceReads(path,async()=>{const rows=[...codexFileRows(path)];appendFileSync(path,'{"id":2}\n');return rows;});
+ expect(appended.stable).toBe(true);expect(appended.changed).toBe(true);
+ const rewritten=await trackSourceReads(path,async()=>{const rows=[...codexFileRows(path)];writeFileSync(path,'{"id":9}\n{"id":2}\n{"id":3}\n');return rows;});
+ expect(rewritten.stable).toBe(false);
+});
 it("recognizes old unflagged compaction by native evidence and upgrades metadata without replaying history",async()=>{
  const root=fixture(),path=join(root,'rollout-old.jsonl');
  const rows=[{type:'session_meta',payload:{id:'old',cwd:root}},

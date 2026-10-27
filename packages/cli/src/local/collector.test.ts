@@ -12,6 +12,72 @@ const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close();
 });
+function retryFixture(scan: ConstructorParameters<typeof Collector>[4],inspect?:()=>Promise<void>){
+  const root=mkdtempSync(join(tmpdir(),"adit-auto-retry-"));mkdirSync(join(root,".git"));
+  const store=new LocalStore(join(root,"state")),collector=new Collector(store,undefined,undefined,inspect,scan);
+  collector.providers=async()=>[{id:"codex",name:"Codex",paths:[],homes:[],homesSupported:true,supported:true,format:"JSONL",enabled:true,version:0}];
+  const workspace=store.saveWorkspace({path:root,providers:["codex"],repositories:[]});
+  cleanup.push(async()=>{await collector.close();vi.useRealTimers();store.close();rmSync(root,{recursive:true,force:true});});
+  return {collector,store,workspace};
+}
+it("automatically retries an incomplete first collection without treating deferred records as failure",async()=>{
+  const scan=vi.fn().mockResolvedValueOnce({counts:{},errors:[],deferred:["codex: Source changed while reading; retry on the next collection"],scanned:1,updated:0})
+    .mockResolvedValue({counts:{},errors:[],scanned:1,updated:0});
+  const f=retryFixture(scan);vi.useFakeTimers();
+  const job=f.collector.collect(f.workspace.id);await f.collector.waitFor(f.workspace.id);
+  expect(f.collector.job(job.id)).toMatchObject({status:"partial",warnings:[expect.stringContaining("Source changed")]});
+  expect(f.collector.job(job.id).error).toBeUndefined();expect(f.store.workspace(f.workspace.id).started).toBe(true);
+  await vi.advanceTimersByTimeAsync(5000);await f.collector.waitFor(f.workspace.id);
+  expect(scan).toHaveBeenCalledTimes(2);expect(f.collector.jobs()[0].status).toBe("done");
+});
+it("bounds rapid automatic retries and cancels them on shutdown",async()=>{
+  const scan=vi.fn(async()=>({counts:{},errors:[],deferred:["codex: retry on the next collection"],scanned:1,updated:0}));
+  const f=retryFixture(scan);vi.useFakeTimers();
+  f.collector.collect(f.workspace.id);await f.collector.waitFor(f.workspace.id);
+  for(const delay of [5000,10000,15000]){await vi.advanceTimersByTimeAsync(delay);await f.collector.waitFor(f.workspace.id);}
+  expect(scan).toHaveBeenCalledTimes(4);
+  await f.collector.close();await vi.advanceTimersByTimeAsync(30000);expect(scan).toHaveBeenCalledTimes(4);
+});
+it("cancels a pending retry on shutdown",async()=>{
+  const scan=vi.fn(async()=>({counts:{},errors:[],deferred:["codex: retry on the next collection"],scanned:1,updated:0}));
+  const f=retryFixture(scan);vi.useFakeTimers();
+  f.collector.collect(f.workspace.id);await f.collector.waitFor(f.workspace.id);
+  await f.collector.close();await vi.advanceTimersByTimeAsync(60000);
+  expect(scan).toHaveBeenCalledTimes(1);
+});
+it("requeues changed source settings with the current selection instead of leaving collection interrupted",async()=>{
+  const scan=vi.fn().mockRejectedValueOnce(new Error("Source settings changed; retry with the saved selection"))
+    .mockResolvedValue({counts:{},errors:[],scanned:1,updated:0});
+  const f=retryFixture(scan);vi.useFakeTimers();
+  const job=f.collector.collect(f.workspace.id);await f.collector.waitFor(f.workspace.id);
+  expect(f.collector.job(job.id)).toMatchObject({status:"partial",warnings:[expect.stringContaining("settings changed")]});
+  await vi.advanceTimersByTimeAsync(5000);await f.collector.waitFor(f.workspace.id);
+  expect(scan).toHaveBeenCalledTimes(2);expect(f.collector.jobs()[0].status).toBe("done");
+});
+it("does not hide a corrupt source or start rapid retries for permanent errors",async()=>{
+  const scan=vi.fn(async()=>({counts:{},errors:["codex: Invalid JSON record at line 2"],scanned:1,updated:0}));
+  const f=retryFixture(scan);vi.useFakeTimers();
+  const job=f.collector.collect(f.workspace.id);await expect(f.collector.waitFor(f.workspace.id)).rejects.toThrow("Invalid JSON");
+  expect(f.collector.job(job.id)).toMatchObject({status:"failed",error:"codex: Invalid JSON record at line 2"});
+  expect(f.collector.job(job.id).warnings).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(30000);expect(scan).toHaveBeenCalledTimes(1);
+});
+it("keeps collected content usable while retrying failed derived processing separately",async()=>{
+  const inspect=vi.fn(async()=>{}).mockRejectedValueOnce(new Error("temporary inspection failure"));
+  const scan=vi.fn(async()=>({counts:{},errors:[],scanned:1,updated:0})),f=retryFixture(scan,inspect);vi.useFakeTimers();
+  const job=f.collector.collect(f.workspace.id);await f.collector.waitFor(f.workspace.id);
+  expect(f.collector.job(job.id)).toMatchObject({status:"partial",warnings:["History inspection failed; previous results retained: temporary inspection failure"]});
+  expect(f.collector.job(job.id).error).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(5000);await f.collector.waitFor(f.workspace.id);
+  expect(inspect).toHaveBeenCalledTimes(2);expect(f.collector.jobs()[0].status).toBe("done");
+});
+it("preserves actionable storage errors from post-processing instead of masking them as pending",async()=>{
+  const inspect=vi.fn(async()=>{throw Object.assign(new Error("disk full"),{code:"SQLITE_FULL"});});
+  const f=retryFixture(async()=>({counts:{},errors:[],scanned:1,updated:0}),inspect);vi.useFakeTimers();
+  const job=f.collector.collect(f.workspace.id);await expect(f.collector.waitFor(f.workspace.id)).rejects.toThrow("disk full");
+  expect(f.collector.job(job.id).warnings).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(30000);expect(inspect).toHaveBeenCalledTimes(1);
+});
 it("publishes Git repositories before waiting for session discovery, without running collection analysis",async()=>{
   const root=mkdtempSync(join(tmpdir(),"adit-discovery-order-")),repo=join(root,"repo");mkdirSync(repo);
   const git=(...args:string[])=>execFileSync("git",["-C",repo,"-c","core.hooksPath=NUL",...args],{windowsHide:true,encoding:"utf8"});
