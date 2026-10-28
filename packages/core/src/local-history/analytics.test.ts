@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { LocalStore } from "../local-state.js";
 import { createHistorySchema } from "./schema.js";
 import { StructuredHistory } from "./structured-store.js";
@@ -309,6 +309,75 @@ it("clips work at the local midnight including a half-hour timezone and does not
   expect(unknown.work.duration).toBe(0);
   expect(unknown.coverage.missingTimestamp).toBe(1);
   expect(unknown.summary.prompts).toBe(1);
+});
+it.each([
+  ["UTC", "7d", "2026-10-19T12:00:00Z", "2026-10-13T00:00:00Z", "2026-10-20T00:00:00Z"],
+  ["UTC", "30d", "2026-10-19T12:00:00Z", "2026-09-20T00:00:00Z", "2026-10-20T00:00:00Z"],
+  ["Asia/Kolkata", "7d", "2026-10-19T12:00:00Z", "2026-10-12T18:30:00Z", "2026-10-19T18:30:00Z"],
+  ["Asia/Kathmandu", "7d", "2026-10-19T12:00:00Z", "2026-10-12T18:15:00Z", "2026-10-19T18:15:00Z"],
+  ["America/New_York", "7d", "2026-03-09T12:00:00Z", "2026-03-03T05:00:00Z", "2026-03-10T04:00:00Z"],
+  ["America/New_York", "7d", "2026-11-02T12:00:00Z", "2026-10-27T04:00:00Z", "2026-11-03T05:00:00Z"],
+  ["Australia/Lord_Howe", "7d", "2026-10-10T12:00:00Z", "2026-10-03T13:30:00Z", "2026-10-10T13:00:00Z"],
+  ["America/Santiago", "7d", "2026-09-12T12:00:00Z", "2026-09-06T04:00:00Z", "2026-09-13T03:00:00Z"],
+  ["Pacific/Apia", "7d", "2012-01-05T00:00:00Z", "2011-12-30T10:00:00Z", "2012-01-05T10:00:00Z"],
+])("keeps %s %s boundaries at %s across fractional offsets and calendar transitions", (timezone, range, now, from, to) => {
+  const { root, history, analytics, workspace } = fixture();
+  const start = Date.parse(from), end = Date.parse(to);
+  const records: [string, number, number][] = [
+    ["before", start - 120_000, start - 60_000],
+    ["cross-start", start - 60_000, start + 60_000],
+    ["at-start", start, start + 60_000],
+    ["cross-end", end - 60_000, end + 60_000],
+    ["after", end, end + 60_000],
+  ];
+  for (const [id, promptAt, replyAt] of records) {
+    const record = session(root, id);
+    record.messages[0].timestamp = new Date(promptAt).toISOString();
+    record.messages[1].timestamp = new Date(replyAt).toISOString();
+    history.write(record);
+  }
+  const result = analytics.overview(workspace, { timezone, range, now: Date.parse(now) });
+  expect(result.summary).toMatchObject({ sessions: 3, messages: 4, prompts: 2, estimatedCost: 1270 });
+  expect(result.work).toMatchObject({ duration: 180_000, peak: 2, peakAt: start, over30m: 0 });
+  expect(result.work.byProvider).toEqual([{ provider: "claude", duration: 180_000 }]);
+  expect(result.work.longest).toHaveLength(3);
+  expect(result.work.longest.every(turn => turn.duration === 60_000)).toBe(true);
+  const hours = new Map<number, number>();
+  const formatter = new Intl.DateTimeFormat("en-GB", { timeZone: timezone, hour: "2-digit", hourCycle: "h23" });
+  for (const [, promptAt, replyAt] of records) {
+    for (const at of [promptAt, replyAt]) if (at >= start && at < end) {
+      const hour = Number(formatter.format(at));
+      hours.set(hour, (hours.get(hour) || 0) + 1);
+    }
+  }
+  expect(result.activity.hours.map(hour => hour.total)).toEqual(Array.from({ length: 24 }, (_, hour) => hours.get(hour) || 0));
+});
+it("preserves all-time undated and future usage while clipping activity and work at tomorrow", () => {
+  const { root, history, analytics, workspace } = fixture();
+  for (const [id, timestamp] of [["future", "2026-10-20T01:00:00Z"], ["undated", undefined]] as const) {
+    const record = session(root, id);
+    record.messages.forEach(message => { message.timestamp = timestamp; });
+    history.write(record);
+  }
+  const result = analytics.overview(workspace, scope);
+  expect(result.summary).toMatchObject({ sessions: 2, messages: 2, prompts: 2, estimatedCost: 1270 });
+  expect(result.work).toMatchObject({ duration: 0, peak: 0, peakAt: null, longest: [] });
+  expect(result.coverage.missingTimestamp).toBe(2);
+  expect(result.activity.hours.every(hour => hour.total === 0)).toBe(true);
+});
+it("reads stored costs without rechecking the entire ledger when analytics is constructed or queried", () => {
+  const { root, store, history, workspace } = fixture();
+  history.write(session(root));
+  const persist = vi.spyOn(LocalPrices.prototype, "persist");
+  try {
+    const reader = new LocalAnalytics(store.db);
+    cleanup.push(() => reader.prices.close());
+    expect(reader.overview(workspace, scope).summary.estimatedCost).toBe(635);
+    expect(reader.overview(workspace, { ...scope, range: "7d" }).summary.estimatedCost).toBe(635);
+    expect(persist).not.toHaveBeenCalled();
+  } finally {
+    persist.mockRestore();
+  }
 });
 it("links only evidenced commits, deduplicates cross-repository SHAs, and keeps the Git denominator under Agent filtering", () => {
   const { root, store, history, analytics, workspace } = fixture(),

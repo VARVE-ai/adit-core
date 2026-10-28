@@ -412,6 +412,8 @@ export const messages = {
   "实际云端推送尚未接入；不受日期和 Agent 筛选影响":
     "Cloud push is not available yet; unaffected by date and agent filters",
   "待推送 {0} 个会话、{1} 个提交": "{0} sessions · {1} commits pending",
+  "正在计算待推送数量…": "Calculating pending uploads…",
+  "待推送数量更新失败，稍后重试": "Pending count update failed; retrying later",
   "未开启云端存储": "Cloud storage is off",
   "登录云端": "Sign in to Cloud",
   "待核对云端历史": "Cloud history not checked yet",

@@ -1,14 +1,20 @@
-import { analyticsSessions, projectUploadRepositories, nativeContextSql, type LocalStore, type LocalWorkspace } from "@varveai/adit-core";
-import { CloudSessionIndex, cloudCommitSelection, cloudFinalReply, cloudTurnUsage, cloudSessionCutoff, syncKey, type CloudBaseline } from "./cloud-projection.js";
+import { analyticsSessions, projectUploadRepositories, nativeContextSql, type LocalWorkspace } from "@varveai/adit-core";
+import { CloudSessionIndex, cloudCommitSelection, cloudFinalReply, cloudTurnUsage, cloudSessionCutoff, syncKey, type CloudBaseline, type CloudReadStore } from "./cloud-projection.js";
+import { pendingRevision } from "./cloud-pending-schema.js";
 
 export type CloudPending =
   | { state: "ready"; sessions: number; commits: number }
   | { state: "disabled" | "disconnected" | "uninitialized" | "unverified"; sessions: null; commits: null };
 
+export type PendingSessionCache = Map<string, { key: string; pending: boolean }>;
+
 /** Counts unconfirmed prompts/replies independently, plus commits awaiting upload/analysis.
  * No transcript parsing, Cloud requests, mapping creation or upload confirmations on a status read. */
-export function cloudPending(store: LocalStore, workspace: LocalWorkspace, scope: string, baseline: CloudBaseline): CloudPending {
+export function cloudPending(store: CloudReadStore, workspace: LocalWorkspace, scope: string, baseline: CloudBaseline, cache?: PendingSessionCache): CloudPending {
   const db = store.db;
+  const scopeRevision = cache ? pendingRevision(db, `scope:${scope}`) : 0;
+  const identityRevision = cache ? pendingRevision(db, "identity") : 0;
+  const visited = new Set<string>();
   const sessionIndex = new CloudSessionIndex(store,baseline);
   const revision = db.prepare("SELECT revision FROM adit_local_cloud_sessions WHERE scope=? AND provider=? AND native_id=?");
   const receipt = db.prepare("SELECT 1 FROM adit_local_cloud_receipts WHERE scope=? AND kind=? AND id=?");
@@ -24,11 +30,22 @@ export function cloudPending(store: LocalStore, workspace: LocalWorkspace, scope
         (b.kind IN ('text','input_text','output_text') AND trim(coalesce(e.text_content,b.text_content,''),char(9)||char(10)||char(13)||' ')<>'')))`);
   const sessions=new Set<string>();let commits = 0;
   for (const s of analyticsSessions(db,workspace)) {
+    const sessionKey = JSON.stringify([s.provider,s.id]);
+    visited.add(sessionKey);
+    const key = cache ? JSON.stringify([scope,scopeRevision,identityRevision,s,pendingRevision(db,`session:${sessionKey}`)]) : "";
+    const cached = cache?.get(sessionKey);
+    if (cached?.key === key) {
+      if (cached.pending) sessions.add(`${s.provider}\0${s.conversation_id}`);
+      continue;
+    }
     const cutoff = cloudSessionCutoff(store,scope,baseline,s,undefined,sessionIndex);
     const saved = revision.get(scope,s.provider,s.id) as {revision:number} | undefined;
-    if (saved?.revision === s.transcript_revision) continue;
+    if (saved?.revision === s.transcript_revision) {
+      cache?.set(sessionKey,{key,pending:false});
+      continue;
+    }
     const visible = turns.all(s.provider,s.id) as {id:string;prompt_message_id:string;occurred_at:number|null;has_next:number}[];
-    if (visible.some(t => {
+    const pending = visible.some(t => {
       if ((cutoff===null || (t.occurred_at!==null && t.occurred_at>cutoff)) &&
         !receipt.get(scope,"event",`lh_${syncKey(scope,t.prompt_message_id)}`)) return true;
       const final=cloudFinalReply(store,t.id,!!t.has_next);
@@ -37,8 +54,11 @@ export function cloudPending(store: LocalStore, workspace: LocalWorkspace, scope
       if(!knownReply && cutoff!==null && (final.occurred_at===null || final.occurred_at<=cutoff))return false;
       return !receipt.get(scope,"event",`lh_${syncKey(scope,final.id)}`) ||
         !receipt.get(scope,"usage",syncKey(t.id,cloudTurnUsage(store,t.id)));
-    })) sessions.add(`${s.provider}\0${s.conversation_id}`);
+    });
+    cache?.set(sessionKey,{key,pending});
+    if (pending) sessions.add(`${s.provider}\0${s.conversation_id}`);
   }
+  if (cache) for (const sessionKey of cache.keys()) if (!visited.has(sessionKey)) cache.delete(sessionKey);
   for (const repo of projectUploadRepositories(db,workspace)) {
     const selection = cloudCommitSelection(store,scope,baseline,repo);
     // The legacy boundary cannot safely be guessed from the local archive total.

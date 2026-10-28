@@ -7,8 +7,8 @@ export type CloudSyncSummary = {
   status?: string;
   endedAt?: string;
   error?: string;
-  pending?: { state: "ready"; sessions: number; commits: number } |
-    { state: "disabled" | "disconnected" | "uninitialized" | "unverified"; sessions: null; commits: null };
+  pending?: ({ state: "ready"; sessions: number; commits: number } |
+    { state: "disabled" | "disconnected" | "uninitialized" | "unverified" | "computing" | "failed"; sessions: null; commits: null }) & { refreshing?: boolean; error?: string };
 };
 
 type CloudPushProps = {
@@ -50,7 +50,13 @@ export function OverviewCloudPush({ enabled, sync, accountState, onPush, onSetti
     summary = t("正在读取云端账号状态…"); action = undefined;
   } else if (pending?.state === "ready") {
     summary = t("待推送 {0} 个会话、{1} 个提交", number(pending.sessions), number(pending.commits));
+    if (pending.refreshing) summary += ` · ${t("正在更新…")}`;
+    else if (pending.error) summary += ` · ${t("待推送数量更新失败，稍后重试")}`;
     title += `；${t("提问可以先推送，回复产生后再增量补传。")}`;
+  } else if (pending?.state === "computing") {
+    summary = t("正在计算待推送数量…");
+  } else if (pending?.state === "failed") {
+    summary = t("待推送数量更新失败，稍后重试");
   } else {
     summary = running ? t("正在核对云端历史…") : t("待核对云端历史");
     title += `；${t("推送时先核对云端历史，已上传的记录不会重复推送。")}`;

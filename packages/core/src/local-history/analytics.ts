@@ -29,6 +29,17 @@ function shift(day: string, days: number) {
     .toISOString()
     .slice(0, 10);
 }
+function dayStart(date: string, format: (at: number) => string) {
+  const midnight = Date.parse(date + "T00:00:00Z");
+  let before = midnight - 36 * 3_600_000,
+    after = midnight + 36 * 3_600_000;
+  while (before < after) {
+    const middle = Math.floor((before + after) / 2);
+    if (format(middle) < date) before = middle + 1;
+    else after = middle;
+  }
+  return before;
+}
 export class LocalAnalytics {
   readonly prices: LocalPrices;
   private cache = new Map<
@@ -40,7 +51,6 @@ export class LocalAnalytics {
   >();
   constructor(private db: Database.Database) {
     this.prices = new LocalPrices(db);
-    this.prices.persist();
     db.exec(
       "CREATE TEMP TABLE IF NOT EXISTS overview_scope(provider TEXT,id TEXT,PRIMARY KEY(provider,id))",
     );
@@ -170,8 +180,10 @@ export class LocalAnalytics {
       hourCycle: "h23",
     });
     const day = (at: number) => dayFormat.format(at),
+      fromTimestamp = range === "all" ? Number.MIN_SAFE_INTEGER : dayStart(from, day),
+      toTimestamp = dayStart(to, day),
       inRange = (at: number | null) =>
-        at !== null && day(at) >= from && day(at) < to;
+        at !== null && at >= fromTimestamp && at < toTimestamp;
     this.db.function("ov_day", { deterministic: true }, (at: number | null) =>
       at === null ? null : day(at),
     );
@@ -204,9 +216,9 @@ export class LocalAnalytics {
       const rows = (sql: string, ...args: any[]) =>
         this.db.prepare(sql).all(...args) as Row[];
       const activity = rows(
-        `SELECT ov_day(m.occurred_at) AS date,ov_hour(m.occurred_at) AS hour,count(*) AS count FROM ${messageFrom} WHERE m.occurred_at IS NOT NULL AND ov_day(m.occurred_at)>=? AND ov_day(m.occurred_at)<? GROUP BY date,hour`,
-        from,
-        to,
+        `SELECT ov_day(m.occurred_at) AS date,ov_hour(m.occurred_at) AS hour,count(*) AS count FROM ${messageFrom} WHERE m.occurred_at>=? AND m.occurred_at<? GROUP BY date,hour`,
+        fromTimestamp,
+        toTimestamp,
       );
       const daily = new Map<string, number>(),
         hours = Array.from({ length: 24 }, (_, hour) => ({
@@ -234,9 +246,9 @@ export class LocalAnalytics {
           : 0;
       for (const h of hours) h.average = recordDays ? h.total / recordDays : 0;
       const prompts = rows(
-        `SELECT ov_day(m.started_at) AS date,count(*) AS count FROM adit_history_turns m ${join} WHERE m.started_at IS NOT NULL AND ov_day(m.started_at)>=? AND ov_day(m.started_at)<? GROUP BY date`,
-        from,
-        to,
+        `SELECT ov_day(m.started_at) AS date,count(*) AS count FROM adit_history_turns m ${join} WHERE m.started_at>=? AND m.started_at<? GROUP BY date`,
+        fromTimestamp,
+        toTimestamp,
       );
       const activeDays = prompts.length,
         promptCount =
@@ -246,7 +258,7 @@ export class LocalAnalytics {
             : prompts.reduce((n, p) => n + p.count, 0);
       const conversationIds=new Map(main.map(s=>[`${s.provider}:${s.id}`,`${s.provider}:${s.conversation_id}`]));
       const sessionCount = new Set((range === "all" ? main.map(s=>({provider:s.provider,session_id:s.id})) : rows(
-        `SELECT DISTINCT m.provider,m.session_id FROM ${messageFrom} WHERE ov_day(m.occurred_at)>=? AND ov_day(m.occurred_at)<?`,from,to))
+        `SELECT DISTINCT m.provider,m.session_id FROM ${messageFrom} WHERE m.occurred_at>=? AND m.occurred_at<?`,fromTimestamp,toTimestamp))
         .map(s=>conversationIds.get(`${s.provider}:${s.session_id}`))).size;
       // One prompt, one Agent and one model vote. Use the first identified
       // assistant response in the turn; repeated tool/usage messages add no votes.
@@ -255,11 +267,11 @@ export class LocalAnalytics {
           WHERE a.turn_id=m.id AND a.role='assistant' AND nullif(a.model,'') IS NOT NULL AND a.model NOT IN ('<synthetic>','unknown')
           ORDER BY a.ordinal LIMIT 1) AS model,count(*) AS count
          FROM adit_history_turns m ${join}
-         WHERE ?='all' OR (ov_day(m.started_at)>=? AND ov_day(m.started_at)<?)
+         WHERE ?='all' OR (m.started_at>=? AND m.started_at<?)
          GROUP BY m.provider,model`,
         range,
-        from,
-        to,
+        fromTimestamp,
+        toTimestamp,
       );
       const promptAgents = new Map<string, number>(),
         promptModels = new Map<string, number>();
@@ -274,48 +286,29 @@ export class LocalAnalytics {
         else unknownModelPrompts += p.count;
       }
       const intervals = rows(
-        `SELECT i.*,m.provider,m.session_id FROM adit_history_work_intervals i JOIN adit_history_turns m ON m.id=i.turn_id ${join}`,
+        `SELECT i.started_at,i.counted_duration_ms,i.turn_id,m.provider,m.session_id FROM adit_history_work_intervals i JOIN adit_history_turns m ON m.id=i.turn_id ${join}
+         WHERE i.started_at<? AND i.started_at+i.counted_duration_ms>?`,
+        toTimestamp,
+        fromTimestamp,
       );
       const workBy = new Map<string, number>(),
         turnDurations = new Map<string, number>(),
         events: { at: number; delta: number; id: string }[] = [];
       // Count the first five minutes of a long idle gap as the evidenced effective interval; versioned rule.
-      for (const i of intervals) {
-        let start = i.started_at,
-          end = i.started_at + i.counted_duration_ms;
+      for (const interval of intervals) {
+        const start = Math.max(interval.started_at, fromTimestamp),
+          end = Math.min(interval.started_at + interval.counted_duration_ms, toTimestamp);
         if (end <= start) continue;
-        // Split at local day boundaries without assuming every local day is 24h.
-        while (start < end) {
-          let next = Math.min(
-            end,
-            (Math.floor(start / 3_600_000) + 1) * 3_600_000,
-          );
-          if (next <= start) break;
-          if (day(start) !== day(next - 1)) {
-            let low = start + 1,
-              high = next;
-            const current = day(start);
-            while (low < high) {
-              const mid = Math.floor((low + high) / 2);
-              if (day(mid) === current) low = mid + 1;
-              else high = mid;
-            }
-            next = low;
-          }
-          if (inRange(start)) {
-            const amount = next - start;
-            workBy.set(i.provider, (workBy.get(i.provider) || 0) + amount);
-            turnDurations.set(
-              i.turn_id,
-              (turnDurations.get(i.turn_id) || 0) + amount,
-            );
-            events.push(
-              { at: start, delta: 1, id: i.provider + ":" + i.session_id },
-              { at: next, delta: -1, id: i.provider + ":" + i.session_id },
-            );
-          }
-          start = next;
-        }
+        const amount = end - start;
+        workBy.set(interval.provider, (workBy.get(interval.provider) || 0) + amount);
+        turnDurations.set(
+          interval.turn_id,
+          (turnDurations.get(interval.turn_id) || 0) + amount,
+        );
+        events.push(
+          { at: start, delta: 1, id: interval.provider + ":" + interval.session_id },
+          { at: end, delta: -1, id: interval.provider + ":" + interval.session_id },
+        );
       }
       let peak = 0,
         peakAt: number | null = null;
@@ -350,10 +343,10 @@ export class LocalAnalytics {
           };
         });
       const usage = rows(
-        `SELECT m.* FROM adit_history_usage_entries m ${join} WHERE m.ledger_role='canonical' AND (?='all' OR (ov_day(m.occurred_at)>=? AND ov_day(m.occurred_at)<?))`,
+        `SELECT m.* FROM adit_history_usage_entries m ${join} WHERE m.ledger_role='canonical' AND (?='all' OR (m.occurred_at>=? AND m.occurred_at<?))`,
         range,
-        from,
-        to,
+        fromTimestamp,
+        toTimestamp,
       );
       const totals: Record<string, number | null> = {
         uncached_input_tokens: 0,
@@ -604,10 +597,10 @@ export class LocalAnalytics {
           attribution: "partial" as const,
           recordDays: "observed_span" as const,
           missingUsage: rows(
-            `SELECT count(*) AS n FROM ${messageFrom} WHERE m.role='assistant' AND NOT EXISTS(SELECT 1 FROM adit_history_usage_observations o WHERE o.message_id=m.id) AND (?='all' OR (ov_day(m.occurred_at)>=? AND ov_day(m.occurred_at)<?))`,
+            `SELECT count(*) AS n FROM ${messageFrom} WHERE m.role='assistant' AND NOT EXISTS(SELECT 1 FROM adit_history_usage_observations o WHERE o.message_id=m.id) AND (?='all' OR (m.occurred_at>=? AND m.occurred_at<?))`,
             range,
-            from,
-            to,
+            fromTimestamp,
+            toTimestamp,
           )[0].n,
         },
       };

@@ -77,6 +77,7 @@ export async function startLocalServer(
     token?: string;
     instance?: string;
     startupRegistration?: StartupRegistration;
+    pendingWorkerUrl?: URL;
   } = {},
 ) {
   const store = new LocalStore(options.directory);
@@ -104,13 +105,14 @@ export async function startLocalServer(
   achievementService = options.instance ? new AchievementService(store.dbPath) : undefined;
   if(attributionService)store.db.prepare("UPDATE adit_attribution_runs SET status='failed',error='上次分析已中断',finished_at=? WHERE status='running'").run(Date.now());
   const analytics = new LocalAnalytics(store.db);
+  analytics.prices.persist();
   const overviewService = options.instance ? new OverviewService(store.dbPath) : undefined;
   const priceTimer = options.instance ? setInterval(() => void analytics.prices.refresh(), 60_000) : undefined;
   priceTimer?.unref();
   // Tests may use isolated servers; only the detached production daemon starts network metadata refresh.
   if (options.instance) void analytics.prices.refresh();
   const account = new LocalAccount(store.directory);
-  const cloudSync = new LocalCloudSync(store, collector);
+  const cloudSync = new LocalCloudSync(store, collector, undefined, options.pendingWorkerUrl);
   const secrets = new LocalSecrets(store.directory);
   const gistCredentialWork = new Set<string>();
   const publications = new PublicationApi(store, analytics.prices, !!options.instance);

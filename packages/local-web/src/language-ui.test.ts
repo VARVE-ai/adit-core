@@ -648,6 +648,31 @@ describe("language switching across the local workbench", () => {
     await act(async()=>{await vi.advanceTimersByTimeAsync(2000);});
     expect(button("正在同步新记录…").props.disabled).toBe(true);
   });
+  it("distinguishes pending calculation from zero and keeps stale counts visible during refresh or failure",async()=>{
+    savedWorkspace={...workspace,cloud:{...workspace.cloud,enabled:true},cloudSync:{pending:{state:"computing",sessions:null,commits:null}}};
+    const root=await render("/overview/ws");
+    await openHeaderStatus("云端存储");
+    const summary=()=>text(root.findByProps({className:"overview-cloud-quick"}));
+    expect(summary()).toContain("Calculating pending uploads…");
+    expect(summary()).not.toContain("0 sessions");
+    expect(button("Push now").props.disabled).toBe(false);
+    savedWorkspace={...savedWorkspace,cloudSync:{pending:{state:"ready",sessions:3,commits:2,refreshing:true}}};
+    await act(async()=>{await vi.advanceTimersByTimeAsync(2000);});
+    expect(summary()).toContain("3 sessions · 2 commits pending · Updating…");
+    savedWorkspace={...savedWorkspace,cloudSync:{pending:{state:"ready",sessions:3,commits:2,error:"unavailable"}}};
+    await act(async()=>{await vi.advanceTimersByTimeAsync(2000);});
+    expect(summary()).toContain("3 sessions · 2 commits pending · Pending count update failed");
+    await toggle();
+    expect(summary()).toContain("待推送 3 个会话、2 个提交 · 待推送数量更新失败");
+    savedWorkspace={...savedWorkspace,cloudSync:{pending:{state:"failed",sessions:null,commits:null,error:"unavailable"}}};
+    await act(async()=>{await vi.advanceTimersByTimeAsync(2000);});
+    expect(summary()).toContain("待推送数量更新失败");
+    expect(summary()).not.toContain("0 个会话");
+    expect(button("立即推送").props.disabled).toBe(false);
+    savedWorkspace={...savedWorkspace,cloudSync:{pending:{state:"computing",sessions:null,commits:null}}};
+    await act(async()=>{await vi.advanceTimersByTimeAsync(2000);});
+    expect(summary()).toContain("正在计算待推送数量…");
+  });
   it("links disabled Cloud storage to directory settings instead of displaying fake pending numbers",async()=>{
     const root=await render("/overview/ws");
     await openHeaderStatus("云端存储");

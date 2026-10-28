@@ -7,7 +7,7 @@ import { createAttributionSchema } from "../../../core/src/local-history/attribu
 import { StructuredHistory } from "../../../core/src/local-history/structured-store.js";
 import { CloudProjection, CloudSessionIndex, cloudFinalReply, cloudTurnUsage, createCloudSyncSchema, finalReply, syncKey, type CloudBaseline } from "./cloud-projection.js";
 import { cloudPending } from "./cloud-pending.js";
-import { LocalCloudSync } from "./cloud-sync.js";
+import { LocalCloudSync as BaseLocalCloudSync } from "./cloud-sync.js";
 import { loadCredentials, collectRemoteBranchSnapshot } from "@varveai/adit-cloud";
 import { runGit } from "@varveai/adit-engine";
 import { sendLocalRuntimeReport } from "./cloud-runtime-report.js";
@@ -16,6 +16,21 @@ import { localCommitBranches } from "./commit-branches.js";
 vi.mock("@varveai/adit-cloud", async () => ({...(await import("../../../cloud/src/index.js")),loadCredentials:vi.fn(),collectRemoteBranchSnapshot:vi.fn()}));
 vi.mock("./cloud-runtime-report.js",()=>({sendLocalRuntimeReport:vi.fn().mockResolvedValue({})}));
 let root:string,store:LocalStore,history:StructuredHistory;
+const instances: BaseLocalCloudSync[] = [];
+class LocalCloudSync extends BaseLocalCloudSync {
+  constructor(...parameters: ConstructorParameters<typeof BaseLocalCloudSync>) {
+    super(parameters[0],parameters[1],parameters[2],new URL("../../dist/local/cloud-pending-worker.js",import.meta.url));
+    instances.push(this);
+  }
+}
+async function settledPending(sync: BaseLocalCloudSync, id: string) {
+  await expect.poll(() => {
+    const pending = sync.status(id).pending;
+    if (pending.error) throw new Error(pending.error);
+    return pending.state !== "computing" && !pending.refreshing;
+  }, { timeout: 10000 }).toBe(true);
+  return sync.status(id).pending;
+}
 const baseline:CloudBaseline={schemaVersion:1,accountId:"user",before:null,repositories:[],sessions:[],nextCursor:null};
 const at=(n:number)=>new Date(Date.UTC(2026,9,16,0,0,n)).toISOString();
 beforeEach(()=>{
@@ -24,7 +39,7 @@ beforeEach(()=>{
   vi.mocked(sendLocalRuntimeReport).mockReset().mockResolvedValue({});
   vi.mocked(collectRemoteBranchSnapshot).mockReset().mockRejectedValue(new Error("Remote unavailable"));
 });
-afterEach(()=>{store.close();rmSync(root,{recursive:true,force:true});vi.restoreAllMocks();});
+afterEach(async()=>{await Promise.all(instances.splice(0).map(instance=>instance.close()));store.close();rmSync(root,{recursive:true,force:true});vi.restoreAllMocks();});
 function workspace(){return store.saveWorkspace({path:root,providers:["codex"],repositories:[],cloud:{enabled:true,mode:"manual",interval:5}});}
 function write(extra=false){history.write({id:"native",provider:"codex",cwd:root,messages:[
   {key:"p",role:"user",content:"question",timestamp:at(1),raw:{}},
@@ -201,21 +216,21 @@ it("uploads unanswered and interrupted prompts independently, then sends only a 
   expect(initial.map(e=>e.type)).toEqual(["prompt_submit","prompt_submit"]);
   expect(JSON.stringify(initial)).not.toContain("still working");
   expect(JSON.stringify(initial)).not.toContain("private");
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:0,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:0,commits:0});
   expect(store.db.prepare("SELECT count(*) n FROM adit_local_cloud_receipts WHERE kind IN ('turn','usage')").get()).toEqual({n:0});
   sync.start(w.id);await sync.wait(w.id);expect(client.post).toHaveBeenCalledTimes(2);
 
   // More tools do not turn an already uploaded prompt into another pending event.
   history.write({...session,messages:[...session.messages,{...tool,key:"tool2"}]});
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:0,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:0,commits:0});
   history.write({...session,messages:[...session.messages,{key:"answer",role:"assistant",content:"done",timestamp:at(7),raw:{payload:{phase:"final"}},
     usage:{input_tokens:20,output_tokens:2,total_tokens:22},model:"gpt-test"}]});
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:1,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:1,commits:0});
   sync.start(w.id);await sync.wait(w.id);
   const appended=client.post.mock.calls.slice(2).flatMap(([,p])=>p.events);
   expect(appended).toHaveLength(1);expect(appended[0]).toMatchObject({type:"assistant_response",text:"done",parentEventId:initial[0].id});
   expect(appended[0].usage[0].totalTokens).toBe(22);
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:0,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:0,commits:0});
   await sync.close();
 });
 it("keeps an unanswered prompt pending until Cloud acknowledges it, then retries the same event identity",async()=>{
@@ -226,12 +241,12 @@ it("keeps an unanswered prompt pending until Cloud acknowledges it, then retries
   const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
   sync.start(w.id);await sync.wait(w.id);
   expect(sync.status(w.id).status).toBe("failed");
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:1,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:1,commits:0});
   const id=client.post.mock.calls[0][1].events[0].id;
   client.post.mockImplementation(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),usageRevisions:Object.fromEntries(payload.events.filter((event:any)=>event.usageRevision!==undefined).map((event:any)=>[event.id,event.usageRevision])),commitIds:[]}));
   sync.start(w.id);await sync.wait(w.id);
   expect(client.post.mock.calls[1][1].events[0].id).toBe(id);
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:0,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:0,commits:0});
   await sync.close();
 });
 it.each([
@@ -378,7 +393,7 @@ it("first sync waits for unified collection and analysis before reading or uploa
 it("does not confirm a partial acknowledgement",async()=>{
   write();const w=workspace();const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>({get:vi.fn().mockResolvedValue(baseline),post:vi.fn().mockResolvedValue({schemaVersion:1,accountId:"user",eventIds:[],commitIds:[]})}));
   sync.start(w.id);await sync.wait(w.id);expect(sync.status(w.id).status).toBe("failed");
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:1,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:1,commits:0});
   expect(store.db.prepare("SELECT count(*) n FROM adit_local_cloud_receipts").get()).toEqual({n:0});await sync.close();
   expect(sendLocalRuntimeReport).not.toHaveBeenCalled();
 });
@@ -607,13 +622,13 @@ it("counts pending sessions once, excludes deleted turns and reads status withou
   store.db.prepare("INSERT INTO adit_local_cloud_scopes VALUES (?,?,?)").run(scope,w.id,JSON.stringify(baseline));
   const transport=vi.fn(),sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn()},transport);
   store.db.pragma("query_only=ON");
-  try {expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:1,commits:0});}
+  try {expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:1,commits:0});}
   finally {store.db.pragma("query_only=OFF");}
   expect(transport).not.toHaveBeenCalled();
   expect(store.db.prepare("SELECT count(*) n FROM adit_local_cloud_sessions").get()).toEqual({n:0});
   expect(store.db.prepare("SELECT count(*) n FROM adit_local_cloud_receipts").get()).toEqual({n:0});
   store.db.prepare("INSERT INTO adit_history_deleted_turns VALUES ('codex','native','p',1),('codex','native','p2',1)").run();
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:0,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:0,commits:0});
   await sync.close();
 });
 
@@ -622,7 +637,7 @@ it("does not substitute archive totals or last-upload counts before a verified b
   expect(sync.status(w.id).pending.state).toBe("uninitialized");
   const credentials=loadCredentials(store.directory)!;
   store.db.prepare("INSERT INTO adit_local_cloud_scopes VALUES (?,?,?)").run(syncKey(credentials.serverUrl,"user",w.id),w.id,JSON.stringify(baseline));
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:1,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:1,commits:0});
   expect(sync.status(w.id,{...credentials,accountId:"other"}).pending.state).toBe("uninitialized");
   expect(sync.status(w.id,{...credentials,serverUrl:"https://other.example"}).pending.state).toBe("uninitialized");
   expect(sync.status(w.id,null).pending.state).toBe("disconnected");
@@ -637,16 +652,16 @@ it("updates pending counts after acknowledgements, new turns and late usage, but
     post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),usageRevisions:Object.fromEntries(payload.events.filter((event:any)=>event.usageRevision!==undefined).map((event:any)=>[event.id,event.usageRevision])),commitIds:[]})),
   }));
   sync.start(w.id);await sync.wait(w.id);
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:0,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:0,commits:0});
   store.db.prepare("INSERT INTO adit_history_text_edits VALUES ('codex','native','p',0,'edited',1)").run();
   store.db.prepare("UPDATE adit_history_sessions SET transcript_revision=transcript_revision+1").run();
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:0,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:0,commits:0});
   store.db.prepare("UPDATE adit_history_usage_entries SET total_tokens=50 WHERE model='gpt-test'").run();
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:1,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:1,commits:0});
   sync.start(w.id);await sync.wait(w.id);
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:0,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:0,commits:0});
   write(true);
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:1,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:1,commits:0});
   await sync.close();
 });
 
@@ -664,13 +679,13 @@ it("invalidates cached counts after a collection worker writes through another d
   write();const w=workspace(),scope=syncKey("http://localhost:3000","user",w.id);
   store.db.prepare("INSERT INTO adit_local_cloud_scopes VALUES (?,?,?)").run(scope,w.id,JSON.stringify(baseline));
   const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn()});
-  const before=sync.status(w.id).pending;
+  const before=await settledPending(sync,w.id);
   expect(before).toEqual({state:"ready",sessions:1,commits:0});
   expect(sync.status(w.id).pending).toBe(before);
   const worker=new LocalStore(store.directory);
   try {worker.db.prepare("INSERT INTO adit_history_deleted_turns VALUES ('codex','native','p',1)").run();}
   finally {worker.close();}
-  expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:0,commits:0});
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:0,commits:0});
   await sync.close();
 });
 

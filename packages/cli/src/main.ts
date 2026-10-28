@@ -100,7 +100,7 @@ export function createProgram(): Command {
       if (options.onLogin && !localLoginStartupEnabled()) return;
       console.log((await startDaemon()).url);
     });
-  daemon.command("status").action(async () => { const s = await daemonStatus(); console.log(s ? `Running: ${s.url} (PID ${s.pid})` : "Stopped"); });
+  daemon.command("status").action(async () => { const status = await daemonStatus(); console.log(status ? `${status.busy ? "Running (busy)" : "Running"}: ${status.url} (PID ${status.pid})` : "Stopped"); });
   daemon.command("stop").action(async () => { await stopDaemon(); console.log("Stopped"); });
   daemon.command("restart").description("Restart the local background service (same as adit restart)").action(restartService);
 

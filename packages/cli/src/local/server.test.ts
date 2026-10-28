@@ -5,7 +5,8 @@ import { join, parse } from "node:path";
 import { request } from "node:http";
 import { startLocalServer } from "./server.js";
 import * as githubCredential from "./github-credential.js";
-import { LocalStateError } from "@varveai/adit-core";
+import { LocalStateError, LocalPrices } from "@varveai/adit-core";
+import { StructuredHistory } from "../../../core/src/local-history/structured-store.js";
 
 let app: Awaited<ReturnType<typeof startLocalServer>>;
 let root: string;
@@ -190,6 +191,32 @@ it("authenticates workspace deletion, removes collected history and cancels futu
   expect((await api(endpoint)).status).toBe(404);
   expect((await api(endpoint, "DELETE", { version: workspace.version })).status).toBe(404);
   expect((await api("/workspaces", "POST", { path: root })).status).toBe(201);
+});
+it("backfills legacy stored costs at startup without repeating the backfill for overview queries", async () => {
+  const workspace = app.store.saveWorkspace({ path: root, providers: ["claude"], repositories: [] });
+  const prices = new LocalPrices(app.store.db);
+  prices.install({
+    fixture: { mode: "chat", input_cost_per_token: 0.000002, output_cost_per_token: 0.000008 },
+  });
+  new StructuredHistory(app.store.db).write({
+    provider: "claude", id: "legacy", cwd: root,
+    messages: [{
+      key: "reply", role: "assistant", model: "fixture", content: "done", raw: {},
+      timestamp: "2026-10-18T01:00:00Z",
+      usage: { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    }],
+  });
+  app.store.db.exec("UPDATE adit_history_usage_entries SET input_cost_microusd=NULL,output_cost_microusd=NULL,cache_read_cost_microusd=NULL,cache_write_cost_microusd=NULL,cost_microusd=NULL; DELETE FROM adit_history_cost_basis;");
+  await prices.close();
+  await app.close();
+  const persist = vi.spyOn(LocalPrices.prototype, "persist");
+  app = await startLocalServer({ directory: join(root, "state") });
+  expect(persist).toHaveBeenCalledOnce();
+  expect(app.store.db.prepare("SELECT cost_microusd FROM adit_history_usage_entries").get()).toEqual({ cost_microusd: 280 });
+  for (const range of ["all", "7d", "30d"]) {
+    expect((await api(`/overview?workspaceId=${workspace.id}&range=${range}&timezone=UTC`)).status).toBe(200);
+  }
+  expect(persist).toHaveBeenCalledOnce();
 });
 it("authenticates overview, validates scope and returns real empty structured metrics", async () => {
   const created = await api("/workspaces", "POST", {
