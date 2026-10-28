@@ -253,7 +253,7 @@ export class LocalStore {
         const cloud = (input.cloud ??
           old?.cloud ?? {
             enabled: false,
-            mode: "manual",
+            mode: this.get("login-startup", { enabled: false }).enabled ? "automatic" : "manual",
             interval: 5,
           }) as Record<string, unknown>;
         if (!cloud || !["manual", "automatic"].includes(String(cloud.mode)))

@@ -1127,7 +1127,7 @@ function WorkspaceEditor({
       repositories: [],
       counts: {},
       gistConfigured: false,
-      cloud: { enabled: false, mode: "manual", interval: 5 },
+      cloud: { enabled: false, mode: state.startup?.enabled ? "automatic" : "manual", interval: 5 },
     },
   );
   const [editing, setEditing] = useState(fresh);
@@ -1143,7 +1143,7 @@ function WorkspaceEditor({
   const sync = state.workspaces.find(w => w.id === workspace?.id)?.cloudSync;
   const syncing = sync?.status === "queued" || sync?.status === "running";
   const [startupBusy, setStartupBusy] = useState(false);
-  const [startupPrompt, setStartupPrompt] = useState(false);
+  const [startupPrompt, setStartupPrompt] = useState<"mode" | "storage" | null>(null);
   const [startupConsent, setStartupConsent] = useState(false);
   const [startupError, setStartupError] = useState("");
   const startup = state.startup ?? {
@@ -1166,8 +1166,9 @@ function WorkspaceEditor({
         try {
           const saved = await api<LoginStartup>("/startup", "PATCH", { enabled: true, version: startup.version });
           if (!saved.enabled) throw new Error(saved.error || "Login startup registration failed");
-          changeCloud({ ...cloudForm, mode: "automatic" });
-          setStartupPrompt(false);
+          if (startupPrompt === "storage") await persistCloudEnabled(true);
+          else changeCloud({ ...cloudForm, mode: "automatic" });
+          setStartupPrompt(null);
         } catch (error) {
           setStartupError(error instanceof Error ? error.message : String(error));
         }
@@ -1268,10 +1269,24 @@ function WorkspaceEditor({
     await persistCloudSettings(cloudForm);
     closeCloudSettings();
   };
+  const persistCloudEnabled = async (enabled: boolean) => {
+    const cloud = { ...savedCloud, enabled, mode: enabled && startup.supported ? "automatic" as const : savedCloud.mode };
+    if (fresh) { change({ cloud }); return; }
+    const saved = await persistCloudSettings(cloud);
+    if (saved) {
+      setCloudDraft(draft => draft ? { ...draft, enabled: saved.cloud.enabled, ...(enabled ? { mode: saved.cloud.mode } : {}) } : null);
+      if (enabled && account?.auth === "valid" && !gitBlocked && workspace?.directoryAvailable !== false)
+        await api(`/workspaces/${saved.id}/sync`, "POST", {});
+    }
+  };
   const changeCloudEnabled = async (enabled: boolean) => {
-    if (fresh) { change({ cloud: { ...form.cloud, enabled } }); return; }
-    const saved = await persistCloudSettings({ ...savedCloud, enabled });
-    if (saved) setCloudDraft(draft => draft ? { ...draft, enabled: saved.cloud.enabled } : null);
+    if (enabled && !startup.enabled && startup.supported) {
+      setStartupConsent(false);
+      setStartupError("");
+      setStartupPrompt("storage");
+      return;
+    }
+    await persistCloudEnabled(enabled);
   };
   const scan = async (path = form.path) => {
     const result = await api<Job>("/discoveries", "POST", { path });
@@ -1717,7 +1732,7 @@ function WorkspaceEditor({
                           if (mode === "automatic" && !startup.enabled) {
                             setStartupConsent(false);
                             setStartupError("");
-                            setStartupPrompt(true);
+                            setStartupPrompt("mode");
                           } else changeCloud({ ...cloudForm, mode });
                         }}
                       />
@@ -1775,7 +1790,7 @@ function WorkspaceEditor({
         </div>
       </section>
       </details>
-      {startupPrompt && <Modal title={t("开启自动同步")} onClose={() => { if (!startupBusy) setStartupPrompt(false); }}>
+      {startupPrompt && <Modal title={t("开启自动同步")} onClose={() => { if (!startupBusy) setStartupPrompt(null); }}>
         <p>{t("自动同步需要登录电脑后自动启动 ADIT。此设置对本机所有工作目录生效。")}</p>
         <div className="field">
           <label className="startup-option">
@@ -1787,7 +1802,7 @@ function WorkspaceEditor({
         {!startup.supported && <p className="repo-hint">{t("当前系统不支持登录后自动启动，可使用手动同步。")}</p>}
         {startupError && <p role="alert" className="error">{systemMessage(startupError)}</p>}
         <footer>
-          <button disabled={startupBusy} onClick={() => setStartupPrompt(false)}>{t("取消")}</button>
+          <button disabled={startupBusy} onClick={() => setStartupPrompt(null)}>{t("取消")}</button>
           <button className="primary" disabled={startupBusy || !startupConsent || !startup.supported}
             onClick={() => void enableStartupForSync()}>
             {startupBusy && <Loader2 size={14} className="spin" />}{t("开启并继续")}
