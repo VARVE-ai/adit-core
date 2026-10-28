@@ -819,6 +819,7 @@ describe("language switching across the local workbench", () => {
     expect(text(root)).toContain("发现完成");expect(text(root)).toContain("完整正文解析和分析将在“开始整理”时执行。");
   });
   it.each([false, true])("registers a new workspace before unified sync and retains its identity when starting sync fails (%s)", async (fails) => {
+    startup.enabled = true;
     empty = true;
     syncStartFails = fails;
     const root = await render("/settings/workspaces/new");
@@ -834,12 +835,12 @@ describe("language switching across the local workbench", () => {
     expect(text(root)).toContain("Select at least one Git repository or session source.");
     await act(async () => { root.findAllByProps({className:"selection-row"}).find(n=>text(n).includes("Claude Code"))!.findByType("input").props.onChange({target:{checked:true}}); });
     expect(button("Sync now").props.disabled).toBe(false);
-    expect(startup.enabled).toBe(false);
+    expect(startup.enabled).toBe(true);
     const before = vi.mocked(fetch).mock.calls.length;
     await act(async () => { button("Sync now").props.onClick(); });
     const writes = vi.mocked(fetch).mock.calls.slice(before).filter(([,options])=>options?.method === "POST");
     expect(writes.map(([url])=>url)).toEqual(["/api/local/workspaces", "/api/local/workspaces/original-flow-project/sync"]);
-    expect(JSON.parse(writes[0][1]!.body as string)).toMatchObject({name:"flow",path:"D:/flowworkerspace",providers:["claude"],cloud:{enabled:true,mode:"manual"}});
+    expect(JSON.parse(writes[0][1]!.body as string)).toMatchObject({name:"flow",path:"D:/flowworkerspace",providers:["claude"],cloud:{enabled:true,mode:"automatic"}});
     expect(location.pathname).toBe("/settings/workspaces/original-flow-project");
     expect(savedWorkspace.id).toBe("original-flow-project");
     expect(text(root)).toContain(fails ? "Sync could not be started" : "flow");
@@ -898,21 +899,71 @@ describe("language switching across the local workbench", () => {
     }
   });
   it("shows the cloud storage switch outside settings and saves it immediately", async () => {
+    startup.enabled = true;
     const root = await render("/settings/workspaces/ws");
+    const before = vi.mocked(fetch).mock.calls.length;
+    const pushes = () => vi.mocked(fetch).mock.calls.slice(before).filter(([url, options]) => url === "/api/local/workspaces/ws/sync" && options?.method === "POST");
     const storageSwitch = () => root.findByProps({ "aria-label": "Enable cloud storage" });
     expect(root.findAllByProps({ id: "cloud-settings" })).toHaveLength(0);
     expect(storageSwitch().props.checked).toBe(false);
     await act(async () => { root.findByProps({ "aria-label": "Enable cloud storage" }).props.onChange({ target: { checked: true } }); });
     expect(savedWorkspace.cloud.enabled).toBe(true);
-    expect(savedWorkspace.cloud.mode).toBe("manual");
-    expect(startup.enabled).toBe(false);
+    expect(savedWorkspace.cloud.mode).toBe("automatic");
+    expect(startup.enabled).toBe(true);
+    expect(pushes()).toHaveLength(1);
     expect(root.findAllByProps({ id: "cloud-settings" })).toHaveLength(0);
     expect(button("Sync now").props.disabled).toBe(false);
     await act(async () => { storageSwitch().props.onChange({ target: { checked: false } }); });
     expect(savedWorkspace.cloud.enabled).toBe(false);
     expect(button("Sync now").props.disabled).toBe(true);
+    expect(pushes()).toHaveLength(1);
     await toggle();
     expect(root.findByProps({ "aria-label": "开启云端存储" }).props.checked).toBe(false);
+  });
+  it("enables automatic cloud storage only after startup consent and starts the first sync", async () => {
+    const root = await render("/settings/workspaces/ws");
+    const before = vi.mocked(fetch).mock.calls.length;
+    const storageSwitch = () => root.findByProps({ "aria-label": "Enable cloud storage" });
+    const dialog = () => root.findByProps({ role: "dialog" });
+    await act(async () => { storageSwitch().props.onChange({ target: { checked: true } }); });
+    expect(savedWorkspace.cloud.enabled).toBe(false);
+    expect(button("Enable and continue").props.disabled).toBe(true);
+    await act(async () => { dialog().findAllByType("button").find(node => text(node) === "Cancel")!.props.onClick(); });
+    expect(savedWorkspace.cloud.enabled).toBe(false);
+    await act(async () => { storageSwitch().props.onChange({ target: { checked: true } }); });
+    await act(async () => { dialog().findByType("input").props.onChange({ target: { checked: true } }); });
+    startupSaveFails = true;
+    await act(async () => { button("Enable and continue").props.onClick(); });
+    expect(savedWorkspace.cloud.enabled).toBe(false);
+    expect(dialog().findByProps({ role: "alert" })).toBeTruthy();
+    startupSaveFails = false;
+    await act(async () => { button("Enable and continue").props.onClick(); });
+    expect(savedWorkspace.cloud).toEqual({ enabled: true, mode: "automatic", interval: 5 });
+    expect(root.findAllByProps({ role: "dialog" })).toHaveLength(0);
+    expect(vi.mocked(fetch).mock.calls.slice(before).filter(([url, options]) => url === "/api/local/workspaces/ws/sync" && options?.method === "POST")).toHaveLength(1);
+  });
+  it("keeps automatic settings when initial sync fails and permits retry without saving again", async () => {
+    startup.enabled = true;
+    syncStartFails = true;
+    const root = await render("/settings/workspaces/ws");
+    await act(async () => { root.findByProps({ "aria-label": "Enable cloud storage" }).props.onChange({ target: { checked: true } }); });
+    expect(savedWorkspace.cloud).toEqual({ enabled: true, mode: "automatic", interval: 5 });
+    expect(text(root)).toContain("Sync could not be started");
+    syncStartFails = false;
+    const before = vi.mocked(fetch).mock.calls.length;
+    await act(async () => { button("Sync now").props.onClick(); });
+    expect(vi.mocked(fetch).mock.calls.slice(before).filter(([, options]) => options?.method === "PATCH")).toHaveLength(0);
+    expect(vi.mocked(fetch).mock.calls.slice(before).filter(([url, options]) => url === "/api/local/workspaces/ws/sync" && options?.method === "POST")).toHaveLength(1);
+  });
+  it("saves automatic sync without uploading while the cloud account is disconnected", async () => {
+    startup.enabled = true;
+    accountConnected = false;
+    const root = await render("/settings/workspaces/ws");
+    const before = vi.mocked(fetch).mock.calls.length;
+    await act(async () => { root.findByProps({ "aria-label": "Enable cloud storage" }).props.onChange({ target: { checked: true } }); });
+    expect(savedWorkspace.cloud.mode).toBe("automatic");
+    expect(button("Sync now").props.disabled).toBe(true);
+    expect(vi.mocked(fetch).mock.calls.slice(before).filter(([url, options]) => url === "/api/local/workspaces/ws/sync" && options?.method === "POST")).toHaveLength(0);
   });
   it("saves the storage switch without applying unsaved frequency changes or losing the draft", async () => {
     startup.enabled = true;
@@ -933,6 +984,7 @@ describe("language switching across the local workbench", () => {
     expect(savedWorkspace.cloud.interval).toBe(30);
   });
   it("retains the saved switch state when enabling cloud storage fails", async () => {
+    startup.enabled = true;
     const root = await render("/settings/workspaces/ws");
     vi.mocked(fetch).mockImplementationOnce(async () => ({ ok:false,json:async()=>({error:"Settings changed; retry"}) }) as Response);
     await act(async () => { root.findByProps({ "aria-label": "Enable cloud storage" }).props.onChange({target:{checked:true}}); });
@@ -942,6 +994,7 @@ describe("language switching across the local workbench", () => {
     expect(text(root)).toContain("Settings changed; retry");
   });
   it("saving only cloud settings preserves unrelated unsaved directory edits", async () => {
+    startup.enabled = true;
     const root = await render("/settings/workspaces/ws");
     await act(async () => { button("Edit").props.onClick(); });
     await act(async () => { root.findByProps({ id: "workspace-name" }).props.onChange({target:{value:"Unsaved name"}}); });

@@ -60,6 +60,14 @@ it("keeps per-directory cloud settings independent from local collection", () =>
   expect(store.schedule().enabled).toBe(false);
   expect(store.jobs()).toEqual([]);
 });
+it("defaults new cloud settings to automatic without enabling uploads or replacing explicit manual settings", () => {
+  const { store, path } = fixture();
+  store.set("login-startup", { enabled: true });
+  const workspace = store.saveWorkspace({ path });
+  expect(workspace.cloud).toEqual({ enabled: false, mode: "automatic", interval: 5 });
+  const manual = store.saveWorkspace({ version: workspace.version, cloud: { enabled: true, mode: "manual", interval: 15 } }, workspace.id);
+  expect(store.saveWorkspace({ version: manual.version, name: "renamed" }, workspace.id).cloud).toEqual(manual.cloud);
+});
 it("removes only the workspace registration and its jobs, preserving files and other workspaces", () => {
   const { store, path } = fixture();
   const file = join(path, "keep.txt");
