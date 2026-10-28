@@ -9,7 +9,7 @@
     "pnpm": ">=11.0.0"
   },
   "scripts": {
-    "build": "node scripts/clean-dist.cjs && pnpm --filter @varveai/adit-cli... run build && pnpm --filter @varveai/adit-local-web run build",
+    "build": "node scripts/prepare-package-docs.cjs && node scripts/clean-dist.cjs && pnpm --filter @varveai/adit-cli... run build && pnpm --filter @varveai/adit-local-web run build",
     "build:core": "pnpm --filter @varveai/adit-core run build",
     "build:engine": "pnpm --filter @varveai/adit-engine run build",
     "build:cli": "pnpm --filter @varveai/adit-cli run build",
@@ -21,7 +21,8 @@
     "lint:fix": "eslint packages/*/src/**/*.ts --fix",
     "format": "prettier --write \"packages/*/src/**/*.ts\"",
     "format:check": "prettier --check \"packages/*/src/**/*.ts\"",
-    "typecheck": "pnpm -r run typecheck"
+    "typecheck": "pnpm -r run typecheck",
+    "test:release": "node --test scripts/release.test.mjs"
   },
   "keywords": [
     "ai",

@@ -275,6 +275,9 @@ Useful environment settings include `ADIT_LOCAL_DATA_DIR`, `ADIT_CLOUD_URL`,
 and synchronization in shared Settings rather than legacy hook threshold variables.
 Native source overrides such as `CODEX_HOME` and `CLAUDE_CONFIG_DIR` remain supported.
 
+Release maintainers: see the [release procedure](docs/releasing.md) for branch
+checks, rehearsals, package validation, publishing, and recovery after failures.
+
 ## License
 
 MIT

@@ -39,3 +39,10 @@ coverage/
 .understand-anything/
 .cache/
 packages/cli/local-assets/
+
+# Generated package documents
+packages/core/LICENSE
+packages/engine/LICENSE
+packages/cloud/LICENSE
+packages/cli/LICENSE
+packages/cli/README.md

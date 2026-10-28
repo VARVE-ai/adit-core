@@ -11,7 +11,9 @@
   "files": [
     "dist",
     "local-assets",
-    "install-skill.cjs"
+    "install-skill.cjs",
+    "LICENSE",
+    "README.md"
   ],
   "bin": {
     "adit": "./dist/index.js"
@@ -27,13 +29,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/VARVE-ai/adit-core"
+    "url": "git+https://github.com/VARVE-ai/adit-core.git",
+    "directory": "packages/cli"
   },
   "homepage": "https://github.com/VARVE-ai/adit-core",
   "scripts": {
     "postinstall": "node install-skill.cjs",
     "build": "tsc",
-    "prepack": "pnpm --filter @varveai/adit-local-web build && pnpm run build",
+    "prepack": "node ../../scripts/prepare-package-docs.cjs cli && pnpm --filter @varveai/adit-local-web build && pnpm run build",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -55,5 +58,6 @@
     "@types/react": "^18.3.28",
     "@types/ws": "^8.18.1",
     "typescript": "^5.7.2"
-  }
+  },
+  "license": "MIT"
 }
