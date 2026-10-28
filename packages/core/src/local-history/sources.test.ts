@@ -39,6 +39,24 @@ function archive() {
 }
 
 describe("targeted Warp and Kilo source enumeration", () => {
+  it("discovers Zed only at its fixed database path without traversing unrelated deep directories", async () => {
+    const root = fixture(), path = write(join(root, "threads/threads.db"));
+    write(join(root, ...Array(12).fill("cache"), "threads.db"));
+    vi.mocked(filesystem.readdir).mockRejectedValue(new Error("Unrelated directories must not be listed"));
+    expect(await Array.fromAsync(sourceFiles("zed", root))).toEqual([path]);
+    expect(await Array.fromAsync(sourceFiles("zed", path))).toEqual([path]);
+    expect(filesystem.readdir).not.toHaveBeenCalled();
+  });
+
+  it("treats missing Zed databases as empty even with deeply nested unrelated files", async () => {
+    const root = fixture();
+    write(join(root, ...Array(12).fill("cache"), "threads.db"));
+    expect(await Array.fromAsync(sourceFiles("zed", root))).toEqual([]);
+    expect(await Array.fromAsync(sourceFiles("zed", join(root, "missing")))).toEqual([]);
+    expect(await archive().scan(root, [{ id: "zed", paths: [root] }], { preview: true }))
+      .toMatchObject({ errors: [], counts: {} });
+  });
+
   it("discovers and collects Warp without listing its protected application directory", async () => {
     const root = fixture(), path = join(root, "warp.sqlite");
     const database = new Database(path);
