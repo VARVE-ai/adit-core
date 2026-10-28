@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { lstatSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import type Database from "better-sqlite3";
 
@@ -14,7 +15,12 @@ export function trackSourceSnapshot(path: string, validate: () => boolean): void
 export function sourceStamp(path: string): string {
   try {
     const s = lstatSync(path, { bigint: true });
-    return [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs, s.mode].join(":");
+    const stamp = [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs, s.mode].join(":");
+    // Small JSON companions contain titles/configuration. Rapid same-size edits
+    // can share timestamps on Windows, so stat metadata alone can miss changes.
+    if (s.isFile() && path.endsWith(".json") && s.size <= 64n * 1024n)
+      return `${stamp}:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
+    return stamp;
   } catch (error) {
     if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code || "")) return "missing";
     throw error;
