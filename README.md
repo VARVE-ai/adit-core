@@ -6,7 +6,8 @@ Local history search works across Agents without uploading or signing in.
 
 ## Installation
 
-Requires Node.js 22 or newer. For development, use pnpm 11 or newer.
+Published packages require Node.js 22 or newer. For source development, use
+Node.js 22.13 or newer within 22.x, or Node.js 24 or newer, and pnpm 11 or newer.
 
 ```sh
 npm install -g @varveai/adit-cli
@@ -264,7 +265,29 @@ files are cached by these commands. These commands require Cloud task API suppor
 pnpm build
 pnpm typecheck
 pnpm test
+pnpm lint
+pnpm format:check
+pnpm test:quality
 ```
+
+Lint checks all TypeScript and TSX source and test files, excluding generated
+files. Potential correctness problems remain errors. Explicit `any` in production
+code, unused bindings and readability improvements are warnings; these do not
+relax the existing TypeScript compiler checks. Only test files allow explicit
+`any` and generators without `yield` for fixtures and mocked streams. Parameters
+and caught errors named with a leading `_` may intentionally be unused. Empty
+catch blocks must explain why ignoring the error is safe; blanket suppression is
+not the cleanup strategy. Other exceptions need a local rationale and review.
+
+`pnpm format:check` checks working-tree contents of staged, unstaged and untracked
+source files changed from `HEAD`. Use `pnpm format:check --base <branch-or-commit>`
+to also include committed branch changes since the common ancestor. Missing refs
+fail the check. `pnpm format` formats only that same changed-file scope and does
+not stage files. Generated files are excluded; a no-files result is not a full
+formatting pass. `pnpm format:check:all` retains the complete historical report.
+Formatting follows the existing two-space, double-quote, semicolon, trailing-comma
+style with a 100-column target. Historical reformatting and behavior fixes are
+reviewed separately after rule triage, rather than aiming to clear a raw count.
 
 Packages: `core` owns shared storage, native collection and project identity;
 `engine` supplies Git operations; `cloud` supplies the Cloud SDK; `cli` provides
