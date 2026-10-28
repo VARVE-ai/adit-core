@@ -222,6 +222,56 @@ describe("cloud task commands", () => {
     expect(mocks.patch).not.toHaveBeenCalled();
   });
 
+  it("maps every editable field and preserves two-hour estimates as quarter person-days", () => {
+    expect(taskPatchFromOptions({ title: "Renamed", keyPoints: "Details", state: "accepted", priority: "high", assignee: taskId,
+      start: "2026-10-27", due: "2026-10-28", estimateHours: "2", createdAt: "2026-10-27T10:00:00+08:00", taskScope: ["Page", "API"] })).toEqual({
+      title: "Renamed", keyPointsText: "Details", progressState: "accepted", priority: "high", assigneeId: taskId,
+      startAt: "2026-10-27T00:00:00.000Z", dueAt: "2026-10-28T00:00:00.000Z", estimatedPersonDays: 0.25,
+      createdAt: "2026-10-27T02:00:00.000Z", scope: ["Page", "API"],
+    });
+    expect(taskPatchFromOptions({ estimateDays: "0" })).toEqual({ estimatedPersonDays: 0 });
+    expect(taskPatchFromOptions({ estimateDays: "0.25" })).toEqual({ estimatedPersonDays: 0.25 });
+    expect(taskPatchFromOptions({ clearDue: true, clearStart: true, clearEstimate: true, clearCreatedAt: true, clearKeyPoints: true, clearAssignee: true, clearScope: true })).toEqual({
+      dueAt: null, startAt: null, estimatedPersonDays: null, createdAt: null, keyPointsText: null, assigneeId: null, scope: [],
+    });
+  });
+
+  it("rejects contradictory or invalid task field options before sending an update", async () => {
+    for (const options of [
+      { start: "2026-02-30" }, { start: "2026-10-28", due: "2026-10-27" }, { start: "2026-10-27", clearStart: true },
+      { estimateHours: "2", estimateDays: "1" }, { estimateHours: "2", clearEstimate: true }, { estimateDays: "0", clearEstimate: true },
+      ...["", " ", "-1", "NaN", "Infinity", "2h", "1e309"].map(estimateHours => ({ estimateHours })),
+      { createdAt: "2026-10-27" }, { createdAt: "2026-02-30T00:00:00Z" }, { createdAt: "2026-10-27T24:00:00Z" },
+      { createdAt: "2026-10-27T00:00:00Z", clearCreatedAt: true }, { assignee: "member name" },
+      { assignee: taskId, clearAssignee: true }, { keyPoints: "", clearKeyPoints: true },
+      { taskScope: [""] }, { taskScope: ["x".repeat(201)] }, { taskScope: ["Page"], clearScope: true },
+    ]) {
+      expect(() => taskPatchFromOptions(options), JSON.stringify(options)).toThrow();
+      await cloudTasksCommand("update", { ...options, json: true }, taskId);
+    }
+    expect(mocks.get).not.toHaveBeenCalled();
+    expect(mocks.patch).not.toHaveBeenCalled();
+  });
+
+  it("registers create and update workload, scope, timestamps and clear flags", async () => {
+    mocks.post.mockResolvedValue({ task: { taskId, estimatedPersonDays: 0.25 } });
+    const create = new Command();
+    registerCloudTaskCommands(create);
+    await create.parseAsync(["tasks", "create", "--title", "Task", "--key-points", "Details", "--start", "2026-10-27", "--estimate-hours", "2",
+      "--task-scope", "Page", "--task-scope", "API", "--assignee", taskId, "--created-at", "2026-10-27T10:00:00+08:00", "--json"], { from: "user" });
+    expect(mocks.post).toHaveBeenCalledExactlyOnceWith("/api/cli/tasks", {
+      localProjectId: "local-project", teamId: undefined, scope: undefined, title: "Task", keyPointsText: "Details",
+      startAt: "2026-10-27T00:00:00.000Z", estimatedPersonDays: 0.25, taskScope: ["Page", "API"], assigneeId: taskId, createdAt: "2026-10-27T02:00:00.000Z",
+    });
+    mocks.patch.mockResolvedValue({ task: { taskId } });
+    const update = new Command();
+    registerCloudTaskCommands(update);
+    await update.parseAsync(["tasks", "update", taskId, "--clear-estimate", "--clear-start", "--clear-created-at", "--clear-key-points", "--clear-assignee", "--clear-scope", "--expected-updated-at", updatedAt, "--json"], { from: "user" });
+    expect(mocks.patch).toHaveBeenCalledExactlyOnceWith(`/api/cli/tasks/${taskId}`, { expectedUpdatedAt: updatedAt, patch: {
+      estimatedPersonDays: null, startAt: null, createdAt: null, keyPointsText: null, assigneeId: null, scope: [],
+    } });
+  });
+
   it("requires login and never substitutes task titles for IDs", async () => {
     mocks.credentials.mockReturnValue(null);
     await cloudTasksCommand("show", { json: true }, taskId);

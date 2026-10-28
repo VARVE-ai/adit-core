@@ -15,7 +15,7 @@ export function cloudPending(store: LocalStore, workspace: LocalWorkspace, scope
   const turns = db.prepare(`SELECT t.id,t.prompt_message_id,m.occurred_at,
     EXISTS(SELECT 1 FROM adit_history_turns later WHERE later.provider=t.provider AND later.session_id=t.session_id AND later.ordinal>t.ordinal) has_next
     FROM adit_history_turns t JOIN adit_history_messages m ON m.id=t.prompt_message_id
-    WHERE t.provider=? AND t.session_id=? AND (? IS NULL OR t.ended_at IS NULL OR t.ended_at>?)
+    WHERE t.provider=? AND t.session_id=?
     AND NOT ${nativeContextSql()}
     AND NOT EXISTS(SELECT 1 FROM adit_history_deleted_turns d WHERE d.provider=t.provider AND d.session_id=t.session_id AND d.prompt_key=m.source_key)
     AND EXISTS(SELECT 1 FROM adit_history_blocks b LEFT JOIN adit_history_text_edits e
@@ -27,12 +27,14 @@ export function cloudPending(store: LocalStore, workspace: LocalWorkspace, scope
     const cutoff = cloudSessionCutoff(store,scope,baseline,s,undefined,sessionIndex);
     const saved = revision.get(scope,s.provider,s.id) as {revision:number} | undefined;
     if (saved?.revision === s.transcript_revision) continue;
-    const visible = turns.all(s.provider,s.id,cutoff,cutoff) as {id:string;prompt_message_id:string;occurred_at:number|null;has_next:number}[];
+    const visible = turns.all(s.provider,s.id) as {id:string;prompt_message_id:string;occurred_at:number|null;has_next:number}[];
     if (visible.some(t => {
       if ((cutoff===null || (t.occurred_at!==null && t.occurred_at>cutoff)) &&
         !receipt.get(scope,"event",`lh_${syncKey(scope,t.prompt_message_id)}`)) return true;
       const final=cloudFinalReply(store,t.id,!!t.has_next);
-      if(!final || (cutoff!==null && (final.occurred_at===null || final.occurred_at<=cutoff)))return false;
+      if(!final) return false;
+      const knownReply=receipt.get(scope,"event",`lh_${syncKey(scope,final.id)}`);
+      if(!knownReply && cutoff!==null && (final.occurred_at===null || final.occurred_at<=cutoff))return false;
       return !receipt.get(scope,"event",`lh_${syncKey(scope,final.id)}`) ||
         !receipt.get(scope,"usage",syncKey(t.id,cloudTurnUsage(store,t.id)));
     })) sessions.add(`${s.provider}\0${s.conversation_id}`);

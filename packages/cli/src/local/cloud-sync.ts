@@ -181,10 +181,11 @@ export class LocalCloudSync {
             repositories:registered?repositories.map(({branches,remoteBranchSnapshot,gitAuthorEmail,gitAuthorName,defaultBranch,...r})=>r):repositories,sessions,events,commits,
             ...(branchUpdates.length?{commitBranches:branchUpdates}:{})};
           if(Buffer.byteLength(JSON.stringify(payload))>8_000_000)throw new Error("A conversation turn exceeds the Cloud batch limit; it remains pending.");
-          const ack=await client.post<{schemaVersion:number;accountId:string;serverProjectId?:string;eventIds:string[];commitIds:string[];commitBranchIds?:string[]}>("/api/sync/local",payload);
+          const ack=await client.post<{schemaVersion:number;accountId:string;serverProjectId?:string;eventIds:string[];commitIds:string[];commitBranchIds?:string[];usageRevisions?:Record<string,number>}>("/api/sync/local",payload);
           if(ack.schemaVersion!==1||ack.accountId!==identity.accountId||!Array.isArray(ack.eventIds)||!Array.isArray(ack.commitIds))throw new Error("Cloud did not acknowledge the uploaded records");
           const expectedEvents=events.map(e=>e.id),expectedCommits=commits.map(c=>`${c.localRepositoryId}:${c.sha}`);
           if(expectedEvents.some(id=>!ack.eventIds.includes(id))||expectedCommits.some(id=>!ack.commitIds.includes(id)))throw new Error("Cloud did not acknowledge every record; retry to continue.");
+          if(events.some(event=>event.usage?.length && ack.usageRevisions?.[event.id]!==event.usageRevision))throw new Error("Cloud did not acknowledge usage costs; update Cloud and retry.");
           if(branchUpdates.some(branch=>!ack.commitBranchIds?.includes(`${branch.localRepositoryId}:${branch.sha}`)))throw new Error("Cloud did not acknowledge commit branch updates; update Cloud and retry.");
           // Persist only the exact requested and acknowledged identities, never a batch-time cursor.
           projection.confirm("event",expectedEvents);projection.confirm("commit",expectedCommits);

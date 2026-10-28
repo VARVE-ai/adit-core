@@ -7,7 +7,12 @@ if (parentPort) {
   const db = new Database(workerData.path);
   db.pragma("busy_timeout=5000");
   const analytics = new LocalAnalytics(db);
-  parentPort.on("message", ({ id, workspace, options }) => {
+  parentPort.on("message", ({ type, id, workspace, options }) => {
+    if (type === "close") {
+      db.close();
+      parentPort!.close();
+      return;
+    }
     try {
       parentPort!.postMessage({
         id,

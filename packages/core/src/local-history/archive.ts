@@ -3,6 +3,7 @@ import {createHistorySchema} from "./schema.js";
 import {StructuredHistory} from "./structured-store.js";
 import {applyTranscriptEdits} from "./transcript-edits.js";
 import { readFile, stat } from "node:fs/promises";
+import { statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import type Database from "better-sqlite3";
@@ -474,12 +475,32 @@ export class LocalHistory {
       // Parser upgrades can change usage on otherwise identical native copies.
       // Keep the full transcript/raw-evidence conflict check in place.
       const usageUpgrade=session.provider==="codex" && other && other.parser_version<parserVersion(session.provider);
+      // Codex moves sessions to archived_sessions. A missing old source must not
+      // prevent collecting an unchanged transcript prefix plus newer events.
+      let relocated = false;
+      if (current && session.provider === "codex") {
+        const previous = comparable(current), incoming = comparable(effective);
+        if (incoming.messages.length >= previous.messages.length &&
+          isDeepStrictEqual(previous, {...incoming, messages: incoming.messages.slice(0, previous.messages.length)})) {
+          const sources = this.db.prepare(
+            "SELECT path FROM adit_history_sources WHERE provider=? AND session_id=? AND path<>?",
+          ).all(session.provider, session.id, path) as {path:string}[];
+          relocated = sources.every(source => {
+            const suffix = `#${encodeURIComponent(session.id)}`;
+            const nativePath = source.path.endsWith(suffix) ? source.path.slice(0, -suffix.length) : source.path;
+            try { statSync(nativePath); return false; }
+            catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
+          });
+        }
+      }
       if (current && !isDeepStrictEqual(comparable(current),comparable(effective)) &&
-        !(usageUpgrade && isDeepStrictEqual(comparable(current,true),comparable(effective,true))))
+        !relocated && !(usageUpgrade && isDeepStrictEqual(comparable(current,true),comparable(effective,true))))
         throw new Error(
           "Conflicting copies of the same session; existing archive retained",
         );
       new StructuredHistory(this.db).write(session,{rebuild});
+      if (relocated)
+        this.db.prepare("DELETE FROM adit_history_sources WHERE provider=? AND session_id=? AND path<>?").run(session.provider,session.id,path);
       this.db
         .prepare(
           "INSERT INTO adit_history_sources VALUES (?,?,?,?,?) ON CONFLICT(provider,path) DO UPDATE SET session_id=excluded.session_id,fingerprint=excluded.fingerprint,parser_version=excluded.parser_version",

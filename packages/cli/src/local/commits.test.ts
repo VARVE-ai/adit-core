@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import {
   mkdtempSync,
   writeFileSync,
@@ -13,6 +13,8 @@ import { LocalStore } from "@varveai/adit-core";
 import { createHistorySchema } from "../../../core/src/local-history/schema.js";
 import { StructuredHistory } from "../../../core/src/local-history/structured-store.js";
 import { analyzeAttribution } from "./attribution-analysis.js";
+import { AttributionService } from "./attribution-service.js";
+import { attributionNeeded } from "./attribution-plan.js";
 import { branchFromCommitOutput, queryCommits } from "./commits.js";
 import { queryCommitSources } from "./commit-sources.js";
 let root: string, store: LocalStore;
@@ -71,6 +73,199 @@ function fixture(
     history: new StructuredHistory(store.db),
   };
 }
+function observePayloadReads() {
+  const calls: string[] = [], results: string[] = [];
+  const prepare = store.db.prepare.bind(store.db);
+  const observe = (row: unknown) => {
+    if (!row || typeof row !== "object") return;
+    const value = row as Record<string, unknown>;
+    if ("input_json" in value) calls.push(String(value.source_call_id));
+    if ("content_text" in value) results.push(String(value.tool_call_id));
+  };
+  const spy = vi.spyOn(store.db, "prepare").mockImplementation((sql: string) => {
+    const statement = prepare(sql);
+    if (/^\s*SELECT/.test(sql) && /adit_history_tool_(?:calls|results)/.test(sql)) {
+      const get = statement.get.bind(statement), all = statement.all.bind(statement), iterate = statement.iterate.bind(statement);
+      vi.spyOn(statement, "get").mockImplementation((...parameters: unknown[]) => {
+        const row = get(...parameters); observe(row); return row;
+      });
+      vi.spyOn(statement, "all").mockImplementation((...parameters: unknown[]) => {
+        const rows = all(...parameters); rows.forEach(observe); return rows;
+      });
+      vi.spyOn(statement, "iterate").mockImplementation(function* (...parameters: unknown[]) {
+        for (const row of iterate(...parameters)) { observe(row); yield row; }
+      });
+    }
+    return statement;
+  });
+  return { calls, results, close: () => spy.mockRestore() };
+}
+
+it("reads only relevant successful write inputs and never loads ordinary tool output", async () => {
+  const { workspace, history, now, sha } = fixture();
+  store.db.prepare("INSERT INTO adit_local_commit_files VALUES (?,?,?,?,?,?,?,?)").run(root, sha, 0, null, "code.ts", 2, 0, 0);
+  for (const [id, cwd] of [["included", root], ["outside", root + "-other"]]) {
+    history.write({ provider: "claude", id, cwd, messages: [
+      { key: "write", role: "assistant", timestamp: new Date(now - 1000).toISOString(), raw: {}, content: [
+        { type: "tool_use", id: id + "-write", name: "Write", input: { file_path: join(cwd, "code.ts"), content: "export const originalValue = 123;" } },
+      ] },
+      { key: "result", role: "tool", timestamp: new Date(now).toISOString(), raw: {}, content: [
+        { type: "tool_result", tool_use_id: id + "-write", content: `${id} output` },
+      ] },
+    ] });
+  }
+  history.write({ provider: "claude", id: "irrelevant", cwd: root, messages: [
+    { key: "calls", role: "assistant", timestamp: new Date(now - 1000).toISOString(), raw: {}, content: [
+      { type: "tool_use", id: "read", name: "Read", input: { file_path: join(root, "code.ts"), content: "unrelated".repeat(100_000) } },
+      { type: "tool_use", id: "search", name: "Bash", input: { command: "rg originalValue ." } },
+      { type: "tool_use", id: "other-file", name: "Write", input: { file_path: join(root, "other.ts"), content: "unrelated".repeat(100_000) } },
+      { type: "tool_use", id: "failed", name: "Write", input: { file_path: join(root, "code.ts"), content: "export const originalValue = 123;" } },
+    ] },
+    { key: "outputs", role: "tool", timestamp: new Date(now).toISOString(), raw: {}, content: [
+      { type: "tool_result", tool_use_id: "read", content: "large read output".repeat(100_000) },
+      { type: "tool_result", tool_use_id: "search", content: "large search output".repeat(100_000) },
+      { type: "tool_result", tool_use_id: "failed", is_error: true, content: "failed output" },
+    ] },
+    { key: "future", role: "assistant", timestamp: new Date(now + 1000).toISOString(), raw: {}, content: [
+      { type: "tool_use", id: "future", name: "Write", input: { file_path: join(root, "code.ts"), content: "export const originalValue = 123;" } },
+    ] },
+  ] });
+  const payloads = observePayloadReads();
+  try {
+    await analyzeAttribution(store, workspace);
+  } finally {
+    payloads.close();
+  }
+  expect(payloads.calls).toEqual(["included-write"]);
+  expect(payloads.results).toEqual([]);
+  expect((await queryCommitSources(store, workspace, root, sha)).sources[0].sessionId).toBe("included");
+});
+
+it("skips analysis payloads for ordinary history changes with no new commits", async () => {
+  const { workspace, history, now } = fixture();
+  history.write({ provider: "codex", id: "pending", cwd: root, messages: [
+    { key: "commit", role: "assistant", timestamp: new Date(now).toISOString(), raw: {}, content: [
+      { type: "tool_use", id: "commit", name: "exec_command", input: { cmd: "git commit -m fixture" } },
+    ] },
+    { key: "running", role: "tool", timestamp: new Date(now + 1).toISOString(), raw: {}, content: [
+      { type: "tool_result", tool_use_id: "commit", content: JSON.stringify({ session_id: 77, output: "" }) },
+    ] },
+  ] });
+  const saved = await analyzeAttribution(store, workspace);
+  history.write({ provider: "claude", id: "ordinary", cwd: root, messages: [
+    { key: "read", role: "assistant", timestamp: new Date(now + 2).toISOString(), raw: {}, content: [
+      { type: "tool_use", id: "read", name: "Read", input: { file_path: "code.ts" } },
+      { type: "tool_use", id: "write", name: "Write", input: { file_path: "code.ts", content: "new code without a commit" } },
+    ] },
+    { key: "output", role: "tool", raw: {}, content: [
+      { type: "tool_result", tool_use_id: "read", content: "large body".repeat(100_000) },
+    ] },
+  ] });
+  const payloads = observePayloadReads();
+  try {
+    expect(attributionNeeded(store, workspace)).toBe(false);
+    expect(await analyzeAttribution(store, workspace)).toEqual({ id: saved.id, cached: true });
+  } finally {
+    payloads.close();
+  }
+  expect(payloads.calls).toEqual([]);
+  expect(payloads.results).toEqual([]);
+});
+
+it("skips work entirely when the workspace has no collected commits", async () => {
+  const { workspace } = fixture();
+  store.db.prepare("DELETE FROM adit_local_commits").run();
+  const payloads = observePayloadReads();
+  try {
+    expect(attributionNeeded(store, workspace)).toBe(false);
+    expect(await analyzeAttribution(store, workspace)).toEqual({ id: null, cached: true });
+  } finally {
+    payloads.close();
+  }
+  expect(payloads.calls).toEqual([]);
+  expect(payloads.results).toEqual([]);
+});
+
+it("filters submission payloads while retaining asynchronous handle collisions", async () => {
+  const { workspace, history, now } = fixture();
+  const messages: any[] = [];
+  const call = (id: string, command: string | { session_id: number }, output: unknown, offset: number) => {
+    messages.push(
+      { key: id, role: "assistant", timestamp: new Date(now + offset).toISOString(), raw: {}, content: [
+        { type: "tool_use", id, name: typeof command === "string" ? "exec_command" : "write_stdin",
+          input: typeof command === "string" ? { cmd: command } : command },
+      ] },
+      { key: id + "-result", role: "tool", timestamp: new Date(now + offset + 1).toISOString(), raw: {}, content: [
+        { type: "tool_result", tool_use_id: id, content: typeof output === "string" ? output : JSON.stringify(output) },
+      ] },
+    );
+  };
+  call("commit", 'git commit -m "fixture"', { session_id: 77, output: "" }, 0);
+  call("test", "pnpm test", { session_id: 77, output: "tests running" }, 2);
+  call("search", "rg code .", "unrelated output".repeat(100_000), 4);
+  call("poll", { session_id: 77 }, { exit_code: 0, output: "" }, 6);
+  history.write({ provider: "codex", id: "collision", cwd: root, messages });
+  const payloads = observePayloadReads();
+  try {
+    await analyzeAttribution(store, workspace);
+  } finally {
+    payloads.close();
+  }
+  expect(payloads.calls).not.toContain("search");
+  const search = store.db.prepare("SELECT id FROM adit_history_tool_calls WHERE source_call_id='search'").get() as { id: string };
+  expect(payloads.results).not.toContain(search.id);
+  expect(queryCommits(store, workspace).commits[0].record).toBeNull();
+  expect(attributionNeeded(store, workspace)).toBe(false);
+  const corrected = messages.map(message => message.key === "test-result" ? {
+    ...message, content: [{ type: "tool_result", tool_use_id: "test", content: JSON.stringify({ session_id: 88, output: "tests running" }) }],
+  } : message);
+  history.write({ provider: "codex", id: "collision", cwd: root, messages: corrected });
+  expect(attributionNeeded(store, workspace)).toBe(true);
+  await analyzeAttribution(store, workspace);
+  expect(queryCommits(store, workspace).commits[0].record).toMatchObject({ sessionId: "collision", method: "subject_time" });
+});
+
+it("retains the published generation when the lightweight revision check detects concurrent collection", async () => {
+  const { workspace, history, now } = fixture();
+  history.write({ provider: "claude", id: "changing", cwd: root, messages: [
+    { key: "user", role: "user", timestamp: new Date(now).toISOString(), content: "initial", raw: {} },
+  ] });
+  const saved = await analyzeAttribution(store, workspace);
+  let changed = false;
+  await expect(analyzeAttribution(store, workspace, { force: true, progress: () => {
+    if (changed) return;
+    changed = true;
+    store.db.prepare("UPDATE adit_history_sessions SET transcript_revision=transcript_revision+1 WHERE id=?").run("changing");
+  } })).rejects.toThrow("采集记录已更新");
+  expect(changed).toBe(true);
+  expect(queryCommits(store, workspace).analysis.runId).toBe(saved.id);
+  expect(store.db.pragma("foreign_key_check")).toEqual([]);
+});
+
+it("restarts an idle analysis worker and repairs late submission evidence from its reopened database", async () => {
+  const { workspace, history, now, sha } = fixture();
+  const service = new AttributionService(store.directory, new URL("../../dist/local/attribution-worker.js", import.meta.url), selected => attributionNeeded(store, selected));
+  try {
+    await service.analyze(workspace);
+    expect(queryCommits(store, workspace).commits[0].record).toBeNull();
+    const before = await queryCommitSources(store, workspace, root, sha);
+    history.write({ provider: "claude", id: "late-submitter", cwd: root, messages: [
+      { key: "user", role: "user", timestamp: new Date(now - 1000).toISOString(), content: "commit", raw: {} },
+      { key: "call", role: "assistant", timestamp: new Date(now).toISOString(), raw: {}, content: [
+        { type: "tool_use", id: "commit", name: "Bash", input: { command: "git commit -m fixture" } },
+      ] },
+      { key: "result", role: "tool", timestamp: new Date(now + 1).toISOString(), raw: {}, content: [
+        { type: "tool_result", tool_use_id: "commit", content: `[feature/fixture ${sha.slice(0, 7)}] fixture` },
+      ] },
+    ] });
+    await service.analyze(workspace);
+    expect(queryCommits(store, workspace).commits[0].record).toMatchObject({ provider: "claude", sessionId: "late-submitter", method: "hash" });
+    const after = await queryCommitSources(store, workspace, root, sha);
+    for (const field of ["eligible", "matched", "unknown", "sources"] as const) expect(after[field]).toEqual(before[field]);
+  } finally {
+    await service.close();
+  }
+});
 it("keeps saved commit sources and can reanalyze original absolute write paths after a directory move",async()=>{
   const {workspace,sha,now,history}=fixture();
   history.write({provider:"claude",id:"writer-before-move",cwd:root,messages:[{key:"write",role:"assistant",timestamp:new Date(now-1000).toISOString(),raw:{},content:[
@@ -1007,6 +1202,7 @@ it("repairs cached missing submissions from late async results without changing 
   history.write({provider:"codex",id:"async-submitter",cwd:root,messages});
   await analyzeAttribution(store,workspace);
   expect(queryCommits(store,workspace).commits[0].record).toBeNull();
+  expect(attributionNeeded(store,workspace)).toBe(false);
   const sourceBefore=await queryCommitSources(store,workspace,root,sha);
   messages.push(
     {key:"u2",role:"user",timestamp:new Date(now+1000).toISOString(),content:"Check completion",raw:{}},
@@ -1014,6 +1210,7 @@ it("repairs cached missing submissions from late async results without changing 
     {key:"done",role:"tool",timestamp:new Date(now+3000).toISOString(),content:null,raw:{payload:{type:"custom_tool_call_output",call_id:"poll",output:JSON.stringify({exit_code:0,output:`[feature/fixture ${sha.slice(0,7)}] fixture`})}}},
   );
   history.write({provider:"codex",id:"async-submitter",cwd:root,messages});
+  expect(attributionNeeded(store,workspace)).toBe(true);
   const native=JSON.stringify(history.read("codex","async-submitter"));
   // Automatic repair uses collected execution evidence, not a full Git/content reanalysis.
   renameSync(join(root,".git"),join(root,"git-unavailable"));

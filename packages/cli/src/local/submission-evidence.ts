@@ -195,14 +195,23 @@ function resultState(result: Row) {
 
 /** Follow native execution handles within one provider/session, retaining the initiating turn. */
 export function submissionExecutions(calls: Row[], results: Row[]) {
+  const byCall = new Map<string, Row[]>();
+  for (const result of results) {
+    const outputs = byCall.get(result.tool_call_id) || [];
+    outputs.push(result);
+    byCall.set(result.tool_call_id, outputs);
+  }
+  const ordered = [...calls].sort((first, second) => (first.occurred_at ?? Infinity) - (second.occurred_at ?? Infinity)
+    || (first.message_ordinal ?? 0) - (second.message_ordinal ?? 0) || (first.call_index ?? 0) - (second.call_index ?? 0) || first.id.localeCompare(second.id));
+  return executionRecords(ordered.map(call => ({ call, outputs: byCall.get(call.id) || [] })));
+}
+
+function executionRecords(records: Iterable<{ call: Row; outputs: Row[] }>, submissionsOnly = false) {
   type Execution = { call: Row; command: string; cwd?: string; output: string; pending: boolean; failed: boolean; ambiguous: boolean; batch: boolean; lastAt: number; resultCount: number };
   const executions = new Map<string, Execution>();
   const active = new Map<string, Execution>();
-  const byCall = new Map<string, Row[]>();
-  for (const r of results) { const list = byCall.get(r.tool_call_id) || []; list.push(r); byCall.set(r.tool_call_id, list); }
-  const ordered = [...calls].sort((a,b) => (a.occurred_at ?? Infinity) - (b.occurred_at ?? Infinity) || (a.message_ordinal ?? 0) - (b.message_ordinal ?? 0) || (a.call_index ?? 0) - (b.call_index ?? 0) || a.id.localeCompare(b.id));
-  for (const call of ordered) {
-    const outputs = (byCall.get(call.id) || []).sort((a,b) => (a.occurred_at ?? Infinity) - (b.occurred_at ?? Infinity));
+  for (const {call, outputs} of records) {
+    outputs.sort((first, second) => (first.occurred_at ?? Infinity) - (second.occurred_at ?? Infinity));
     const split = sequentialSteps(call, outputs);
     for (const { parsed, outputs: stepOutputs, index } of split || [{ parsed: invocation(call), outputs, index: 0 }]) {
       const scoped = (kind: string, id: string) => JSON.stringify([call.provider, call.session_id, kind, id]);
@@ -212,12 +221,19 @@ export function submissionExecutions(calls: Row[], results: Row[]) {
         execution = active.get(scoped(parsed.poll.kind, parsed.poll.id));
         if (!execution || at == null || execution.lastAt > at) continue;
       } else {
-        execution = { call, command: parsed.command, cwd: parsed.cwd, output: "", pending: false, failed: false, ambiguous: false, batch: !parsed.single && /\btools\.exec_command\s*\(/.test(parsed.source), lastAt: call.occurred_at ?? Infinity, resultCount: 0 };
-        executions.set(index ? JSON.stringify([call.id, index]) : call.id, execution);
+        const retain = !submissionsOnly || commitCommand(parsed.command);
+        const savedCall = submissionsOnly ? {
+          id: call.id, provider: call.provider, session_id: call.session_id, turn_id: call.turn_id,
+          occurred_at: call.occurred_at, working_directory: call.working_directory,
+        } : call;
+        execution = { call: savedCall, command: retain ? parsed.command : "", cwd: parsed.cwd, output: "", pending: false, failed: false, ambiguous: false, batch: !parsed.single && /\btools\.exec_command\s*\(/.test(parsed.source), lastAt: call.occurred_at ?? Infinity, resultCount: 0 };
+        if (retain) executions.set(index ? JSON.stringify([call.id, index]) : call.id, execution);
       }
       for (const result of stepOutputs) {
         const state = resultState(result);
-        execution.output += "\n" + state.text;
+        if (!submissionsOnly) execution.output += "\n" + state.text;
+        else if (execution.command)
+          execution.output += "\n" + state.text.split(/\r?\n/).filter(line => /^\[[^\]\r\n]+ [a-f0-9]{7,64}\]/.test(line)).join("\n");
         execution.failed ||= state.failed;
         execution.resultCount++;
         execution.lastAt = result.occurred_at ?? Infinity;
@@ -237,7 +253,15 @@ export function submissionExecutions(calls: Row[], results: Row[]) {
 }
 
 export function submissionCandidates(calls: Row[], results: Row[]) {
-  return [...submissionExecutions(calls, results).values()]
+  return candidates(submissionExecutions(calls, results));
+}
+
+export function streamedSubmissionCandidates(records: Iterable<{ call: Row; outputs: Row[] }>) {
+  return candidates(executionRecords(records, true));
+}
+
+function candidates(executions: ReturnType<typeof executionRecords>) {
+  return [...executions.values()]
     .filter(e => e.resultCount && !e.failed && !e.ambiguous && commitCommand(e.command))
     .map(e => ({ ...e, hashes: [...e.output.matchAll(/^\[[^\]\r\n]+ ([a-f0-9]{7,64})\]/gm)].map(m => m[1]),
       // A running shell is not evidence that a quiet commit has succeeded.

@@ -149,6 +149,13 @@ export function createHistorySchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS adit_history_commit_op_tool ON adit_history_commit_operations(tool_call_id);
   `);
   createAttributionSchema(db);
+  const usageColumns = new Set((db.prepare("PRAGMA table_info(adit_history_usage_entries)").all() as {name:string}[]).map(column => column.name));
+  db.transaction(() => {
+    const names = ["input_cost_microusd", "output_cost_microusd", "cache_read_cost_microusd", "cache_write_cost_microusd", "cost_microusd"];
+    for (const name of names)
+      if (!usageColumns.has(name)) db.exec(`ALTER TABLE adit_history_usage_entries ADD COLUMN ${name} INTEGER`);
+    if (names.some(name => !usageColumns.has(name))) db.exec("UPDATE adit_history_sessions SET transcript_revision=transcript_revision+1");
+  })();
   createInspectionSchema(db);
   removeHistorySearchIndex(db);
 }

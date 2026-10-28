@@ -171,6 +171,39 @@ it("backfills titles on identical transcript copies but still rejects conflictin
   expect(f.archive.session("codex", "s")?.messages).toHaveLength(1);
 });
 
+it.each(["extended", "identical", "modified", "shortened", "different-workspace"])("handles a moved Codex transcript (%s) without losing archived evidence", async scenario => {
+  const f = fixture("codex", "sessions"), source = join(f.home, "archived_sessions");
+  const path = join(f.source, "2026/10/27/rollout-s.jsonl"), moved = join(source, "rollout-s.jsonl");
+  const meta = { type: "session_meta", payload: { id: "s", cwd: f.home } };
+  const rows = Array.from({length: 123}, (_, i) => ({ type: "response_item", payload: {
+    id: `m${i}`, type: "message", role: i % 2 ? "assistant" : "user", content: `Message ${i}`,
+  } }));
+  write(path, lines(meta, ...rows.slice(0, 78)));
+  const scan = () => f.archive.scan(f.home, [{ id: "codex", paths: [f.source, source] }]);
+  expect(await scan()).toMatchObject({ errors: [], updated: 1 });
+  const original = f.archive.session("codex", "s");
+  const oldSources = f.db.prepare("SELECT path FROM adit_history_sources").all();
+  const count = scenario === "identical" ? 78 : scenario === "shortened" ? 77 : 123;
+  const incoming = rows.slice(0, count);
+  if (scenario === "modified") incoming[0] = {...incoming[0], payload: {...incoming[0].payload, content: "Changed"}};
+  write(moved, lines(scenario === "different-workspace" ? {...meta, payload: {...meta.payload, cwd: source}} : meta, ...incoming));
+  rmSync(path);
+  const result = await scan();
+  if (scenario === "extended" || scenario === "identical") {
+    expect(result).toMatchObject({ errors: [], updated: 1 });
+    expect(f.archive.session("codex", "s")?.messages).toHaveLength(count);
+    expect(f.archive.session("codex", "s")?.messages.slice(0, 78)).toEqual(original?.messages);
+    const sources = f.db.prepare("SELECT path FROM adit_history_sources").all();
+    expect(sources).toHaveLength(1);
+    expect(sources).not.toEqual(oldSources);
+    expect(await scan()).toMatchObject({ errors: [], updated: 0 });
+  } else {
+    expect(result.errors).toEqual([expect.stringContaining("Conflicting copies")]);
+    expect(f.archive.session("codex", "s")).toEqual(original);
+    expect(f.db.prepare("SELECT path FROM adit_history_sources").all()).toEqual(oldSources);
+  }
+});
+
 it.each(["commandcode", "copilot", "kimi", "kimi-work"])("updates %s from its title companion while retaining the first prompt", async provider => {
   const f = fixture(provider);
   const path = provider === "commandcode" ? join(f.source, "s.jsonl") : provider === "copilot" ? join(f.source, "session-state/s/events.jsonl") : join(f.source, "work/conv-s/wire.jsonl");

@@ -21,6 +21,19 @@ export type CostUsage = {
   cache_write_5m_tokens: number | null;
   cache_write_1h_tokens: number | null;
 };
+export type RequestCost = {
+  input_cost_microusd: number;
+  output_cost_microusd: number;
+  cache_read_cost_microusd: number;
+  cache_write_cost_microusd: number;
+  cost_microusd: number;
+  matched_model: string;
+};
+const databases = new WeakMap<Database.Database, LocalPrices>();
+export function persistHistoryCosts(db: Database.Database, provider: string, sessionId: string) {
+  const prices = databases.get(db) ?? new LocalPrices(db);
+  prices.persist(provider, sessionId);
+}
 const fields = [
   "input_cost_per_token",
   "output_cost_per_token",
@@ -115,6 +128,11 @@ export class LocalPrices {
       PRIMARY KEY(version,model_id,rate_key),FOREIGN KEY(version,model_id) REFERENCES adit_model_prices(version,model_id));
       CREATE INDEX IF NOT EXISTS adit_model_price_snapshot_time ON adit_model_price_snapshots(fetched_at DESC);`);
     this.reload();
+    databases.set(db, this);
+    db.exec(`CREATE TABLE IF NOT EXISTS adit_history_cost_basis (
+      usage_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, pricing_status TEXT NOT NULL,
+      unpriced_reason TEXT, matched_model TEXT, price_snapshot_id TEXT, pricing_version INTEGER NOT NULL,
+      calculated_at INTEGER NOT NULL, costs_json TEXT NOT NULL)`);
   }
   reload() {
     const row = this.db
@@ -193,7 +211,7 @@ export class LocalPrices {
     const prices = parsePrices(payload),
       json = JSON.stringify(prices),
       version = createHash("sha256").update(json).digest("hex"),
-      at = Date.now();
+        at = Math.max(Date.now(), (this.fetchedAt ?? 0) + 1);
     this.db.transaction(() => {
       this.db
         .prepare(
@@ -229,8 +247,66 @@ export class LocalPrices {
     this.fetchedAt = at;
     this.error = null;
     this.nextAttempt = at + 86_400_000;
+    this.persist();
+  }
+  persist(provider?: string, sessionId?: string) {
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='adit_history_usage_entries'").get()) return;
+    this.reload();
+    const columns = ["input_cost_microusd", "output_cost_microusd", "cache_read_cost_microusd", "cache_write_cost_microusd", "cost_microusd"];
+    const rows = this.db.prepare(`SELECT * FROM adit_history_usage_entries WHERE ledger_role='canonical' AND id>?
+      ${provider === undefined ? "" : "AND provider=? AND session_id=?"} ORDER BY id LIMIT 500`);
+    const read = this.db.prepare("SELECT * FROM adit_history_cost_basis WHERE usage_id=?");
+    const save = this.db.prepare(`INSERT INTO adit_history_cost_basis VALUES(?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(usage_id) DO UPDATE SET fingerprint=excluded.fingerprint,pricing_status=excluded.pricing_status,
+      unpriced_reason=excluded.unpriced_reason,matched_model=excluded.matched_model,price_snapshot_id=excluded.price_snapshot_id,
+      pricing_version=excluded.pricing_version,calculated_at=excluded.calculated_at,costs_json=excluded.costs_json`);
+    const update = this.db.prepare(`UPDATE adit_history_usage_entries SET ${columns.map(name => `${name}=?`).join(",")} WHERE id=?`);
+    const changed = new Set<string>();
+    this.db.transaction(() => {
+      let after = "";
+      for (;;) {
+        const batch = rows.all(after,...(provider === undefined ? [] : [provider, sessionId!])) as (CostUsage & {id:string;session_id:string;cost_microusd:number|null;completeness:string})[];
+        if (!batch.length) break;
+        after = batch[batch.length - 1].id;
+        for (const row of batch) {
+          const fingerprint = createHash("sha256").update(JSON.stringify([row.provider,row.model,row.scope,row.input_total_tokens,
+            row.uncached_input_tokens,row.output_tokens,row.cache_read_tokens,row.cache_write_tokens,row.cache_write_5m_tokens,row.cache_write_1h_tokens,row.completeness])).digest("hex");
+          const prior = read.get(row.id) as {fingerprint:string;pricing_status:string;price_snapshot_id:string|null;matched_model:string|null;costs_json:string}|undefined;
+          let values: (number|null)[];
+          if (prior?.fingerprint === fingerprint && (prior.pricing_status === "priced" || prior.price_snapshot_id === this.version)) {
+            values = JSON.parse(prior.costs_json);
+          } else {
+            const snapshot = prior?.matched_model ? prior.price_snapshot_id : this.version;
+            const cost = row.completeness === "complete" ? this.atSnapshot(row,snapshot) : null;
+            values = columns.map(name => cost ? cost[name as keyof RequestCost] as number : null);
+            save.run(row.id,fingerprint,cost ? "priced" : "unpriced",cost ? null : "missing_price_or_incomplete_usage",
+              cost?.matched_model ?? prior?.matched_model ?? null,snapshot,1,Date.now(),JSON.stringify(values));
+          }
+          if (columns.some((name,index) => (row as unknown as Record<string,unknown>)[name] !== values[index])) {
+            update.run(...values,row.id);
+            changed.add(JSON.stringify([row.provider,row.session_id]));
+          }
+        }
+      }
+      const revision = this.db.prepare("UPDATE adit_history_sessions SET transcript_revision=transcript_revision+1 WHERE provider=? AND id=?");
+      for (const key of changed) revision.run(...JSON.parse(key));
+    })();
   }
   estimate(record: CostUsage): number | null {
+    return this.breakdown(record)?.cost_microusd ?? null;
+  }
+  private atSnapshot(record: CostUsage, version: string | null): RequestCost | null {
+    if (version === this.version) return this.breakdown(record);
+    const snapshot = this.db.prepare("SELECT catalog_json FROM adit_model_price_snapshots WHERE version=?").get(version) as {catalog_json:string}|undefined;
+    if (!snapshot) return null;
+    const current = this.prices, lookup = this.lookup;
+    try {
+      this.prices = JSON.parse(snapshot.catalog_json);
+      this.lookup = new Map();
+      return this.breakdown(record);
+    } finally { this.prices = current; this.lookup = lookup; }
+  }
+  breakdown(record: CostUsage): RequestCost | null {
     if (!record.model || record.scope !== "message") return null;
     if (!this.lookup.has(record.model)) {
       const exact = this.prices.find((p) => p.model === record.model),
@@ -290,11 +366,12 @@ export class LocalPrices {
     ];
     let numerator = 0n,
       denominator = 1n;
+    const parts: [bigint, bigint][] = [];
     for (let i = 0; i < counts.length; i++) {
       const count = counts[i];
       if (count === null || !Number.isSafeInteger(count) || count < 0)
         return null;
-      if (!count) continue;
+      if (!count) { parts.push([0n, 1n]); continue; }
       const rule = rules[i].find(
         ({ threshold }) =>
           threshold < 0 ||
@@ -303,11 +380,25 @@ export class LocalPrices {
       )!;
       if (rule.rate === null) return null;
       const [n, d] = rule.rate;
+      parts.push([n * BigInt(count), d]);
       numerator = numerator * d + n * BigInt(count) * denominator;
       denominator *= d;
     }
     const amount = Number((numerator + denominator / 2n) / denominator);
-    return Number.isSafeInteger(amount) ? amount : null;
+    if (!Number.isSafeInteger(amount)) return null;
+    const combined = [parts[0], parts[1], parts[2],
+      [parts[3][0] * parts[4][1] + parts[4][0] * parts[3][1], parts[3][1] * parts[4][1]] as [bigint, bigint]];
+    const allocated = combined.map(([value, divisor]) => value / divisor);
+    const order = combined.map(([value, divisor], index) => ({ index, remainder: value % divisor, divisor }))
+      .sort((left, right) => {
+        const difference = left.remainder * right.divisor - right.remainder * left.divisor;
+        return difference > 0n ? -1 : difference < 0n ? 1 : left.index - right.index;
+      });
+    const remaining = BigInt(amount) - allocated.reduce((sum, value) => sum + value, 0n);
+    for (let index = 0; index < Number(remaining); index++) allocated[order[index].index]++;
+    return { input_cost_microusd: Number(allocated[0]), output_cost_microusd: Number(allocated[1]),
+      cache_read_cost_microusd: Number(allocated[2]), cache_write_cost_microusd: Number(allocated[3]),
+      cost_microusd: amount, matched_model: price.model };
   }
   async close() {
     this.controller.abort();

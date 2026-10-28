@@ -42,7 +42,7 @@ export function shareMarkdown(s: ShareSnapshot): string {
 }
 
 export class LocalSharing {
-  constructor(private db: Database.Database, private prices: LocalPrices) { createPublicationSchema(db); }
+  constructor(private db: Database.Database, _prices: LocalPrices) { createPublicationSchema(db); }
   list(w: LocalWorkspace, offset = 0, cursor?: string | null) {
     if (!Number.isSafeInteger(offset) || offset < 0) throw new LocalStateError("Invalid offset");
     const after = publicationCursor(cursor);
@@ -161,7 +161,7 @@ export class LocalSharing {
         provider, models: [...new Set(exportedTurns.flatMap(t => t.models))], date: chosen[0].started_at, promptCount: chosen.length,
         commitCount: commits.length, commandCount, turns: exportedTurns, commits: commits.filter(c => !c.turn_id).map(exportCommit) };
       if (o.cost) {
-        const costs = usage.filter(u => chosenIds.has(u.turn_id) || o.scope === "all").map(u => this.prices.estimate(u));
+        const costs = usage.filter(u => chosenIds.has(u.turn_id) || o.scope === "all").map(u => u.cost_microusd as number | null);
         snapshot.costMicrousd = costs.length && costs.every(c => c !== null) ? costs.reduce<number>((n, c) => n + (c || 0), 0) : null;
         snapshot.costIncomplete = !costs.length || costs.some(c => c === null);
       }

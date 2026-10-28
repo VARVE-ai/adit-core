@@ -1,44 +1,87 @@
 import { Worker } from "node:worker_threads";
 import type { LocalWorkspace } from "@varveai/adit-core";
 import type {CollectionJob} from "./collector.js";
+type PendingAnalysis = { resolve: () => void; reject: (error: Error) => void };
+type AnalysisWorker = {
+  worker: Worker;
+  exited: Promise<void>;
+  pending: Map<number, PendingAnalysis>;
+};
 export class AttributionService {
-  private worker: Worker;
+  private state?: AnalysisWorker;
+  private retiring: Promise<void> = Promise.resolve();
   private id = 0;
-  private failed = false;
-  private pending = new Map<
-    number,
-    { resolve: () => void; reject: (error: Error) => void }
-  >();
-  constructor(directory: string) {
-    this.worker = new Worker(
-      new URL("./attribution-worker.js", import.meta.url),
-      { workerData: { directory } },
+  private stopped = false;
+  constructor(
+    private directory: string,
+    private workerUrl = new URL("./attribution-worker.js", import.meta.url),
+    private needed: (workspace: LocalWorkspace) => boolean = () => true,
+  ) {}
+  private startWorker(): AnalysisWorker {
+    const worker = new Worker(
+      this.workerUrl,
+      { workerData: { directory: this.directory } },
     );
-    this.worker.on("message", ({ id, error }) => {
-      const entry = this.pending.get(id);
+    let finish!: () => void;
+    const state: AnalysisWorker = {
+      worker,
+      exited: new Promise<void>(resolve => { finish = resolve; }),
+      pending: new Map(),
+    };
+    this.state = state;
+    worker.on("message", ({ id, error }) => {
+      const entry = state.pending.get(id);
       if (!entry) return;
-      this.pending.delete(id);
+      state.pending.delete(id);
+      if (!state.pending.size) this.retire(state);
       if (error) entry.reject(new Error(error));
       else entry.resolve();
     });
     const fail = () => {
-      this.failed = true;
-      for (const p of this.pending.values())
-        p.reject(new Error("提交分析服务已停止"));
-      this.pending.clear();
+      for (const entry of state.pending.values())
+        entry.reject(new Error("提交分析服务已停止"));
+      state.pending.clear();
     };
-    this.worker.on("error", fail);
-    this.worker.on("exit", fail);
+    worker.on("error", () => {
+      this.retire(state, true);
+      fail();
+    });
+    worker.on("exit", () => {
+      if (this.state === state) this.state = undefined;
+      fail();
+      finish();
+    });
+    return state;
   }
-  analyze(workspace: LocalWorkspace,job?:CollectionJob): Promise<void> {
-    if (this.failed) return Promise.reject(new Error("提交分析服务不可用"));
+  private retire(state: AnalysisWorker, terminate = false) {
+    if (this.state === state) this.state = undefined;
+    this.retiring = state.exited;
+    if (terminate) void state.worker.terminate();
+    else {
+      try { state.worker.postMessage({ type: "close" }); }
+      catch { void state.worker.terminate(); }
+    }
+  }
+  async analyze(workspace: LocalWorkspace,job?:CollectionJob): Promise<void> {
+    if (this.stopped) throw new Error("提交分析服务不可用");
+    await this.retiring;
+    if (this.stopped) throw new Error("提交分析服务不可用");
+    if (!this.needed(workspace)) return;
+    const state = this.state ?? this.startWorker();
     return new Promise((resolve, reject) => {
       const id = ++this.id;
-      this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, workspace, job });
+      state.pending.set(id, { resolve, reject });
+      try { state.worker.postMessage({ id, workspace, job }); }
+      catch (error) {
+        state.pending.delete(id);
+        if (!state.pending.size) this.retire(state);
+        reject(error);
+      }
     });
   }
   async close() {
-    await this.worker.terminate();
+    this.stopped = true;
+    if (this.state) this.retire(this.state, true);
+    await this.retiring;
   }
 }
