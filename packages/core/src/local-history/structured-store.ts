@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import {record,string,type HistoryMessage,type HistorySession} from "./types.js";
 import {hasCodexPromptContext,promptSummary} from "./prompt-summary.js";
 import {applyTranscriptEdits,isHistoryPrompt as isPrompt} from "./transcript-edits.js";
+import {persistHistoryCosts} from "./pricing.js";
 
 const encode=(value:unknown)=>value === undefined ? null : JSON.stringify(value);
 const decode=(value:string|null)=>value === null ? undefined : JSON.parse(value);
@@ -67,7 +68,10 @@ export class StructuredHistory {
   }
 
   write(session:HistorySession, options:{rebuild?:boolean}={}):void {
-    this.db.transaction(()=>this.replace(applyTranscriptEdits(this.db,session),options.rebuild))();
+    this.db.transaction(()=>{
+      this.replace(applyTranscriptEdits(this.db,session),options.rebuild);
+      persistHistoryCosts(this.db,session.provider,session.id);
+    })();
   }
 
   private replace(session:HistorySession,rebuild=false):void {

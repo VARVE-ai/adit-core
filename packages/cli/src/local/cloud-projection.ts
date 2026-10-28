@@ -30,7 +30,7 @@ export interface CloudBaseline {
 export interface CloudEvent {
   id: string; sessionId: string; parentEventId: string | null; sequence: number;
   type: "prompt_submit" | "assistant_response" | "git_commit"; text: string | null; startedAt: string;
-  usage?: Row[]; usageRevision?: number; commit?: { sha: string; localRepositoryId: string; method: string | null; branch: string | null };
+  usage?: Row[]; usageRevision?: number; usageOnly?: boolean; commit?: { sha: string; localRepositoryId: string; method: string | null; branch: string | null };
 }
 export interface CloudSession { id: string; nativeId: string; provider: string; startedAt: string; title: string | null }
 
@@ -281,7 +281,9 @@ export class CloudProjection {
       const t = turns[index];
       const usageRows = cloudTurnUsage(this.store,t.id);
       const usageKey = syncKey(t.id,usageRows);
-      if (cutoff !== null && t.ended_at !== null && t.ended_at <= cutoff) continue;
+      const knownReply = cloudFinalReply(this.store,t.id,index < turns.length-1);
+      const canRefine = knownReply && this.receipt("event",this.eventId(knownReply.id));
+      if (!canRefine && cutoff !== null && t.ended_at !== null && t.ended_at <= cutoff) continue;
       const finalHead = cloudFinalReply(this.store,t.id,index < turns.length-1);
       if (finalHead && this.receipt("event",this.eventId(finalHead.id)) && this.receipt("turn",t.id) && this.receipt("usage",usageKey))continue;
       const messages: Row[] = (db.prepare(`SELECT m.*,EXISTS(SELECT 1 FROM adit_history_tool_calls c WHERE c.message_id=m.id) has_tool
@@ -307,16 +309,20 @@ export class CloudProjection {
       const fid = final ? this.eventId(final.id) : null;
       if (final && !iso(final.occurred_at)) {
         this.warnings.add("Some final replies have no reliable timestamp and remain pending."); pending=true;
-      } else if (final && fid && (!this.receipt("event",fid) || !this.receipt("usage",usageKey)) && (cutoff === null || final.occurred_at > cutoff)) {
+      } else if (final && fid && (!this.receipt("event",fid) || !this.receipt("usage",usageKey)) && (canRefine || cutoff === null || final.occurred_at > cutoff)) {
         const usage = usageRows
           .filter(u => cutoff === null || (u.occurred_at !== null && u.occurred_at > cutoff)).map(u => ({
             id:syncKey(this.scope,u.id),provider:u.provider,model:u.model,occurredAt:iso(u.occurred_at),requestId:u.request_id,responseId:u.response_id,
             inputTokens:u.input_total_tokens,uncachedInputTokens:u.uncached_input_tokens,outputTokens:u.output_tokens,
             cacheReadTokens:u.cache_read_tokens,cacheWriteTokens:u.cache_write_tokens,reasoningTokens:u.reasoning_tokens,
             totalTokens:u.total_tokens,complete:u.completeness==="complete",
+            inputCostMicrousd:u.input_cost_microusd?.toString() ?? null,outputCostMicrousd:u.output_cost_microusd?.toString() ?? null,
+            cacheReadCostMicrousd:u.cache_read_cost_microusd?.toString() ?? null,cacheWriteCostMicrousd:u.cache_write_cost_microusd?.toString() ?? null,
+            costMicrousd:u.cost_microusd?.toString() ?? null,
           }));
         events.push({id:fid,sessionId:session.id,parentEventId:events.some(e=>e.id===pid)||this.receipt("event",pid)?pid:inheritedPrompt,
-          sequence:state.sequence_base+final.ordinal*2,type:"assistant_response",text:final.text,startedAt:iso(final.occurred_at)!,usage,usageRevision:s.transcript_revision});
+          sequence:state.sequence_base+final.ordinal*2,type:"assistant_response",text:canRefine ? null : final.text,
+          ...(canRefine ? {usageOnly:true} : {}),startedAt:iso(final.occurred_at)!,usage,usageRevision:s.transcript_revision});
       }
       if (events.length) yield events;
       // Enumerating the generator alone must never confirm an upload.

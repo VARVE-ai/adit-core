@@ -1,16 +1,12 @@
-import { Worker } from "node:worker_threads";
 import { LocalInspection, type LocalWorkspace } from "@varveai/adit-core";
+import { OnDemandWorker } from "./on-demand-worker.js";
 export class InspectionService {
   get available() {
     return !this.stopped;
   }
-  private worker?: Worker;
+  private worker?: OnDemandWorker;
   private queue: Promise<void> = Promise.resolve();
   private active = new Map<string, Promise<void>>();
-  private pending = new Map<
-    string,
-    { resolve: () => void; reject: () => void }
-  >();
   private stopped = false;
   constructor(
     readonly inspection: LocalInspection,
@@ -22,30 +18,11 @@ export class InspectionService {
       )
       .run(Date.now());
     if (path) {
-      this.worker = new Worker(
+      this.worker = new OnDemandWorker(
         new URL("./inspection-worker.js", import.meta.url),
-        { workerData: { path } },
+        { path },
+        () => new Error("Inspection unavailable"),
       );
-      this.worker.on("message", ({ id, error }) => {
-        const p = this.pending.get(id);
-        this.pending.delete(id);
-        if (error) p?.reject();
-        else p?.resolve();
-      });
-      const fail = () => {
-        this.stopped = true;
-        for (const p of this.pending.values()) p.reject();
-        this.pending.clear();
-        inspection.db
-          .prepare(
-            "UPDATE adit_history_secret_scan_runs SET status='failed',finished_at=? WHERE status IN ('queued','running','indexing')",
-          )
-          .run(Date.now());
-      };
-      this.worker.on("error", fail);
-      this.worker.on("exit", () => {
-        if (!this.stopped) fail();
-      });
     }
   }
   start(workspace: LocalWorkspace, trigger = "manual"): Promise<void> {
@@ -60,19 +37,23 @@ export class InspectionService {
     const id = this.inspection.start(workspace, trigger);
     const promise = this.queue.then(async () => {
       if (this.stopped) return;
-      if (this.worker)
-        await new Promise<void>((resolve, reject) => {
-          this.pending.set(id, {
-            resolve,
-            reject: () => reject(new Error("Inspection unavailable")),
-          });
-          this.worker!.postMessage({
-            id,
+      if (this.worker) {
+        try {
+          await this.worker.request<void>({
+            runId: id,
             workspace,
             force: trigger === "manual",
           });
-        });
-      else await this.inspection.run(workspace, id, trigger === "manual");
+        } catch (error) {
+          if (!this.stopped)
+            this.inspection.db
+              .prepare(
+                "UPDATE adit_history_secret_scan_runs SET status='failed',finished_at=? WHERE id=? AND status IN ('queued','running','indexing')",
+              )
+              .run(Date.now(), id);
+          throw error;
+        }
+      } else await this.inspection.run(workspace, id, trigger === "manual");
     });
     this.active.set(workspace.id, promise);
     this.queue = promise.catch(() => {});
@@ -91,11 +72,7 @@ export class InspectionService {
         "UPDATE adit_history_secret_scan_runs SET cancel_requested=1 WHERE status IN ('queued','running','indexing')",
       )
       .run();
-    if (this.worker) {
-      await this.worker.terminate();
-      for (const p of this.pending.values()) p.resolve();
-      this.pending.clear();
-    }
+    await this.worker?.close();
     await this.queue;
     this.inspection.db
       .prepare(

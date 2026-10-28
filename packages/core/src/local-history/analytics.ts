@@ -2,7 +2,7 @@ import type Database from "better-sqlite3";
 import type { LocalWorkspace } from "../local-state.js";
 import { LocalStateError } from "../local-state.js";
 import { sourceDefinitions } from "./sources.js";
-import { LocalPrices, type CostUsage } from "./pricing.js";
+import { LocalPrices } from "./pricing.js";
 import { NON_MERGE_COMMIT_SQL } from "./commit-policy.js";
 import { analyticsSessions } from "./analytics-scope.js";
 import { redactSecrets } from "./secret-detector.js";
@@ -40,6 +40,7 @@ export class LocalAnalytics {
   >();
   constructor(private db: Database.Database) {
     this.prices = new LocalPrices(db);
+    this.prices.persist();
     db.exec(
       "CREATE TEMP TABLE IF NOT EXISTS overview_scope(provider TEXT,id TEXT,PRIMARY KEY(provider,id))",
     );
@@ -382,7 +383,7 @@ export class LocalAnalytics {
           if (value === null) totals[key] = null;
           else if (totals[key] !== null) totals[key]! += value;
         }
-        const cost = this.prices.estimate(u as CostUsage);
+        const cost = u.cost_microusd as number | null;
         if (cost === null) {
           unpriced++;
           continue;

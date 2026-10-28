@@ -1,6 +1,6 @@
 import type { CloudClient } from "./http/client.js";
 
-export type CloudTaskState = "not_started" | "in_progress" | "paused" | "done";
+export type CloudTaskState = "unassigned" | "not_started" | "in_progress" | "paused" | "done" | "accepted";
 export interface CloudTask {
   taskId: string;
   title: string;
@@ -8,6 +8,10 @@ export interface CloudTask {
   progressState: CloudTaskState;
   priority: string;
   dueAt: string | null;
+  startAt?: string | null;
+  estimatedPersonDays?: number | null;
+  createdAt?: string | null;
+  scope?: string[];
   updatedAt: string;
   /** Present on show, context and update; list rows are already the caller's own tasks. */
   assigneeId?: string | null;
@@ -33,22 +37,25 @@ export interface CloudTaskContext extends CloudTaskDetail {
   resources: Array<{ id: string; name: string; kind: "attachment" | "material" | "sketch"; mimeType: string | null; url: string | null; expiresAt: string | null }>;
 }
 export interface CloudTaskPatch {
-  progressState?: CloudTaskState;
+  progressState?: Exclude<CloudTaskState, "unassigned">;
   dueAt?: string | null;
+  startAt?: string | null;
+  estimatedPersonDays?: number | null;
+  createdAt?: string | null;
+  scope?: string[];
   title?: string;
-  keyPointsText?: string;
+  keyPointsText?: string | null;
   priority?: "high" | "medium" | "low";
-  assigneeId?: string;
+  assigneeId?: string | null;
 }
 
-export interface CloudTaskCreate {
+export interface CloudTaskCreate extends Omit<CloudTaskPatch, "scope" | "title" | "keyPointsText"> {
   localProjectId: string;
   teamId?: string;
   scope?: "personal";
   title: string;
   keyPointsText: string;
-  priority?: "high" | "medium" | "low";
-  dueAt?: string;
+  taskScope?: string[];
 }
 
 export interface CloudTaskCreated {

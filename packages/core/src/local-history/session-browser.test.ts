@@ -758,7 +758,7 @@ it("prices only visible day rows without multiplying timezone work by the page s
     expect(first.total).toBe(105);
     expect(first.items).toHaveLength(50);
     expect(first.items.every(s => s.cost === 600 && s.prompts === 1 && s.messages === 2)).toBe(true);
-    expect(estimate).toHaveBeenCalledTimes(50);
+    expect(estimate).not.toHaveBeenCalled();
     // Count actual SQL date conversions, not wall-clock time. The old correlated
     // page lookup repeated this conversion for each candidate day of each request.
     expect(dateCalls).toBeLessThan(messages.length * 5);
@@ -766,7 +766,7 @@ it("prices only visible day rows without multiplying timezone work by the page s
     const last = browser.list(w, { timezone: "UTC", offset: 100 });
     expect(last.items).toHaveLength(5);
     expect(last.items.every(s => s.cost === 600 && s.prompts === 1)).toBe(true);
-    expect(estimate).toHaveBeenCalledTimes(5);
+    expect(estimate).not.toHaveBeenCalled();
     estimate.mockClear();
     expect(browser.list(w, { timezone: "UTC", offset: 200 }).items).toEqual([]);
     expect(estimate).not.toHaveBeenCalled();

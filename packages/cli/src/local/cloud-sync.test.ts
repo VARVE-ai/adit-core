@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalStore, LocalHistory, projectRepositories } from "@varveai/adit-core";
+import { LocalStore, LocalHistory, LocalPrices, projectRepositories } from "@varveai/adit-core";
 import { createAttributionSchema } from "../../../core/src/local-history/attribution-schema.js";
 import { StructuredHistory } from "../../../core/src/local-history/structured-store.js";
 import { CloudProjection, CloudSessionIndex, cloudFinalReply, cloudTurnUsage, createCloudSyncSchema, finalReply, syncKey, type CloudBaseline } from "./cloud-projection.js";
@@ -193,7 +193,7 @@ it("uploads unanswered and interrupted prompts independently, then sends only a 
   history.write(session);
   history.write({id:"prompt-only",provider:"codex",cwd:root,messages:[{...prompt,key:"p2",timestamp:at(6)}]});
   const w=workspace(),client={get:vi.fn().mockResolvedValue(structuredClone(baseline)),post:vi.fn(async(_url,payload)=>({
-    schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),commitIds:[],
+    schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),usageRevisions:Object.fromEntries(payload.events.filter((event:any)=>event.usageRevision!==undefined).map((event:any)=>[event.id,event.usageRevision])),commitIds:[],
   }))};
   const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
   sync.start(w.id);await sync.wait(w.id);
@@ -228,7 +228,7 @@ it("keeps an unanswered prompt pending until Cloud acknowledges it, then retries
   expect(sync.status(w.id).status).toBe("failed");
   expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:1,commits:0});
   const id=client.post.mock.calls[0][1].events[0].id;
-  client.post.mockImplementation(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),commitIds:[]}));
+  client.post.mockImplementation(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),usageRevisions:Object.fromEntries(payload.events.filter((event:any)=>event.usageRevision!==undefined).map((event:any)=>[event.id,event.usageRevision])),commitIds:[]}));
   sync.start(w.id);await sync.wait(w.id);
   expect(client.post.mock.calls[1][1].events[0].id).toBe(id);
   expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:0,commits:0});
@@ -313,7 +313,7 @@ it("upgrades cached session boundaries without losing receipts or advancing the 
   const projection=new CloudProjection(store,w,scope,cached);
   projection.confirm("event",["already-confirmed"]);
   const fresh={...baseline,before:at(30),sessions:[{...old,lastEventAt:at(5)},{...old,id:"other-session",metadata:null,lastEventAt:at(20)}]};
-  const client={get:vi.fn().mockResolvedValue(fresh),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((event:any)=>event.id),commitIds:[]}))};
+  const client={get:vi.fn().mockResolvedValue(fresh),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((event:any)=>event.id),usageRevisions:Object.fromEntries(payload.events.filter((event:any)=>event.usageRevision!==undefined).map((event:any)=>[event.id,event.usageRevision])),commitIds:[]}))};
   const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
   sync.start(w.id);await sync.wait(w.id);
   expect(sync.status(w.id).status).toBe("done");
@@ -343,7 +343,7 @@ it("retries stable identities after a missing acknowledgement and skips confirme
   const client={get:vi.fn().mockResolvedValue(structuredClone(baseline)),post:vi.fn().mockImplementation(async(_url,payload)=>{
     ids.push(payload.events.map((e:any)=>e.id));attempts++;
     if(attempts===1)throw new Error("Connection ended after server save");
-    return {schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),commitIds:[]};
+    return {schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),usageRevisions:Object.fromEntries(payload.events.filter((event:any)=>event.usageRevision!==undefined).map((event:any)=>[event.id,event.usageRevision])),commitIds:[]};
   })};
   const collector={collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)};
   const sync=new LocalCloudSync(store,collector,()=>client);
@@ -359,7 +359,7 @@ it("first sync waits for unified collection and analysis before reading or uploa
   let finishCollection!:()=>void;
   const pending=new Promise<void>(resolve=>{finishCollection=resolve;});
   const collector={collect:vi.fn(),waitFor:vi.fn(async()=>{await pending;write();store.markStarted(w.id);})};
-  const client={get:vi.fn().mockResolvedValue(structuredClone(baseline)),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),commitIds:[]}))};
+  const client={get:vi.fn().mockResolvedValue(structuredClone(baseline)),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),usageRevisions:Object.fromEntries(payload.events.filter((event:any)=>event.usageRevision!==undefined).map((event:any)=>[event.id,event.usageRevision])),commitIds:[]}))};
   const sync=new LocalCloudSync(store,collector,()=>client);
   sync.start(w.id);
   await Promise.resolve();
@@ -384,7 +384,7 @@ it("does not confirm a partial acknowledgement",async()=>{
 });
 it("reports runtime only after business acknowledgement and keeps diagnostic errors separate from sync status",async()=>{
   write();const w=workspace();
-  const client={get:vi.fn().mockResolvedValue(structuredClone(baseline)),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),commitIds:[]}))};
+  const client={get:vi.fn().mockResolvedValue(structuredClone(baseline)),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),usageRevisions:Object.fromEntries(payload.events.filter((event:any)=>event.usageRevision!==undefined).map((event:any)=>[event.id,event.usageRevision])),commitIds:[]}))};
   vi.mocked(sendLocalRuntimeReport).mockImplementation(async()=>{
     expect(store.db.prepare("SELECT count(*) n FROM adit_local_cloud_receipts WHERE kind='event'").get()).toEqual({n:2});
     return {runtimeReportError:"Diagnostic service unavailable"};
@@ -405,6 +405,43 @@ it("sends late usage refinements without resending the prompt or changing immuta
   const next=p.sessions()[0],events=[...p.sessionBatches(next.source,next.session!)].flat();
   expect(events).toHaveLength(1);expect(events[0].type).toBe("assistant_response");
   expect(events[0].usageRevision).toBe(2);expect(events[0].usage?.find(u=>u.model==="gpt-test")?.totalTokens).toBe(44);
+  expect(events[0]).toMatchObject({usageOnly:true,text:null});
+});
+
+it("uploads newly calculated fees for an acknowledged turn without resending its text",()=>{
+  write();const projection=project(),initial=projection.sessions()[0];
+  for(const events of projection.sessionBatches(initial.source,initial.session!))projection.confirm("event",events.map(event=>event.id));
+  const prices=new LocalPrices(store.db);
+  prices.install(Object.fromEntries(["gpt-test","zai/glm-5.3"].map(model=>[model,{mode:"chat",
+    input_cost_per_token:0.000001,output_cost_per_token:0.000001,cache_read_input_token_cost:0.000001}])));
+  const next=projection.sessions()[0],events=[...projection.sessionBatches(next.source,next.session!)].flat();
+  expect(events).toHaveLength(1);
+  expect(events[0]).toMatchObject({usageOnly:true,text:null,type:"assistant_response"});
+  expect(events[0].usage!.map(usage=>usage.costMicrousd)).toEqual(["23","34"]);
+  for(const usage of events[0].usage!)expect(BigInt(usage.inputCostMicrousd)+BigInt(usage.outputCostMicrousd)+
+    BigInt(usage.cacheReadCostMicrousd)+BigInt(usage.cacheWriteCostMicrousd)).toBe(BigInt(usage.costMicrousd));
+});
+
+it("does not confirm cost uploads when Cloud acknowledges event identities but omits usage revisions",async()=>{
+  write();const w=workspace();
+  const client={get:vi.fn().mockResolvedValue(structuredClone(baseline)),post:vi.fn(async(_url,payload)=>({
+    schemaVersion:1,accountId:"user",eventIds:payload.events.map((event:any)=>event.id),commitIds:[],
+  }))};
+  const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
+  sync.start(w.id);await sync.wait(w.id);
+  expect(sync.status(w.id)).toMatchObject({status:"failed",error:expect.stringContaining("usage costs")});
+  expect(store.db.prepare("SELECT 1 FROM adit_local_cloud_receipts WHERE kind='event'").get()).toBeUndefined();
+});
+
+it("fee refinements retain the inherited usage boundary instead of importing the old prefix",()=>{
+  write();const projection=project({...baseline,before:at(3),sessions:[{id:"historical",platform:"codex",
+    metadata:JSON.stringify({nativeId:"native"}),startedAt:at(1),deleted:false,sequence:50}]}),initial=projection.sessions()[0];
+  for(const events of projection.sessionBatches(initial.source,initial.session!))projection.confirm("event",events.map(event=>event.id));
+  new LocalPrices(store.db).install(Object.fromEntries(["gpt-test","zai/glm-5.3"].map(model=>[model,{mode:"chat",
+    input_cost_per_token:0.000001,output_cost_per_token:0.000001,cache_read_input_token_cost:0.000001}])));
+  const next=projection.sessions()[0],events=[...projection.sessionBatches(next.source,next.session!)].flat();
+  expect(events).toHaveLength(1);expect(events[0].usageOnly).toBe(true);
+  expect(events[0].usage!.map(usage=>usage.model)).toEqual(["gpt-test"]);
 });
 
 function gitWorkspace() {
@@ -419,7 +456,7 @@ it("syncs configured Git author and default branch without new events, and refre
   for(const args of [["init","-b","feature/test"],["config","user.name","Configured Author"],["symbolic-ref","refs/remotes/origin/HEAD","refs/remotes/origin/main"]]) {
     expect((await runGit(args,{cwd:repo.path})).exitCode).toBe(0);
   }
-  const client={get:vi.fn().mockResolvedValue(structuredClone(baseline)),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),commitIds:[]}))};
+  const client={get:vi.fn().mockResolvedValue(structuredClone(baseline)),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),usageRevisions:Object.fromEntries(payload.events.filter((event:any)=>event.usageRevision!==undefined).map((event:any)=>[event.id,event.usageRevision])),commitIds:[]}))};
   const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
   sync.start(w.id);await sync.wait(w.id);
   expect(client.post.mock.calls[0][1].repositories[0]).toMatchObject({gitAuthorName:"Configured Author",defaultBranch:"main"});
@@ -437,7 +474,7 @@ it("refreshes remote-only branch changes, empty snapshots and repeated snapshots
   const branch={name:"main",headSha:"a".repeat(40),isDefault:true};
   const remote=vi.mocked(collectRemoteBranchSnapshot);
   remote.mockResolvedValue({branches:[branch],fingerprint:"first"});
-  const client={get:vi.fn().mockResolvedValue(structuredClone(baseline)),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),commitIds:[]}))};
+  const client={get:vi.fn().mockResolvedValue(structuredClone(baseline)),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),usageRevisions:Object.fromEntries(payload.events.filter((event:any)=>event.usageRevision!==undefined).map((event:any)=>[event.id,event.usageRevision])),commitIds:[]}))};
   const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
   try {
     for(const branches of [[branch],[],[branch],[branch]]) {
@@ -472,7 +509,7 @@ it("syncs Git-derived branches without sessions and repairs confirmed commits wi
   const fresh=await git(["rev-parse","HEAD"]);commit(repo.path,fresh,5);
   const source={...structuredClone(baseline),knownCommits:[{localRepositoryId:repo.localRepositoryId,sha:old}]};
   const client={get:vi.fn().mockResolvedValue(source),post:vi.fn(async(_url:string,payload:any)=>({
-    schemaVersion:1,accountId:"user",eventIds:payload.events.map((event:any)=>event.id),
+    schemaVersion:1,accountId:"user",eventIds:payload.events.map((event:any)=>event.id),usageRevisions:Object.fromEntries(payload.events.filter((event:any)=>event.usageRevision!==undefined).map((event:any)=>[event.id,event.usageRevision])),
     commitIds:payload.commits.map((item:any)=>`${item.localRepositoryId}:${item.sha}`),
     commitBranchIds:(payload.commitBranches??[]).map((item:any)=>`${item.localRepositoryId}:${item.sha}`),
   }))};
@@ -597,7 +634,7 @@ it("does not substitute archive totals or last-upload counts before a verified b
 it("updates pending counts after acknowledgements, new turns and late usage, but ignores body-only edits",async()=>{
   write();const w=workspace(),sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>({
     get:vi.fn().mockResolvedValue(structuredClone(baseline)),
-    post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),commitIds:[]})),
+    post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((e:any)=>e.id),usageRevisions:Object.fromEntries(payload.events.filter((event:any)=>event.usageRevision!==undefined).map((event:any)=>[event.id,event.usageRevision])),commitIds:[]})),
   }));
   sync.start(w.id);await sync.wait(w.id);
   expect(sync.status(w.id).pending).toEqual({state:"ready",sessions:0,commits:0});

@@ -171,6 +171,7 @@ describe("CLI help", () => {
 
     expect(help).toContain("Usage: adit cloud tasks update [options] <taskId>");
     expect(help).toContain("--state <state>");
+    for (const option of ["--estimate-hours", "--estimate-days", "--clear-estimate", "--start", "--clear-start", "--task-scope", "--clear-scope", "--created-at", "--clear-created-at", "--clear-key-points", "--clear-assignee"]) expect(help).toContain(option);
   });
 
   it("supports nested help for leaf commands", async () => {

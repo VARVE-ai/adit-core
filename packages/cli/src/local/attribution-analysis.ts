@@ -2,12 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import { dirname, join, resolve, isAbsolute, basename, relative } from "node:path";
 import {
   LocalStore,
   createAttributionSchema,
   ATTRIBUTION_RESULT_TABLES,
-  NON_MERGE_COMMIT_SQL,
   insideDirectory,
   analyticsSessions,
   projectSessionLocations,
@@ -22,26 +23,15 @@ import {
   tokenOverlap,
 } from "./attribution-evidence.js";
 import { saveAttributionSummaries, type AttributionLine, type AttributionCandidate } from "./attribution-summaries.js";
-import { commandOf, submissionCandidates } from "./submission-evidence.js";
+import { commandOf } from "./submission-evidence.js";
+import { attributionNeeded, collectedCommits, rememberSubmissionRevision, savedRun, submissionRevision } from "./attribution-plan.js";
+import { callIdentities, readSubmissionCandidates, writeCalls } from "./attribution-input.js";
+import { AttributionEvidenceStore, type AttributionEvidence as Evidence } from "./attribution-evidence-store.js";
 const execute = promisify(execFile);
 export const ATTRIBUTION_VERSION = 5;
 const digest = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 type Row = Record<string, any>;
-type Evidence = {
-  id: string;
-  provider: string;
-  sessionId: string;
-  turnId: string | null;
-  toolId: string | null;
-  kind: string;
-  sourcePath: string | null;
-  filePath: string | null;
-  at: number;
-  text: string;
-  group: string;
-  repository: string | null;
-};
 type AddedLine = {
   path: string;
   number: number;
@@ -80,7 +70,7 @@ const gitSourcePaths = [
 ];
 
 // This equivalence map exists only in memory for a single analysis. No native session is changed.
-export function analysisIdentities(sessions: Row[], calls: Row[]) {
+export function analysisIdentities(sessions: Row[], calls: Iterable<Row>) {
   const parent = new Map(
     sessions.map((s) => [key(s.provider, s.id), key(s.provider, s.id)]),
   );
@@ -139,74 +129,43 @@ export function analysisIdentities(sessions: Row[], calls: Row[]) {
   };
 }
 
-function collectedCommits(store: LocalStore, w: LocalWorkspace) {
-  const select = store.db.prepare(
-    `SELECT c.* FROM adit_local_commits c WHERE c.repository=? AND ${NON_MERGE_COMMIT_SQL} ORDER BY c.committed_at,c.sha`,
-  );
-  return w.repositories.flatMap(
-    (repository) => select.all(repository) as Row[],
-  );
-}
-
-function savedRun(store: LocalStore, workspaceId: string) {
-  return store.db
-    .prepare(
-      "SELECT * FROM adit_attribution_runs WHERE workspace_id=? AND status='done' ORDER BY started_at DESC LIMIT 1",
-    )
-    .get(workspaceId) as Row | undefined;
-}
-
-function inputSnapshot(store: LocalStore, w: LocalWorkspace) {
+function inputMetadata(store: LocalStore, workspace: LocalWorkspace) {
   const db = store.db;
   return db.transaction(() => {
-    const scopes = new Map(analyticsSessions(db,w).map(s=>[key(s.provider,s.id),s.cwd]));
-    const locations = projectSessionLocations(db,w);
+    const scopedSessions = analyticsSessions(db, workspace).filter(session => workspace.providers.includes(session.provider));
+    const scopes = new Map(scopedSessions.map(session => [key(session.provider, session.id), session.cwd]));
+    const scope = JSON.stringify(scopedSessions.map(session => [session.provider, session.id]));
+    const locations = projectSessionLocations(db, workspace);
     const sessions = (
       db
         .prepare(
-          `SELECT s.*,coalesce(nullif(s.cwd,''),a.workspace,'') scope_cwd FROM adit_history_sessions s LEFT JOIN adit_history_assignments a ON a.provider=s.provider AND a.session_id=s.id`,
+          `SELECT s.* FROM adit_history_sessions s WHERE (s.provider,s.id) IN (
+            SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?)
+          ) ORDER BY s.rowid`,
         )
-        .all() as Row[]
-    ).filter((s) => w.providers.includes(s.provider) && scopes.has(key(s.provider,s.id)))
-      .map((s): Row=>({...s,scope_cwd:scopes.get(key(s.provider,s.id))!,original_root:locations.get(key(s.provider,s.id))?.original_root}));
-    const keys = new Set(sessions.map((s) => key(s.provider, s.id)));
-    const calls = (
-      db
-        .prepare(
-          `SELECT t.*,m.ordinal message_ordinal FROM adit_history_tool_calls t JOIN adit_history_messages m ON m.id=t.message_id`,
-        )
-        .all() as Row[]
-    ).filter((c) => keys.has(key(c.provider, c.session_id))).map(c=> {
-      const location=locations.get(key(c.provider,c.session_id));
-      if (!location || !c.working_directory || !insideDirectory(location.original_root,c.working_directory)) return c;
-      return {...c,working_directory:resolve(w.path,relative(location.original_root,c.working_directory))};
-    });
-    const callIds = new Set(calls.map((c) => c.id));
-    const results = (
-      db
-        .prepare(
-          "SELECT tool_call_id,content_text,occurred_at,exit_code,status FROM adit_history_tool_results WHERE tool_call_id IS NOT NULL",
-        )
-        .all() as Row[]
-    ).filter((r) => callIds.has(r.tool_call_id));
-    const commits = collectedCommits(store, w);
-    const sources = (
-      db
-        .prepare(
-          "SELECT provider,session_id,path,fingerprint FROM adit_history_sources WHERE provider='claude'",
-        )
-        .all() as Row[]
-    ).filter((s) => keys.has(key(s.provider, s.session_id)));
+        .all(scope) as Row[]
+    ).map((session): Row => ({
+      ...session,
+      scope_cwd: scopes.get(key(session.provider, session.id))!,
+      original_root: locations.get(key(session.provider, session.id))?.original_root,
+    }));
+    const commits = collectedCommits(store, workspace);
+    const sources = db.prepare(
+      `SELECT provider,session_id,path,fingerprint FROM adit_history_sources
+        WHERE provider='claude' AND (provider,session_id) IN (
+          SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?)
+        ) ORDER BY rowid`,
+    ).all(scope) as Row[];
     const fingerprint = digest([
       ATTRIBUTION_VERSION,
-      w.path,
-      w.providers,
-      w.repositories,
-      sessions.map((s) => [s.provider, s.id, s.transcript_revision]),
-      commits.map((c) => [c.repository, c.sha, c.committed_at, c.authored_at]),
+      workspace.path,
+      workspace.providers,
+      workspace.repositories,
+      sessions.map((session) => [session.provider, session.id, session.transcript_revision]),
+      commits.map((commit) => [commit.repository, commit.sha, commit.committed_at, commit.authored_at]),
       sources,
     ]);
-    return { sessions, calls, results, commits, sources, fingerprint };
+    return { sessions, commits, sources, fingerprint, locations, scope };
   })();
 }
 
@@ -310,30 +269,31 @@ function writeLocation(
   return { filePath, repository: repositoryFor(w, filePath) };
 }
 
+function normalizedPath(value: string): string {
+  const path = resolve(value);
+  return process.platform === "win32" ? path.toLowerCase() : path;
+}
+
 function samePath(a: string, b: string): boolean {
-  const normalize = (value: string) => {
-    const path = resolve(value);
-    return process.platform === "win32" ? path.toLowerCase() : path;
-  };
-  return normalize(a) === normalize(b);
+  return normalizedPath(a) === normalizedPath(b);
 }
 
 async function backupEvidence(
-  snapshot: ReturnType<typeof inputSnapshot>,
+  snapshot: ReturnType<typeof inputMetadata>,
   w: LocalWorkspace,
   add: (source: Omit<Evidence, "id" | "text" | "group">, text: string) => void,
+  relevant: (repository: string | null, filePath: string | null) => boolean,
+  signal?: AbortSignal,
 ) {
   let missing = 0;
   const manifest: unknown[] = [];
   for (const source of snapshot.sources) {
-    let text: string;
     try {
       const info = await stat(source.path);
       if (info.size > 128 * 1024 * 1024) {
         missing++;
         continue;
       }
-      text = await readFile(source.path, "utf8");
     } catch {
       missing++;
       continue;
@@ -348,7 +308,11 @@ async function backupEvidence(
     if (basename(root) !== "projects") continue;
     const home = dirname(root);
     const previous = new Map<string, { text: string; at: number }>();
-    for (const line of text.split("\n")) {
+    const input = createReadStream(source.path, { encoding: "utf8" });
+    const reader = createInterface({ input, crlfDelay: Infinity });
+    try {
+    for await (const line of reader) {
+      signal?.throwIfAborted();
       if (!line.includes("file-history-snapshot")) continue;
       let row: any;
       try {
@@ -364,6 +328,8 @@ async function backupEvidence(
       ][]) {
         const name = entry.backupFileName;
         if (typeof name !== "string") continue;
+        const location = writeLocation(w, session.scope_cwd, "", file, session.original_root);
+        if (!relevant(location.repository, location.filePath)) continue;
         // Native backup names must stay under this session's file-history directory.
         const dir = join(home, "file-history", source.session_id),
           path = resolve(dir, name);
@@ -390,7 +356,6 @@ async function backupEvidence(
               .split("\n")
               .filter((l) => !oldLines.has(normalizeLine(l)))
               .join("\n");
-            const location = writeLocation(w, session.scope_cwd, "", file,session.original_root);
             add(
               {
                 provider: source.provider,
@@ -407,11 +372,19 @@ async function backupEvidence(
             );
           }
           previous.set(file, { text: content, at });
-        } catch {
+        } catch (error) {
+          if (String((error as { code?: string }).code).startsWith("SQLITE_")) throw error;
           missing++;
           manifest.push([path, "missing"]);
         }
       }
+    }
+    } catch (error) {
+      if (signal?.aborted || String((error as { code?: string }).code).startsWith("SQLITE_")) throw error;
+      missing++;
+    } finally {
+      reader.close();
+      input.destroy();
     }
   }
   return { missing, manifest };
@@ -430,9 +403,11 @@ export async function analyzeAttribution(
   createAttributionSchema(store.db);
   const db = store.db;
   options.signal?.throwIfAborted();
+  if (!options.force && !options.recheck?.length && !attributionNeeded(store, w))
+    return { id: savedRun(store, w.id)?.id ?? null, cached: true };
   // New SHAs and explicit rechecks recompute code provenance. Late submission
   // evidence may fill an empty link without rewriting saved line attribution.
-  const { previous, analyzed, pending } = db.transaction(() => {
+  const { previous, analyzed } = db.transaction(() => {
     const previous = savedRun(store, w.id);
     const commits = collectedCommits(store, w);
     for (const target of options.recheck || [])
@@ -460,15 +435,15 @@ export async function analyzeAttribution(
     return {
       previous,
       analyzed,
-      pending: commits.some((c) => !analyzed.has(key(c.repository, c.sha))),
     };
   })();
-  const snapshot = inputSnapshot(store, w),
-    identities = analysisIdentities(snapshot.sessions, snapshot.calls);
+  const snapshot = inputMetadata(store, w),
+    identities = analysisIdentities(snapshot.sessions, callIdentities(store, snapshot.scope));
+  const submissionInputRevision = submissionRevision(store, w);
   const targets = snapshot.commits.filter(
     (c) => !analyzed.has(key(c.repository, c.sha)),
   );
-  const operations = submissionCandidates(snapshot.calls, snapshot.results).map(e => {
+  const operations = readSubmissionCandidates(store, snapshot.scope).map(e => {
     const session = snapshot.sessions.find(s => s.provider === e.call.provider && s.id === e.call.session_id)!;
     return { ...e, group: identities.find(key(e.call.provider, e.call.session_id)),
       repository: e.batch ? null : repositoryFor(w, e.cwd || e.call.working_directory || session.scope_cwd, e.command, session.original_root) };
@@ -549,14 +524,32 @@ export async function analyzeAttribution(
     const match = matchSubmission(commit);
     return match.operation ? [{commit, ...match}] : [];
   }) : [];
-  if (!options.force && previous && !pending && !repairs.length) return {id: previous.id, cached: true};
-  const evidence: Evidence[] = [];
-  const unique = new Set<string>();
+  if (!options.force && previous && !targets.length && !repairs.length) {
+    rememberSubmissionRevision(store, w, submissionInputRevision);
+    return {id: previous.id, cached: true};
+  }
+  const evidenceStore = new AttributionEvidenceStore();
+  try {
+  const targetPaths = new Map<string, Set<string> | null>();
+  const selectFiles = db.prepare("SELECT path FROM adit_local_commit_files WHERE repository=? AND sha=?");
+  for (const commit of targets) {
+    if (targetPaths.get(commit.repository) === null) continue;
+    const files = selectFiles.all(commit.repository, commit.sha) as Row[];
+    if (!files.length) targetPaths.set(commit.repository, null);
+    else {
+      const paths = targetPaths.get(commit.repository) ?? new Set<string>();
+      for (const file of files) paths.add(normalizedPath(resolve(commit.repository, file.path)));
+      targetPaths.set(commit.repository, paths);
+    }
+  }
+  const relevantLocation = (repository: string | null, filePath: string | null) => repository !== null && targetPaths.has(repository)
+    && (!filePath || targetPaths.get(repository) === null || targetPaths.get(repository)!.has(normalizedPath(filePath)));
   let missingTime = 0;
   const add = (
     source: Omit<Evidence, "id" | "text" | "group">,
     text: string,
   ) => {
+    if (!relevantLocation(source.repository, source.filePath)) return;
     if (!Number.isFinite(source.at)) {
       missingTime++;
       return;
@@ -573,9 +566,7 @@ export async function analyzeAttribution(
         source.filePath,
         line,
       ]);
-      if (unique.has(id)) continue;
-      unique.add(id);
-      evidence.push({
+      evidenceStore.add({
         ...source,
         id,
         text: line,
@@ -583,13 +574,17 @@ export async function analyzeAttribution(
       });
     }
   };
-  const failedCalls = new Set(snapshot.results.filter(r => ["error", "failed"].includes(r.status) || r.exit_code != null && r.exit_code !== 0).map(r => r.tool_call_id));
-  for (const call of targets.length ? snapshot.calls : []) {
-    if (failedCalls.has(call.id)) continue;
+  const payload = db.prepare("SELECT * FROM adit_history_tool_calls WHERE id=?");
+  const latest = targets.reduce((last, commit) => Math.max(last, commit.committed_at ?? commit.authored_at ?? 0), 0);
+  const sessions = new Map(snapshot.sessions.map(session => [key(session.provider, session.id), session]));
+  for (const metadata of targets.length ? writeCalls(store, snapshot.scope, latest) : []) {
     options.signal?.throwIfAborted();
-    const session = snapshot.sessions.find(
-      (s) => s.provider === call.provider && s.id === call.session_id,
-    )!;
+    const session = sessions.get(key(metadata.provider, metadata.session_id))!;
+    if (metadata.file_path && isAbsolute(metadata.file_path) && /edit|write/i.test(metadata.tool_name || "")) {
+      const location = writeLocation(w, metadata.working_directory || session.scope_cwd, "", metadata.file_path, session.original_root);
+      if (!relevantLocation(location.repository, location.filePath)) continue;
+    }
+    const call = payload.get(metadata.id) as Row;
     let input: unknown;
     try {
       input = JSON.parse(call.input_json || "null");
@@ -625,7 +620,7 @@ export async function analyzeAttribution(
       );
     }
   }
-  const backups = targets.length ? await backupEvidence(snapshot, w, add) : {missing: previous?.missing_backup_count || 0, manifest: []},
+  const backups = targets.length ? await backupEvidence(snapshot, w, add, relevantLocation, options.signal) : {missing: previous?.missing_backup_count || 0, manifest: []},
     fingerprint = digest([snapshot.fingerprint, backups.manifest]);
   const run = randomUUID();
   db.prepare(
@@ -644,33 +639,6 @@ export async function analyzeAttribution(
     targets.length ? missingTime : previous?.missing_time_count || 0,
     backups.missing,
   );
-  const exact = new Map<string, Evidence[]>(),
-    values = new Map<string, Evidence[]>(),
-    tokens = new Map<string, Set<string>>(),
-    postings = new Map<string, Set<string>>(),
-    texts = new Map<string, Evidence[]>();
-  for (const e of evidence) {
-    const list = exact.get(e.text) || [];
-    list.push(e);
-    exact.set(e.text, list);
-    const value = jsonTextValue(e.text);
-    if (value) {
-      const same = values.get(value) || [];
-      same.push(e);
-      values.set(value, same);
-    }
-    if (!texts.has(e.text)) {
-      const words = wordTokens(e.text);
-      tokens.set(e.text, words);
-      for (const word of words) {
-        const set = postings.get(word) || new Set<string>();
-        set.add(e.text);
-        postings.set(word, set);
-      }
-    }
-    texts.set(e.text, list);
-  }
-  const evidenceById = new Map(evidence.map((e) => [digest([run, e.id]), e]));
   try {
     let completed = 0;
     for (const commit of targets) {
@@ -737,6 +705,36 @@ export async function analyzeAttribution(
           const line = normalizeLine(raw);
           if (wanted.has(line)) oldLines.add(line);
         }
+      }
+
+      const exact = new Map<string, Evidence[]>(),
+        values = new Map<string, Evidence[]>(),
+        tokens = new Map<string, Set<string>>(),
+        postings = new Map<string, Set<string>>(),
+        texts = new Map<string, Evidence[]>(),
+        evidenceById = new Map<string, Evidence>();
+      const paths = [...new Set(lines.filter(line => !line.excluded && !oldLines.has(line.text)).map(line => resolve(commit.repository, line.path)))];
+      for (const evidence of paths.length && at !== null ? evidenceStore.forCommit(commit.repository, paths, at) : []) {
+        evidenceById.set(digest([run, evidence.id]), evidence);
+        const matches = exact.get(evidence.text) || [];
+        matches.push(evidence);
+        exact.set(evidence.text, matches);
+        const value = jsonTextValue(evidence.text);
+        if (value) {
+          const same = values.get(value) || [];
+          same.push(evidence);
+          values.set(value, same);
+        }
+        if (!texts.has(evidence.text)) {
+          const words = wordTokens(evidence.text);
+          tokens.set(evidence.text, words);
+          for (const word of words) {
+            const posting = postings.get(word) || new Set<string>();
+            posting.add(evidence.text);
+            postings.set(word, posting);
+          }
+        }
+        texts.set(evidence.text, matches);
       }
 
       type Candidate = { e: Evidence; method: string; score: number };
@@ -935,7 +933,7 @@ export async function analyzeAttribution(
         currentWorkspace.providers,
         currentWorkspace.repositories,
       ]) !== digest([w.path, w.providers, w.repositories]) ||
-      inputSnapshot(store, w).fingerprint !== snapshot.fingerprint
+      inputMetadata(store, w).fingerprint !== snapshot.fingerprint
     )
       throw new Error("采集记录已更新，将在下一次采集后重试未完成的提交分析");
     db.transaction(() => {
@@ -975,6 +973,7 @@ export async function analyzeAttribution(
         "DELETE FROM adit_attribution_runs WHERE workspace_id=? AND id<>?",
       ).run(w.id, run);
     })();
+    rememberSubmissionRevision(store, w, submissionInputRevision);
     return { id: run, cached: false };
   } catch (error) {
     db.prepare(
@@ -985,5 +984,8 @@ export async function analyzeAttribution(
       run,
     );
     throw error;
+  }
+  } finally {
+    evidenceStore.close();
   }
 }

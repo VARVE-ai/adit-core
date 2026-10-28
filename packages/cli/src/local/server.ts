@@ -36,6 +36,7 @@ import { OverviewService } from "./overview-service.js";
 import { queryCommits } from "./commits.js";
 import { queryCommitSources } from "./commit-sources.js";
 import { AttributionService } from './attribution-service.js';
+import { attributionNeeded } from "./attribution-plan.js";
 import { LoginStartup, type StartupRegistration } from "./login-startup.js";
 import { AchievementService } from "./achievement-service.js";
 import { readmePreview } from "./readme-preview.js";
@@ -83,7 +84,7 @@ export async function startLocalServer(
   const startup = new LoginStartup(store, options.startupRegistration);
   // Isolated in-process servers have no OS side effects unless a registration is supplied.
   if (options.instance || options.startupRegistration) await startup.initialize();
-  const attributionService=options.instance?new AttributionService(store.directory):undefined;
+  const attributionService=options.instance?new AttributionService(store.directory,undefined,workspace=>attributionNeeded(store,workspace)):undefined;
   let achievements: LocalAchievements;
   let achievementService: AchievementService | undefined;
   let inspectionService: InspectionService;

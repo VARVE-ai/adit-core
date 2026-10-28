@@ -65,7 +65,7 @@ it("computes off-thread and sees fact and price changes committed by the daemon 
       },
     });
     expect((await service.query(workspace, opts)).summary.estimatedCost).toBe(
-      480,
+      280,
     );
     await expect(
       service.query(workspace, { range: "bad" }),

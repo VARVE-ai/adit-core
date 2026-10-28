@@ -175,7 +175,7 @@ const item = (r: Row): SessionItem => ({
 export class LocalSessionBrowser {
   constructor(
     private db: Database.Database,
-    private prices?: Pick<LocalPrices, "estimate">,
+    _prices?: Pick<LocalPrices, "estimate">,
   ) { registerHistoryRedaction(db); }
 
   private scope(w: LocalWorkspace) {
@@ -360,7 +360,7 @@ export class LocalSessionBrowser {
         scope AS MATERIALIZED (SELECT json_extract(value,'$.provider') provider,json_extract(value,'$.id') id,
           json_extract(value,'$.conversation_id') conversation_id FROM json_each(@scope)
           WHERE EXISTS (SELECT 1 FROM page p WHERE p.provider=json_extract(value,'$.provider') AND p.id=json_extract(value,'$.conversation_id'))),
-        usage AS MATERIALIZED (SELECT u.provider,u.model,u.scope,u.input_total_tokens,u.uncached_input_tokens,u.output_tokens,
+        usage AS MATERIALIZED (SELECT u.cost_microusd,u.provider,u.model,u.scope,u.input_total_tokens,u.uncached_input_tokens,u.output_tokens,
           u.cache_read_tokens,u.cache_write_tokens,u.cache_write_5m_tokens,u.cache_write_1h_tokens,
           q.conversation_id,session_day(u.occurred_at) day FROM scope q
           CROSS JOIN adit_history_usage_entries u ON u.provider=q.provider AND u.session_id=q.id WHERE u.ledger_role='canonical')
@@ -368,7 +368,7 @@ export class LocalSessionBrowser {
       const byDay = new Map(items.map(s => [JSON.stringify([s.provider,s.id,s.day]),s]));
       for (const u of usage) {
         const row = byDay.get(JSON.stringify([u.provider,u.conversation_id,u.day]))!;
-        const cost = this.prices?.estimate(u) ?? null;
+        const cost = u.cost_microusd as number | null;
         if (cost === null) row.unpriced++;
         else row.cost = (row.cost ?? 0) + cost;
       }
@@ -493,7 +493,7 @@ export class LocalSessionBrowser {
         )
         .all(provider, JSON.stringify(ids)) as (Row & CostUsage)[];
       const scopedUsage = usage.filter(u => !matches || matches(u.occurred_at));
-      const costs = this.prices ? scopedUsage.map((u) => this.prices!.estimate(u)) : [],
+      const costs = scopedUsage.map((usage) => usage.cost_microusd as number | null),
         priced = costs.filter((v): v is number => v !== null);
       const total = scopedTurns.length;
       const allowed = new Set(

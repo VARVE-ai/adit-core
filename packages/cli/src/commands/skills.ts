@@ -14,7 +14,7 @@ export interface SkillDefinition {
 
 export const TASK_SKILL = `---
 name: adit-tasks
-description: Create independent ADIT Cloud tasks on explicit request, query and work on tasks assigned to the current user, read their PRD and reference URLs, and update task state or due date. Use for requests such as create a task for me, which of my tasks are still open, work on this task, mark it done, pause it, or postpone its due date. Not for unrelated local TODO lists, other members' progress (adit-reports), or session history (adit-history).
+description: Create independent ADIT Cloud tasks on explicit request, query and work on the user's tasks, read their PRD and references, and edit task fields including workload estimates, dates, assignee and state. Use for creating tasks, listing unfinished tasks, implementing a task, estimating its workload or updating its details. Not for unrelated local TODO lists, other members' progress (adit-reports), or session history (adit-history).
 ---
 
 # ADIT tasks
@@ -36,7 +36,7 @@ Do not begin by listing every team on the account or ask for a team when the pro
 
 Both scopes and list always send the current project's identity, including list --team. scopes returns project and only teams mounted by that project that the user can access, not all account memberships. With exactly one team, query it directly. With multiple teams, ask only among those returned. With no linked teams and an explicit team request, explain that this project has no accessible linked team; do not widen the search to unrelated teams. For an explicit personal-task request use list --personal. --project <localProjectId> is only for a project the user explicitly selected. Do not initialize, link, change directory, or change the login silently if setup is missing. Report the returned project name and effective scope with results.
 
-List results include taskId, blueprintId (null for independent tasks), title, keyPointsText, progressState, priority, dueAt, updatedAt, projectId and teamId. By default, automatically follow nextOffset with the same project/scope/state and --offset until it is null, then present the complete task list. API pagination is internal: do not ask the user to request the next page. Use --state all, done or paused when requested; paused tasks are still unfinished and appear in the default list. An empty list means no matching tasks in the returned scope, not permission to query other teams.
+List results include taskId, blueprintId (null for independent tasks), title, keyPointsText, progressState, priority, dueAt, updatedAt, projectId and teamId. By default, automatically follow nextOffset with the same project/scope/state and --offset until it is null, then present the complete task list. API pagination is internal: do not ask the user to request the next page. Use --state all, done, accepted or paused when requested; paused tasks are unfinished, while done and accepted are excluded from the default list. An empty list means no matching tasks in the returned scope, not permission to query other teams.
 
 Display every matching task with continuous numbering, title, readable status and priority, and due date when present. Keep each task compact, preferably one row; group by intent if helpful without restarting numbering, and include independent tasks. Do not show only the first ten or replace remaining tasks with a summary such as "18 more". Only shorten the list when the user explicitly requests a summary or a limited number. Keep full task IDs available for follow-up actions without printing a separate UUID line for every task unless requested. Do not expose pagination diagnostics such as nextOffset in the normal reply. Before sending, check that every fetched task is represented. If fetching fails or a response limit prevents a complete list, explicitly state what is missing rather than claim completeness.
 
@@ -48,9 +48,9 @@ Create only when the user asks to add a task to Cloud, not when they merely disc
 
     adit cloud tasks create --title "Fix booking conflicts" --key-points "Prevent concurrent bookings for the same room and time slot" --json
 
-Optional flags are --priority high|medium|low and --due YYYY-MM-DD. Resolve relative dates in the user's local timezone; omit unspecified dates and priority (defaults: no deadline, medium priority). Quote user-supplied text safely for the active shell; never evaluate it as a command.
+Creation also accepts --priority, --due, --start, --estimate-days or --estimate-hours, --created-at, --task-scope and --state, using the units and constraints below. Only set fields the user requested; unspecified dates and estimates stay empty, and priority defaults to medium. Title and key points cannot be empty on creation. Quote user-supplied text safely for the active shell; never evaluate it as a command.
 
-Creation uses the same project/team resolution as list and assigns the task to the logged-in user with state not_started and blueprintId null. No blueprint or PRD is created. With multiple linked teams, TEAM_SELECTION_REQUIRED returns only the current project's candidates: ask the user, then retry with --team <teamId>. Use --personal only for an explicit personal-task request and --project only for an explicitly selected project. For an explicit team request without a known team ID, use tasks scopes first; do not silently create a personal task or choose another team. Creation does not assign tasks to other members.
+Creation uses the same project/team resolution as list and defaults to the logged-in assignee, state not_started and blueprintId null. In a team, an explicit --assignee <memberId> assigns another member and --clear-assignee leaves it unassigned; use only confirmed member IDs. Personal tasks are self-assigned at creation, just like the webpage. No blueprint or PRD is created. With multiple linked teams, TEAM_SELECTION_REQUIRED returns only the current project's candidates: ask the user, then retry with --team <teamId>. Use --personal only for an explicit personal-task request and --project only for an explicitly selected project. For an explicit team request without a known team ID, use tasks scopes first; do not silently create a personal task or choose another team.
 
 The command writes immediately to Cloud and records creation history; no sync is needed. Report the returned title, taskId, project/team, priority and due date. If the request times out or returns an uncertain server error, do not blindly retry: list tasks with --state all in the same scope, following pagination, and check whether it was created. If the outcome remains uncertain, tell the user before trying again. A 404 from an older Cloud may mean the creation endpoint is not deployed; do not bypass it with database writes or switch servers.
 
@@ -89,20 +89,43 @@ When the user explicitly says the task is completed and asks to change status, r
     adit cloud tasks show <taskId> --json
     adit cloud tasks update <taskId> --state done --expected-updated-at <updatedAt> --json
 
-For an explicit request to change progress use not_started, in_progress, paused or done. Only a not-started or in-progress task can be paused, and a paused task must be resumed (not_started or in_progress) before it can be marked done; pausing keeps the due date and stops the overdue count. For postponement, resolve a definite calendar date in the user's local timezone; ask if ambiguous, and pass YYYY-MM-DD:
+For an explicit request to change progress use not_started, in_progress, paused, done or accepted. Accepted is a manual status choice, not an approval workflow; do not set it merely because implementation finished. Only a not-started or in-progress task can be paused, and a paused task must be resumed (not_started or in_progress) before it can be marked done; pausing keeps the due date and stops the overdue count. For postponement, resolve a definite calendar date in the user's local timezone; ask if ambiguous, and pass YYYY-MM-DD:
 
     adit cloud tasks update <taskId> --due <YYYY-MM-DD> --expected-updated-at <updatedAt> --json
 
 Use --clear-due only when explicitly asked to remove the deadline. Postponement changes dueAt, not progressState. Completed tasks freeze due dates: do not silently reopen a completed task to bypass that rule.
 
-Task assignees may change their own state and due date. Other fields require existing management rights; do not infer those rights from being assigned. Supported explicit edits include --title, --key-points, --priority high|medium|low, and --assignee <memberId>. Never guess member IDs. Use adit cloud tasks update --help for options.
+Task assignees may change their own state, expected start/completion and workload estimate. Other fields require existing management rights; being assigned does not grant those rights. Creators retain existing management rights on independent tasks even after reassignment. The CLI uses the same permissions and completed-task freezes as the webpage.
+
+Editable fields (omitted options preserve stored values):
+
+| Field | Set | Clear |
+|---|---|---|
+| Title | --title <text> | Not allowed |
+| Key points | --key-points <text> | --clear-key-points (update only) |
+| State | --state not_started/in_progress/paused/done/accepted | Clear the assignee for unassigned |
+| Priority | --priority high/medium/low | Not allowed |
+| Assignee | --assignee <memberId> | --clear-assignee |
+| Expected start | --start YYYY-MM-DD | --clear-start |
+| Expected completion | --due YYYY-MM-DD | --clear-due |
+| Workload | --estimate-days <days> OR --estimate-hours <hours> | --clear-estimate |
+| Task scope | Repeat --task-scope <text> to replace the entire list | --clear-scope |
+| Creation time | --created-at <ISO timestamp with timezone> | --clear-created-at |
+
+Creation time is editable only for independent tasks. Resolve dates in the user's timezone and pass a timezone explicitly for creation time. --task-scope describes pages/modules/APIs and is unrelated to --team/--project selection. Never guess member IDs; use assignableMembers from task details. Setting and clearing the same field together is rejected.
+
+Estimates use the webpage's person-days: 1 person-day = 8 hours. For an explicitly requested two-hour estimate, use:
+
+    adit cloud tasks update <taskId> --estimate-hours 2 --expected-updated-at <updatedAt> --json
+
+This saves estimatedPersonDays=0.25, displayed as 0.25 person-days on the webpage. Creation accepts the same estimate flags. Zero is a real estimate; --clear-estimate means unknown (null). Negative and non-finite values are invalid. Never infer an estimate from elapsed time or invent one; ask when the user's unit is unclear. Read the result to confirm the saved value.
 
 The update writes directly to Cloud and records history. No adit cloud sync is needed. Report success only from a successful server response, identifying the task and the returned change. On 409 the error text says which case applies: the task changed since it was read (read it again, explain the difference, then decide), or the task is done and its owner, dates and estimate are frozen (do not retry that change). Never retry with a fresh version blindly. On a network timeout, read the task to determine whether the update succeeded before retrying. On 401 the login is invalid or expired; on 403 the login is fine but the permission is missing and the error text names the rule; on 404 the task is missing, deleted, archived or reassigned. Explain and stop rather than switching accounts or scope automatically.
 
 ## Response fields
 
-- create: project and scope identify where the independent task was created; task includes the new taskId, blueprintId null, assigneeId (the logged-in user), progressState not_started, title, keyPointsText, priority, dueAt and timestamps.
-- list: project names the project used to resolve the scope; scope carries projectId, teamId and teamName (teamName null means personal scope); tasks carry taskId, title, keyPointsText, progressState (not_started, in_progress, paused, done), priority (high, medium, low), dueAt, updatedAt, blueprintId and blueprintTitle (null for an independent task), projectId and teamId; total and nextOffset drive pagination.
+- create: project and scope identify where the independent task was created; task includes the new taskId, blueprintId null, assigneeId, progressState, title, keyPointsText, priority, startAt, dueAt, estimatedPersonDays and timestamps.
+- list: project names the project used to resolve the scope; scope carries projectId, teamId and teamName (teamName null means personal scope); tasks carry taskId, title, keyPointsText, progressState (not_started, in_progress, paused, done, accepted), priority (high, medium, low), dueAt, updatedAt, blueprintId and blueprintTitle (null for an independent task), projectId and teamId; total and nextOffset drive pagination.
 - show and context: task is the task record: taskId, title, keyPointsText, scope and dependencies (lists of text), progressState, priority, assigneeId, dueAt and startAt (expected completion and start), estimatedPersonDays (null until the owner estimates), kind (task, or module when it groups tasks) and parentTaskId, confirmRequestedAt and confirmedAt (when completion was requested and confirmed), currentStatusDecision (a proposed state change awaiting confirmation: fromState, toState, createdAt, confirmedAt, revertedAt; null when none), createdAt, updatedAt, blueprintId, projectId and teamId. assignableMembers lists members you may transfer the task to (empty without manage rights); permissions carries canManage, canUpdateState and canUpdateDueAt (false once the task is done).
 - context: prd is null for an independent task, otherwise blueprintId, title, markdown (the current document), updatedAt, activeVersionId and latestVersionId; resources carry id, name, kind (attachment, material or sketch), mimeType, url (null when nothing can be served) and expiresAt (null for a public external URL).
 - update: task is the updated task in the same shape; recorded lists the history entries written, one per changed field (state, due, start, assign, priority, workload, edit); an empty list means nothing differed from the stored task.

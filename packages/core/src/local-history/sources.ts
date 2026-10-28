@@ -245,6 +245,10 @@ export async function* sourceFiles(
   signal?.throwIfAborted();
   if (depth > 10)
     throw new Error("Source directory nesting exceeds supported depth");
+  if ((provider === "warp" || provider === "kilo") && depth === 0) {
+    yield* targetedDatabaseFiles(provider, root, signal);
+    return;
+  }
   if (provider === "cursor" && depth === 0) {
     yield* cursorFiles(root, signal);
     return;
@@ -333,6 +337,51 @@ export async function* sourceFiles(
         yield path;
     }
   }
+}
+
+async function sourceInfo(path: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
+  try {
+    const info = await lstat(path);
+    signal?.throwIfAborted();
+    return info.isSymbolicLink() ? undefined : info;
+  } catch (error) {
+    signal?.throwIfAborted();
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return undefined;
+  }
+}
+
+async function* targetedDatabaseFiles(
+  provider: "warp" | "kilo",
+  root: string,
+  signal?: AbortSignal,
+): AsyncGenerator<string> {
+  const databaseName = provider === "warp" ? "warp.sqlite" : "kilo.db";
+  const rootInfo = await sourceInfo(root, signal);
+  if (rootInfo?.isFile()) {
+    if (basename(root) === databaseName) yield root;
+    return;
+  }
+  if (!rootInfo?.isDirectory()) return;
+  const databasePath = join(root, databaseName);
+  if ((await sourceInfo(databasePath, signal))?.isFile()) yield databasePath;
+  signal?.throwIfAborted();
+  if (provider === "warp") return;
+
+  const storagePath = join(root, "storage");
+  if (!(await sourceInfo(storagePath, signal))?.isDirectory()) return;
+  for (const project of await directoryEntries(join(storagePath, "session"))) {
+    signal?.throwIfAborted();
+    if (!project.isDirectory() || project.isSymbolicLink()) continue;
+    const projectPath = join(storagePath, "session", project.name);
+    for (const file of await directoryEntries(projectPath)) {
+      signal?.throwIfAborted();
+      if (file.isFile() && !file.isSymbolicLink() && file.name.endsWith(".json"))
+        yield join(projectPath, file.name);
+    }
+  }
+  signal?.throwIfAborted();
 }
 
 async function* cursorFiles(

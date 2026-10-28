@@ -443,7 +443,7 @@ it("reuses unchanged projections and invalidates them after fact correction, del
   analytics.prices.install({
     "model-a": { ...catalog["model-a"], output_cost_per_token: 0 },
   });
-  expect(analytics.overview(workspace, scope).summary.estimatedCost).toBe(235);
+  expect(analytics.overview(workspace, scope).summary.estimatedCost).toBe(1035);
   store.db.prepare("DELETE FROM adit_history_sessions").run();
   expect(analytics.overview(workspace, scope).summary.sessions).toBe(0);
 });
