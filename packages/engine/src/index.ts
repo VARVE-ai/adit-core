@@ -1,5 +1,5 @@
 /**
- * @varveai/adit-engine — Git operations, snapshots, detection, timeline, and environment capture.
+ * @varveai/adit-engine — Git operations and working tree detection.
  */
 
 // Git operations
@@ -33,15 +33,3 @@ export {
   type FileChange,
   type NumstatEntry,
 } from "./detector/working-tree.js";
-
-// Timeline management
-export {
-  createTimelineManager,
-  type TimelineManager,
-  type RecordEventParams,
-  type ListOptions,
-} from "./timeline/manager.js";
-
-// Environment capture & diffing
-export { captureEnvironment, type PreComputedGitState } from "./environment/capture.js";
-export { diffEnvironments } from "./environment/differ.js";

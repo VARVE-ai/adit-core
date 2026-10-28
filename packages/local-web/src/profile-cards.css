@@ -1,0 +1,316 @@
+.profile-page input[type="radio"],
+.profile-page input[type="checkbox"] {
+  accent-color: #3478db;
+}
+.profile-main {
+  padding: 20px 24px 24px;
+  border-bottom: 0;
+}
+.profile-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+  font-size: 13px;
+  font-weight: 500;
+}
+.profile-label span {
+  font-size: 12px;
+  font-weight: 400;
+  color: hsl(var(--muted-foreground));
+}
+.profile-wide-preview {
+  margin-top: 10px;
+}
+.profile-wide {
+  display: block;
+  width: 900px;
+  max-width: 100%;
+  height: auto;
+}
+.profile-small-label {
+  margin-top: 26px;
+}
+.profile-badges {
+  margin-top: 10px;
+}
+.profile-badge-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 46%) minmax(0, 1fr);
+  align-items: center;
+  gap: 18px;
+  min-height: 68px;
+  padding: 12px;
+  margin: 0;
+  border-bottom: 1px solid hsl(var(--border));
+  cursor: pointer;
+}
+.profile-badge-row:last-child {
+  border-bottom: 0;
+}
+.profile-badge-row.focused,
+.profile-badge-row:hover {
+  background: color-mix(in srgb, #5084db 5%, transparent);
+  border-radius: 6px;
+}
+.profile-badge-preview {
+  min-width: 0;
+}
+.profile-badge-preview img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+.profile-badge-row .ach-row-copy > span {
+  white-space: normal;
+}
+@media (max-width: 1100px) {
+  .profile-badge-row {
+    grid-template-columns: 16px minmax(0, 1fr);
+    gap: 8px 12px;
+  }
+  .profile-badge-row input {
+    grid-row: 1 / 3;
+  }
+  .profile-badge-row .ach-row-copy {
+    grid-column: 2;
+  }
+}
+.profile-sidebar .ach-tabs [aria-pressed="true"] {
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+}
+.profile-sidebar .ach-tabs {
+  flex-shrink: 0;
+}
+.profile-sidebar button {
+  width: auto;
+  margin: 0;
+}
+.profile-sidebar .ach-tabs button {
+  height: 28px;
+  min-height: 28px;
+  padding: 4px 9px;
+  font-size: 12px;
+}
+.profile-sidebar .ach-footer > div {
+  flex-direction: row;
+}
+.profile-inline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+}
+.profile-inline h2 {
+  margin-bottom: 0;
+  flex-shrink: 0;
+}
+.profile-inline small {
+  margin-left: auto;
+  color: hsl(var(--muted-foreground));
+}
+.profile-workspace {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  background: hsl(var(--muted) / 0.5);
+  padding: 7px 10px;
+}
+.profile-workspace strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+.profile-workspace span {
+  font:
+    12px ui-monospace,
+    monospace;
+  color: hsl(var(--muted-foreground));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.profile-workspace svg {
+  flex-shrink: 0;
+  color: hsl(var(--muted-foreground));
+}
+.profile-sidebar .ach-option small {
+  max-width: 48%;
+}
+.profile-sidebar .ach-footer {
+  border-top: 0;
+}
+.profile-sidebar pre {
+  white-space: pre;
+  max-height: 126px;
+  line-height: 20px;
+}
+.profile-examples {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  align-items: stretch;
+}
+.profile-readme-pane {
+  min-width: 0;
+  background: #fff;
+  color: #172033;
+}
+.profile-readme-pane + .profile-readme-pane {
+  border-left: 1px solid #343b45;
+}
+.profile-readme-pane.dark {
+  background: #131820;
+  color: #dce2eb;
+}
+.profile-readme-heading {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 24px;
+  border-bottom: 1px solid #e2e8f0;
+  color: #64748b;
+  font-size: 12px;
+}
+.profile-readme-heading strong {
+  color: inherit;
+  font-size: 13px;
+  font-weight: 500;
+}
+.profile-readme-heading small {
+  margin-left: auto;
+}
+.profile-readme-heading select {
+  margin-left: auto;
+  width: auto;
+  height: 26px;
+  min-height: 26px;
+  padding: 2px 6px;
+  font-size: 12px;
+  background: transparent;
+  color: inherit;
+  border: 0;
+}
+.profile-readme table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+  font-size: 12px;
+}
+.profile-readme td,
+.profile-readme th {
+  border: 1px solid #cbd5e1;
+  padding: 6px 10px;
+  text-align: left;
+}
+.profile-readme-pane.dark td,
+.profile-readme-pane.dark th {
+  border-color: #303844;
+}
+.profile-readme-pane.dark .profile-readme-heading {
+  border-color: #303844;
+  color: #a0adbf;
+}
+.profile-readme {
+  padding: 26px 30px;
+  font:
+    14px/22px -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+}
+.profile-readme h1 {
+  font-size: 28px;
+  line-height: 36px;
+  font-weight: 600;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.profile-readme h2 {
+  display: block;
+  margin-top: 24px;
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 600;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.profile-readme-pane.dark h1,
+.profile-readme-pane.dark h2 {
+  border-color: #303844;
+}
+.profile-readme p {
+  margin-top: 12px;
+}
+.profile-readme .profile-wide {
+  width: 100%;
+  margin-top: 14px;
+}
+.profile-example-plain,
+.profile-example-rich {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.profile-example-rich {
+  gap: 12px;
+  margin-top: 10px;
+}
+.profile-readme img {
+  max-width: 100%;
+  height: auto;
+}
+.profile-readme .profile-example-achievements {
+  border: 0;
+  padding: 0;
+}
+.profile-example-summary {
+  font-size: 12px;
+  color: #64748b;
+}
+.profile-readme-pane.dark .profile-example-summary {
+  color: #a0adbf;
+}
+.profile-readme ol {
+  margin: 12px 0 0;
+  padding-left: 22px;
+}
+@media (max-width: 1280px) {
+  .profile-main {
+    padding: 20px 24px;
+  }
+  .profile-label {
+    flex-wrap: wrap;
+  }
+}
+@media (max-width: 1000px) {
+  .profile-readme {
+    padding: 20px;
+  }
+  .profile-sidebar .ach-option {
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    margin-bottom: 5px;
+  }
+  .profile-sidebar .ach-option small {
+    max-width: none;
+    margin-left: 24px;
+    width: 100%;
+  }
+}
+@media (max-width: 760px) {
+  .profile-examples {
+    grid-template-columns: 1fr;
+  }
+  .profile-readme-pane + .profile-readme-pane {
+    border-left: 0;
+    border-top: 1px solid #343b45;
+  }
+}

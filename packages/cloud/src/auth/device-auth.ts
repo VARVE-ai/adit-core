@@ -24,6 +24,7 @@ export interface TokenResponse {
   tokenType?: "Bearer";
   expiresIn?: number;
   expiresAt?: string;
+  user?: { id: string; name: string | null; email: string | null; image?: string | null };
 }
 
 export interface DeviceAuthOptions {
@@ -41,11 +42,13 @@ export interface DeviceAuthOptions {
 export async function requestDeviceCode(
   serverUrl: string,
   options: DeviceAuthOptions,
+  signal?: AbortSignal,
 ): Promise<DeviceCodeResponse> {
   const url = `${normalizeServerUrl(serverUrl)}/api/auth/device`;
 
   try {
     const response = await fetch(url, {
+      signal,
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -86,13 +89,16 @@ export async function pollForToken(
   deviceCode: string,
   intervalMs = 5000,
   timeoutMs = 300_000, // 5 minutes
+  signal?: AbortSignal,
 ): Promise<TokenResponse> {
   const url = `${normalizeServerUrl(serverUrl)}/api/auth/device/token`;
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
+    signal?.throwIfAborted();
     try {
       const response = await fetch(url, {
+        signal,
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ deviceCode }),
@@ -104,7 +110,7 @@ export async function pollForToken(
 
       // 428 = authorization_pending (standard device flow response)
       if (response.status === 428) {
-        await sleep(intervalMs);
+        await sleep(intervalMs, signal);
         continue;
       }
 
@@ -132,9 +138,10 @@ export async function pollForToken(
         body,
       );
     } catch (error) {
+      signal?.throwIfAborted();
       if (error instanceof CloudApiError) throw error;
       // Network errors during polling — wait and retry
-      await sleep(intervalMs);
+      await sleep(intervalMs, signal);
     }
   }
 
@@ -144,6 +151,11 @@ export async function pollForToken(
   );
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); reject(signal?.reason); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 }

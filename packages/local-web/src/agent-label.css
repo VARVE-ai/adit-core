@@ -1,0 +1,11 @@
+.agent-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: hsl(var(--foreground));
+  white-space: nowrap;
+  vertical-align: baseline;
+}
+.agent-label > svg {
+  flex-shrink: 0;
+}

@@ -8,8 +8,7 @@
 import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
-  openDatabase,
-  closeDatabase,
+  LocalStore,
   type AditConfig,
 } from "@varveai/adit-core";
 import {
@@ -205,7 +204,8 @@ export async function projectLinkCliHandler(opts: LinkOptions): Promise<LinkResu
   }
 
   // Open database and run the link flow
-  const db = openDatabase(config.dbPath);
+  const store = new LocalStore();
+  const db = store.db;
   try {
     const result = await linkCommand(
       db,
@@ -265,6 +265,6 @@ export async function projectLinkCliHandler(opts: LinkOptions): Promise<LinkResu
     }
     return null;
   } finally {
-    closeDatabase(db);
+    store.close();
   }
 }

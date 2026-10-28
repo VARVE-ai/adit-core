@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { codexAdapter, resolveAditHookBinary } from "@varveai/adit-hooks/adapters";
 import { buildCloudHookCommand } from "../hook-post-script.js";
 
 const CODEX_CLOUD_HOOK_MARKER = "from=adit-cloud-codex-env";
@@ -21,19 +20,6 @@ export interface InstalledHooks {
   cleanup: () => void;
 }
 
-export async function ensurePersistentCodexHooksInstalled(opts: {
-  cwd: string;
-  aditHookBinary?: string;
-}): Promise<boolean> {
-  const validation = await codexAdapter.validateInstallation(opts.cwd);
-  if (validation.valid) return false;
-
-  await codexAdapter.installHooks(
-    opts.cwd,
-    opts.aditHookBinary ?? resolveAditHookBinary(),
-  );
-  return true;
-}
 
 export function installCodexHooks(opts: {
   cwd: string;

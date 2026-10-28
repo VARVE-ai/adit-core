@@ -7,7 +7,11 @@
  * the ADIT timeline.
  */
 
-import { Command } from "commander";
+import { Command, Option } from "commander";
+import { localLoginStartupEnabled } from "@varveai/adit-core";
+import { serveCommand, startDaemon, stopDaemon, daemonStatus } from "./local/daemon.js";
+import { registerPrCommand } from "./commands/pr.js";
+import { registerHistoryCommands } from "./commands/history.js";
 import { initCommand } from "./commands/init.js";
 import { listCommand } from "./commands/list.js";
 import { showCommand } from "./commands/show.js";
@@ -77,17 +81,40 @@ export function createProgram(): Command {
   // Set before any subcommand exists so every subcommand inherits it.
   program.configureOutput({ outputError: (text, write) => write(formatParseError(text)) });
   configureTopLevelHelp(program);
+  registerPrCommand(program);
+  registerHistoryCommands(program);
+
+  program.command("server").alias("serve").description("Open the local web UI, starting the background service if needed")
+    .option("--port <port>", "Local port for a new daemon")
+    .option("--no-browser", "Print the address without opening a browser")
+    .action(serveCommand);
+  const restartService = async () => {
+    await stopDaemon();
+    console.log((await startDaemon()).url);
+  };
+  program.command("restart").description("Restart the local background service").action(restartService);
+  const daemon = program.command("daemon").description("Manage the independent local collection service");
+  daemon.command("start")
+    .addOption(new Option("--on-login").hideHelp())
+    .action(async (options) => {
+      if (options.onLogin && !localLoginStartupEnabled()) return;
+      console.log((await startDaemon()).url);
+    });
+  daemon.command("status").action(async () => { const s = await daemonStatus(); console.log(s ? `Running: ${s.url} (PID ${s.pid})` : "Stopped"); });
+  daemon.command("stop").action(async () => { await stopDaemon(); console.log("Stopped"); });
+  daemon.command("restart").description("Restart the local background service (same as adit restart)").action(restartService);
 
   program
     .command("init")
-    .description("Initialize ADIT in the current project")
+    .description("Choose Git repositories and native session sources, then start organizing")
+    .option("-y, --yes", "Accept detected selections and start organizing without interactive prompts")
     .option(
       "-p, --platform <platform>",
-      "Target platform (claude-code, opencode, cursor, codex, gemini)",
+      "Add a native history source (claude, codex, cursor-ide, opencode, gemini, etc.)",
     )
     .option(
       "-f, --force",
-      "Force reinstall hooks (removes existing ADIT hooks first)",
+      "Compatibility flag; refresh registration while preserving identity and settings",
     )
     .option(
       "--single-repo",
@@ -95,7 +122,7 @@ export function createProgram(): Command {
     )
     .option(
       "--multi-repo",
-      "Include every child Git repository; on re-init also apply repository list changes without asking",
+      "Preselect all discovered Git repositories; use --yes to skip interactive confirmation",
     )
     .option(
       "--repos <paths>",
@@ -103,7 +130,7 @@ export function createProgram(): Command {
     )
     .option(
       "--detach",
-      "Deprecated alias: init always creates an independent project without changing its parent",
+      "Retired: maintain project directories in Settings",
     )
     .option(
       "--absorb",
@@ -112,6 +139,7 @@ export function createProgram(): Command {
     .action(withUpdateWarning("init", (opts) =>
       initCommand({
         cwd: process.cwd(),
+        yes: opts.yes,
         platform: opts.platform,
         force: opts.force,
         singleRepo: opts.singleRepo,
@@ -127,15 +155,15 @@ export function createProgram(): Command {
   program
     .command("timeline")
     .aliases(["list", "ls"])
-    .description("Show timeline entries")
+    .description("List collected native sessions")
     .option("-l, --limit <n>", "Number of entries to show", "20")
-    .option("-a, --actor <actor>", "Filter by actor (assistant|user|tool)")
-    .option("-t, --type <type>", "Filter by event type")
+    .option("-a, --actor <actor>", "Retired event filter; use adit history turn")
+    .option("-t, --type <type>", "Retired event filter; use adit history turn")
     .option("-q, --query <text>", "Search by text")
     .option("-e, --expand", "Show expanded summaries")
     .option(
       "-s, --sort <field>",
-      "Sort by field: ACTOR or TIME (default: TIME)",
+      "Sort by TIME; legacy ACTOR sorting is unsupported",
     )
     .option("--json", "Output as JSON")
     .action((opts) =>
@@ -153,16 +181,16 @@ export function createProgram(): Command {
   program
     .command("show <id>")
     .usage("<id>")
-    .description("Show full event details")
+    .description("Show a collected native session or turn by its exact ID")
     .action((id) => showCommand(id));
 
   // Search
   program
     .command("search <query>")
-    .description("Search events by text")
+    .description("Search collected native sessions by text")
     .option("-l, --limit <n>", "Max results", "20")
     .option("-a, --actor <actor>", "Filter by actor")
-    .option("-t, --type <type>", "Filter by event type")
+    .option("-t, --type <type>", "Retired event filter; use adit history turn")
     .option("--from <date>", "Start date (ISO 8601)")
     .option("--to <date>", "End date (ISO 8601)")
     .option("--branch <branch>", "Filter by git branch")
@@ -211,7 +239,7 @@ export function createProgram(): Command {
     ));
 
   // Export commands
-  const exportCmd = program.command("export").description("Export event data");
+  const exportCmd = program.command("export").description("Export collected native history");
 
   exportCmd
     .command("event <id>")
@@ -229,7 +257,7 @@ export function createProgram(): Command {
     .option("--from <date>", "Start date filter")
     .option("--to <date>", "End date filter")
     .option("--include-diffs", "Include full diffs (jsonl format only)")
-    .option("--include-env", "Include environment snapshots (jsonl format only)")
+    .option("--include-env", "Retired: environment snapshots are not collected")
     .option("--gzip", "Compress output with gzip")
     .action((sessionId, opts) =>
       exportSessionCommand(sessionId, {
@@ -254,7 +282,7 @@ export function createProgram(): Command {
   registerHookCommands(
     program
       .command("hook")
-      .description("Manage platform hook integrations"),
+      .description("Inspect or remove retired collection hooks"),
   );
 
   program
@@ -268,6 +296,11 @@ export function createProgram(): Command {
 
   // Cloud sync
   const cloudCmd = program.command("cloud").description("Cloud sync commands");
+  cloudCmd.hook("preAction", async (_command, action) => {
+    // Local sync and coding commands need the collector; diagnostics and remote
+    // queries must not change the local service's running/stopped state.
+    if (["sync", "claude", "codex"].includes(action.name())) await startDaemon();
+  });
   registerCloudTaskCommands(cloudCmd);
   registerCloudHistoryCommands(cloudCmd);
   registerCloudMemoryCommands(cloudCmd);
@@ -349,7 +382,7 @@ export function createProgram(): Command {
 
   debugDbCmd
     .command("clear-events")
-    .description("Delete all local events, sessions, diffs, and env snapshots")
+    .description("Retired: manage native turns and project deletion in ADIT Local")
     .option("-y, --yes", "Skip confirmation")
     .option("--json", "Output as JSON")
     .action((opts) => dbClearEventsCommand({ yes: opts.yes, json: opts.json }));
@@ -386,7 +419,7 @@ export function createProgram(): Command {
   // Snapshot — diff display and environment snapshot features
   const snapshotCmd = program
     .command("snapshot")
-    .description("Diff and environment snapshot commands");
+    .description("Retired per-turn snapshots (Git commit diffs remain available)");
 
   snapshotCmd
     .command("diff <id>")
@@ -446,7 +479,7 @@ export function createProgram(): Command {
   // TUI — interactive terminal interface
   program
     .command("tui")
-    .description("Launch the interactive terminal UI")
+    .description("Open the shared local workbench")
     .action(() => launchTui());
 
   registerNestedHelpCommand(program);
@@ -457,7 +490,7 @@ export function createProgram(): Command {
 function registerHookCommands(hookCmd: Command): void {
   hookCmd
     .command("install [platform]")
-    .description("Install ADIT hooks for a platform")
+    .description("Retired: use native collection in ADIT Local")
     .option("--json", "Output as JSON")
     .action(withUpdateWarning("hook.install", (platform, opts) =>
       pluginInstallCommand(platform, { json: opts.json }),
@@ -465,9 +498,9 @@ function registerHookCommands(hookCmd: Command): void {
 
   hookCmd
     .command("uninstall [platform]")
-    .description("Remove ADIT hooks for a platform")
+    .description("Remove legacy collection hooks; preserve Cloud relay and user hooks")
     .option("-a, --all", "Uninstall hooks for all installed platforms")
-    .option("--clean", "Also remove the .adit/ data directory")
+    .option("--clean", "Retired: use adit uninstall for project-scoped deletion")
     .option("--json", "Output as JSON")
     .action((platform, opts) =>
       pluginUninstallCommand(platform, {
@@ -485,7 +518,7 @@ function registerHookCommands(hookCmd: Command): void {
 
   hookCmd
     .command("validate [platform]")
-    .description("Validate platform hook installation")
+    .description("Inspect legacy collection hooks")
     .option("--json", "Output as JSON")
     .action(withUpdateWarning("hook.validate", (platform, opts) =>
       pluginValidateCommand(platform, { json: opts.json }),
@@ -506,21 +539,25 @@ Options:
   -h, --help                 display help for command
 
 Commands:
-  init [options]             Initialize ADIT in the current project
+  server|serve [options]     Open the local web UI (starts the service if needed)
+  restart                    Restart the local background service
+  daemon                     Start, stop or inspect the background service
+  init [options]             Register this Git project in ADIT Local
   uninstall [options]        Uninstall ADIT from the current project
 
   status [options]           Show project status
-  timeline|list [options]    Show local timeline entries
-  show <id>                  Show full event details
-  search [options] <query>   Search timeline events
+  timeline|list [options]    List collected native sessions
+  show <id>                  Show a collected native session or turn by its exact ID
+  search [options] <query>   Search collected native sessions
+  history                    Search collected local sessions and commits across Agents
 
-  snapshot                   Show event diffs and environment snapshots
+  snapshot                   Explain retired per-turn snapshots
   cloud                      Sync and connect with adit-cloud
-  hook                       Manage AI platform hook integrations
-  export                     Export event or session data
+  hook                       Inspect/remove retired collection hooks
+  export                     Export native turn or session data
 
   doctor [options]           Validate installation health
-  tui                        Launch the interactive terminal UI
+  tui                        Open the shared local workbench
   update [options]           Update ADIT
   debug                      Debug and maintenance commands
   help [command...]          display help for command

@@ -10,3 +10,7 @@ onlyBuiltDependencies:
 # not run on install (it requires a native toolchain).
 neverBuiltDependencies:
   - better-sqlite3
+# Shields uses bundled font data; defer the dependency's unused Node file loaders
+# so importing badge-maker in the browser does not call util.promisify.
+patchedDependencies:
+  char-width-table-consumer@1.0.0: patches/char-width-table-consumer@1.0.0.patch

@@ -6,7 +6,7 @@
  */
 
 import type { CloudCredentials } from "../auth/credentials.js";
-import { normalizeServerUrl } from "@varveai/adit-core";
+import { localDataDir, normalizeServerUrl } from "@varveai/adit-core";
 import {
   clearAuthFailure,
   isTokenExpired,
@@ -16,6 +16,7 @@ import {
   saveCredentials,
   withCredentialsRefreshLock,
 } from "../auth/credentials.js";
+import { sameCredential } from "../auth/credential-database.js";
 import { CloudAuthError, CloudNetworkError, CloudApiError } from "./errors.js";
 
 const DEFAULT_MAX_RETRIES = 5;
@@ -26,6 +27,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_RATE_LIMIT_RETRIES = 3;
 
 export interface CloudClientOptions {
+  credentialsDirectory?: string;
   /** Per-request timeout in milliseconds (default: 30s) */
   timeoutMs?: number;
   /**
@@ -67,6 +69,7 @@ export class CloudClient {
   private readonly serverUrl: string;
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
+  private readonly credentialsDirectory: string;
 
   constructor(
     serverUrl: string,
@@ -75,6 +78,7 @@ export class CloudClient {
   ) {
     this.serverUrl = normalizeServerUrl(serverUrl);
     this.credentials = credentials;
+    this.credentialsDirectory = options?.credentialsDirectory ?? localDataDir();
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
   }
@@ -131,7 +135,7 @@ export class CloudClient {
             retry.status,
           );
         }
-        clearAuthFailure();
+        clearAuthFailure(this.credentialsDirectory, this.credentials);
         return headersToRecord(retry.headers);
       }
       this.recordRequestAuthFailure(response.status, response.statusText);
@@ -147,7 +151,7 @@ export class CloudClient {
       );
     }
 
-    clearAuthFailure();
+    clearAuthFailure(this.credentialsDirectory, this.credentials);
     return headersToRecord(response.headers);
   }
 
@@ -357,7 +361,7 @@ export class CloudClient {
           );
         }
 
-        clearAuthFailure();
+        clearAuthFailure(this.credentialsDirectory, this.credentials);
         if (response.status === 204) {
           return undefined as T;
         }
@@ -393,7 +397,10 @@ export class CloudClient {
 
     await withCredentialsRefreshLock(async () => {
       const original = this.credentials;
-      const stored = loadCredentials();
+      const stored = loadCredentials(this.credentialsDirectory);
+      if (!stored || !sameCredential(stored, original)) {
+        throw new CloudAuthError("Cloud account changed. Please sign in again.");
+      }
       if (
         stored &&
         stored.authType !== "token" &&
@@ -431,8 +438,8 @@ export class CloudClient {
             message,
             status: response.status,
             code,
-          });
-          throw new CloudAuthError(message);
+          }, this.credentialsDirectory, this.credentials);
+          throw new CloudAuthError(message, { status: response.status, code });
         }
 
         const tokenData = asRecord(data) as TokenRefreshResponse;
@@ -440,11 +447,16 @@ export class CloudClient {
         const refreshToken = readString(tokenData.refreshToken);
         if (!accessToken || !refreshToken) {
           const message = "Token refresh failed: response missing accessToken or refreshToken.";
-          recordAuthFailureUnlocked({ stage: "refresh", message, code: "malformed_refresh_response" });
+          recordAuthFailureUnlocked({ stage: "refresh", message, code: "malformed_refresh_response" }, this.credentialsDirectory, this.credentials);
           throw new CloudAuthError(message);
         }
 
-        const expiresAt = resolveExpiresAt(tokenData);
+        let expiresAt: string;
+        try { expiresAt = resolveExpiresAt(tokenData); }
+        catch (error) {
+          recordAuthFailureUnlocked({ stage: "refresh", message: (error as Error).message, code: "malformed_refresh_response" }, this.credentialsDirectory, this.credentials);
+          throw error;
+        }
         this.credentials = {
           ...this.credentials,
           accessToken,
@@ -452,16 +464,17 @@ export class CloudClient {
           clientId: readString(tokenData.clientId) ?? this.credentials.clientId,
           expiresAt,
           lastAuthFailure: undefined,
+          authStatus: "valid",
         };
 
-        saveCredentials(this.credentials);
+        saveCredentials(this.credentials, this.credentialsDirectory);
       } catch (error) {
         if (error instanceof CloudAuthError) throw error;
         const message = `Token refresh failed: ${error instanceof Error ? error.message : String(error)}`;
-        recordAuthFailureUnlocked({ stage: "refresh", message });
+        recordAuthFailureUnlocked({ stage: "refresh", message }, this.credentialsDirectory, original);
         throw new CloudAuthError(message);
       }
-    });
+    }, this.credentialsDirectory);
   }
 
   private sameServer(serverUrl: string): boolean {
@@ -474,7 +487,7 @@ export class CloudClient {
       message: `Authentication failed: ${status} ${statusText}`,
       status,
       code,
-    });
+    }, this.credentialsDirectory, this.credentials);
   }
 }
 
@@ -491,8 +504,6 @@ function resolveExpiresAt(data: TokenRefreshResponse): string {
   }
 
   const message = "Token refresh failed: response missing valid expiresAt or expiresIn.";
-  // Unlocked: resolveExpiresAt is only called from refreshToken, inside the lock.
-  recordAuthFailureUnlocked({ stage: "refresh", message, code: "malformed_refresh_response" });
   throw new CloudAuthError(message);
 }
 

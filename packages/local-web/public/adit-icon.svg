@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>ADIT Local</title>
+  <rect width="64" height="64" rx="16" fill="#111111" />
+  <g
+    fill="#ffffff"
+    font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
+    font-size="32"
+    font-weight="800"
+    text-anchor="middle"
+    dominant-baseline="middle"
+  >
+    <text x="20" y="33">&gt;</text>
+    <text x="44" y="33">&lt;</text>
+  </g>
+</svg>

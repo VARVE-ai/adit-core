@@ -2,10 +2,6 @@ import fs from "node:fs";
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
-import {
-  claudeCodeAdapter,
-  resolveAditHookBinary,
-} from "@varveai/adit-hooks/adapters";
 import { buildCloudHookCommand, quoteHookCommandArg } from "../hook-post-script.js";
 
 const EVENTS = [
@@ -68,19 +64,6 @@ export interface InstalledHooks {
   cleanup: () => void;
 }
 
-export async function ensurePersistentClaudeHooksInstalled(opts: {
-  cwd: string;
-  aditHookBinary?: string;
-}): Promise<boolean> {
-  const validation = await claudeCodeAdapter.validateInstallation(opts.cwd);
-  if (validation.valid) return false;
-
-  await claudeCodeAdapter.installHooks(
-    opts.cwd,
-    opts.aditHookBinary ?? resolveAditHookBinary(),
-  );
-  return true;
-}
 
 export async function cleanupStaleClaudeCloudSettings(opts: {
   cwd: string;

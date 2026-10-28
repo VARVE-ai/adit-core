@@ -1,3 +1,4 @@
+import { cleanupLegacyHooks } from "./legacy-hook-cleanup.js";
 import { randomUUID } from "node:crypto";
 import { projectNameFromRoot } from "@varveai/adit-core";
 import {
@@ -13,11 +14,9 @@ import {
 } from "./cli-agent/codex/codex-binary-resolver.js";
 import { CodexRelayEventDeduper, CodexTranscriptSync } from "./cli-agent/codex/codex-transcript-sync.js";
 import {
-  ensurePersistentCodexHooksInstalled,
   installCodexHooks,
   type InstalledHooks,
 } from "./cli-agent/codex/hooks-bootstrap.js";
-import { ensureConnectedPlatformsRecorded } from "./connected-platforms.js";
 import { startCliAgentHookServer, type HookServer } from "./cli-agent/hook-server.js";
 import { CodexLocalSessionLister, LocalSessionsReporter } from "./cli-agent/local-sessions.js";
 import {
@@ -39,7 +38,7 @@ import {
   trimRelayEventQueue,
   type InFlightReliableEventBatch,
 } from "./cli-agent/reliable-event-queue.js";
-import { loadInitializedProjectConfig } from "./project-initialization.js";
+import { loadProjectContext } from "./project-context.js";
 import type {
   CliAgentRelayEvent,
   PromptImageAttachment,
@@ -355,8 +354,9 @@ async function drainCommandQueue(input: {
 }
 
 export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void> {
-  const config = loadInitializedProjectConfig("adit cloud codex");
+  const config = loadProjectContext("adit cloud codex");
   if (!config) return;
+  for (const error of cleanupLegacyHooks(config.projectRoot).errors) console.error(error);
 
   const credentials = loadCredentials();
   if (!credentials) {
@@ -452,24 +452,6 @@ export async function cloudCodexCommand(opts?: CloudCodexOptions): Promise<void>
   const enqueueEvents = (events: CliAgentRelayEvent[]): void => {
     for (const event of events) enqueueEvent(event);
   };
-
-  try {
-    // Self-heal only repairs platforms the user connected; a project where
-    // Codex was never connected is left untouched.
-    const connectedPlatforms = await ensureConnectedPlatformsRecorded(config.projectRoot);
-    if (connectedPlatforms.includes("codex")) {
-      const installedPersistentHooks = await ensurePersistentCodexHooksInstalled({
-        cwd: config.projectRoot,
-      });
-      if (installedPersistentHooks) {
-        notices.line("Reinstalled ADIT Codex hooks for local timeline tracking.");
-      }
-    }
-  } catch (error) {
-    notices.line(
-      `warning: failed to install persistent ADIT Codex hooks: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
 
   try {
     hookServer = await startCliAgentHookServer();

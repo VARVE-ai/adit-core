@@ -1,0 +1,195 @@
+import {openSync,readSync,closeSync,fstatSync,lstatSync} from "node:fs";
+import {createHash} from "node:crypto";
+import {basename,dirname,join,resolve} from "node:path";
+import {HistoryFormatError,record,string} from "./types.js";
+import {parseCodexRows,codexContinuationRoot,isCodexInternalReview} from "./codex.js";
+import {sourceFiles,insideDirectory} from "./sources.js";
+import {trackSource,sourceStamp,trackSourceSnapshot} from "./source-checkpoints.js";
+import type Database from "better-sqlite3";
+import {isCompactedReply} from "./message-semantics.js";
+import {ATTRIBUTION_RESULT_TABLES} from "./attribution-schema.js";
+import {Decompress} from "fzstd";
+
+/** Upgrade from native headers only; unchanged coding transcripts keep their checkpoints and edits. */
+export function refreshCodexSources(db:Database.Database):number {
+ const candidates=db.prepare(`SELECT s.provider,s.id,h.path FROM adit_history_sessions s
+   JOIN adit_history_sources h ON h.provider=s.provider AND h.session_id=s.id
+   WHERE s.provider IN ('codex','traex','augure-code') AND coalesce(json_extract(s.metadata_json,'$.nativeSourceVersion'),0)<1`).all() as {provider:string;id:string;path:string}[];
+ const checked=new Set<string>();let removed=0;
+ for(const s of candidates){
+  const key=`${s.provider}\0${s.id}`;if(checked.has(key))continue;
+  const suffix=`#${encodeURIComponent(s.id)}`,path=s.path.endsWith(suffix)?s.path.slice(0,-suffix.length):s.path;
+  let meta:Record<string,unknown>|undefined;
+  try {
+   for(const row of codexFileRows(path)){
+    // A missing, replaced or unreadable source cannot authorize removal of archived history.
+    if(row.type==='session_meta' && parseCodexRows([row],undefined,path).id===s.id)meta=record(row.payload);
+    break;
+   }
+  }catch{continue;}
+  if(!meta)continue;
+  const source=meta.source;
+  db.transaction(()=>{
+   if(isCodexInternalReview(source)){
+    // Invalidate only affected derived commit results. Collection will reanalyse
+    // those commits with the remaining real sessions; Git facts stay intact.
+    const commits=db.prepare(`SELECT run_id,repository,sha FROM adit_attribution_commits WHERE submit_provider=? AND submit_session_id=?
+      UNION SELECT run_id,repository,sha FROM adit_attribution_writers WHERE provider=? AND session_id=?
+      UNION SELECT run_id,repository,sha FROM adit_attribution_alternatives WHERE (provider=? AND session_id=?) OR (writer_provider=? AND writer_session_id=?)
+      UNION SELECT run_id,repository,sha FROM adit_attribution_turns WHERE provider=? AND session_id=?`)
+      .all(s.provider,s.id,s.provider,s.id,s.provider,s.id,s.provider,s.id,s.provider,s.id) as {run_id:string;repository:string;sha:string}[];
+    for(const commit of commits)for(const table of ATTRIBUTION_RESULT_TABLES)
+      db.prepare(`DELETE FROM adit_attribution_${table} WHERE run_id=? AND repository=? AND sha=?`).run(commit.run_id,commit.repository,commit.sha);
+    for(const run of new Set(commits.map(c=>c.run_id)))db.prepare(`UPDATE adit_attribution_runs SET
+      commit_count=(SELECT count(*) FROM adit_attribution_commits WHERE run_id=?),
+      completed_count=(SELECT count(*) FROM adit_attribution_commits WHERE run_id=?) WHERE id=?`).run(run,run,run);
+    // Transcript, usage, turns and inspection findings cascade together. Native files are never changed.
+    removed+=db.prepare('DELETE FROM adit_history_sessions WHERE provider=? AND id=?').run(s.provider,s.id).changes;
+   }else{
+    db.prepare("UPDATE adit_history_sessions SET metadata_json=json_set(coalesce(metadata_json,'{}'),'$.nativeSourceVersion',1,'$.nativeSource',json(?)) WHERE provider=? AND id=?")
+      .run(JSON.stringify(source??null),s.provider,s.id);
+   }
+  })();
+  checked.add(key);
+ }
+ return removed;
+}
+
+/** One-time native-evidence upgrade. IDs, bodies, edits, usage and source checkpoints stay intact. */
+export function refreshCodexContexts(db:Database.Database, options:{provider?:string;scopes?:string[];signal?:AbortSignal}={}):number {
+ if(options.provider && !['codex','traex','augure-code'].includes(options.provider))return 0;
+ const candidates=db.prepare(`SELECT s.provider,s.id,s.cwd,h.path FROM adit_history_sessions s
+   JOIN adit_history_sources h ON h.provider=s.provider AND h.session_id=s.id
+   WHERE s.provider IN ('codex','traex','augure-code') AND coalesce(json_extract(s.metadata_json,'$.nativeContextVersion'),0)<1`).all() as {provider:string;id:string;cwd:string;path:string}[];
+ let changed=0;
+ for(const s of candidates){
+  if(options.provider && s.provider!==options.provider || options.scopes && !options.scopes.some(scope=>insideDirectory(scope,s.cwd)))continue;
+  options.signal?.throwIfAborted();
+  const path=s.path.endsWith(`#${s.id}`)?s.path.slice(0,-s.id.length-1):s.path;
+  try{
+   let candidate:Record<string,unknown>|undefined;const keys=new Set<string>();
+   for(const row of codexFileRows(path,options.signal)){
+    if(row.type==='response_item')candidate=row;
+    if(isCompactedReply(row,candidate)){const key=string(record(candidate?.payload).id);if(key)keys.add(key);}
+   }
+   changed+=db.transaction(()=>{
+    let count=0;
+    for(const key of keys)count+=db.prepare(`UPDATE adit_history_messages SET extra_json=json_set(extra_json,'$.contextKind','compaction')
+      WHERE provider=? AND session_id=? AND source_key=? AND coalesce(json_extract(extra_json,'$.contextKind'),'')<>'compaction'`).run(s.provider,s.id,key).changes;
+    db.prepare("UPDATE adit_history_sessions SET metadata_json=json_set(coalesce(metadata_json,'{}'),'$.nativeContextVersion',1),transcript_revision=transcript_revision+? WHERE provider=? AND id=?").run(count?1:0,s.provider,s.id);
+    return count;
+   })();
+  }catch{options.signal?.throwIfAborted();/* Unavailable or changing sources are retried at the next collection. */}
+ }
+ return changed;
+}
+
+/** Correct old page identities using only the native header, without replaying bodies. */
+export function refreshCodexContinuations(db:Database.Database):number {
+ const candidates=db.prepare(`SELECT s.provider,s.id,s.parent_id,s.metadata_json,h.path FROM adit_history_sessions s
+   JOIN adit_history_sources h ON h.provider=s.provider AND h.session_id=s.id
+   WHERE s.provider IN ('codex','traex','augure-code') AND s.relationship='fork'
+   AND json_extract(s.metadata_json,'$.historyBase.thread_id') IS NOT NULL`).all() as {provider:string;id:string;parent_id:string;metadata_json:string;path:string}[];
+ let changed=0;
+ for(const s of candidates){
+  const path=s.path.endsWith(`#${s.id}`)?s.path.slice(0,-s.id.length-1):s.path;
+  try {
+   for(const row of codexFileRows(path)){
+    if(row.type!=="session_meta")break;
+    const meta=record(row.payload);
+    const root=codexContinuationRoot(meta,s.id);if(!root)break;
+    db.transaction(()=>{
+     db.prepare("UPDATE adit_history_sessions SET relationship='continuation',parent_id=?,metadata_json=? WHERE provider=? AND id=?")
+       .run(root,JSON.stringify({...JSON.parse(s.metadata_json),nativeSessionId:root}),s.provider,s.id);
+     db.prepare("UPDATE adit_history_relations SET kind='continuation',parent_id=? WHERE provider=? AND session_id=?").run(root,s.provider,s.id);
+    })();changed++;break;
+   }
+  } catch { /* Missing or unreadable native evidence must not merge archived sessions. */ }
+ }
+ return changed;
+}
+
+// Bound a single record rather than the total session: long sessions can exceed 128 MiB.
+export function* codexFileRows(path:string,signal?:AbortSignal,offset=0,ignoreInvalid=false):Generator<Record<string,unknown>>{
+ trackSource(path);
+ signal?.throwIfAborted();if(lstatSync(path).isSymbolicLink())throw new HistoryFormatError("Symbolic sources are not collected");
+ const fd=openSync(path,"r"),chunk=Buffer.allocUnsafe(1024*1024);let pending=Buffer.alloc(0),line=0;
+ const decoded:Buffer[]=[];
+ const decoder=path.endsWith(".zst")?new Decompress(bytes=>decoded.push(Buffer.from(bytes))):undefined;
+ const parse=(bytes:Buffer)=>{line++;const text=bytes.toString("utf8").replace(/^\uFEFF/,"").trim();if(!text)return undefined;let value:unknown;try{value=JSON.parse(text);}catch{if(ignoreInvalid)return;throw new HistoryFormatError(`Invalid JSON record at line ${line}`);}if(!value||typeof value!=="object"||Array.isArray(value)){if(ignoreInvalid)return;throw new HistoryFormatError(`Invalid JSON record at line ${line}`);}return value as Record<string,unknown>;};
+ try{
+  const before=fstatSync(fd);if(!before.isFile())throw new HistoryFormatError("Source is not a regular file");
+  if(decoder&&offset)throw new HistoryFormatError("Compressed rollouts require a full read");
+  const digest=createHash("sha256");
+  for(let prefix=0;prefix<offset;){signal?.throwIfAborted();const size=readSync(fd,chunk,0,Math.min(chunk.length,offset-prefix),prefix);if(!size)throw new HistoryFormatError("Source was truncated while reading");digest.update(chunk.subarray(0,size));prefix+=size;}
+  let position=offset,done=false;
+  while(!done){signal?.throwIfAborted();const size=readSync(fd,chunk,0,Math.min(chunk.length,Math.max(0,before.size-position)),position);position+=size;done=position>=before.size||!size;
+   if(size)digest.update(chunk.subarray(0,size));
+   // The decoder retains incomplete compressed blocks; the next read reuses chunk.
+   if(decoder)decoder.push(Buffer.from(chunk.subarray(0,size)),done);else if(size)decoded.push(chunk.subarray(0,size));
+   for(const bytes of decoded.splice(0)) {const data=pending.length?Buffer.concat([pending,bytes]):bytes;let start=0,end:number;
+   while((end=data.indexOf(10,start))!==-1){if(end-start>64*1024*1024)throw new HistoryFormatError("Codex record exceeds the 64 MiB record limit");const row=parse(data.subarray(start,end));if(row)yield row;start=end+1;}
+   pending=Buffer.from(data.subarray(start));if(pending.length>64*1024*1024)throw new HistoryFormatError("Codex record exceeds the 64 MiB record limit");
+   }
+  }
+  if(pending.length){let valid=true;try{JSON.parse(pending.toString("utf8"));}catch{valid=false;}if(valid){const row=parse(pending);if(row)yield row;}}
+  const expected=digest.digest("hex");
+  const validate=()=>{
+   signal?.throwIfAborted();
+   if(decoder)return false;
+   let check:number|undefined;
+   try{
+    if(lstatSync(path).isSymbolicLink())return false;
+    check=openSync(path,"r");const current=fstatSync(check);
+    if(current.dev!==before.dev||current.ino!==before.ino||current.birthtimeMs!==before.birthtimeMs||current.size<before.size)return false;
+    const hash=createHash("sha256"),buffer=Buffer.allocUnsafe(1024*1024);
+    for(let cursor=0;cursor<before.size;){signal?.throwIfAborted();const size=readSync(check,buffer,0,Math.min(buffer.length,before.size-cursor),cursor);if(!size)return false;hash.update(buffer.subarray(0,size));cursor+=size;}
+    return hash.digest("hex")===expected;
+   }catch{signal?.throwIfAborted();return false;}finally{if(check!==undefined)closeSync(check);}
+  };
+  const after=fstatSync(fd);if(position<before.size||((before.size!==after.size||before.mtimeMs!==after.mtimeMs)&&!validate()))throw new HistoryFormatError("Source changed while reading; retry on the next collection");
+  if(!decoder)trackSourceSnapshot(path,validate);
+ }finally{closeSync(fd);}
+}
+export async function readCodexSession(path:string,provider:string,root:string,signal?:AbortSignal){
+ let parent="",nativeId="";
+ for(const row of codexFileRows(path,signal))if(row.type==="session_meta"){const meta=record(row.payload);if(isCodexInternalReview(meta.source))return [];nativeId=string(meta.id);parent=string(meta.forked_from_id)||string(record(record(record(meta.source).subagent).thread_spawn).parent_thread_id);break;}
+ let turns:Set<string>|undefined;
+ if(parent)for await(const candidate of sourceFiles(provider,root,signal)){
+  if(candidate===path||!basename(candidate).includes(parent))continue;
+  let match=false;const found=new Set<string>();
+  for(const row of codexFileRows(candidate,signal)){
+   const payload=record(row.payload);if(row.type==="session_meta"&&!match){if(payload.id!==parent)break;match=true;}
+   if(row.type==="turn_context"&&string(payload.turn_id))found.add(string(payload.turn_id));
+  }
+  if(match){turns=found;break;}
+ }
+ const session=parseCodexRows(codexFileRows(path,signal),turns,path,provider);session.provider=provider;
+ session.metadata={...session.metadata,title:await codexThreadTitle(path,string(session.metadata?.nativeSessionId)||nativeId,signal)};
+ return [session];
+}
+
+const titleIndexes=new Map<string,{stamp:string;titles:Map<string,string>}>();
+/** The native index lives beside sessions/ and archived_sessions/, including custom homes. */
+export async function codexThreadTitle(path:string,id:string,signal?:AbortSignal):Promise<string>{
+ for(let dir=dirname(resolve(path));dir!==dirname(dir);dir=dirname(dir)){
+  if(!["sessions","archived_sessions"].includes(basename(dir)))continue;
+  const index=join(dirname(dir),"session_index.jsonl");
+  trackSource(index);signal?.throwIfAborted();
+  const stamp=sourceStamp(index);
+  if(stamp==="missing"){titleIndexes.delete(index);return "";}
+  let cached=titleIndexes.get(index);
+  if(cached?.stamp!==stamp){
+   const titles=new Map<string,string>();
+   for(const row of codexFileRows(index,signal,0,true)){
+    signal?.throwIfAborted();
+    // A partially written or malformed index entry must not hide other titles.
+    if(string(row.id)&&typeof row.thread_name==="string")titles.set(string(row.id),row.thread_name.trim());
+   }
+   if(titleIndexes.size>=16)titleIndexes.clear();
+   cached={stamp,titles};titleIndexes.set(index,cached);
+  }
+  return cached.titles.get(id)||"";
+ }
+ return "";
+}

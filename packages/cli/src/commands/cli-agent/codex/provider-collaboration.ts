@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { projectRuntimeDirectory, resolveLocalProject } from "@varveai/adit-core";
 import type {
   AppendSessionContextInput,
   AppendSessionContextResult,
@@ -35,7 +35,7 @@ export class CodexProviderCollaboration {
   }) {
     this.run = new CodexCollaborationRun(input.emitEvent);
     this.context = new ProviderSessionContext(
-      () => new CodexSessionContextStore(input.dataDir ?? join(input.cwd, ".adit")),
+      () => new CodexSessionContextStore(input.dataDir ?? projectRuntimeDirectory(resolveLocalProject({path:input.cwd}).projectId)),
       formatCodexSessionContext,
       input.emitEvent,
       input.debug,

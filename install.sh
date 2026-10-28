@@ -3,7 +3,7 @@
 #  ADIT Core — install.sh
 #  Detects the system environment, installs required runtimes and
 #  libraries, builds the project, and registers the `adit` and
-#  `adit-hook` commands.
+#  `adit` command.
 #
 #  Two protections for `curl | bash` piped execution:
 #  1. Wrap in { } so bash reads the entire script before executing.
@@ -408,7 +408,7 @@ build_project() {
 
 # ── Register commands ───────────────────────────────────────────────
 register_commands() {
-  info "Registering adit and adit-hook commands …"
+  info "Registering adit command …"
   cd "$SCRIPT_DIR"
 
   # Determine a bin directory that is already on PATH.
@@ -429,15 +429,12 @@ register_commands() {
 
   # Resolve absolute paths to the built entry points
   local adit_bin="$SCRIPT_DIR/packages/cli/dist/index.js"
-  local hook_bin="$SCRIPT_DIR/packages/hooks/dist/index.js"
 
   # Verify the built files exist
   [[ -f "$adit_bin" ]] || die "CLI entry point not found at $adit_bin — build may have failed"
-  [[ -f "$hook_bin" ]] || die "Hook entry point not found at $hook_bin — build may have failed"
 
   # Ensure they are executable
   chmod +x "$adit_bin"
-  chmod +x "$hook_bin"
 
   # Create wrapper scripts (avoids symlink issues with Node ESM resolution)
   cat > "$bin_dir/adit" <<EOF
@@ -446,14 +443,12 @@ exec node "$adit_bin" "\$@"
 EOF
   chmod +x "$bin_dir/adit"
 
-  cat > "$bin_dir/adit-hook" <<EOF
-#!/usr/bin/env bash
-exec node "$hook_bin" "\$@"
-EOF
-  chmod +x "$bin_dir/adit-hook"
+  # Remove only the wrapper created by this installer for this checkout.
+  if [[ -f "$bin_dir/adit-hook" ]] && grep -qFx "exec node \"$SCRIPT_DIR/packages/hooks/dist/index.js\" \"\$@\"" "$bin_dir/adit-hook"; then
+    rm -- "$bin_dir/adit-hook"
+  fi
 
   ok "adit     → $bin_dir/adit"
-  ok "adit-hook → $bin_dir/adit-hook"
 
   # If bin_dir is not on PATH, add it to the shell profile automatically
   if ! echo "$PATH" | tr ':' '\n' | grep -q "^${bin_dir}$"; then
@@ -496,13 +491,6 @@ verify() {
     ok "adit command available: $(command -v adit)"
   else
     warn "adit command not found in PATH (you may need to restart your shell)"
-    all_ok=false
-  fi
-
-  if command -v adit-hook &>/dev/null; then
-    ok "adit-hook command available: $(command -v adit-hook)"
-  else
-    warn "adit-hook command not found in PATH (you may need to restart your shell)"
     all_ok=false
   fi
 

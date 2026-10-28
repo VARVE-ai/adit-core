@@ -6,14 +6,11 @@
  * events are only known locally.
  */
 
-import { existsSync } from "node:fs";
+import { currentLocalSession } from "./current-local-session.js";
 import { Command, Option } from "commander";
 import {
-  CloudApiError,
-  CloudNetworkError,
   DEFAULT_SERVER_URL,
   cloudSessionLink,
-  countUnsyncedEvents,
   explainCloudCommit,
   listCloudProjects,
   listCloudSessions,
@@ -27,17 +24,6 @@ import {
   type CloudSessionAnalysis,
   type CloudSessionDetail,
 } from "@varveai/adit-cloud";
-import {
-  closeDatabase,
-  getLastEventOfSession,
-  getLatestSession,
-  getSessionByPlatformSessionId,
-  getSyncState,
-  listRecentSessions,
-  loadConfig,
-  openDatabase,
-  type AditSession,
-} from "@varveai/adit-core";
 import { commandWith, pageOptions, periodOptions, printJson, reportFailure, requireCloudClient } from "./cloud-read-output.js";
 import {
   arrow,
@@ -79,18 +65,7 @@ export interface CurrentSessionDeps {
   cwd?: string;
   serverUrl: string;
   now?: Date;
-  local: {
-    loadConfig: typeof loadConfig;
-    existsSync: typeof existsSync;
-    openDatabase: typeof openDatabase;
-    closeDatabase: typeof closeDatabase;
-    getSessionByPlatformSessionId: typeof getSessionByPlatformSessionId;
-    getLatestSession: typeof getLatestSession;
-    listRecentSessions: typeof listRecentSessions;
-    getLastEventOfSession: typeof getLastEventOfSession;
-    getSyncState: typeof getSyncState;
-    countUnsyncedEvents: typeof countUnsyncedEvents;
-  };
+  registry?: typeof currentLocalSession;
   /** Reads the session from Cloud; null skips Cloud entirely. */
   cloud: ((sessionId: string) => Promise<CloudSessionDetail>) | null;
 }
@@ -102,22 +77,21 @@ export interface CurrentSessionReport {
   /** True when no platform session ID was available and the latest local session was taken instead. */
   inferred: boolean;
   project: { id: string; root: string } | null;
-  session: { id: string; platform: string; startedAt: string; lastEventAt: string | null } | null;
-  local: { unsyncedEvents: number; lastSyncedAt: string | null } | null;
+  session: { id: string; nativeId?:string; cloudId?:string|null; platform: string; startedAt: string; lastEventAt: string | null } | null;
+  local: { unsyncedEvents: number|null; pendingSessions?:number|null; lastSyncedAt: string | null } | null;
   cloud: { status: "ready" | "notSynced" | "unreachable" | "skipped"; analysis: CloudSessionAnalysis | null; title: string | null; error: string | null } | null;
   candidates: Array<{ id: string; platform: string; startedAt: string; lastEventAt: string | null }>;
   hint: string;
 }
 
-const SYNC_HINT = "Run 'adit cloud sync' in this project directory, then query the session again.";
 
 export function defaultCurrentSessionDeps(): CurrentSessionDeps {
   const credentials = loadCredentials();
   const serverUrl = loadCloudConfig().serverUrl ?? credentials?.serverUrl ?? DEFAULT_SERVER_URL;
   return {
     env: process.env,
+    registry: currentLocalSession,
     serverUrl,
-    local: { loadConfig, existsSync, openDatabase, closeDatabase, getSessionByPlatformSessionId, getLatestSession, listRecentSessions, getLastEventOfSession, getSyncState, countUnsyncedEvents },
     cloud: credentials ? (sessionId) => showCloudSession(requireCloudClient(), sessionId) : null,
   };
 }
@@ -128,63 +102,24 @@ export function platformSessionIdFromEnv(env: NodeJS.ProcessEnv): { id: string |
   if (explicit) return { id: explicit, platform: null };
   const claude = env.CLAUDE_CODE_SESSION_ID?.trim();
   if (claude) return { id: claude, platform: "claude-code" };
+  const codex = env.CODEX_THREAD_ID?.trim();
+  if (codex) return { id: codex, platform: "codex" };
   return { id: null, platform: env.CLAUDECODE ? "claude-code" : null };
 }
 
 export async function resolveCurrentSession(deps: CurrentSessionDeps): Promise<CurrentSessionReport> {
   const { id: platformSessionId, platform } = platformSessionIdFromEnv(deps.env);
-  const now = deps.now ?? new Date();
+  const current=await deps.registry?.(deps,platformSessionId,platform);
+  if(current)return current;
   const base = { platformSessionId, platform, inferred: false, project: null, session: null, local: null, cloud: null, candidates: [] as CurrentSessionReport["candidates"] };
-  const config = deps.local.loadConfig(deps.cwd);
-  if (config.initialization !== "initialized" || !deps.local.existsSync(config.dbPath)) {
-    return { ...base, state: "notInitialized", hint: "This directory is not initialized for ADIT, so sessions started here are not recorded locally or in Cloud. Run this command inside the project where the session was recorded, or run 'adit init' there first." };
-  }
-  const project = { id: config.projectId, root: config.projectRoot };
-  const db = deps.local.openDatabase(config.dbPath);
-  try {
-    const describe = (session: AditSession) => ({ id: session.id, platform: session.platform, startedAt: session.startedAt, lastEventAt: deps.local.getLastEventOfSession(db, session.id)?.startedAt ?? null });
-    let session = platformSessionId ? deps.local.getSessionByPlatformSessionId(db, platformSessionId) : null;
-    let inferred = false;
-    const since = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
-    const recent = deps.local.listRecentSessions(db, { projectId: config.projectId, since, limit: 5 });
-    if (!session && platformSessionId) {
-      return { ...base, state: "notRecorded", project, candidates: recent.map(describe), hint: "The current session is not recorded in this project: hooks may not be installed here, or the session belongs to another project directory. Run 'adit doctor' to check the hooks." };
-    }
-    if (!session) {
-      if (recent.length > 1) return { ...base, state: "ambiguous", project, candidates: recent.map(describe), hint: "No session ID is available from the environment and several sessions were active in the last day; pick one by ID." };
-      session = recent[0] ?? deps.local.getLatestSession(db, config.projectId, config.clientId);
-      inferred = true;
-      if (!session) return { ...base, state: "notRecorded", project, hint: "No session has been recorded in this project yet." };
-    }
-    const syncState = deps.local.getSyncState(db, deps.serverUrl);
-    const local = { unsyncedEvents: deps.local.countUnsyncedEvents(db, syncState?.lastSyncedEventId ?? null, config.projectId), lastSyncedAt: syncState?.lastSyncedAt ?? null };
-    let cloud: CurrentSessionReport["cloud"] = { status: "skipped", analysis: null, title: null, error: null };
-    if (deps.cloud) {
-      try {
-        const detail = await deps.cloud(session.id);
-        cloud = { status: "ready", analysis: detail.session.analysis, title: detail.session.title, error: null };
-      } catch (error) {
-        const cause = error instanceof CloudNetworkError && error.cause ? `: ${error.cause.message}` : "";
-        cloud = error instanceof CloudApiError && error.status === 404
-          ? { status: "notSynced", analysis: null, title: null, error: null }
-          : { status: "unreachable", analysis: null, title: null, error: `${error instanceof Error ? error.message : String(error)}${cause}` };
-      }
-    }
-    const hints: string[] = [];
-    if (inferred) hints.push("No session ID came from the environment; this is the latest session recorded in the project.");
-    if (local.unsyncedEvents > 0) hints.push(`${local.unsyncedEvents} events of this project are not in Cloud yet (the count covers the whole project, not only this session). ${SYNC_HINT}`);
-    else if (cloud.status === "notSynced") hints.push(`Cloud has not received this session yet. ${SYNC_HINT}`);
-    if (cloud.analysis && cloud.analysis.state !== "ready") hints.push(`Cloud analysis is ${cloud.analysis.state}; read raw events when the outline is missing.`);
-    return { ...base, state: "resolved", inferred, project, session: describe(session), local, cloud, candidates: [], hint: hints.join(" ") };
-  } finally {
-    deps.local.closeDatabase(db);
-  }
+  return { ...base, state: "notInitialized", candidates: [], hint: "Run adit init and organize native history in the local page." };
 }
 
 async function sessionArgument(value: string): Promise<string> {
   if (value !== "current") return value;
   const report = await resolveCurrentSession({ ...defaultCurrentSessionDeps(), cloud: null });
   if (!report.session) throw new Error(`Could not determine the current session (${report.state}). ${report.hint}`);
+  if (report.session.nativeId && !report.session.cloudId) throw new Error("This collected session has not been synced to Cloud. Run 'adit cloud sync' first.");
   return report.session.id;
 }
 
@@ -271,7 +206,7 @@ export async function cloudSessionsCurrentCommand(options: Json, deps: CurrentSe
 
     if (report.state === "notInitialized") {
       printTitle("Current session", "not initialized here");
-      printEnd(`${marks.warn} This directory is not initialized for ADIT ${dim("·")} run this in the project where the session was recorded, or ${strong("adit init")} there first`);
+      printEnd(`${marks.warn} ${report.hint}`);
       return;
     }
     if (report.state === "ambiguous") {
@@ -283,7 +218,7 @@ export async function cloudSessionsCurrentCommand(options: Json, deps: CurrentSe
     if (report.state === "notRecorded" || !report.session) {
       printTitle("Current session", "not recorded");
       if (report.candidates.length > 0) candidatesTable();
-      printEnd(report.platformSessionId
+      printEnd(deps.registry ? `${marks.warn} ${report.hint}` : report.platformSessionId
         ? `${marks.warn} This session is not recorded in this project ${dim("·")} run ${strong("adit doctor")} to check the hooks`
         : `${marks.skip} No session recorded in this project yet`);
       return;
@@ -301,7 +236,7 @@ export async function cloudSessionsCurrentCommand(options: Json, deps: CurrentSe
       rows.push({
         label: "Local",
         value: joinParts([
-          report.local.unsyncedEvents > 0 ? inTone("unsynced", `${report.local.unsyncedEvents} unsynced in this project`) : "0 unsynced",
+          report.local.unsyncedEvents === null ? (report.local.pendingSessions === null ? "sync baseline not established" : `${report.local.pendingSessions} sessions pending in this project`) : report.local.unsyncedEvents > 0 ? inTone("unsynced", `${report.local.unsyncedEvents} unsynced in this project`) : "0 unsynced",
           report.local.lastSyncedAt ? `last sync ${localMoment(report.local.lastSyncedAt, now)}` : "never synced",
         ]),
       });
@@ -324,7 +259,7 @@ export async function cloudSessionsCurrentCommand(options: Json, deps: CurrentSe
 
     printTitle("Current session", session.id, platformName(session.platform));
     printRows(rows);
-    if (report.local && report.local.unsyncedEvents > 0) {
+    if (report.local && report.local.unsyncedEvents !== null && report.local.unsyncedEvents > 0) {
       printEnd(`${marks.warn} ${plural(report.local.unsyncedEvents, "event")} not in Cloud yet ${dim("·")} run ${strong("adit cloud sync")} here, then query again`);
     } else if (cloud?.status === "notSynced") {
       printEnd(`${marks.warn} Cloud has not received this session yet ${dim("·")} run ${strong("adit cloud sync")}`);

@@ -1,0 +1,31 @@
+diff --git a/src/consumer.js b/src/consumer.js
+index c723a903a9da60eff9c9ed125b89dbef184f1a47..ec189cde8e963e9f1a5b08956245e2790b455f9a 100644
+--- a/src/consumer.js
++++ b/src/consumer.js
+@@ -1,9 +1,6 @@
+ 'use strict'
+ 
+-const fs = require('fs')
+ const bs = require('binary-search')
+-const { promisify } = require('util')
+-const readFile = promisify(fs.readFile)
+ 
+ module.exports = class CharWidthTableConsumer {
+   constructor(data) {
+@@ -16,12 +13,16 @@ module.exports = class CharWidthTableConsumer {
+   }
+ 
+   static async load(path) {
++    const fs = require('fs')
++    const { promisify } = require('util')
++    const readFile = promisify(fs.readFile)
+     const json = await readFile(path)
+     const data = JSON.parse(json)
+     return new CharWidthTableConsumer(data)
+   }
+ 
+   static loadSync(path) {
++    const fs = require('fs')
+     const json = fs.readFileSync(path)
+     const data = JSON.parse(json)
+     return new CharWidthTableConsumer(data)

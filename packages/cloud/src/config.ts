@@ -38,8 +38,8 @@ export function loadCloudConfig(): CloudConfig {
   // activation depends on credentials existing (checked by auto-sync).
   const enabled = process.env.ADIT_CLOUD_ENABLED !== "false";
 
-  // Auto-sync is enabled by default when credentials exist.
-  // Only disabled when explicitly set to "false".
+  // This environment preference is also gated by explicit login-startup
+  // consent in triggerAutoSync; credentials alone never enable uploads.
   const autoSync = process.env.ADIT_CLOUD_AUTO_SYNC !== "false";
 
   return {

@@ -1,3 +1,4 @@
+import { cleanupLegacyHooks } from "./legacy-hook-cleanup.js";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { projectNameFromRoot } from "@varveai/adit-core";
@@ -8,12 +9,10 @@ import {
   loadCredentials,
 } from "@varveai/adit-cloud";
 import { ClaudeCodeProvider } from "./cli-agent/claude/provider.js";
-import { ensureConnectedPlatformsRecorded } from "./connected-platforms.js";
 import { resolveExecutable } from "./cli-agent/cli-process.js";
 import { ClaudeTranscriptSync } from "./cli-agent/claude/claude-transcript-sync.js";
 import {
   cleanupStaleClaudeCloudSettings,
-  ensurePersistentClaudeHooksInstalled,
   installClaudeHooks,
   type InstalledHooks,
 } from "./cli-agent/claude/hooks-bootstrap.js";
@@ -34,7 +33,7 @@ import {
   trimRelayEventQueue,
   type InFlightReliableEventBatch,
 } from "./cli-agent/reliable-event-queue.js";
-import { loadInitializedProjectConfig } from "./project-initialization.js";
+import { loadProjectContext } from "./project-context.js";
 import type {
   CliAgentRelayEvent,
   PromptImageAttachment,
@@ -427,8 +426,9 @@ async function drainCommandQueue(input: {
 }
 
 export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<void> {
-  const config = loadInitializedProjectConfig("adit cloud claude");
+  const config = loadProjectContext("adit cloud claude");
   if (!config) return;
+  for (const error of cleanupLegacyHooks(config.projectRoot).errors) console.error(error);
 
   const credentials = loadCredentials();
   if (!credentials) {
@@ -504,24 +504,6 @@ export async function cloudClaudeCommand(opts?: CloudClaudeOptions): Promise<voi
   };
 
   try {
-    try {
-      // Self-heal only repairs platforms the user connected; a project where
-      // Claude Code was never connected is left untouched.
-      const connectedPlatforms = await ensureConnectedPlatformsRecorded(config.projectRoot);
-      if (connectedPlatforms.includes("claude-code")) {
-        const installedPersistentHooks = await ensurePersistentClaudeHooksInstalled({
-          cwd: config.projectRoot,
-        });
-        if (installedPersistentHooks) {
-          notices.line("Reinstalled ADIT Claude Code hooks for local timeline tracking.");
-        }
-      }
-    } catch (error) {
-      notices.line(
-        `warning: failed to install persistent ADIT Claude Code hooks: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-
     await cleanupStaleClaudeCloudSettings({ cwd: config.projectRoot });
     hookServer = await startCliAgentHookServer();
     const hookSettingsPath = join(

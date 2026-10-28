@@ -16,6 +16,11 @@ describe("skill installation", () => {
     expect(TASK_SKILL).toContain('TEAM_SELECTION_REQUIRED');
     expect(TASK_SKILL).toContain('do not blindly retry');
     expect(TASK_SKILL).toContain('blueprintId null');
+    expect(TASK_SKILL).toContain('--estimate-hours 2');
+    expect(TASK_SKILL).toContain('1 person-day = 8 hours');
+    expect(TASK_SKILL).toContain('estimatedPersonDays=0.25');
+    expect(TASK_SKILL).toContain('--clear-estimate');
+    expect(TASK_SKILL).toContain('same permissions and completed-task freezes');
   });
   it("installs every skill into both agent locations and is idempotent", () => {
     const directory = home();
