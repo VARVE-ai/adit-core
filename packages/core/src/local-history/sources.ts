@@ -245,7 +245,7 @@ export async function* sourceFiles(
   signal?.throwIfAborted();
   if (depth > 10)
     throw new Error("Source directory nesting exceeds supported depth");
-  if ((provider === "warp" || provider === "kilo") && depth === 0) {
+  if ((provider === "warp" || provider === "kilo" || provider === "zed") && depth === 0) {
     yield* targetedDatabaseFiles(provider, root, signal);
     return;
   }
@@ -353,21 +353,21 @@ async function sourceInfo(path: string, signal?: AbortSignal) {
 }
 
 async function* targetedDatabaseFiles(
-  provider: "warp" | "kilo",
+  provider: "warp" | "kilo" | "zed",
   root: string,
   signal?: AbortSignal,
 ): AsyncGenerator<string> {
-  const databaseName = provider === "warp" ? "warp.sqlite" : "kilo.db";
+  const databaseName = provider === "warp" ? "warp.sqlite" : provider === "zed" ? "threads.db" : "kilo.db";
   const rootInfo = await sourceInfo(root, signal);
   if (rootInfo?.isFile()) {
     if (basename(root) === databaseName) yield root;
     return;
   }
   if (!rootInfo?.isDirectory()) return;
-  const databasePath = join(root, databaseName);
+  const databasePath = provider === "zed" ? join(root, "threads", databaseName) : join(root, databaseName);
   if ((await sourceInfo(databasePath, signal))?.isFile()) yield databasePath;
   signal?.throwIfAborted();
-  if (provider === "warp") return;
+  if (provider === "warp" || provider === "zed") return;
 
   const storagePath = join(root, "storage");
   if (!(await sourceInfo(storagePath, signal))?.isDirectory()) return;

@@ -1,13 +1,15 @@
 {
   "name": "@varveai/adit-core",
   "version": "0.0.0",
+  "license": "MIT",
   "description": "Core types, database, and sync primitives for ADIT",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE"
   ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -18,6 +20,7 @@
     }
   },
   "scripts": {
+    "prepack": "node ../../scripts/prepare-package-docs.cjs core",
     "build": "tsc",
     "typecheck": "tsc --noEmit"
   },

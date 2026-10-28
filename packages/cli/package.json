@@ -1,6 +1,7 @@
 {
   "name": "@varveai/adit-cli",
   "version": "0.0.0",
+  "license": "MIT",
   "description": "AI Development Intent Tracker — Transparent Time Machine for your codebase",
   "type": "module",
   "main": "./dist/main.js",
@@ -11,7 +12,9 @@
   "files": [
     "dist",
     "local-assets",
-    "install-skill.cjs"
+    "install-skill.cjs",
+    "LICENSE",
+    "README.md"
   ],
   "bin": {
     "adit": "./dist/index.js"
@@ -33,7 +36,7 @@
   "scripts": {
     "postinstall": "node install-skill.cjs",
     "build": "tsc",
-    "prepack": "pnpm --filter @varveai/adit-local-web build && pnpm run build",
+    "prepack": "node ../../scripts/prepare-package-docs.cjs cli && pnpm --filter @varveai/adit-local-web build && pnpm run build",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

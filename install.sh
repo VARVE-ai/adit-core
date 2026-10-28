@@ -45,6 +45,8 @@ debug() { [[ "${ADIT_DEBUG:-}" == "1" ]] && printf "[debug] %s\n" "$*" >&2 || tr
 
 # ── Constants ───────────────────────────────────────────────────────
 REQUIRED_NODE_MAJOR=22
+REQUIRED_NODE_MINOR=13
+REQUIRED_NODE_DESCRIPTION="22.13+ within 22.x, or 24+"
 REQUIRED_PNPM_MAJOR=11
 ADIT_REPO="https://github.com/VARVE-ai/adit-core.git"
 ADIT_INSTALL_DIR="${ADIT_INSTALL_DIR:-$HOME/.adit-core}"
@@ -106,6 +108,18 @@ detect_platform() {
 version_ge() {
   local have="$1" need="$2"
   [[ "$have" -ge "$need" ]] 2>/dev/null
+}
+
+# Source builds use the maintained lint toolchain; published packages still
+# support Node.js 22.0+. Keep this aligned with the root package's engines.
+supported_build_node() {
+  local version="$1"
+  local major="${version%%.*}"
+  local remainder="${version#*.}"
+  local minor="${remainder%%.*}"
+  [[ "$major" -ge 24 ]] || {
+    [[ "$major" -eq "$REQUIRED_NODE_MAJOR" ]] && [[ "$minor" -ge "$REQUIRED_NODE_MINOR" ]]
+  }
 }
 
 # ── Semver comparison ───────────────────────────────────────────────
@@ -223,16 +237,15 @@ ensure_node() {
   if command -v node &>/dev/null; then
     local node_ver
     node_ver="$(node -v | sed 's/^v//')"
-    local node_major="${node_ver%%.*}"
-    if version_ge "$node_major" "$REQUIRED_NODE_MAJOR"; then
-      ok "Node.js v${node_ver} found (>= ${REQUIRED_NODE_MAJOR} required)"
+    if supported_build_node "$node_ver"; then
+      ok "Node.js v${node_ver} found (${REQUIRED_NODE_DESCRIPTION} required)"
       return
     else
-      warn "Node.js v${node_ver} found but >= ${REQUIRED_NODE_MAJOR} is required"
+      warn "Node.js v${node_ver} found but ${REQUIRED_NODE_DESCRIPTION} is required"
     fi
   fi
 
-  info "Installing Node.js >= ${REQUIRED_NODE_MAJOR} …"
+  info "Installing a supported Node.js version (${REQUIRED_NODE_DESCRIPTION}) …"
 
   # Prefer fnm if available, else nvm, else system package manager
   if command -v fnm &>/dev/null; then
@@ -251,7 +264,7 @@ ensure_node() {
           brew install "node@${REQUIRED_NODE_MAJOR}"
           brew link --overwrite "node@${REQUIRED_NODE_MAJOR}" 2>/dev/null || true
         else
-          die "Please install Homebrew (https://brew.sh) or Node.js >= ${REQUIRED_NODE_MAJOR} manually"
+          die "Please install Homebrew (https://brew.sh) or Node.js ${REQUIRED_NODE_DESCRIPTION} manually"
         fi
         ;;
       linux)
@@ -276,7 +289,7 @@ ensure_node() {
             sudo zypper install -y nodejs
             ;;
           *)
-            die "Cannot auto-install Node.js — please install Node.js >= ${REQUIRED_NODE_MAJOR} manually"
+            die "Cannot auto-install Node.js — please install Node.js ${REQUIRED_NODE_DESCRIPTION} manually"
             ;;
         esac
         ;;
@@ -286,8 +299,7 @@ ensure_node() {
   command -v node &>/dev/null || die "Node.js installation failed"
   local final_ver
   final_ver="$(node -v | sed 's/^v//')"
-  local final_major="${final_ver%%.*}"
-  version_ge "$final_major" "$REQUIRED_NODE_MAJOR" || die "Node.js v${final_ver} is below the required v${REQUIRED_NODE_MAJOR}"
+  supported_build_node "$final_ver" || die "Node.js v${final_ver} does not meet the source build requirement (${REQUIRED_NODE_DESCRIPTION})"
   ok "Node.js v${final_ver} ready"
 }
 
