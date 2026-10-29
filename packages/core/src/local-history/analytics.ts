@@ -187,8 +187,8 @@ export class LocalAnalytics {
     this.db.function("ov_day", { deterministic: true }, (at: number | null) =>
       at === null ? null : day(at),
     );
-    this.db.function("ov_hour", { deterministic: true }, (at: number | null) =>
-      at === null ? null : Number(hourFormat.format(at)),
+    this.db.function("ov_activity_bucket", { deterministic: true }, (at: number | null) =>
+      at === null ? null : `${day(at)}|${hourFormat.format(at)}`,
     );
     const run = () => {
       const { sessions } = inputs;
@@ -216,7 +216,7 @@ export class LocalAnalytics {
       const rows = (sql: string, ...args: any[]) =>
         this.db.prepare(sql).all(...args) as Row[];
       const activity = rows(
-        `SELECT ov_day(m.occurred_at) AS date,ov_hour(m.occurred_at) AS hour,count(*) AS count FROM ${messageFrom} WHERE m.occurred_at>=? AND m.occurred_at<? GROUP BY date,hour`,
+        `SELECT ov_activity_bucket(m.occurred_at) AS bucket,count(*) AS count FROM ${messageFrom} WHERE m.occurred_at>=? AND m.occurred_at<? GROUP BY bucket`,
         fromTimestamp,
         toTimestamp,
       );
@@ -226,9 +226,10 @@ export class LocalAnalytics {
           total: 0,
           average: 0,
         }));
-      for (const a of activity) {
-        daily.set(a.date, (daily.get(a.date) || 0) + a.count);
-        hours[a.hour].total += a.count;
+      for (const entry of activity) {
+        const [date, hour] = entry.bucket.split("|");
+        daily.set(date, (daily.get(date) || 0) + entry.count);
+        hours[Number(hour)].total += entry.count;
       }
       const bounds = rows(
         `SELECT min(m.occurred_at) AS first,max(m.occurred_at) AS last,sum(m.occurred_at IS NULL) AS missing FROM ${messageFrom}`,
@@ -343,7 +344,9 @@ export class LocalAnalytics {
           };
         });
       const usage = rows(
-        `SELECT m.* FROM adit_history_usage_entries m ${join} WHERE m.ledger_role='canonical' AND (?='all' OR (m.occurred_at>=? AND m.occurred_at<?))`,
+        `SELECT m.provider,m.session_id,m.model,m.occurred_at,m.uncached_input_tokens,m.cache_read_tokens,
+          m.cache_write_tokens,m.output_tokens,m.total_tokens,m.cost_microusd
+         FROM adit_history_usage_entries m ${join} WHERE m.ledger_role='canonical' AND (?='all' OR (m.occurred_at>=? AND m.occurred_at<?))`,
         range,
         fromTimestamp,
         toTimestamp,
@@ -597,10 +600,8 @@ export class LocalAnalytics {
           attribution: "partial" as const,
           recordDays: "observed_span" as const,
           missingUsage: rows(
-            `SELECT count(*) AS n FROM ${messageFrom} WHERE m.role='assistant' AND NOT EXISTS(SELECT 1 FROM adit_history_usage_observations o WHERE o.message_id=m.id) AND (?='all' OR (m.occurred_at>=? AND m.occurred_at<?))`,
-            range,
-            fromTimestamp,
-            toTimestamp,
+            `SELECT count(*) AS n FROM ${messageFrom} WHERE m.role='assistant' AND NOT EXISTS(SELECT 1 FROM adit_history_usage_observations o WHERE o.message_id=m.id)${range === "all" ? "" : " AND m.occurred_at>=? AND m.occurred_at<?"}`,
+            ...(range === "all" ? [] : [fromTimestamp, toTimestamp]),
           )[0].n,
         },
       };

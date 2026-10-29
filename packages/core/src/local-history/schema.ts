@@ -70,6 +70,7 @@ export function createHistorySchema(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS adit_history_messages_turn ON adit_history_messages(turn_id,ordinal);
     CREATE INDEX IF NOT EXISTS adit_history_message_scope_time ON adit_history_messages(provider,session_id,occurred_at);
+    CREATE INDEX IF NOT EXISTS adit_history_assistant_scope_time ON adit_history_messages(provider,session_id,occurred_at,id) WHERE role='assistant';
     CREATE TABLE IF NOT EXISTS adit_history_blocks (
       id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES adit_history_messages(id) ON DELETE CASCADE,
       block_index INTEGER NOT NULL, kind TEXT NOT NULL, text_content TEXT, data_json TEXT,
@@ -149,6 +150,12 @@ export function createHistorySchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS adit_history_commit_op_tool ON adit_history_commit_operations(tool_call_id);
   `);
   createAttributionSchema(db);
+  const messageColumns = db.prepare("PRAGMA table_info(adit_history_messages)").all() as { name: string }[];
+  if (!messageColumns.some(column => column.name === "raw_content_paths_json")) db.transaction(() => {
+    const current = db.prepare("PRAGMA table_info(adit_history_messages)").all() as { name: string }[];
+    if (!current.some(column => column.name === "raw_content_paths_json"))
+      db.exec("ALTER TABLE adit_history_messages ADD COLUMN raw_content_paths_json TEXT");
+  }).immediate();
   const usageColumns = new Set((db.prepare("PRAGMA table_info(adit_history_usage_entries)").all() as {name:string}[]).map(column => column.name));
   db.transaction(() => {
     const names = ["input_cost_microusd", "output_cost_microusd", "cache_read_cost_microusd", "cache_write_cost_microusd", "cost_microusd"];

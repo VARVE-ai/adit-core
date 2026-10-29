@@ -45,6 +45,7 @@ import { scanHistoryInBackground } from "./collection-scan.js";
 import { PublicationApi } from "./publication-api.js";
 import { LocalCloudSync } from "./cloud-sync.js";
 import { DeletionCheckpoint } from "./deletion-checkpoint.js";
+import { MaintenanceService } from "./maintenance-service.js";
 import { CLI_VERSION } from "../version.js";
 
 async function body(req: IncomingMessage, limit = 65536): Promise<Record<string, unknown>> {
@@ -78,6 +79,7 @@ export async function startLocalServer(
     instance?: string;
     startupRegistration?: StartupRegistration;
     pendingWorkerUrl?: URL;
+    maintenanceWorkerUrl?: URL;
   } = {},
 ) {
   const store = new LocalStore(options.directory);
@@ -113,6 +115,7 @@ export async function startLocalServer(
   if (options.instance) void analytics.prices.refresh();
   const account = new LocalAccount(store.directory);
   const cloudSync = new LocalCloudSync(store, collector, undefined, options.pendingWorkerUrl);
+  const maintenance = options.instance || options.maintenanceWorkerUrl ? new MaintenanceService(store, options.maintenanceWorkerUrl) : undefined;
   const secrets = new LocalSecrets(store.directory);
   const gistCredentialWork = new Set<string>();
   const publications = new PublicationApi(store, analytics.prices, !!options.instance);
@@ -265,6 +268,7 @@ export async function startLocalServer(
           setTimeout(() => void close(), 50);
           return;
         }
+        if (route === "/maintenance" && req.method === "GET") return json(res, { tasks: maintenance?.status() ?? [] });
         if (route === "/state" && req.method === "GET") {
           const syncStatuses = cloudSync.statuses();
           return json(res, {
@@ -484,6 +488,7 @@ export async function startLocalServer(
   origin = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
   collector.schedule(true);
   if (options.instance) cloudSync.schedule();
+  maintenance?.start();
   if (options.instance) for (const workspace of store.workspaces().filter(w=>w.started)) {
     void inspectionService.start(workspace,"startup").catch(()=>{});
     const latest = store.jobs<CollectionJob>().find(j=>j.workspaceId===workspace.id && j.kind==="collect" && ["done","partial"].includes(j.status));
@@ -492,6 +497,7 @@ export async function startLocalServer(
   function close(): Promise<void> {
     return (closing ??= (async () => {
       account.cancel();
+      await maintenance?.close();
       await cloudSync.close();
       clearInterval(priceTimer);
       await analytics.prices.close();
