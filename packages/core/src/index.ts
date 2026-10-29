@@ -178,3 +178,4 @@ export {
 export { nativeConversationId, conversationSegments, conversationScope } from "./local-history/session-identity.js";
 export { submittedPromptText, promptImageCount, PROMPT_IMAGE_KINDS } from "./local-history/prompt-summary.js";
 export { nativeContextKind, nativeContextSql, historyFinalReply, replyCompleted } from "./local-history/message-semantics.js";
+export { compactHistoryRaw, restoreHistoryRaw } from "./local-history/raw-data.js";

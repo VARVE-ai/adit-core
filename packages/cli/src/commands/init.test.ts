@@ -33,7 +33,10 @@ beforeEach(()=>{
  });
 });
 afterEach(()=>{store.close();vi.restoreAllMocks();vi.clearAllMocks();vi.unstubAllEnvs();process.exitCode=0;rmSync(root,{recursive:true,force:true});});
-function git(){execFileSync("git",["init",repo],{windowsHide:true,stdio:"ignore"});}
+function git(){
+ execFileSync("git",["init",repo],{windowsHide:true,stdio:"ignore"});
+ execFileSync("git",["-C",repo,"remote","add","origin","https://example.invalid/test.git"],{windowsHide:true,stdio:"ignore"});
+}
 it("rejects a plain directory before creating project state and uses the same service as HTTP",async()=>{
  await initCommand({cwd:repo});expect(process.exitCode).toBe(1);expect(store.workspaces()).toEqual([]);
  expect(()=>registerWorkspace(store,{path:repo})).toThrow(/No Git repository/);
@@ -68,7 +71,7 @@ it("selects Git first, then real session metadata, then saves and starts the pag
  git();const order:string[]=[];
  vi.mocked(selectInitChoices).mockImplementation(async(title,choices)=>{
    order.push(title);
-   if(title.startsWith("1.")){expect(localRequest).not.toHaveBeenCalled();return [];}
+   if(title.startsWith("1.")){expect(localRequest).not.toHaveBeenCalled();return [repo];}
    expect(choices.find(c=>c.id==="codex")).toMatchObject({checked:true,detail:"2 sessions"});
    expect(choices.find(c=>c.id==="claude")).toMatchObject({checked:false});
    expect(store.workspaces()).toEqual([]);return ["codex"];
@@ -76,7 +79,7 @@ it("selects Git first, then real session metadata, then saves and starts the pag
  vi.mocked(confirmInit).mockImplementation(async()=>{order.push("confirm");expect(store.workspaces()).toEqual([]);return true;});
  await initCommand({cwd:repo});
  expect(process.exitCode).toBe(0);expect(order).toEqual(["1. Git repositories","2. Session sources","confirm"]);
- const w=store.workspaces()[0];expect(w).toMatchObject({repositories:[],providers:["codex"],started:true});
+ const w=store.workspaces()[0];expect(w).toMatchObject({repositories:[repo],providers:["codex"],started:true});
  expect(localRequest).toHaveBeenLastCalledWith(`/workspaces/${w.id}/collect`,"POST",{});
  expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining("Open adit server to review the directory and start organizing"));
 });

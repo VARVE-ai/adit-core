@@ -857,8 +857,13 @@ describe("language switching across the local workbench", () => {
     });
     expect(button("Sync now").props.disabled).toBe(true);
     await act(async()=>{await vi.advanceTimersByTimeAsync(200);});
-    expect(text(root)).toContain("Select at least one Git repository or session source.");
+    expect(text(root)).toContain("Select at least one Git repository.");
     await act(async () => { root.findAllByProps({className:"selection-row"}).find(n=>text(n).includes("Claude Code"))!.findByType("input").props.onChange({target:{checked:true}}); });
+    expect(button("Sync now").props.disabled).toBe(true);
+    expect(button("Start organizing").props.disabled).toBe(true);
+    await act(async () => { button("Discover").props.onClick(); });
+    jobs=[{...jobs[0],status:"done",repositories:[{path:"D:/flowworkerspace",count:3}],providers:{claude:1}}];
+    await act(async()=>{await vi.advanceTimersByTimeAsync(2500);});
     expect(button("Sync now").props.disabled).toBe(false);
     expect(startup.enabled).toBe(true);
     const before = vi.mocked(fetch).mock.calls.length;

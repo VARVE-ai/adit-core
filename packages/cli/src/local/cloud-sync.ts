@@ -1,4 +1,4 @@
-import { assertWorkspaceGit } from "@varveai/adit-core";
+import { assertWorkspaceGit, assertSelectedRepositories, missingOriginRemote } from "@varveai/adit-core";
 import { randomUUID } from "node:crypto";
 import { LocalStore, LocalStateError, localLoginStartupEnabled, projectUploadRepositories } from "@varveai/adit-core";
 import { CloudClient, loadCredentials, collectDefaultBranch, collectRemoteBranchSnapshot, type UpgradeNotice } from "@varveai/adit-cloud";
@@ -66,6 +66,7 @@ export class LocalCloudSync {
     if(this.stopped)throw new LocalStateError("Cloud sync is stopping",409);
     const workspace=this.store.workspace(id);
     assertWorkspaceGit(workspace.path);
+    assertSelectedRepositories(workspace.path, workspace.repositories);
     if(workspace.cloudDeletedAt)throw new LocalStateError("This project was deleted from Cloud. Review its identity in Settings.",409);
     if(!workspace.cloud.enabled)throw new LocalStateError("Enable Cloud storage for this directory first.",409);
     if(this.active.has(id))return this.jobs.get(id)!;
@@ -143,7 +144,9 @@ export class LocalCloudSync {
         }
         const repositories=await Promise.all(projectUploadRepositories(this.store.db,workspace).map(async r=>{
           let repositoryUrl=await getRemoteUrl(r.path).catch(()=>null);
+          if(!repositoryUrl)throw new LocalStateError(`${missingOriginRemote} (${r.path})`,409);
           if(repositoryUrl?.includes("://")) { try {const url=new URL(repositoryUrl);url.username="";url.password="";repositoryUrl=url.toString();}catch{repositoryUrl=null;} }
+          if(!repositoryUrl)throw new LocalStateError(`Invalid git remote 'origin' URL (${r.path})`,409);
           const checkpoint=this.store.db.prepare("SELECT refs,identity FROM adit_local_git_checkpoints WHERE repository=?").get(r.path) as {refs:string;identity:string}|undefined;
           const branches:{name:string;headSha:string}[]=[];
           if(checkpoint) {

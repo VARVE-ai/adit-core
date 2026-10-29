@@ -1,10 +1,23 @@
 import { existsSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { canonicalDirectory, LocalStateError, type LocalStore, type LocalWorkspace } from "./local-state.js";
 import { containsPath, relocatedRepositories } from "./local-projects.js";
 import { sourceDefinitions } from "./local-history/sources.js";
 
 export const missingGitRepository = "No Git repository found. Select a directory containing a Git repository to create the project or start organizing.";
+export const missingSelectedRepository = "Select at least one Git repository before organizing or syncing.";
+export const missingOriginRemote = "No git remote 'origin' configured. Add one with: git remote add origin <url>";
+export function repositoryOriginUrl(path: string): string | null {
+  try {
+    return execFileSync("git", ["-C", path, "remote", "get-url", "origin"],
+      { encoding: "utf8", windowsHide: true, timeout: 5000, stdio: ["ignore", "pipe", "pipe"] }).trim() || null;
+  } catch { return null; }
+}
+export function assertSelectedRepositories(root: string, repositories: string[]): void {
+  if (!repositories.length) throw new LocalStateError(missingSelectedRepository, 409);
+  validateWorkspaceRepositories(root, repositories);
+}
 /** Metadata only: the workspace itself and its immediate child repositories. */
 export function discoverWorkspaceRepositories(root: string): string[] {
   const path = canonicalDirectory(root);
@@ -30,6 +43,8 @@ export function validateWorkspaceRepositories(root: string, value: unknown): ass
   assertWorkspaceGit(root);
   if (!Array.isArray(value) || value.some(path => typeof path !== "string" || !containsPath(root, canonicalDirectory(path)) || !existsSync(join(path, ".git"))))
     throw new LocalStateError("Select Git repositories inside the workspace");
+  for (const path of value)
+    if (!repositoryOriginUrl(path)) throw new LocalStateError(`${missingOriginRemote} (${path})`, 409);
 }
 
 /** User-facing registration, shared by CLI and HTTP. Storage also supports reading

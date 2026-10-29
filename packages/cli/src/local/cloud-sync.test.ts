@@ -1,3 +1,4 @@
+import {execFileSync} from "node:child_process";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -34,13 +35,22 @@ async function settledPending(sync: BaseLocalCloudSync, id: string) {
 const baseline:CloudBaseline={schemaVersion:1,accountId:"user",before:null,repositories:[],sessions:[],nextCursor:null};
 const at=(n:number)=>new Date(Date.UTC(2026,9,16,0,0,n)).toISOString();
 beforeEach(()=>{
-  root=mkdtempSync(join(tmpdir(),"adit-local-cloud-"));mkdirSync(join(root,".git"));store=new LocalStore(join(root,"state"));new LocalHistory(store.db);createCloudSyncSchema(store);history=new StructuredHistory(store.db);
+  root=mkdtempSync(join(tmpdir(),"adit-local-cloud-"));execFileSync("git",["init",root]);execFileSync("git",["-C",root,"remote","add","origin","https://example.invalid/test.git"]);store=new LocalStore(join(root,"state"));new LocalHistory(store.db);createCloudSyncSchema(store);history=new StructuredHistory(store.db);
   vi.mocked(loadCredentials).mockReturnValue({clientId:"device",accountId:"user",credentialId:"credential",serverUrl:"http://localhost:3000",accessToken:"test",refreshToken:"",expiresAt:"",authType:"token"});
   vi.mocked(sendLocalRuntimeReport).mockReset().mockResolvedValue({});
   vi.mocked(collectRemoteBranchSnapshot).mockReset().mockRejectedValue(new Error("Remote unavailable"));
 });
 afterEach(async()=>{await Promise.all(instances.splice(0).map(instance=>instance.close()));store.close();rmSync(root,{recursive:true,force:true});vi.restoreAllMocks();});
-function workspace(){return store.saveWorkspace({path:root,providers:["codex"],repositories:[],cloud:{enabled:true,mode:"manual",interval:5}});}
+function workspace(){return store.saveWorkspace({path:root,providers:["codex"],repositories:[root],cloud:{enabled:true,mode:"manual",interval:5}});}
+it("rejects cloud sync with only conversation sources before contacting Cloud", async () => {
+  const w=store.saveWorkspace({path:root,providers:["codex"],repositories:[],cloud:{enabled:true,mode:"manual",interval:5}});
+  const client={get:vi.fn(),post:vi.fn()},collector={collect:vi.fn(),waitFor:vi.fn()};
+  const sync=new LocalCloudSync(store,collector,()=>client);
+  try {
+    expect(()=>sync.start(w.id)).toThrow("Select at least one Git repository");
+    expect(collector.collect).not.toHaveBeenCalled();expect(client.get).not.toHaveBeenCalled();expect(client.post).not.toHaveBeenCalled();
+  } finally {await sync.close();}
+});
 function write(extra=false){history.write({id:"native",provider:"codex",cwd:root,messages:[
   {key:"p",role:"user",content:"question",timestamp:at(1),raw:{}},
   {key:"progress",role:"assistant",content:"working",timestamp:at(2),raw:{payload:{phase:"commentary"}},usage:{input_tokens:20,cached_input_tokens:5,output_tokens:3,total_tokens:23},model:"zai/glm-5.3"},
@@ -331,7 +341,7 @@ it("upgrades cached session boundaries without losing receipts or advancing the 
   const client={get:vi.fn().mockResolvedValue(fresh),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",eventIds:payload.events.map((event:any)=>event.id),usageRevisions:Object.fromEntries(payload.events.filter((event:any)=>event.usageRevision!==undefined).map((event:any)=>[event.id,event.usageRevision])),commitIds:[]}))};
   const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
   sync.start(w.id);await sync.wait(w.id);
-  expect(sync.status(w.id).status).toBe("done");
+  expect(sync.status(w.id).status).toBe("partial");
   expect(client.post.mock.calls.flatMap(([,payload])=>payload.events.map((event:any)=>event.text))).toEqual(["next question","next answer"]);
   const saved=JSON.parse((store.db.prepare("SELECT baseline FROM adit_local_cloud_scopes WHERE id=?").get(scope) as any).baseline);
   expect(saved.before).toBe(at(10));expect(saved.sessions.map((session:any)=>session.lastEventAt)).toEqual([at(5),at(10)]);
@@ -363,7 +373,7 @@ it("retries stable identities after a missing acknowledgement and skips confirme
   const collector={collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)};
   const sync=new LocalCloudSync(store,collector,()=>client);
   const first=sync.start(w.id);expect(sync.start(w.id).id).toBe(first.id);await sync.wait(w.id);expect(first.status).toBe("failed");
-  sync.start(w.id);await sync.wait(w.id);expect(ids[0]).toEqual(ids[1]);expect(sync.status(w.id).status).toBe("done");
+  sync.start(w.id);await sync.wait(w.id);expect(ids[0]).toEqual(ids[1]);expect(sync.status(w.id).status).toBe("partial");
   sync.start(w.id);await sync.wait(w.id);expect(client.post).toHaveBeenCalledTimes(2);
   write(true);sync.start(w.id);await sync.wait(w.id);expect(ids[2]).toHaveLength(2);expect(ids[2].some(id=>ids[0].includes(id))).toBe(false);
   await sync.close();
@@ -384,7 +394,7 @@ it("first sync waits for unified collection and analysis before reading or uploa
   expect(client.post).not.toHaveBeenCalled();
   finishCollection();
   await sync.wait(w.id);
-  expect(sync.status(w.id).status).toBe("done");
+  expect(sync.status(w.id).status).toBe("partial");
   expect(store.workspace(w.id).started).toBe(true);
   expect(client.post.mock.calls.flatMap(([,payload])=>payload.events).map((event:any)=>event.text)).toEqual(["question","final answer"]);
   expect(collector.collect).toHaveBeenCalledTimes(1);
@@ -406,7 +416,7 @@ it("reports runtime only after business acknowledgement and keeps diagnostic err
   });
   const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
   sync.start(w.id);await sync.wait(w.id);
-  expect(sync.status(w.id)).toMatchObject({status:"done",runtimeReportError:"Diagnostic service unavailable",warnings:[]});
+  expect(sync.status(w.id)).toMatchObject({status:"partial",runtimeReportError:"Diagnostic service unavailable",warnings:[expect.stringContaining("Unable to refresh remote branches")]});
   expect(sendLocalRuntimeReport).toHaveBeenCalledTimes(1);
   sync.start(w.id);await sync.wait(w.id);
   expect(client.post).toHaveBeenCalledTimes(1);expect(sendLocalRuntimeReport).toHaveBeenCalledTimes(2);
@@ -460,7 +470,7 @@ it("fee refinements retain the inherited usage boundary instead of importing the
 });
 
 function gitWorkspace() {
-  const paths=[join(root,"repo-a"),join(root,"repo-b")];paths.forEach(p=>mkdirSync(p));
+  const paths=[join(root,"repo-a"),join(root,"repo-b")];paths.forEach(p=>{execFileSync("git",["init","-b","develop",p]);execFileSync("git",["-C",p,"remote","add","origin","https://example.invalid/test.git"]);});
   const w=store.saveWorkspace({path:root,providers:["codex"],repositories:paths,cloud:{enabled:true,mode:"manual",interval:5}});
   createAttributionSchema(store.db);
   store.db.prepare("INSERT INTO adit_attribution_runs(id,workspace_id,algorithm_version,input_fingerprint,status,started_at) VALUES ('run',?,1,'test','done',1)").run(w.id);
@@ -484,7 +494,7 @@ it("syncs configured Git author and default branch without new events, and refre
 });
 it("refreshes remote-only branch changes, empty snapshots and repeated snapshots without new history",async()=>{
   const {w,repos}=gitWorkspace(),repo=repos[0];
-  for(const args of [["init"],["remote","add","origin","https://example.invalid/test.git"]])
+  for(const args of [["init"],["remote","set-url","origin","https://example.invalid/test.git"]])
     expect((await runGit(args,{cwd:repo.path})).exitCode).toBe(0);
   const branch={name:"main",headSha:"a".repeat(40),isDefault:true};
   const remote=vi.mocked(collectRemoteBranchSnapshot);
@@ -531,7 +541,7 @@ it("syncs Git-derived branches without sessions and repairs confirmed commits wi
   const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
   try {
     sync.start(w.id);await sync.wait(w.id);
-    expect(sync.status(w.id).status).toBe("done");
+    expect(sync.status(w.id).status).toBe("partial");
     const payloads=client.post.mock.calls.map(call=>call[1]);
     expect(payloads.flatMap(payload=>payload.commits)).toMatchObject([{sha:fresh,branch:"feature/test",attributions:[]}]);
     expect(payloads.flatMap(payload=>payload.commitBranches??[])).toEqual(expect.arrayContaining([
@@ -554,7 +564,7 @@ it("syncs Git-derived branches without sessions and repairs confirmed commits wi
     client.post.mockImplementationOnce(async()=>({schemaVersion:1,accountId:"user",eventIds:[],commitIds:[],commitBranchIds:[]}));
     sync.start(w.id);await sync.wait(w.id);expect(sync.status(w.id).status).toBe("failed");
     expect(store.db.prepare("SELECT count(*) n FROM adit_local_cloud_receipts WHERE kind='commit-branch'").get()).toEqual({n:0});
-    sync.start(w.id);await sync.wait(w.id);expect(sync.status(w.id).status).toBe("done");
+    sync.start(w.id);await sync.wait(w.id);expect(sync.status(w.id).status).toBe("partial");
     expect(client.post.mock.calls.at(-1)![1].commits).toEqual([]);
   } finally {await sync.close();}
 });

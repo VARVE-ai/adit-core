@@ -9,14 +9,26 @@ import { analyzeAttribution } from "./attribution-analysis.js";
 import { queryCommits } from "./commits.js";
 
 const cleanup: (() => Promise<void>)[] = [];
+it("discovers only repositories with origin and excludes local-only repositories", async () => {
+  const root=mkdtempSync(join(tmpdir(),"adit-origin-discovery-"));
+  try {
+    for(const name of ["local-only","remote"]){
+      const path=join(root,name);execFileSync("git",["init",path],{stdio:"pipe"});
+      if(name==="remote")execFileSync("git",["-C",path,"remote","add","origin","https://example.invalid/repo.git"],{stdio:"pipe"});
+    }
+    expect((await repositories(root)).map(r=>r.path)).toEqual([join(root,"remote")]);
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close();
 });
 function retryFixture(scan: ConstructorParameters<typeof Collector>[4],inspect?:()=>Promise<void>){
-  const root=mkdtempSync(join(tmpdir(),"adit-auto-retry-"));mkdirSync(join(root,".git"));
+  const root=mkdtempSync(join(tmpdir(),"adit-auto-retry-"));
+  execFileSync("git",["init",root]);execFileSync("git",["-C",root,"remote","add","origin","https://example.invalid/test.git"]);
+  execFileSync("git",["-C",root,"config","user.email","fixture@example.test"]);
   const store=new LocalStore(join(root,"state")),collector=new Collector(store,undefined,undefined,inspect,scan);
   collector.providers=async()=>[{id:"codex",name:"Codex",paths:[],homes:[],homesSupported:true,supported:true,format:"JSONL",enabled:true,version:0}];
-  const workspace=store.saveWorkspace({path:root,providers:["codex"],repositories:[]});
+  const workspace=store.saveWorkspace({path:root,providers:["codex"],repositories:[root]});
   cleanup.push(async()=>{await collector.close();vi.useRealTimers();store.close();rmSync(root,{recursive:true,force:true});});
   return {collector,store,workspace};
 }
@@ -57,8 +69,8 @@ it("requeues changed source settings with the current selection instead of leavi
 it("does not hide a corrupt source or start rapid retries for permanent errors",async()=>{
   const scan=vi.fn(async()=>({counts:{},errors:["codex: Invalid JSON record at line 2"],scanned:1,updated:0}));
   const f=retryFixture(scan);vi.useFakeTimers();
-  const job=f.collector.collect(f.workspace.id);await expect(f.collector.waitFor(f.workspace.id)).rejects.toThrow("Invalid JSON");
-  expect(f.collector.job(job.id)).toMatchObject({status:"failed",error:"codex: Invalid JSON record at line 2"});
+  const job=f.collector.collect(f.workspace.id);await f.collector.waitFor(f.workspace.id);
+  expect(f.collector.job(job.id)).toMatchObject({status:"partial",error:"codex: Invalid JSON record at line 2"});
   expect(f.collector.job(job.id).warnings).toBeUndefined();
   await vi.advanceTimersByTimeAsync(30000);expect(scan).toHaveBeenCalledTimes(1);
 });
@@ -74,14 +86,15 @@ it("keeps collected content usable while retrying failed derived processing sepa
 it("preserves actionable storage errors from post-processing instead of masking them as pending",async()=>{
   const inspect=vi.fn(async()=>{throw Object.assign(new Error("disk full"),{code:"SQLITE_FULL"});});
   const f=retryFixture(async()=>({counts:{},errors:[],scanned:1,updated:0}),inspect);vi.useFakeTimers();
-  const job=f.collector.collect(f.workspace.id);await expect(f.collector.waitFor(f.workspace.id)).rejects.toThrow("disk full");
+  const job=f.collector.collect(f.workspace.id);await f.collector.waitFor(f.workspace.id);
+  expect(f.collector.job(job.id)).toMatchObject({status:"partial",error:expect.stringContaining("disk full")});
   expect(f.collector.job(job.id).warnings).toBeUndefined();
   await vi.advanceTimersByTimeAsync(30000);expect(inspect).toHaveBeenCalledTimes(1);
 });
 it("publishes Git repositories before waiting for session discovery, without running collection analysis",async()=>{
   const root=mkdtempSync(join(tmpdir(),"adit-discovery-order-")),repo=join(root,"repo");mkdirSync(repo);
   const git=(...args:string[])=>execFileSync("git",["-C",repo,"-c","core.hooksPath=NUL",...args],{windowsHide:true,encoding:"utf8"});
-  git("init","--initial-branch=feature/discovery");git("config","user.email","fixture@example.test");git("config","user.name","Fixture");
+  git("init","--initial-branch=feature/discovery");git("remote","add","origin","https://example.invalid/test.git");git("config","user.email","fixture@example.test");git("config","user.name","Fixture");
   const store=new LocalStore(join(root,"state"));
   let release!:()=>void;const waiting=new Promise<void>(resolve=>{release=resolve;});
   const scan=vi.fn(async()=>{await waiting;return {counts:{codex:2},pending:{aider:1},errors:[],scanned:2,updated:0};});
@@ -112,13 +125,13 @@ it("reports analyzed commits separately from matched commits and excludes failed
 });
 it("skips unavailable directories in automatic collection and applies the same guard to manual collection",async()=>{
   const root=mkdtempSync(join(tmpdir(),"adit-missing-directory-")),missing=join(root,"missing"),available=join(root,"available");
-  mkdirSync(join(missing,".git"),{recursive:true});mkdirSync(join(available,".git"),{recursive:true});
+  for(const dir of [missing,available]){execFileSync("git",["init",dir]);execFileSync("git",["-C",dir,"remote","add","origin","https://example.invalid/test.git"]);}
   const store=new LocalStore(join(root,"state"));
   const scan=vi.fn(async(_request: {workspaces?: {id:string}[]})=>({counts:{},errors:[],scanned:0,updated:0}));
   const collector=new Collector(store,undefined,undefined,undefined,scan);
   collector.providers=async()=>[];
   cleanup.push(async()=>{await collector.close();store.close();rmSync(root,{recursive:true,force:true});});
-  const a=store.saveWorkspace({path:missing,providers:["codex"]}),b=store.saveWorkspace({path:available,providers:["codex"]});
+  const a=store.saveWorkspace({path:missing,providers:["codex"],repositories:[missing]}),b=store.saveWorkspace({path:available,providers:["codex"],repositories:[available]});
   store.markStarted(a.id);store.markStarted(b.id);renameSync(missing,join(root,"renamed"));
   expect(()=>collector.collect(a.id)).toThrow(/Settings/);
   const jobs=collector.collectAll();expect(jobs.map(j=>j.workspaceId)).toEqual([b.id]);
@@ -131,7 +144,7 @@ it("retains old Git rows, adds only new commits and reconciles rewritten refs", 
   const store=new LocalStore(join(root,"state")),collector=new Collector(store);
   cleanup.push(async()=>{await collector.close();store.close();rmSync(root,{recursive:true,force:true});});
   const git=(...args:string[])=>execFileSync("git",["-C",repo,"-c","core.hooksPath=NUL",...args],{windowsHide:true,encoding:"utf8"});
-  git("init","--initial-branch=feature/incremental");git("config","user.name","Fixture");git("config","user.email","fixture@example.test");
+  git("init","--initial-branch=feature/incremental");git("remote","add","origin","https://example.invalid/test.git");git("config","user.name","Fixture");git("config","user.email","fixture@example.test");
   const commit=(text:string)=>{writeFileSync(join(repo,"file.txt"),text);git("add",".");git("commit","-m",text);return git("rev-parse","HEAD").trim();};
   const first=commit("first");
   const workspace=store.saveWorkspace({path:repo,providers:[],repositories:[repo]});
@@ -159,9 +172,10 @@ it("retries failed post-processing but does not repeat successful processing for
   const collector=new Collector(store,undefined,undefined,inspect,async()=>({counts:{},errors:["codex: malformed native source"],scanned:1,updated:0}));
   collector.providers=async()=>[{id:"codex",name:"Codex",paths:[],homes:[],homesSupported:true,supported:true,format:"JSONL",enabled:true,version:0}];
   cleanup.push(async()=>{await collector.close();store.close();rmSync(root,{recursive:true,force:true});});
-  mkdirSync(join(root,".git"));
-  const workspace=store.saveWorkspace({path:root,providers:["codex"],repositories:[]});
-  const collect=async()=>{const job=collector.collect(workspace.id);await expect.poll(()=>store.jobs<CollectionJob>().find(j=>j.id===job.id)?.status).toBe("failed");};
+  execFileSync("git",["init",root]);execFileSync("git",["-C",root,"remote","add","origin","https://example.invalid/test.git"]);
+  execFileSync("git",["-C",root,"config","user.email","fixture@example.test"]);
+  const workspace=store.saveWorkspace({path:root,providers:["codex"],repositories:[root]});
+  const collect=async()=>{const job=collector.collect(workspace.id);await expect.poll(()=>store.jobs<CollectionJob>().find(j=>j.id===job.id)?.status).toBe("partial");};
   await collect();expect(inspect).toHaveBeenCalledTimes(1);
   await collect();expect(inspect).toHaveBeenCalledTimes(2);
   await collect();expect(inspect).toHaveBeenCalledTimes(2);
@@ -184,7 +198,7 @@ it("excludes real merge commits from discovery, collection and analysis but keep
       windowsHide: true,
       encoding: "utf8",
     });
-  git("init", "--initial-branch=feature/fixture");
+  git("init", "--initial-branch=feature/fixture");git("remote","add","origin","https://example.invalid/test.git");
   git("config", "user.name", "Fixture");
   git("config", "user.email", "fixture@example.test");
   const commit = (name: string, subject: string) => {
@@ -274,7 +288,7 @@ it("collects structured Git authors, parents, commit bodies and renamed/binary f
       windowsHide: true,
       encoding: "utf8",
     });
-  git("init", "--initial-branch=feature/test-facts");
+  git("init", "--initial-branch=feature/test-facts");git("remote","add","origin","https://example.invalid/test.git");
   git("config", "user.name", "Fixture Author");
   git("config", "user.email", "fixture@example.test");
   writeFileSync(join(repo, "first file.txt"), "first\nsecond\n");
