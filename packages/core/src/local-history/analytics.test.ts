@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { LocalStore } from "../local-state.js";
 import { createHistorySchema } from "./schema.js";
 import { StructuredHistory } from "./structured-store.js";
@@ -76,6 +76,97 @@ const scope = {
   now: Date.parse("2026-10-19T12:00:00Z"),
   year: 2026,
 };
+it.each([
+  ["UTC", ["2026-10-18T23:59:59.999Z", "2026-10-19T00:00:00Z"]],
+  ["Asia/Shanghai", ["2026-10-18T15:59:59.999Z", "2026-10-18T16:00:00Z"]],
+  ["Asia/Kathmandu", ["2026-10-18T18:14:59.999Z", "2026-10-18T18:15:00Z"]],
+  ["America/New_York", ["2026-03-08T06:59:59.999Z", "2026-03-08T07:00:00Z", "2026-11-01T05:30:00Z", "2026-11-01T06:30:00Z"]],
+  ["Australia/Lord_Howe", ["2026-04-04T14:59:59.999Z", "2026-04-04T15:00:00Z", "2026-10-03T15:29:59.999Z", "2026-10-03T15:30:00Z"]],
+  ["Pacific/Apia", ["2011-12-30T09:59:59.999Z", "2011-12-30T10:00:00Z"]],
+  ["Africa/Monrovia", ["1972-01-07T00:44:29.999Z", "1972-01-07T00:44:30Z"]],
+  ["UTC", ["1969-12-31T23:59:59.999Z", "1970-01-01T00:00:00Z"]],
+])("preserves exact day/hour grouping in %s for %j", (timezone, timestamps) => {
+  const { root, history, analytics, workspace } = fixture();
+  const dates = timestamps as string[];
+  history.write({
+    provider: "claude", id: "boundaries", cwd: root,
+    messages: [...dates, dates[0], undefined].map((timestamp, index) => ({
+      key: String(index), role: "assistant", timestamp, content: "reply", raw: {},
+    })),
+  });
+  const result = analytics.overview(workspace, { ...scope, timezone: timezone as string, now: Date.parse("2026-11-03T12:00:00Z") });
+  const dayFormat = new Intl.DateTimeFormat("en-CA", { timeZone: timezone as string, year: "numeric", month: "2-digit", day: "2-digit" });
+  const hourFormat = new Intl.DateTimeFormat("en-GB", { timeZone: timezone as string, hour: "2-digit", hourCycle: "h23" });
+  const daily = new Map<string, number>();
+  const hours = Array<number>(24).fill(0);
+  for (const timestamp of [...dates, dates[0]]) {
+    const instant = Date.parse(timestamp), date = dayFormat.format(instant);
+    daily.set(date, (daily.get(date) || 0) + 1);
+    hours[Number(hourFormat.format(instant))]++;
+  }
+  expect(result.activity.hours.map(entry => entry.total)).toEqual(hours);
+  expect(result.activity.days.filter(entry => entry.count).map(entry => [entry.date, entry.count]))
+    .toEqual([...daily].filter(([date]) => date.startsWith("2026-")).sort(([left], [right]) => left.localeCompare(right)));
+  expect(result.summary.messages).toBe(dates.length + 2);
+  expect(result.coverage.missingTimestamp).toBe(1);
+  expect(result.activity.busiest).toEqual([...daily].sort(([leftDate, leftCount], [rightDate, rightCount]) => rightCount - leftCount || leftDate.localeCompare(rightDate))
+    .map(([date, count]) => ({ date, count }))[0]);
+});
+it.each(["all", "7d", "30d"])("counts missing usage via a covering index without changing %s semantics", range => {
+  const { root, store, history, analytics, workspace } = fixture();
+  const base = { role: "assistant", timestamp: "2026-10-19T01:00:00Z", content: "reply", raw: {} };
+  history.write({ provider: "claude", id: "coverage", cwd: root, messages: [
+    { ...base, key: "user", role: "user" },
+    { ...base, key: "present", usage: { output_tokens: 0 } },
+    { ...base, key: "unrecognized", usage: {} },
+    { ...base, key: "missing" },
+    { ...base, key: "undated", timestamp: undefined },
+    { ...base, key: "old", timestamp: "2026-09-01T12:00:00Z" },
+    { ...base, key: "future", timestamp: "2026-10-20T01:00:00Z" },
+    { ...base, key: "tool", role: "tool" },
+  ] });
+  history.write({ provider: "claude", id: "child", cwd: root, parentId: "coverage", relationship: "subagent", messages: [{ ...base, key: "child" }] });
+  history.write({ provider: "claude", id: "outside", cwd: root + "-other", messages: [{ ...base, key: "outside" }] });
+  history.write({ provider: "codex", id: "other-agent", cwd: root, messages: [{ ...base, key: "codex" }] });
+  store.db.exec(`INSERT INTO adit_history_usage_observations
+    SELECT id||'-duplicate',provider,session_id,message_id,turn_id,source_key||'-duplicate',scope,source_kind,model,request_id,response_id,occurred_at,raw_usage_json
+    FROM adit_history_usage_observations WHERE session_id='coverage' LIMIT 1`);
+  const prepare = vi.spyOn(store.db, "prepare");
+  const result = analytics.overview(workspace, { ...scope, range, provider: "claude" });
+  const sql = prepare.mock.calls.map(([query]) => query).find(query => query.includes("WHERE m.role='assistant' AND NOT EXISTS"))!;
+  prepare.mockRestore();
+  expect(result.coverage.missingUsage).toBe(range === "all" ? 4 : 1);
+  const args = range === "all" ? [] : [Date.parse(`${result.scope.from}T00:00:00Z`), Date.parse(`${result.scope.to}T00:00:00Z`)];
+  const plan = store.db.prepare("EXPLAIN QUERY PLAN " + sql).all(...args) as { detail: string }[];
+  expect(plan.some(entry => entry.detail.includes("USING COVERING INDEX adit_history_assistant_scope_time"))).toBe(true);
+  if (range !== "all") expect(plan.some(entry => entry.detail.includes("occurred_at>?") && entry.detail.includes("occurred_at<?"))).toBe(true);
+});
+it("adds the assistant covering index to existing archives without rewriting messages", () => {
+  const { root, store, history } = fixture();
+  history.write(session(root));
+  store.db.exec("DROP INDEX adit_history_assistant_scope_time");
+  const before = store.db.prepare("SELECT * FROM adit_history_messages ORDER BY id").all();
+  createHistorySchema(store.db);
+  createHistorySchema(store.db);
+  expect(store.db.prepare("SELECT * FROM adit_history_messages ORDER BY id").all()).toEqual(before);
+  expect(store.db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='adit_history_assistant_scope_time'").get()).toBeDefined();
+});
+it("loads only the ten usage fields needed by the overview", () => {
+  const { root, store, history, analytics, workspace } = fixture();
+  history.write(session(root));
+  const prepare = vi.spyOn(store.db, "prepare");
+  const result = analytics.overview(workspace, scope);
+  const sql = prepare.mock.calls.map(([query]) => query).find(query => query.includes("FROM adit_history_usage_entries m "))!;
+  prepare.mockRestore();
+  const columns = ["provider", "session_id", "model", "occurred_at", "uncached_input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens", "total_tokens", "cost_microusd"];
+  const statement = store.db.prepare(sql);
+  expect(statement.columns().map(column => column.name)).toEqual(columns);
+  const original = store.db.prepare("SELECT * FROM adit_history_usage_entries WHERE ledger_role='canonical'").all() as Record<string, unknown>[];
+  expect(statement.all("all", Number.MIN_SAFE_INTEGER, Date.parse("2026-10-20T00:00:00Z")))
+    .toEqual(original.map(entry => Object.fromEntries(columns.map(column => [column, entry[column]]))));
+  expect(result.summary.estimatedCost).toBe(635);
+  expect(result.usage).toMatchObject({ entries: 1, priced: 1, unpriced: 0 });
+});
 it("shows the latest twelve calendar months and scopes the heatmap footer without changing overview totals", () => {
   const { root, history, analytics, workspace } = fixture();
   const dates = ["2025-10-31", "2025-11-01", "2026-10-18"];
@@ -309,6 +400,75 @@ it("clips work at the local midnight including a half-hour timezone and does not
   expect(unknown.work.duration).toBe(0);
   expect(unknown.coverage.missingTimestamp).toBe(1);
   expect(unknown.summary.prompts).toBe(1);
+});
+it.each([
+  ["UTC", "7d", "2026-10-19T12:00:00Z", "2026-10-13T00:00:00Z", "2026-10-20T00:00:00Z"],
+  ["UTC", "30d", "2026-10-19T12:00:00Z", "2026-09-20T00:00:00Z", "2026-10-20T00:00:00Z"],
+  ["Asia/Kolkata", "7d", "2026-10-19T12:00:00Z", "2026-10-12T18:30:00Z", "2026-10-19T18:30:00Z"],
+  ["Asia/Kathmandu", "7d", "2026-10-19T12:00:00Z", "2026-10-12T18:15:00Z", "2026-10-19T18:15:00Z"],
+  ["America/New_York", "7d", "2026-03-09T12:00:00Z", "2026-03-03T05:00:00Z", "2026-03-10T04:00:00Z"],
+  ["America/New_York", "7d", "2026-11-02T12:00:00Z", "2026-10-27T04:00:00Z", "2026-11-03T05:00:00Z"],
+  ["Australia/Lord_Howe", "7d", "2026-10-10T12:00:00Z", "2026-10-03T13:30:00Z", "2026-10-10T13:00:00Z"],
+  ["America/Santiago", "7d", "2026-09-12T12:00:00Z", "2026-09-06T04:00:00Z", "2026-09-13T03:00:00Z"],
+  ["Pacific/Apia", "7d", "2012-01-05T00:00:00Z", "2011-12-30T10:00:00Z", "2012-01-05T10:00:00Z"],
+])("keeps %s %s boundaries at %s across fractional offsets and calendar transitions", (timezone, range, now, from, to) => {
+  const { root, history, analytics, workspace } = fixture();
+  const start = Date.parse(from), end = Date.parse(to);
+  const records: [string, number, number][] = [
+    ["before", start - 120_000, start - 60_000],
+    ["cross-start", start - 60_000, start + 60_000],
+    ["at-start", start, start + 60_000],
+    ["cross-end", end - 60_000, end + 60_000],
+    ["after", end, end + 60_000],
+  ];
+  for (const [id, promptAt, replyAt] of records) {
+    const record = session(root, id);
+    record.messages[0].timestamp = new Date(promptAt).toISOString();
+    record.messages[1].timestamp = new Date(replyAt).toISOString();
+    history.write(record);
+  }
+  const result = analytics.overview(workspace, { timezone, range, now: Date.parse(now) });
+  expect(result.summary).toMatchObject({ sessions: 3, messages: 4, prompts: 2, estimatedCost: 1270 });
+  expect(result.work).toMatchObject({ duration: 180_000, peak: 2, peakAt: start, over30m: 0 });
+  expect(result.work.byProvider).toEqual([{ provider: "claude", duration: 180_000 }]);
+  expect(result.work.longest).toHaveLength(3);
+  expect(result.work.longest.every(turn => turn.duration === 60_000)).toBe(true);
+  const hours = new Map<number, number>();
+  const formatter = new Intl.DateTimeFormat("en-GB", { timeZone: timezone, hour: "2-digit", hourCycle: "h23" });
+  for (const [, promptAt, replyAt] of records) {
+    for (const at of [promptAt, replyAt]) if (at >= start && at < end) {
+      const hour = Number(formatter.format(at));
+      hours.set(hour, (hours.get(hour) || 0) + 1);
+    }
+  }
+  expect(result.activity.hours.map(hour => hour.total)).toEqual(Array.from({ length: 24 }, (_, hour) => hours.get(hour) || 0));
+});
+it("preserves all-time undated and future usage while clipping activity and work at tomorrow", () => {
+  const { root, history, analytics, workspace } = fixture();
+  for (const [id, timestamp] of [["future", "2026-10-20T01:00:00Z"], ["undated", undefined]] as const) {
+    const record = session(root, id);
+    record.messages.forEach(message => { message.timestamp = timestamp; });
+    history.write(record);
+  }
+  const result = analytics.overview(workspace, scope);
+  expect(result.summary).toMatchObject({ sessions: 2, messages: 2, prompts: 2, estimatedCost: 1270 });
+  expect(result.work).toMatchObject({ duration: 0, peak: 0, peakAt: null, longest: [] });
+  expect(result.coverage.missingTimestamp).toBe(2);
+  expect(result.activity.hours.every(hour => hour.total === 0)).toBe(true);
+});
+it("reads stored costs without rechecking the entire ledger when analytics is constructed or queried", () => {
+  const { root, store, history, workspace } = fixture();
+  history.write(session(root));
+  const persist = vi.spyOn(LocalPrices.prototype, "persist");
+  try {
+    const reader = new LocalAnalytics(store.db);
+    cleanup.push(() => reader.prices.close());
+    expect(reader.overview(workspace, scope).summary.estimatedCost).toBe(635);
+    expect(reader.overview(workspace, { ...scope, range: "7d" }).summary.estimatedCost).toBe(635);
+    expect(persist).not.toHaveBeenCalled();
+  } finally {
+    persist.mockRestore();
+  }
 });
 it("links only evidenced commits, deduplicates cross-repository SHAs, and keeps the Git denominator under Agent filtering", () => {
   const { root, store, history, analytics, workspace } = fixture(),

@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
 import {
   appendFileSync,
   existsSync,
@@ -29,17 +30,22 @@ const workerUrl = new URL(
   "../../dist/local/collection-worker.js",
   import.meta.url,
 );
+function createRepository(path: string) {
+  execFileSync("git", ["init", path], { windowsHide: true, stdio: "pipe" });
+  execFileSync("git", ["-C", path, "remote", "add", "origin", "https://example.invalid/test.git"], { windowsHide: true, stdio: "pipe" });
+  execFileSync("git", ["-C", path, "config", "user.email", "fixture@example.test"], { windowsHide: true, stdio: "pipe" });
+}
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "adit-collection-worker-"));
   const source = join(root, "source");
   mkdirSync(source);
-  mkdirSync(join(root,".git"));
+  createRepository(root);
   const store = new LocalStore(join(root, "state"));
   const history = new LocalHistory(store.db);
   const workspace = store.saveWorkspace({
     path: root,
     providers: ["codex"],
-    repositories: [],
+    repositories: [root],
   });
   const definition = sourceDefinitions().find((s) => s.id === "codex")!;
   const sources = [
@@ -91,8 +97,8 @@ const scan = (
 
 it("shares one worker scan across projects and uses identical incremental processing for manual and automatic triggers", async () => {
   const {root,store,history,request,file}=fixture();
-  const one=join(root,"one"),two=join(root,"two");mkdirSync(join(one,".git"),{recursive:true});mkdirSync(join(two,".git"),{recursive:true});
-  const workspaces=[one,two].map(path=>store.saveWorkspace({path,providers:["codex"],repositories:[]}));
+  const one=join(root,"one"),two=join(root,"two");createRepository(one);createRepository(two);
+  const workspaces=[one,two].map(path=>store.saveWorkspace({path,providers:["codex"],repositories:[path]}));
   for(const workspace of workspaces)store.markStarted(workspace.id);
   const rows=(id:string,cwd:string)=>JSON.stringify({type:"session_meta",payload:{id,cwd}})+"\n"+
     JSON.stringify({type:"response_item",payload:{type:"message",role:"user",content:"question"}})+"\n";
@@ -127,7 +133,7 @@ it("shares one worker scan across projects and uses identical incremental proces
   await wait(collector.collectAll());
   expect(history.session("codex","two")!.messages).toHaveLength(2);
   expect(inspect).toHaveBeenCalledTimes(3);
-});
+}, 15000);
 
 it("collects in the worker, persists progress, and updates only changed transcripts", async () => {
   const { store, history, workspace, request, file } = fixture();
@@ -138,6 +144,7 @@ it("collects in the worker, persists progress, and updates only changed transcri
   await expect
     .poll(
       () => store.jobs<CollectionJob>().find((j) => j.id === job.id)?.status,
+      { timeout: 10000 },
     )
     .toBe("done");
   expect(
@@ -159,7 +166,7 @@ it("collects in the worker, persists progress, and updates only changed transcri
   appendFileSync(file, "{invalid}\n");
   expect((await scan(request)).errors).toHaveLength(1);
   expect(history.session("codex", "fixture")?.messages).toHaveLength(2);
-});
+}, 15000);
 
 it("keeps discovery read-only and rejects changed workspace/source selections", async () => {
   const { store, history, workspace, request } = fixture();

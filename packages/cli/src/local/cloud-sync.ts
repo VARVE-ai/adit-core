@@ -1,11 +1,11 @@
-import { assertWorkspaceGit } from "@varveai/adit-core";
+import { assertWorkspaceGit, assertSelectedRepositories, missingOriginRemote } from "@varveai/adit-core";
 import { randomUUID } from "node:crypto";
 import { LocalStore, LocalStateError, localLoginStartupEnabled, projectUploadRepositories } from "@varveai/adit-core";
 import { CloudClient, loadCredentials, collectDefaultBranch, collectRemoteBranchSnapshot, type UpgradeNotice } from "@varveai/adit-cloud";
 import { CloudProjection, createCloudSyncSchema, syncKey, type CloudBaseline, type CloudEvent, type CloudSession } from "./cloud-projection.js";
 import type { Collector } from "./collector.js";
 import { getRemoteUrl, runGit } from "@varveai/adit-engine";
-import { cloudPending, type CloudPending } from "./cloud-pending.js";
+import { CloudPendingService, type CloudPendingStatus } from "./cloud-pending-service.js";
 import { sendLocalRuntimeReport } from "./cloud-runtime-report.js";
 import { localCommitBranches, type CommitBranch } from "./commit-branches.js";
 
@@ -20,12 +20,14 @@ type Transport = Pick<CloudClient,"get"|"post">;
 export class LocalCloudSync {
   private active=new Map<string,Promise<void>>();
   private jobs=new Map<string,LocalCloudJob>();
-  private pendingCache=new Map<string,{key:string;value:CloudPending}>();
+  private pendingService: CloudPendingService;
   private stopped=false;
   private timer?:ReturnType<typeof setInterval>;
   constructor(readonly store:LocalStore,private collector:Pick<Collector,"collect"|"waitFor">,
-    private transport?: (credentials:NonNullable<ReturnType<typeof loadCredentials>>)=>Transport) {
+    private transport?: (credentials:NonNullable<ReturnType<typeof loadCredentials>>)=>Transport,
+    pendingWorkerUrl?: URL) {
     createCloudSyncSchema(store);
+    this.pendingService = new CloudPendingService(store, pendingWorkerUrl);
     for(const job of store.jobs<LocalCloudJob>()) if(job.kind==="cloud-sync" && ["queued","running"].includes(job.status))
       store.job({...job,status:"failed",endedAt:new Date().toISOString(),error:"Sync was interrupted. Retry to continue from confirmed records."});
     for(const row of store.db.prepare("SELECT key,data FROM adit_local_settings WHERE key LIKE 'cloud-job:%'").all() as {key:string;data:string}[]) {
@@ -39,7 +41,7 @@ export class LocalCloudSync {
   }
   forget(id:string) {
     if(this.active.has(id))throw new LocalStateError("Wait for this project's background tasks to finish before deleting it.",409);
-    this.jobs.delete(id);this.pendingCache.delete(id);
+    this.jobs.delete(id);this.pendingService.forget(id);
   }
   status(id:string,credentials=loadCredentials(this.store.directory)) {
     const accountKey=credentials?syncKey(credentials.serverUrl,credentials.accountId??credentials.clientId):"disconnected";
@@ -48,26 +50,23 @@ export class LocalCloudSync {
     return {...saved,pending:this.pending(workspace,credentials),nextAt:workspace.cloud.enabled&&workspace.cloud.mode==="automatic"&&localLoginStartupEnabled(this.store.directory)
       ?new Date((saved?Date.parse(saved.startedAt):Date.now())+workspace.cloud.interval*60_000).toISOString():null};
   }
-  private pending(workspace:ReturnType<LocalStore["workspace"]>,credentials:ReturnType<typeof loadCredentials>):CloudPending {
-    if(!workspace.cloud.enabled)return {state:"disabled",sessions:null,commits:null};
-    if(!credentials)return {state:"disconnected",sessions:null,commits:null};
-    if(!credentials.accountId)return {state:"uninitialized",sessions:null,commits:null};
+  private pending(workspace:ReturnType<LocalStore["workspace"]>,credentials:ReturnType<typeof loadCredentials>):CloudPendingStatus {
+    if(!workspace.cloud.enabled || !credentials?.accountId) {
+      this.pendingService.forget(workspace.id);
+      return {state:!workspace.cloud.enabled?"disabled":!credentials?"disconnected":"uninitialized",sessions:null,commits:null};
+    }
     const scope=syncKey(credentials.serverUrl,credentials.accountId,workspace.id);
-    // data_version covers collection-worker writes; total_changes covers receipts / edits on this connection.
-    const key=JSON.stringify([scope,workspace.version,this.store.db.pragma("data_version",{simple:true}),
-      (this.store.db.prepare("SELECT total_changes() n").get() as {n:number}).n]);
-    const cached=this.pendingCache.get(workspace.id);
-    if(cached?.key===key)return cached.value;
-    const row=this.store.db.prepare("SELECT baseline FROM adit_local_cloud_scopes WHERE id=?").get(scope) as {baseline:string}|undefined;
-    const value:CloudPending=row?cloudPending(this.store,workspace,scope,JSON.parse(row.baseline))
-      :{state:"uninitialized",sessions:null,commits:null};
-    this.pendingCache.set(workspace.id,{key,value});
-    return value;
+    if (!this.store.db.prepare("SELECT 1 FROM adit_local_cloud_scopes WHERE id=?").get(scope)) {
+      this.pendingService.forget(workspace.id);
+      return {state:"uninitialized",sessions:null,commits:null};
+    }
+    return this.pendingService.read(workspace,scope);
   }
   start(id:string):LocalCloudJob {
     if(this.stopped)throw new LocalStateError("Cloud sync is stopping",409);
     const workspace=this.store.workspace(id);
     assertWorkspaceGit(workspace.path);
+    assertSelectedRepositories(workspace.path, workspace.repositories);
     if(workspace.cloudDeletedAt)throw new LocalStateError("This project was deleted from Cloud. Review its identity in Settings.",409);
     if(!workspace.cloud.enabled)throw new LocalStateError("Enable Cloud storage for this directory first.",409);
     if(this.active.has(id))return this.jobs.get(id)!;
@@ -145,7 +144,9 @@ export class LocalCloudSync {
         }
         const repositories=await Promise.all(projectUploadRepositories(this.store.db,workspace).map(async r=>{
           let repositoryUrl=await getRemoteUrl(r.path).catch(()=>null);
+          if(!repositoryUrl)throw new LocalStateError(`${missingOriginRemote} (${r.path})`,409);
           if(repositoryUrl?.includes("://")) { try {const url=new URL(repositoryUrl);url.username="";url.password="";repositoryUrl=url.toString();}catch{repositoryUrl=null;} }
+          if(!repositoryUrl)throw new LocalStateError(`Invalid git remote 'origin' URL (${r.path})`,409);
           const checkpoint=this.store.db.prepare("SELECT refs,identity FROM adit_local_git_checkpoints WHERE repository=?").get(r.path) as {refs:string;identity:string}|undefined;
           const branches:{name:string;headSha:string}[]=[];
           if(checkpoint) {
@@ -221,5 +222,5 @@ export class LocalCloudSync {
       }
     },15000);this.timer.unref();
   }
-  async close(){this.stopped=true;clearInterval(this.timer);await Promise.allSettled(this.active.values());}
+  async close(){this.stopped=true;clearInterval(this.timer);await this.pendingService.close();await Promise.allSettled(this.active.values());}
 }

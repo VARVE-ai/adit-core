@@ -28,7 +28,9 @@ it("keeps one detached instance and resumes collection after restart without a b
   const initialSettings = new LocalStore(data);
   initialSettings.set("login-startup", { enabled: false, version: 1 });
   initialSettings.close();
-  mkdirSync(join(workspace,".git"),{recursive:true});
+  await exec("git", ["init", workspace], { windowsHide: true });
+  await exec("git", ["-C", workspace, "remote", "add", "origin", "https://example.invalid/test.git"], { windowsHide: true });
+  await exec("git", ["-C", workspace, "config", "user.email", "fixture@example.test"], { windowsHide: true });
   mkdirSync(source);
   const env = {
     ...process.env,
@@ -101,6 +103,7 @@ it("keeps one detached instance and resumes collection after restart without a b
     const response = await api("/workspaces", "POST", {
       path: workspace,
       providers: ["codex"],
+      repositories: [workspace],
     });
     expect(response.status).toBe(201);
     const w = (await response.json()) as { id: string };

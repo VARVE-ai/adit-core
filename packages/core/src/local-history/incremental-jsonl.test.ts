@@ -19,10 +19,10 @@ function fixture(provider="codex") {
   const root=mkdtempSync(join(tmpdir(),"adit-jsonl-"));roots.push(root);const db=new Database(":memory:");dbs.push(db);new LocalHistory(db);
   const path=join(root,provider==="codex"?"rollout-s.jsonl":"s.jsonl"),key=process.platform==="win32"?path.toLowerCase():path;
   const scope=JSON.stringify([resolve(root),[root]]),full=vi.fn(()=>provider==="codex"?readCodexSession(path,provider,root):readClaudeLineage(path,provider));
-  const collect=async()=>{
-    const result=await trackSourceReads(path,()=>collectIncrementalJSONL(db,provider,path,scope,99,full));
+  const collect=async(database=db)=>{
+    const result=await trackSourceReads(path,()=>collectIncrementalJSONL(database,provider,path,scope,99,full));
     expect(result.stable).toBe(true);
-    db.transaction(()=>{for(const s of result.value.sessions)new StructuredHistory(db).write(s);new SourceCheckpoints(db).save(provider,key,scope,99,result.manifest,result.value.sessions.map(s=>[provider,s.id]));result.value.commit();})();
+    database.transaction(()=>{for(const s of result.value.sessions)new StructuredHistory(database).write(s);new SourceCheckpoints(database).save(provider,key,scope,99,result.manifest,result.value.sessions.map(s=>[provider,s.id]));result.value.commit();})();
     return result.value;
   };
   return {root,db,path,full,collect};
@@ -39,6 +39,32 @@ it("resumes Codex across restarts, preserving IDs, models and usage with full-pa
   expect(new StructuredHistory(f.db).read("codex","s")).toEqual((await readCodexSession(f.path,"codex",f.root))[0]);
   expect(f.db.prepare("SELECT length(state_json)<4096 small FROM adit_history_jsonl_cursors").get()).toEqual({small:1});
   expect(f.db.pragma("foreign_key_check")).toEqual([]);
+});
+it.each(["codex", "claude"])("appends %s after raw compaction with the same history and digests as legacy storage", async provider => {
+  const fixtureState = fixture(provider);
+  const text = "long native message ".repeat(40);
+  const claudeRow = (role: string, key: string, parent: string | null) => ({ type: role, uuid: key, parentUuid: parent,
+    sessionId: "s", cwd: fixtureState.root, message: { id: `response-${key}`, role, content: text } });
+  writeFileSync(fixtureState.path, provider === "codex"
+    ? lines({ type: "session_meta", payload: { id: "s", cwd: fixtureState.root } }, prompt(text), answer(text))
+    : lines(claudeRow("user", "prompt", null), claudeRow("assistant", "answer", "prompt")));
+  await fixtureState.collect();
+  expect(fixtureState.db.prepare("SELECT count(*) count FROM adit_history_messages WHERE raw_content_paths_json IS NOT NULL").get()).toEqual({ count: 2 });
+  const legacy = new Database(fixtureState.db.serialize());
+  dbs.push(legacy);
+  const previous = new StructuredHistory(legacy).read(provider, "s")!;
+  for (const message of previous.messages)
+    legacy.prepare("UPDATE adit_history_messages SET raw_json=?,raw_content_paths_json=NULL WHERE source_key=?").run(JSON.stringify(message.raw), message.key);
+  appendFileSync(fixtureState.path, provider === "codex" ? lines(prompt(text), answer(text))
+    : lines(claudeRow("user", "next", "answer"), claudeRow("assistant", "final", "next")));
+  expect((await fixtureState.collect()).usedAppend).toBe(true);
+  expect((await fixtureState.collect(legacy)).usedAppend).toBe(true);
+  expect(fixtureState.full).toHaveBeenCalledTimes(1);
+  const expected = provider === "codex" ? await readCodexSession(fixtureState.path, provider, fixtureState.root)
+    : await readClaudeLineage(fixtureState.path, provider);
+  expect(new StructuredHistory(fixtureState.db).read(provider, "s")).toEqual(expected[0]);
+  expect(fixtureState.db.prepare("SELECT * FROM adit_history_message_digests ORDER BY rowid").all())
+    .toEqual(legacy.prepare("SELECT * FROM adit_history_message_digests ORDER BY rowid").all());
 });
 it("falls back on in-place prefix rewrite, truncation, and incomplete trailing records",async()=>{
   const f=fixture(),header={type:"session_meta",payload:{id:"s",cwd:f.root}};writeFileSync(f.path,lines(header,prompt("Before"),answer("Reply")));await f.collect();
