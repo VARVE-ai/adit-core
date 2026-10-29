@@ -52,13 +52,19 @@ function githubRelease(tag) {
   const result = github(['api', '--include', `repos/${repository}/releases/tags/${tag}`]);
   return JSON.parse(result.slice(result.indexOf('{')));
 }
-function findRelease(tag) {
-  // Only a confirmed 404 means absent; authentication/network failures must stop.
-  try { return githubRelease(tag); }
-  catch (error) {
-    if (String(error.stdout).includes('HTTP/2.0 404') || String(error.stdout).includes('HTTP/2 404') || String(error.stdout).includes('HTTP/1.1 404')) return null;
-    throw error;
-  }
+export function findRelease(tag) {
+  // REST's tag lookup only finds published releases. Resolve drafts via GraphQL,
+  // then fetch the same REST shape (including assets) by release ID.
+  const [owner, name] = repository.split('/');
+  const result = JSON.parse(github(['api', 'graphql', '-f',
+    'query=query($owner:String!,$name:String!,$tag:String!){repository(owner:$owner,name:$name){release(tagName:$tag){databaseId}}}',
+    '-f', `owner=${owner}`, '-f', `name=${name}`, '-f', `tag=${tag}`]));
+  assert.ok(!result.errors?.length, 'Release lookup failed');
+  const release = result.data?.repository?.release;
+  // Only an explicit missing release is safe to create; lookup failures must stop.
+  assert.notEqual(release, undefined, 'Release lookup did not return a repository');
+  if (release === null) return null;
+  return JSON.parse(github(['api', `repos/${repository}/releases/${release.databaseId}`]));
 }
 function assertPublishContext() {
   assert.equal(process.env.GITHUB_ACTIONS, 'true', 'Remote writes are allowed only in GitHub Actions');
@@ -142,7 +148,7 @@ function pack(version, commit, directory) {
     for (const { file, original } of manifests) writeFileSync(file, original);
   }
 }
-function stage(version, commit, directory) {
+export function stage(version, commit, directory) {
   assertPublishContext();
   const tag = `v${version}`;
   const local = verifyArtifacts(directory, version, commit);
@@ -170,6 +176,7 @@ function stage(version, commit, directory) {
     writeFileSync(notes, `${process.env.RELEASE_NOTES.trim()}\n\n## Installation\n\nRequires Node.js 22 or later.\n\n\`\`\`sh\nnpm install -g @varveai/adit-cli@${version}\n\`\`\`\n\nSource: https://github.com/${repository}/commit/${commit}\n\nValidation: https://github.com/${repository}/actions/runs/${process.env.GITHUB_RUN_ID}\n`);
     github(['release', 'create', tag, '--repo', repository, '--verify-tag', '--draft', '--title', tag, '--notes-file', notes]);
     release = findRelease(tag);
+    assert.ok(release, 'Created draft release is not visible; retry the same release');
   }
   // A partial asset upload is safe to retry only when existing bytes match.
   for (const p of local.packages) {
