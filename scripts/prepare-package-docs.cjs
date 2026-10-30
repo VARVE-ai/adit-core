@@ -1,4 +1,4 @@
-const { copyFileSync } = require("node:fs");
+const { copyFileSync, readFileSync, writeFileSync } = require("node:fs");
 const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
@@ -14,6 +14,13 @@ for (const name of packages) {
   // Keep the repository documents as the only maintained copies.
   copyFileSync(path.join(root, "LICENSE"), path.join(directory, "LICENSE"));
   if (name === "cli") {
-    copyFileSync(path.join(root, "README.md"), path.join(directory, "README.md"));
+    // npm displays the README outside the repository, so resolve repository assets there.
+    const readme = readFileSync(path.join(root, "README.md"), "utf8")
+      .replaceAll('src="docs/images/', 'src="https://raw.githubusercontent.com/VARVE-ai/adit-core/main/docs/images/')
+      .replaceAll("](docs/releasing.md)", "](https://github.com/VARVE-ai/adit-core/blob/main/docs/releasing.md)");
+    writeFileSync(path.join(directory, "README.md"), readme);
+    for (const file of ["SECURITY.md", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_LICENSES.txt"]) {
+      copyFileSync(path.join(root, file), path.join(directory, file));
+    }
   }
 }
