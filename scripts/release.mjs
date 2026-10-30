@@ -190,6 +190,7 @@ export function stage(version, commit, directory) {
   github(['release', 'upload', tag, path.join(directory, 'release-manifest.json'), '--repo', repository]);
 }
 export async function uploadPackages(manifest, io) {
+  const now = io.now ?? (() => performance.now());
   // Validate every existing version before any new registry write.
   for (const p of manifest.packages) {
     const remote = await io.lookup(p.name, p.version);
@@ -199,13 +200,18 @@ export async function uploadPackages(manifest, io) {
     const remote = await io.lookup(p.name, p.version);
     if (remote) assertRegistryMatch(p, remote);
     else await io.upload(p);
+    // npm may accept the archive but take several minutes to expose it.
+    // Bound elapsed time, including slow lookups, and check once at the deadline.
+    const deadline = now() + 5 * 60 * 1000;
     let visible;
-    for (let attempt = 0; attempt < 6; attempt++) {
+    while (true) {
       visible = await io.lookup(p.name, p.version);
       if (visible) break;
-      await io.delay();
+      const remaining = deadline - now();
+      if (remaining <= 0) break;
+      await io.delay(Math.min(5000, remaining));
     }
-    assert.ok(visible, `Published package not visible: ${p.name}; retry the same release`);
+    assert.ok(visible, `Published package not visible after 5 minutes: ${p.name}; retry the same release`);
     assertRegistryMatch(p, visible);
   }
 }
@@ -216,7 +222,7 @@ async function publish(version, commit, directory) {
   await uploadPackages(manifest, {
     lookup: registry,
     upload: p => npm(['publish', path.join(directory, p.file), '--access', 'public', '--tag', 'candidate', '--ignore-scripts']),
-    delay: () => new Promise(resolve => setTimeout(resolve, 5000)),
+    delay: ms => new Promise(resolve => setTimeout(resolve, ms)),
   });
 }
 export async function promotePackages(manifest, io) {

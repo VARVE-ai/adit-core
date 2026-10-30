@@ -161,7 +161,10 @@ test('artifact verification detects changed bytes before publication', t => {
 });
 function fakeRegistry() {
   const saved = new Map(), uploaded = [];
-  return { saved, uploaded, lookup: async name => saved.get(name) || null, delay: async () => {}, upload: async p => { uploaded.push(p.name); saved.set(p.name, { ...p, dist: { integrity: p.integrity } }); } };
+  let time = 0;
+  return { saved, uploaded, lookup: async name => saved.get(name) || null, now: () => time,
+    delay: async (ms = 5000) => { time += ms; },
+    upload: async p => { uploaded.push(p.name); saved.set(p.name, { ...p, dist: { integrity: p.integrity } }); } };
 }
 test('partial upload resumes without reuploading successful packages, CLI last', async () => {
   const m = fixture(), io = fakeRegistry(), upload = io.upload;
@@ -183,6 +186,38 @@ test('an existing conflicting package stops the entire batch before any upload',
 test('upload success without registry visibility must not be reported as release success', async () => {
   const io = fakeRegistry(); io.upload = async () => {};
   await assert.rejects(uploadPackages(fixture(), io), /not visible/);
+  assert.equal(io.now(), 300000, 'Stop after five minutes rather than waiting indefinitely');
+});
+test('delayed registry processing is allowed for each package without uploading it twice', async () => {
+  const m = fixture(), io = fakeRegistry(), upload = io.upload, readyAt = new Map();
+  io.upload = async p => { await upload(p); readyAt.set(p.name, io.now() + 120000); };
+  io.lookup = async name => io.now() >= readyAt.get(name) ? io.saved.get(name) : null;
+  await uploadPackages(m, io);
+  assert.deepEqual(io.uploaded, m.packages.map(p => p.name));
+  assert.equal(io.now(), 480000);
+});
+test('the final visibility check at the deadline can still confirm publication', async () => {
+  const m = fixture(), io = fakeRegistry(), upload = io.upload;
+  io.upload = async p => { await upload(p); };
+  io.lookup = async name => io.now() >= 300000 ? io.saved.get(name) || null : null;
+  await uploadPackages(m, io);
+  assert.equal(io.now(), 300000);
+  assert.deepEqual(io.uploaded, m.packages.map(p => p.name));
+});
+test('slow registry responses count toward the visibility deadline', async () => {
+  const io = fakeRegistry();
+  let submitted = false;
+  io.upload = async () => { submitted = true; };
+  io.lookup = async () => { if (submitted) await io.delay(30000); return null; };
+  await assert.rejects(uploadPackages(fixture(), io), /not visible/);
+  assert.ok(io.now() >= 300000 && io.now() <= 330000);
+});
+test('delayed publication still rejects mismatched package contents', async () => {
+  const io = fakeRegistry(), upload = io.upload;
+  io.upload = async p => { await upload(p); io.saved.get(p.name).dist.integrity = 'sha512-other'; };
+  io.lookup = async name => io.now() >= 120000 ? io.saved.get(name) || null : null;
+  await assert.rejects(uploadPackages(fixture(), io), /Published content differs/);
+  assert.equal(io.uploaded.length, 1);
 });
 
 test('remote-writing commands refuse rehearsal mode before touching remote services', () => {

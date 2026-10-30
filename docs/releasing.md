@@ -57,6 +57,8 @@ References: [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)
 5. Upload in dependency order: core → engine → cloud → CLI. Initially use the
    `candidate` distribution tag, leaving `latest` unchanged. These are public
    packages already, not private staging packages or beta version numbers.
+   After each upload, allow up to five minutes for npm processing before failing;
+   a timeout leaves the release resumable without overwriting uploaded packages.
 6. Install the exact uploaded CLI version from npm in a clean Linux environment.
    Only after verification, promote the four packages to `latest` (CLI last) and
    publish the GitHub release with the supplied notes and source/run links.
