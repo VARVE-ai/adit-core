@@ -47,7 +47,7 @@ export async function cloudUsageCommand(options: Json & PeriodOptions & { by?: s
     const who = result.scope.member
       ? personName(result.scope.member)
       : result.scope.team
-        ? `team ${result.scope.team.name}`
+        ? `collaboration project ${result.scope.team.name}`
         : result.scope.kind === "me" ? "yours" : result.scope.kind;
     const scope = [who, periodLabel(result.period), result.period.timeZone, `by ${result.by}`];
     if (result.rows.length === 0 && result.totals.requests === 0) {
@@ -100,11 +100,11 @@ export async function cloudReportsDailyCommand(options: Json & PeriodOptions & {
     const scope = [
       periodLabel(result.period),
       members.size === 1 && firstMember ? personName(firstMember) : null,
-      result.reports.length > 0 ? plural(new Set(result.reports.map((report) => report.team.id)).size, "team") : null,
+      result.reports.length > 0 ? plural(new Set(result.reports.map((report) => report.team.id)).size, "collaboration project") : null,
     ];
     if (!result.reports.length) {
       printTitle("Daily reports", ...scope);
-      printEnd(`${marks.skip} You are not in any team, so there are no daily reports`);
+      printEnd(`${marks.skip} You are not in any collaboration project, so there are no daily reports`);
       return;
     }
     printTitle("Daily reports", ...scope);
@@ -143,7 +143,7 @@ export async function cloudTeamMembersCommand(options: Json & { team?: string })
     const result = await listCloudTeamMembers(requireCloudClient(), options.team);
     if (options.json) return printJson(result);
     printTitle(
-      `Team ${result.team.name}`,
+      `Collaboration project ${result.team.name}`,
       plural(result.members.length, "member"),
       `you are ${result.viewer.role}${result.viewer.canQueryOthers ? ", can query others" : ", can query only yourself"}`,
     );
@@ -154,7 +154,7 @@ export async function cloudTeamMembersCommand(options: Json & { team?: string })
     printEnd(result.viewer.canQueryOthers
       ? dim(`progress: ${strong(`adit cloud team progress --team ${result.team.id} --member <id>`)}`)
       : undefined);
-  } catch (error) { reportFailure(error, options, "team members", `find the team ID with ${strong("adit cloud teams list")}`); }
+  } catch (error) { reportFailure(error, options, "team members", `find the collaboration project ID with ${strong("adit cloud teams list")}`); }
 }
 
 export async function cloudTeamProgressCommand(options: Json & PeriodOptions & { team?: string; member?: string; query?: string }): Promise<void> {
@@ -220,19 +220,19 @@ function withPeriod(command: Command): Command {
 export function registerCloudReportCommands(cloud: Command): void {
   withPeriod(cloud.command("usage").description("Token usage and estimated cost (defaults to the last 7 days)"))
     .addOption(new Option("--by <dimension>", "Group rows by").choices(["model", "day", "session", "member"]).default("model"))
-    .addOption(new Option("--scope <scope>", "Your own usage or a team's").choices(["me", "team"]).default("me"))
-    .option("--team <id>", "Team ID for scope team").option("--member <id>", "One member of the team").option("--project <id>", "Limit to one project")
+    .addOption(new Option("--scope <scope>", "Your own usage or a collaboration project's").choices(["me", "team"]).default("me"))
+    .option("--team <id>", "Collaboration project ID for --scope team").option("--member <id>", "One member of the collaboration project").option("--project <id>", "Limit to one workspace")
     .option("--json", "Output JSON").action((options) => cloudUsageCommand(options));
 
   const reports = cloud.command("reports").description("Daily work reports");
   withPeriod(reports.command("daily").description("Read daily reports (defaults to today)"))
     .option("--date <date>", "One calendar day, YYYY-MM-DD")
-    .option("--team <id>", "Team ID; defaults to every team you belong to").option("--member <id>", "Another member (owners and leads only)")
+    .option("--team <id>", "Collaboration project ID; defaults to every collaboration project you belong to").option("--member <id>", "Another member (owners and leads only)")
     .option("--json", "Output JSON").action((options) => cloudReportsDailyCommand(options));
 
-  const team = cloud.command("team").description("Team members and their progress");
-  team.command("members").description("List a team's members with roles").requiredOption("--team <id>", "Team ID").option("--json", "Output JSON").action((options) => cloudTeamMembersCommand(options));
+  const team = cloud.command("team").description("Collaboration project members and their progress");
+  team.command("members").description("List a collaboration project's members with roles").requiredOption("--team <id>", "Collaboration project ID").option("--json", "Output JSON").action((options) => cloudTeamMembersCommand(options));
   withPeriod(team.command("progress").description("A member's tasks, sessions, evidence and commits for a feature"))
-    .requiredOption("--team <id>", "Team ID").requiredOption("--member <id>", "Member ID").option("--query <text>", "Feature words to match")
+    .requiredOption("--team <id>", "Collaboration project ID").requiredOption("--member <id>", "Member ID").option("--query <text>", "Feature words to match")
     .option("--json", "Output JSON").action((options) => cloudTeamProgressCommand(options));
 }

@@ -55,6 +55,47 @@ function api(
     body: body === undefined ? undefined : JSON.stringify(body),
   });
 }
+it("keeps automatic update settings local, rejects stale writes and does not enable source updates", async () => {
+  const state = await (await api("/state")).json() as any;
+  expect(state.autoUpdate).toMatchObject({ supported: false, enabled: true });
+  expect((await fetch(app.origin + "/api/local/auto-update", { method: "PATCH", body: JSON.stringify({ enabled: false, version: 0 }) })).status).toBe(403);
+  expect((await api("/auto-update", "PATCH", { enabled: false, version: 0 })).status).toBe(200);
+  expect((await api("/auto-update", "PATCH", { enabled: false, version: 0 })).status).toBe(409);
+  expect((await api("/auto-update", "PATCH", { enabled: true, version: 1 })).status).toBe(409);
+  expect((await (await api("/state")).json() as any).startup.enabled).toBe(true);
+});
+it("waits for mutations, gates new collection during install, keeps health and state readable and resumes on failure", async () => {
+  await app.close();
+  const launch = vi.fn(async () => process.pid);
+  app = await startLocalServer({ directory: join(root, "state"), autoUpdateOptions: {
+    currentVersion: "1.1.6", latest: async () => "1.2.0", launch,
+    detect: async () => ({ installation: { root, entry: join(root, "index.js"), manager: "npm" } }),
+  } });
+  const workspace = app.store.saveWorkspace({ path: root, providers: [] });
+  let finishImport!: () => void;
+  const imported = vi.spyOn(githubCredential, "importGitHubCredential").mockImplementation(() => new Promise(resolveDone => {
+    finishImport = () => resolveDone({ configured: true, account: "test" });
+  }));
+  const request = api(`/workspaces/${workspace.id}/gist-credential`, "POST", {});
+  await vi.waitFor(() => expect(imported).toHaveBeenCalledOnce());
+  await app.autoUpdate.tick();
+  expect(app.autoUpdate.status().phase).toBe("waiting");
+  expect(launch).not.toHaveBeenCalled();
+  finishImport();
+  await request;
+  await app.autoUpdate.tick();
+  expect(launch).toHaveBeenCalledOnce();
+  expect((await fetch(app.origin + "/health")).status).toBe(200);
+  expect((await api("/state")).status).toBe(200);
+  expect((await api("/discoveries", "POST", { path: root })).status).toBe(503);
+  expect(() => app.collector.discover(root)).toThrow(/updating/);
+  const saved = app.store.get<any>("automatic-update", {});
+  mkdirSync(join(app.store.directory, "auto-update"), { recursive: true });
+  writeFileSync(join(app.store.directory, "auto-update", "result.json"), JSON.stringify({ id: saved.requestId, error: "installation failed" }));
+  await app.autoUpdate.tick();
+  expect(app.autoUpdate.updating).toBe(false);
+  expect((await api("/auto-update", "PATCH", { enabled: false, version: 0 })).status).toBe(200);
+});
 it("imports a local GitHub account only after an explicit protected local POST", async () => {
   const imported = vi.spyOn(githubCredential, "importGitHubCredential").mockResolvedValue({ configured: true, account: "test-user" });
   const workspace = app.store.saveWorkspace({ path: root, providers: [] });

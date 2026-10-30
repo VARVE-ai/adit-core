@@ -162,6 +162,7 @@ const overview = {
 let empty = false;
 let accountConnected = true;
 let startup = { enabled: false, supported: true, version: 0 };
+let autoUpdate: { enabled: boolean; supported: boolean; version: number; phase: string; reason?: string } = { enabled: true, supported: true, version: 0, phase: "idle" };
 let savedWorkspace: typeof workspace & { cloudSync?: CloudSyncSummary; repositoryInfo?: {path:string;count:number|null;skipReason?:"missing-git-email"}[] } = workspace;
 let jobs: { id: string; workspaceId: string; kind: string; status: string; phase?:string; repositories?:{path:string;count:number|null}[]; providers?:Record<string,number>;pending?:Record<string,number>;sourceProgress?:Record<string,{completed:number;total:number|null;status:string}>;repositoryProgress?:Record<string,{completed:number;total:number|null;status:string;matched:number}> }[] = [];
 let syncStartFails = false;
@@ -175,6 +176,7 @@ const respond = (path: string, input?: any): unknown => {
     return {
       workspaces: empty ? [] : [savedWorkspace],
       startup,
+      autoUpdate,
       jobs,
       schedule: { enabled: true, interval: 5, version: 1 },
     };
@@ -198,6 +200,10 @@ const respond = (path: string, input?: any): unknown => {
     startup = { ...startup, enabled: input.enabled, version: startup.version + 1 };
     if (!startup.enabled) savedWorkspace = { ...savedWorkspace, version: savedWorkspace.version + 1, cloud: { ...savedWorkspace.cloud, mode: "manual" } };
     return startup;
+  }
+  if (path === "/auto-update") {
+    autoUpdate = { ...autoUpdate, enabled: input.enabled, version: autoUpdate.version + 1 };
+    return autoUpdate;
   }
   if (path === `/workspaces/${savedWorkspace.id}`) {
     if (input) savedWorkspace = { ...savedWorkspace, ...input, version: savedWorkspace.version + 1 };
@@ -365,6 +371,7 @@ beforeEach(() => {
   empty = false;
   accountConnected = true;
   startup = { enabled: false, supported: true, version: 0 };
+  autoUpdate = { enabled: true, supported: true, version: 0, phase: "idle" };
   savedWorkspace = workspace;
   jobs = [];
   syncStartFails = false;
@@ -533,7 +540,7 @@ describe("language switching across the local workbench", () => {
     expect(requests()).toHaveLength(before);
     expect(text(root.findByProps({ role: "dialog" }))).toContain(workspace.path);
     expect(text(root.findByProps({ role: "dialog" }))).toContain("Cloud data and published shares will remain.");
-    expect(text(root.findByProps({ role: "dialog" }))).toContain("Records still used by other projects will be kept");
+    expect(text(root.findByProps({ role: "dialog" }))).toContain("Records still used by other workspaces will be kept");
     await act(async () => { button("Cancel").props.onClick(); });
     expect(root.findAllByProps({ role: "dialog" })).toHaveLength(0);
     expect(requests()).toHaveLength(before);
@@ -732,6 +739,34 @@ describe("language switching across the local workbench", () => {
     await toggle();
     expect(text(root)).toContain("启动设置");
     expect(text(root)).toContain("登录电脑后自动启动");
+  });
+  it("allows automatic updates to be disabled independently of login startup and sync", async () => {
+    startup = { enabled: true, supported: true, version: 1 };
+    savedWorkspace = { ...workspace, cloud: { ...workspace.cloud, mode: "automatic" } };
+    const root = await render("/settings/cli");
+    const checkbox = () => root.findAllByType("label")
+      .find(node => text(node).trim() === "Automatically update to the latest stable release")!.findByType("input");
+    expect(checkbox().props.checked).toBe(true);
+    expect(text(root)).toContain("Checks every 24 hours");
+    await act(async () => { await checkbox().props.onChange({ target: { checked: false } }); });
+    expect(checkbox().props.checked).toBe(false);
+    expect(startup.enabled).toBe(true);
+    expect(savedWorkspace.cloud.mode).toBe("automatic");
+    expect(text(root)).toContain("Automatic updates are off");
+    await toggle();
+    expect(text(root)).toContain("自动更新到最新稳定版");
+    expect(text(root)).toContain("自动更新已关闭");
+  });
+  it("explains why source installations cannot update automatically", async () => {
+    autoUpdate = { ...autoUpdate, supported: false, reason: "source" };
+    const root = await render("/settings/cli");
+    const checkbox = root.findAllByType("label")
+      .find(node => text(node).trim() === "Automatically update to the latest stable release")!.findByType("input");
+    expect(checkbox.props.disabled).toBe(true);
+    expect(checkbox.props.checked).toBe(false);
+    expect(text(root)).toContain("Source, development and linked installations do not update automatically");
+    await toggle();
+    expect(text(root)).toContain("源码版、开发版或链接安装不自动更新");
   });
   it("asks for startup consent before selecting automatic sync and keeps manual mode on cancel or failure", async () => {
     const root = await render("/settings/workspaces/ws");

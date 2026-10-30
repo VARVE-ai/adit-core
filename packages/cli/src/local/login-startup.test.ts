@@ -7,6 +7,7 @@ import { LoginStartup, UserLoginRegistration, type StartupRegistration } from ".
 
 const resources: { store: LocalStore; root: string }[] = [];
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const { store, root } of resources.splice(0)) {
     store.close();
     rmSync(root, { recursive: true, force: true });
@@ -127,3 +128,13 @@ it.skipIf(process.platform !== "win32")("creates and removes a real Windows shor
   await registration.remove();
   expect(registration.installed()).toBe(false);
 }, 30000);
+it("preserves an explicit test-environment update opt-out in the login launcher", async () => {
+  const { root } = fixture();
+  const entry = join(root, "cli.js");
+  writeFileSync(entry, "");
+  vi.stubEnv("ADIT_DISABLE_AUTO_UPDATE", "1");
+  const data = join(root, "opt-out-data");
+  const registration = new UserLoginRegistration(data, { platform: "linux", home: root, configHome: join(root, "config"), entry });
+  await registration.install();
+  expect(readFileSync(join(data, "startup", "start.cjs"), "utf8")).toContain('process.env.ADIT_DISABLE_AUTO_UPDATE = "1";');
+});

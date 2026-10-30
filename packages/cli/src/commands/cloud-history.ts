@@ -129,7 +129,7 @@ function scopeParams(options: ScopeOptions) {
   return { scope: options.scope ?? "me", project: options.project, team: options.team, member: options.member };
 }
 
-const SYNC_NOT_FOUND = `run ${strong("adit cloud sync")} in the project directory, then retry`;
+const SYNC_NOT_FOUND = `run ${strong("adit cloud sync")} in the workspace directory, then retry`;
 const PLATFORM_NAMES: Record<string, string> = {
   "claude-code": "Claude Code",
   "claude-vscode": "Claude Code (VS Code)",
@@ -158,16 +158,16 @@ export async function cloudProjectsCommand(options: Json & { scope?: CloudReadSc
     if (options.json) return printJson(result);
     const filters = [result.scope.description, options.query ? `matching "${options.query}"` : null, options.kind ?? null];
     if (!result.projects.length) {
-      printTitle("Projects", ...filters);
-      printEnd(`${marks.skip} No projects in this scope`);
+      printTitle("Workspaces", ...filters);
+      printEnd(`${marks.skip} No workspaces in this scope`);
       return;
     }
-    printTitle("Projects", ...filters, String(result.projects.length));
+    printTitle("Workspaces", ...filters, String(result.projects.length));
     printTable(
-      [{ header: "id" }, { header: "kind" }, { header: "name" }, { header: "teams" }, { header: "last activity" }],
+      [{ header: "id" }, { header: "kind" }, { header: "name" }, { header: "collaboration projects" }, { header: "last activity" }],
       result.projects.map((project) => [
         project.id,
-        project.kind,
+        project.kind === "team" ? "shared workspace" : "my workspace",
         project.name ? strong(truncate(project.name, 30)) : dim("(unnamed)"),
         truncate(project.teams.map((team) => team.name).join(", "), 30) || "-",
         localDateTime(project.lastActivityAt),
@@ -182,13 +182,13 @@ export async function cloudTeamsCommand(options: Json): Promise<void> {
     const result = await listCloudTeams(requireCloudClient());
     if (options.json) return printJson(result);
     if (!result.teams.length) {
-      printTitle("Teams");
-      printEnd(`${marks.skip} You are not in any team`);
+      printTitle("Collaboration projects");
+      printEnd(`${marks.skip} You are not in any collaboration project`);
       return;
     }
-    printTitle("Teams", String(result.teams.length));
+    printTitle("Collaboration projects", String(result.teams.length));
     printTable(
-      [{ header: "id" }, { header: "role" }, { header: "name" }, { header: "members" }, { header: "projects" }],
+      [{ header: "id" }, { header: "role" }, { header: "name" }, { header: "members" }, { header: "workspaces" }],
       result.teams.map((team) => [team.id, team.role, strong(truncate(team.name, 30)), String(team.memberCount), String(team.projects.length)]),
     );
     printEnd(dim(`members: ${strong("adit cloud team members --team <id>")}`));
@@ -219,8 +219,8 @@ export async function cloudSessionsCurrentCommand(options: Json, deps: CurrentSe
       printTitle("Current session", "not recorded");
       if (report.candidates.length > 0) candidatesTable();
       printEnd(deps.registry ? `${marks.warn} ${report.hint}` : report.platformSessionId
-        ? `${marks.warn} This session is not recorded in this project ${dim("·")} run ${strong("adit doctor")} to check the hooks`
-        : `${marks.skip} No session recorded in this project yet`);
+        ? `${marks.warn} This session is not recorded in this workspace ${dim("·")} run ${strong("adit doctor")} to check the hooks`
+        : `${marks.skip} No session recorded in this workspace yet`);
       return;
     }
 
@@ -236,7 +236,7 @@ export async function cloudSessionsCurrentCommand(options: Json, deps: CurrentSe
       rows.push({
         label: "Local",
         value: joinParts([
-          report.local.unsyncedEvents === null ? (report.local.pendingSessions === null ? "sync baseline not established" : `${report.local.pendingSessions} sessions pending in this project`) : report.local.unsyncedEvents > 0 ? inTone("unsynced", `${report.local.unsyncedEvents} unsynced in this project`) : "0 unsynced",
+          report.local.unsyncedEvents === null ? (report.local.pendingSessions === null ? "sync baseline not established" : `${report.local.pendingSessions} sessions pending in this workspace`) : report.local.unsyncedEvents > 0 ? inTone("unsynced", `${report.local.unsyncedEvents} unsynced in this workspace`) : "0 unsynced",
           report.local.lastSyncedAt ? `last sync ${localMoment(report.local.lastSyncedAt, now)}` : "never synced",
         ]),
       });
@@ -255,7 +255,7 @@ export async function cloudSessionsCurrentCommand(options: Json, deps: CurrentSe
               : dim("not checked (not logged in)"),
       });
     }
-    if (report.inferred) rows.push({ label: "Note", value: inTone("warning", "no session ID came from the environment; this is the latest session in the project") });
+    if (report.inferred) rows.push({ label: "Note", value: inTone("warning", "no session ID came from the environment; this is the latest session in the workspace") });
 
     printTitle("Current session", session.id, platformName(session.platform));
     printRows(rows);
@@ -347,7 +347,7 @@ export async function cloudSessionsShowCommand(sessionId: string, options: Json)
         ])})` : ""}`
       : null;
     const rows: Row[] = [
-      { label: "Project", value: joinParts([strong(session.project.name ?? session.project.id), platformName(session.platform), personName(session.user)]) },
+      { label: "Workspace", value: joinParts([strong(session.project.name ?? session.project.id), platformName(session.platform), personName(session.user)]) },
       {
         label: "Time",
         value: joinParts([
@@ -489,7 +489,7 @@ export async function cloudCommitsExplainCommand(sha: string, options: Json & { 
       printRows(rows);
     }
     printEnd(dim(result.note));
-  } catch (error) { reportFailure(error, options, "commits explain", `the commit may not be synced yet; run ${strong("adit cloud sync")} in its project`); }
+  } catch (error) { reportFailure(error, options, "commits explain", `the commit may not be synced yet; run ${strong("adit cloud sync")} in its workspace`); }
 }
 
 // ─── Registration ────────────────────────────────────────────────────────────
@@ -497,8 +497,8 @@ export async function cloudCommitsExplainCommand(sha: string, options: Json & { 
 function withScope(command: Command): Command {
   return command
     .addOption(new Option("--scope <scope>", "me: your sessions; visible: all sessions you may read").choices(["me", "visible"]).default("me"))
-    .option("--project <id>", "Project ID from 'projects list'")
-    .option("--team <id>", "Team ID from 'teams list'")
+    .option("--project <id>", "Workspace ID from 'projects list'")
+    .option("--team <id>", "Collaboration project ID from 'teams list'")
     .option("--member <id>", "Member ID from 'team members' (owners and leads only)");
 }
 function withPeriod(command: Command): Command {
@@ -512,15 +512,15 @@ function withPage(command: Command, maxLimit: number): Command {
 }
 
 export function registerCloudHistoryCommands(cloud: Command): void {
-  const projects = cloud.command("projects").description("Projects you can read");
-  projects.command("list").description("List your projects; use --scope visible to include readable team projects")
-    .addOption(new Option("--scope <scope>", "me: your projects (default); visible: all readable projects; legacy --kind team implies visible when omitted").choices(["me", "visible"]))
-    .option("--query <text>", "Filter by project or repository name")
+  const projects = cloud.command("projects").description("Workspaces you can read");
+  projects.command("list").description("List your workspaces; use --scope visible to include workspaces shared through collaboration projects")
+    .addOption(new Option("--scope <scope>", "me: your workspaces (default); visible: all readable workspaces; legacy --kind team implies visible when omitted").choices(["me", "visible"]))
+    .option("--query <text>", "Filter by workspace or repository name")
     .addOption(new Option("--kind <kind>", "Legacy filter: personal (owned by you) or team (owned by others)").choices(["personal", "team"]))
     .option("--json", "Output JSON").action((options) => cloudProjectsCommand(options));
 
-  const teams = cloud.command("teams").description("Teams you belong to");
-  teams.command("list").description("List your teams with your role in each").option("--json", "Output JSON").action((options) => cloudTeamsCommand(options));
+  const teams = cloud.command("teams").description("Collaboration projects you belong to");
+  teams.command("list").description("List your collaboration projects with your role in each").option("--json", "Output JSON").action((options) => cloudTeamsCommand(options));
 
   const sessions = cloud.command("sessions").description("Recorded coding sessions");
   sessions.command("current").description("Identify the session running here and whether Cloud has it").option("--json", "Output JSON").action((options) => cloudSessionsCurrentCommand(options));
@@ -541,6 +541,6 @@ export function registerCloudHistoryCommands(cloud: Command): void {
   const commits = cloud.command("commits").description("Synced git commits");
   commits.command("explain <sha>").description("Show your prompts and responses recorded around a commit")
     .addOption(new Option("--scope <scope>", "me: your linked sessions; visible: all readable linked sessions").choices(["me", "visible"]).default("me"))
-    .option("--project <id>", "Project ID when a short SHA is ambiguous")
+    .option("--project <id>", "Workspace ID when a short SHA is ambiguous")
     .option("--json", "Output JSON").action((sha, options) => cloudCommitsExplainCommand(sha, options));
 }

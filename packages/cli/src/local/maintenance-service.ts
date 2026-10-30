@@ -7,6 +7,13 @@ export class MaintenanceService {
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = false;
   private running = false;
+  get busy() { return this.running; }
+  private updatePaused = false;
+  pauseForUpdate(paused: boolean) {
+    this.updatePaused = paused;
+    if (paused) { clearTimeout(this.timer); this.timer = undefined; }
+    else this.start();
+  }
   private failures = 0;
 
   constructor(private store: LocalStore, workerUrl = new URL("./maintenance-worker.js", import.meta.url)) {
@@ -19,7 +26,7 @@ export class MaintenanceService {
   }
 
   start(delay = 5000) {
-    if (this.stopped || this.running || this.timer) return;
+    if (this.stopped || this.running || this.timer || this.updatePaused) return;
     if (maintenanceTasks.every(task => this.status().some(progress => progress.task === task && progress.status === "done"))) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;

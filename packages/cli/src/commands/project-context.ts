@@ -7,7 +7,7 @@ export function loadProjectContext(command: string, cwd?: string) {
     const project = resolveLocalProject({path:cwd});
     return {...project,dataDir:projectRuntimeDirectory(project.projectId)};
   } catch (error) {
-    printError(commandLabel(command),error instanceof Error ? error.message : "Project identification failed","open adit server and maintain the working directory in Settings");
+    printError(commandLabel(command),error instanceof Error ? error.message : "Workspace identification failed","open adit server and maintain the working directory in Settings");
     process.exitCode=1;
     return null;
   }

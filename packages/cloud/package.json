@@ -22,7 +22,8 @@
   "scripts": {
     "prepack": "node ../../scripts/prepare-package-docs.cjs cloud",
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepack": "node ../../scripts/prepare-package-docs.cjs cloud"
   },
   "dependencies": {
     "@varveai/adit-core": "workspace:*",
@@ -31,5 +32,11 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "typescript": "^5.7.2"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VARVE-ai/adit-core.git",
+    "directory": "packages/cloud"
   }
 }

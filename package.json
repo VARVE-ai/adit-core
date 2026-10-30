@@ -23,7 +23,8 @@
     "format": "node scripts/format-changed.mjs --write",
     "format:check": "node scripts/format-changed.mjs --check",
     "format:check:all": "prettier --check \"packages/*/src/**/*.{ts,tsx}\"",
-    "typecheck": "pnpm -r run typecheck"
+    "typecheck": "pnpm -r run typecheck",
+    "test:release": "node --test scripts/release.test.mjs"
   },
   "keywords": [
     "ai",

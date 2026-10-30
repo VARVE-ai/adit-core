@@ -130,11 +130,11 @@ export function createProgram(): Command {
     )
     .option(
       "--detach",
-      "Retired: maintain project directories in Settings",
+      "Retired: maintain workspace directories in Settings",
     )
     .option(
       "--absorb",
-      "Unsupported legacy option; parent and child projects now remain independent",
+      "Unsupported legacy option; parent and child workspaces now remain independent",
     )
     .action(withUpdateWarning("init", (opts) =>
       initCommand({
@@ -223,7 +223,7 @@ export function createProgram(): Command {
 
   program
     .command("status")
-    .description("Show ADIT status for the current project")
+    .description("Show ADIT status for the current workspace")
     .option("--json", "Output as JSON")
     .action(withUpdateWarning("status", (opts) =>
       statusCommand({ json: opts.json }),
@@ -287,7 +287,7 @@ export function createProgram(): Command {
 
   program
     .command("uninstall")
-    .description("Uninstall ADIT from the current project")
+    .description("Uninstall ADIT from the current workspace")
     .option("-y, --yes", "Skip confirmation")
     .option("--json", "Output as JSON")
     .action((opts) =>
@@ -355,7 +355,7 @@ export function createProgram(): Command {
 
   cloudCmd
     .command("link")
-    .description("Link this project to adit-cloud")
+    .description("Link this workspace to adit-cloud")
     .option("-f, --force", "Clear cache and re-link from scratch")
     .option("--skip-docs", "Skip document upload")
     .option("--skip-commits", "Skip commit history upload")
@@ -382,7 +382,7 @@ export function createProgram(): Command {
 
   debugDbCmd
     .command("clear-events")
-    .description("Retired: manage native turns and project deletion in ADIT Local")
+    .description("Retired: manage native turns and workspace deletion in ADIT Local")
     .option("-y, --yes", "Skip confirmation")
     .option("--json", "Output as JSON")
     .action((opts) => dbClearEventsCommand({ yes: opts.yes, json: opts.json }));
@@ -500,7 +500,7 @@ function registerHookCommands(hookCmd: Command): void {
     .command("uninstall [platform]")
     .description("Remove legacy collection hooks; preserve Cloud relay and user hooks")
     .option("-a, --all", "Uninstall hooks for all installed platforms")
-    .option("--clean", "Retired: use adit uninstall for project-scoped deletion")
+    .option("--clean", "Retired: use adit uninstall for workspace-scoped deletion")
     .option("--json", "Output as JSON")
     .action((platform, opts) =>
       pluginUninstallCommand(platform, {
@@ -542,10 +542,10 @@ Commands:
   server|serve [options]     Open the local web UI (starts the service if needed)
   restart                    Restart the local background service
   daemon                     Start, stop or inspect the background service
-  init [options]             Register this Git project in ADIT Local
-  uninstall [options]        Uninstall ADIT from the current project
+  init [options]             Register this Git workspace in ADIT Local
+  uninstall [options]        Uninstall ADIT from the current workspace
 
-  status [options]           Show project status
+  status [options]           Show workspace status
   timeline|list [options]    List collected native sessions
   show <id>                  Show a collected native session or turn by its exact ID
   search [options] <query>   Search collected native sessions

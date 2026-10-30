@@ -38,6 +38,7 @@ function accountMetadata(user?: CloudAccountUser) {
 }
 
 export class LocalAccount {
+  get busy() { return !!this.tokenAttempt || this.attempt?.status === "pending"; }
   constructor(private readonly directory = localDataDir()) {}
   private preferredServer(): string {
     const store = new LocalStore(this.directory);

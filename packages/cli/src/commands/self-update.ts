@@ -12,6 +12,8 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { compareVersions, fetchLatestPublishedVersion } from "../update-check.js";
 import { CLI_VERSION } from "../version.js";
+import { acquireInstallationLock } from "../local/auto-update-process.js";
+import { detectAutomaticInstallation } from "../local/auto-update-installation.js";
 
 export function completeUpgradedInstallation(expectedVersion?: string): boolean {
   try {
@@ -167,7 +169,16 @@ export async function selfUpdateCommand(opts?: {
   const installDir = resolveInstallDir();
 
   if (!installDir) {
-    await upgradePackageInstall(opts);
+    if (opts?.check) { await upgradePackageInstall(opts); return; }
+    let release: (() => void) | undefined;
+    try {
+      const detected = await detectAutomaticInstallation({ entry: process.argv[1], env: {} });
+      release = acquireInstallationLock(detected.installation?.root ?? resolve(dirname(realpathSync(process.argv[1])), ".."));
+      await upgradePackageInstall(opts);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+    } finally { release?.(); }
     return;
   }
 

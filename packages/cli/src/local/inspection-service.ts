@@ -1,6 +1,7 @@
 import { LocalInspection, type LocalWorkspace } from "@varveai/adit-core";
 import { OnDemandWorker } from "./on-demand-worker.js";
 export class InspectionService {
+  get busy() { return this.active.size > 0; }
   get available() {
     return !this.stopped;
   }

@@ -1,6 +1,15 @@
 // Local service messages can come from saved jobs as well as new requests.
 // Translate these known messages at display time, keeping paths and details intact.
 export const systemMessages: Record<string, string> = {
+  "ADIT 正在更新，请稍后重试。": "ADIT is updating. Please try again shortly.",
+  "ADIT 正在更新，请等待完成后再修改此设置。": "ADIT is updating. Please wait before changing this setting.",
+  "自动更新设置已变更，请刷新后重试。": "Automatic update settings changed. Refresh and try again.",
+  "自动更新设置无效。": "Invalid automatic update settings",
+  "当前安装不支持自动更新。": "Automatic updates are unavailable for this installation",
+  "未能检查最新稳定版，将稍后重试。": "Could not check the latest stable release. Will retry later.",
+  "自动更新已中断，可以执行 adit update 手动重试。": "Automatic update was interrupted. Run 'adit update' to retry manually.",
+  "另一个 ADIT 更新正在进行，请稍后重试。": "Another ADIT update is in progress. Try again later.",
+  "自动更新超时。请查看 auto-update.log，或执行 adit update 手动重试。": "Automatic update timed out. See auto-update.log; run 'adit update' to retry manually.",
   "请至少选择一个 Git 仓库。": "Select at least one Git repository before organizing or syncing.",
   "未检测到 Git 仓库，无法创建项目或开始整理。请选择包含 Git 仓库的目录。": "No Git repository found. Select a directory containing a Git repository to create the project or start organizing.",
   "正在检查 Git 仓库…": "Checking Git repositories…",

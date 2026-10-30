@@ -22,7 +22,8 @@
   "scripts": {
     "prepack": "node ../../scripts/prepare-package-docs.cjs core",
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepack": "node ../../scripts/prepare-package-docs.cjs core"
   },
   "dependencies": {
     "acorn": "^8.19.0",
@@ -34,5 +35,11 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "typescript": "^5.7.2"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VARVE-ai/adit-core.git",
+    "directory": "packages/core"
   }
 }
