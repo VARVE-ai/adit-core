@@ -1,10 +1,44 @@
-# ADIT Core
+<h1 align="center">{&gt;&lt;} ADIT Core</h1>
 
-ADIT organizes AI coding history from native Agent records and local Git. The local
-workbench and CLI use the same project registry, collected history and Cloud login.
-Local history search works across Agents without uploading or signing in.
+<p align="center"><strong>Your AI coding history. All in one place.</strong></p>
 
-## Installation
+<p align="center">Bring conversations together. Trace commits. Recover context.<br>Keep your coding history on your device, ready for you and your Agent.</p>
+
+<p align="center"><a href="https://adit.varve.ai/">Website ↗</a> &nbsp; · &nbsp; <a href="#get-started">Get started</a> &nbsp; · &nbsp; <a href="#reference">Reference</a></p>
+
+<a href="https://adit.varve.ai/"><img src="docs/images/adit-local-overview.jpg" alt="ADIT Local overview showing session history, activity, estimated costs and commit attribution with illustrative sample data." width="100%"></a>
+
+<p align="center"><sub>ADIT Local overview · Illustrative sample data · <a href="https://adit.varve.ai/">Explore ADIT ↗</a></sub></p>
+
+## Why ADIT?
+
+| What you can do | How ADIT helps |
+| --- | --- |
+| Find past conversations | Search native coding sessions from different Agents in one place. |
+| Understand a code change | Follow commits back to related sessions and recover the context. |
+| See your activity | Explore session activity, model usage and estimated costs in the local workbench. |
+| Give your Agent context | Use bundled Skills to search history and inspect original turns. |
+
+## Get started
+
+```sh
+npm install -g @varveai/adit-cli
+
+cd /path/to/your-project
+adit init
+adit server
+```
+
+Requires Node.js 22 or newer. Installation opens the local workbench. Add a working directory there, or initialize a project from the CLI.
+
+Local history search works without a Cloud account. Cloud storage and automatic synchronization are optional and require explicit setup.
+
+## Reference
+
+<a name="installation"></a>
+
+<details>
+<summary><strong>Installation</strong></summary>
 
 Published packages require Node.js 22 or newer. For source development, use
 Node.js 22.13 or newer within 22.x, or Node.js 24 or newer, and pnpm 11 or newer.
@@ -38,7 +72,12 @@ pnpm build
 The repository's `install.sh` builds and registers `adit`. Collection hooks and the
 old `adit-hook` command are no longer installed.
 
-## Quick start
+</details>
+
+<a name="quick-start"></a>
+
+<details>
+<summary><strong>Quick start</strong></summary>
 
 ```sh
 cd /path/to/git-project
@@ -63,7 +102,12 @@ Git is checked before session metadata discovery. Full transcript parsing and
 commit attribution happen in the shared collection queue. Initial, manual and
 automatic collection use the same incremental processing and concurrency control.
 
-## Project identity and storage
+</details>
+
+<a name="project-identity-and-storage"></a>
+
+<details>
+<summary><strong>Project identity and storage</strong></summary>
 
 `adit init` and the local Settings page call the same registration service. Repeated
 initialization preserves the project ID, repository IDs, collected history, Cloud
@@ -99,7 +143,12 @@ Legacy `ADIT_DATA_DIR`, `ADIT_DB_PATH`, `ADIT_PROJECT_ROOT`, `ADIT_CLIENT_ID`,
 project storage or identity. `adit config` explains the current storage paths.
 The machine ID is stored globally; an existing global `client-id` is adopted once.
 
-## Local commands
+</details>
+
+<a name="local-commands"></a>
+
+<details>
+<summary><strong>Local commands</strong></summary>
 
 | Command | Behavior |
 | --- | --- |
@@ -123,7 +172,12 @@ are retired with explicit guidance. Git commit diffs remain available in the loc
 workbench. Project deletion preserves other projects, shared credentials and Cloud
 data; the CLI shows a preview without `--yes`.
 
-## Collection hooks and Cloud relay hooks
+</details>
+
+<a name="collection-hooks-and-cloud-relay-hooks"></a>
+
+<details>
+<summary><strong>Collection hooks and Cloud relay hooks</strong></summary>
 
 Native history collection does not require Hooks. `init`, `doctor --fix` and Cloud
 Agent launch clean only recognized old ADIT collection entries in project Agent
@@ -139,7 +193,12 @@ Hooks for Cloud panel operations, interruption and status updates. They store
 runtime data under the global project runtime directory. Ordinary Agent use
 without the injected relay endpoint does not send relay events.
 
-## Cloud login and synchronization
+</details>
+
+<a name="cloud-login-and-synchronization"></a>
+
+<details>
+<summary><strong>Cloud login and synchronization</strong></summary>
 
 ```sh
 adit cloud login
@@ -176,7 +235,12 @@ repository identity, validates paths/remotes, and caches confirmed link state in
 shared database. It never creates project-local storage. Cloud-deleted/excluded
 repositories are omitted from uploads while local history remains readable.
 
-## Cloud queries and coding
+</details>
+
+<a name="cloud-queries-and-coding"></a>
+
+<details>
+<summary><strong>Cloud queries and coding</strong></summary>
 
 `adit cloud codex [cliArgs...]` and `adit cloud claude [cliArgs...]` connect the local
 Agent to Cloud Coding using the shared account and project identity.
@@ -213,7 +277,12 @@ explicit `--scope me --kind team` is an error. JSON responses echo `scope.kind`;
 update the Cloud server before the CLI, since an older server cannot confirm
 these scope guarantees and its query results are rejected by the new CLI.
 
-## Skills
+</details>
+
+<a name="skills"></a>
+
+<details>
+<summary><strong>Skills</strong></summary>
 
 Five skills are installed automatically by `adit init`, `adit update`, and
 published npm installs with lifecycle scripts enabled: `adit-tasks` (the user's
@@ -259,7 +328,12 @@ Private resource URLs expire after 15 minutes and must not be published or
 committed. Re-query context to refresh them. No task snapshots or attachment
 files are cached by these commands. These commands require Cloud task API support.
 
-## Development
+</details>
+
+<a name="development"></a>
+
+<details>
+<summary><strong>Development</strong></summary>
 
 ```sh
 pnpm build
@@ -301,6 +375,17 @@ Native source overrides such as `CODEX_HOME` and `CLAUDE_CONFIG_DIR` remain supp
 Release maintainers: see the [release procedure](docs/releasing.md) for branch
 checks, rehearsals, package validation, publishing, and recovery after failures.
 
+</details>
+
+## Security
+
+Report suspected vulnerabilities privately using the [security policy](https://github.com/VARVE-ai/adit-core/blob/main/SECURITY.md).
+Do not post credentials or private conversation data in public issues.
+
 ## License
 
-MIT
+ADIT's original code is [MIT-licensed](https://github.com/VARVE-ai/adit-core/blob/main/LICENSE).
+Third-party components retain their own licenses and terms; in particular, the
+Claude Agent SDK is governed by Anthropic's terms, not ADIT's MIT license.
+See the [third-party notices](https://github.com/VARVE-ai/adit-core/blob/main/THIRD_PARTY_NOTICES.md)
+and the bundled license texts included with the CLI package.

@@ -46,3 +46,6 @@ packages/engine/LICENSE
 packages/cloud/LICENSE
 packages/cli/LICENSE
 packages/cli/README.md
+packages/cli/SECURITY.md
+packages/cli/THIRD_PARTY_NOTICES.md
+packages/cli/THIRD_PARTY_LICENSES.txt

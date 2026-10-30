@@ -36,6 +36,12 @@ References: [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)
 
 ## Release procedure
 
+Before a release that changes dependencies, copied assets or bundling, refresh
+the [third-party notices](../THIRD_PARTY_NOTICES.md) and bundled license texts from
+the reviewed installed versions. Keep the private reporting contact in
+[SECURITY.md](../SECURITY.md) current. The CLI archive must include `SECURITY.md`,
+`THIRD_PARTY_NOTICES.md`, `THIRD_PARTY_LICENSES.txt` and the existing icon license.
+
 1. Review the changes on `main`. Choose an explicit stable version (such as
    `1.1.5`) and write user-facing changes, compatibility notes, and upgrade steps.
    All four public packages share this version; prereleases and automatic version

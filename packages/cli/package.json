@@ -14,7 +14,10 @@
     "local-assets",
     "install-skill.cjs",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "SECURITY.md",
+    "THIRD_PARTY_NOTICES.md",
+    "THIRD_PARTY_LICENSES.txt"
   ],
   "bin": {
     "adit": "./dist/index.js"
