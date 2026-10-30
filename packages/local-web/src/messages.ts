@@ -1,6 +1,27 @@
 // Chinese keys preserve the prototype copy. Only interface text belongs here;
 // native session titles, commit subjects, paths and account names are never keys.
 export const messages = {
+  "自动更新": "Automatic updates",
+  "自动更新到最新稳定版": "Automatically update to the latest stable release",
+  "每 24 小时检查一次；等待采集、整理和同步结束后更新，仅重启 ADIT 后台，不重启电脑或打开浏览器。": "Checks every 24 hours and waits for collection, organization and sync to finish. Only the ADIT background service restarts; your computer is not restarted and no browser opens.",
+  "源码版、开发版或链接安装不自动更新，请手动更新。": "Source, development and linked installations do not update automatically. Update them manually.",
+  "无法确认全局安装来源，不执行自动更新。": "The global installation could not be verified. Automatic updates will not run.",
+  "当前环境已禁用自动更新。": "Automatic updates are disabled in this environment.",
+  "安装目录不可写或当前以管理员身份运行，请手动更新。": "The installation is not writable or is running as root. Update manually.",
+  "正在确认安装来源…": "Verifying installation…",
+  "尚未检查更新": "Not checked yet",
+  "正在检查更新…": "Checking for updates…",
+  "已是最新稳定版": "Already on the latest stable release",
+  "等待后台任务完成后更新": "Waiting for background tasks before updating",
+  "正在更新，完成后自动重启后台": "Updating; the background service will restart when ready",
+  "更新完成": "Update complete",
+  "更新未完成，将稍后重试": "Update incomplete; will retry later",
+  "更新状态": "Update status",
+  "自动更新已关闭": "Automatic updates are off",
+  "最新版本：{0}": "Latest version: {0}",
+  "最近检查更新": "Last update check",
+  "下次检查更新": "Next update check",
+  "最近更新": "Last update",
   "请至少选择一个 Git 仓库。": "Select at least one Git repository.",
   "部分记录或分析待补齐，将在后续整理重试；已整理内容可正常使用。": "Some records or analysis are pending and will be retried. Collected content remains available.",
   "第 {0} 轮提问": "Turn {0}",
@@ -69,7 +90,7 @@ export const messages = {
   "工作目录不可用，请在设置中更新目录。": "Workspace directory is unavailable. Update its path in Settings.",
   "目录不可用": "Directory unavailable",
   "更新目录": "Update directory",
-  "目录改名或移动后，在这里选择新目录并保存。项目身份和已有记录会保留，已选仓库按原相对位置更新。": "After renaming or moving the directory, choose its new location here and save. Project identity and existing records are kept; selected repositories follow their original relative locations.",
+  "目录改名或移动后，在这里选择新目录并保存。工作区身份和已有记录会保留，已选仓库按原相对位置更新。": "After renaming or moving the directory, choose its new location here and save. Workspace identity and existing records are kept; selected repositories follow their original relative locations.",
   "选择登录方式": "Choose a sign-in method",
   "浏览器授权": "Browser authorization",
   "在浏览器中登录 Cloud 并确认授权。": "Sign in to Cloud in your browser and approve access.",
@@ -145,14 +166,14 @@ export const messages = {
   更多操作: "More actions",
   删除: "Delete",
   删除工作目录: "Delete workspace",
-  删除本地项目: "Delete local project",
-  "删除项目“{0}”？": 'Delete project “{0}”?',
-  "将删除此项目在本机 ADIT 中保存的会话、提交、统计、分析结果、分享记录和配置，并停止自动整理与同步。尚未同步的本地修改也会删除。":
-    "This removes this project's sessions, commits, statistics, analysis results, share records, and settings stored in ADIT on this computer, and stops automatic collection and sync. Unsynced local edits will also be removed.",
-  "云端数据和已发布的分享不会删除。项目文件、Git 仓库和 Agent 原始记录会保留。":
-    "Cloud data and published shares will remain. Project files, Git repositories, and original Agent records will be kept.",
-  "其他项目仍在使用的共享记录会保留，仅解除与此项目的关联。":
-    "Records still used by other projects will be kept; only this project's links to them will be removed.",
+  删除本地工作区: "Delete local workspace",
+  "删除工作区“{0}”？": 'Delete workspace “{0}”?',
+  "将删除此工作区在本机 ADIT 中保存的会话、提交、统计、分析结果、分享记录和配置，并停止自动整理与同步。尚未同步的本地修改也会删除。":
+    "This removes this workspace's sessions, commits, statistics, analysis results, share records, and settings stored in ADIT on this computer, and stops automatic collection and sync. Unsynced local edits will also be removed.",
+  "云端数据和已发布的分享不会删除。工作区文件、Git 仓库和 Agent 原始记录会保留。":
+    "Cloud data and published shares will remain. Workspace files, Git repositories, and original Agent records will be kept.",
+  "其他工作区仍在使用的共享记录会保留，仅解除与此工作区的关联。":
+    "Records still used by other workspaces will be kept; only this workspace's links to them will be removed.",
   正在删除: "Deleting",
   "确定删除工作目录“{0}”？": 'Delete workspace “{0}”?',
   "将移除该工作目录的配置并停止后续自动整理。已采集的本地历史、磁盘文件和云端数据会保留。":
@@ -226,10 +247,10 @@ export const messages = {
   "通过云端账号 {0} 存储": "Stored through cloud account {0}",
   云端账号已连接: "Cloud account connected",
   云端账号未连接: "Cloud account not connected",
-  云端项目: "Cloud project",
+  云端工作区: "Cloud workspace",
   尚未关联: "Not linked yet",
   首次推送时自动创建: "Created automatically on the first push",
-  尚未关联云端项目: "No cloud project linked yet",
+  尚未关联云端工作区: "No cloud workspace linked yet",
   在云端查看: "View in Cloud",
   同步方式: "Sync mode",
   每小时: "Hourly",

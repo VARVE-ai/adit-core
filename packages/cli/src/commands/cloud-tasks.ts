@@ -200,7 +200,7 @@ export async function cloudTasksCommand(
       const config = loadProjectContext(`adit cloud tasks ${action}`);
       if (!config)
         throw new Error(
-          "Add this working directory in Settings or provide an explicit project ID.",
+          "Add this working directory in Settings or provide an explicit workspace ID.",
         );
       localProjectId = config.projectId;
     }
@@ -243,7 +243,7 @@ export async function cloudTasksCommand(
         printTitle(
           "Task created",
           created.project.name ?? created.project.localProjectId,
-          created.scope.teamName ? `team ${created.scope.teamName}` : "personal",
+          created.scope.teamName ? `collaboration project ${created.scope.teamName}` : "personal",
         );
         printRows([
           { label: "ID", value: created.task.taskId },
@@ -364,7 +364,7 @@ export async function cloudTasksCommand(
         printError(
           `tasks ${action}`,
           failure.message.replace(/\.$/u, ""),
-          `pick a team with ${strong("--team <id>")}${teams.length ? `: ${teams.map((team) => `${team.name ?? "?"} ${team.id ?? ""}`.trim()).join(", ")}` : ""}`,
+          `pick a collaboration project with ${strong("--team <id>")}${teams.length ? `: ${teams.map((team) => `${team.name ?? "?"} ${team.id ?? ""}`.trim()).join(", ")}` : ""}`,
         );
       } else {
         console.log(JSON.stringify({ ...error.body, ok: false, status: failure.status }, null, 2));
@@ -409,7 +409,7 @@ function printTaskList(list: CloudTaskList, options: Options): void {
   const state = options.state ?? "unfinished";
   const scope = [
     list.project.name ?? list.project.localProjectId,
-    list.scope.teamName ? `team ${list.scope.teamName}` : "personal",
+    list.scope.teamName ? `collaboration project ${list.scope.teamName}` : "personal",
     state,
   ];
   if (!list.tasks.length) {
@@ -556,7 +556,7 @@ function taskFieldOptions(command: Command) {
     .option("--clear-assignee", "Clear the assignee; updates require manage access")
     .option(
       "--task-scope <text>",
-      "Task scope entry (repeat to replace the whole list; not team/project selection)",
+      "Task scope entry (repeat to replace the whole list; not collaboration project/workspace selection)",
       (value: string, previous: string[] = []) => [...previous, value],
     )
     .option("--clear-scope", "Clear all task scope entries")
@@ -575,9 +575,9 @@ export function registerCloudTaskCommands(cloud: Command) {
       .description("Create an independent task in Cloud; assigned to you unless specified")
       .requiredOption("--title <text>", "Task title, 1-200 characters")
       .requiredOption("--key-points <text>", "Task requirements, 1-20000 characters")
-      .option("--team <id>", "Select a team linked to this project (see tasks scopes)")
-      .option("--project <id>", "Local project ID; defaults to this initialized project")
-      .option("--personal", "Create in the personal project instead of its linked team")
+      .option("--team <id>", "Select a collaboration project linked to this workspace's repositories (see tasks scopes)")
+      .option("--project <id>", "Local workspace ID; defaults to this initialized workspace")
+      .option("--personal", "Create in your workspace instead of its linked collaboration project")
       .option(
         "--file <path>",
         "Attach an image (max 10 MB) or MD, TXT, DOCX, PDF, HTML, HTM document (max 20 MB); repeat for multiple files",
@@ -621,10 +621,10 @@ export function registerCloudTaskCommands(cloud: Command) {
     .action((taskId, options) => cloudTasksCommand("attach", options, taskId));
   tasks
     .command("list")
-    .description("List your tasks in the current project or a team")
-    .option("--team <id>", "Select a team linked to this project (see tasks scopes)")
-    .option("--project <id>", "Local project ID; defaults to this initialized project")
-    .option("--personal", "Query personal project tasks instead of its linked team")
+    .description("List your tasks in the current workspace or a collaboration project")
+    .option("--team <id>", "Select a collaboration project linked to this workspace's repositories (see tasks scopes)")
+    .option("--project <id>", "Local workspace ID; defaults to this initialized workspace")
+    .option("--personal", "Query workspace tasks instead of its linked collaboration project")
     .option("--type <name>", "Filter by a saved type name, including removed choices")
     .option("--unclassified", "Show only tasks without a type")
     .addOption(
@@ -638,8 +638,8 @@ export function registerCloudTaskCommands(cloud: Command) {
     .action((options) => cloudTasksCommand("list", options));
   tasks
     .command("scopes")
-    .description("List teams linked to the current project, not all account teams")
-    .option("--project <id>", "Local project ID; defaults to this initialized project")
+    .description("List collaboration projects linked to this workspace's repositories, not all account memberships")
+    .option("--project <id>", "Local workspace ID; defaults to this initialized workspace")
     .option("--json", "Output JSON")
     .action((options) => cloudTasksCommand("scopes", options));
   for (const action of ["show", "context"] as const)

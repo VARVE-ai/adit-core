@@ -68,6 +68,7 @@ export class UserLoginRegistration implements StartupRegistration {
       'const { spawnSync } = require("node:child_process");',
       `process.env.ADIT_LOCAL_DATA_DIR = ${JSON.stringify(resolve(this.directory))};`,
       `process.env.ADIT_CLI_ENTRY = ${JSON.stringify(entry)};`,
+      ...(process.env.ADIT_DISABLE_AUTO_UPDATE === "1" ? ['process.env.ADIT_DISABLE_AUTO_UPDATE = "1";'] : []),
       `const result = spawnSync(${JSON.stringify(node)}, [${JSON.stringify(entry)}, "daemon", "start", "--on-login"], { env: process.env, windowsHide: true, stdio: "ignore" });`,
       "process.exitCode = result.error ? 1 : result.status ?? 1;",
       "",

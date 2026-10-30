@@ -22,6 +22,9 @@ export class LocalCloudSync {
   private jobs=new Map<string,LocalCloudJob>();
   private pendingService: CloudPendingService;
   private stopped=false;
+  private updatePaused=false;
+  get busy() { return this.active.size > 0; }
+  pauseForUpdate(paused:boolean) { this.updatePaused=paused; }
   private timer?:ReturnType<typeof setInterval>;
   constructor(readonly store:LocalStore,private collector:Pick<Collector,"collect"|"waitFor">,
     private transport?: (credentials:NonNullable<ReturnType<typeof loadCredentials>>)=>Transport,
@@ -63,6 +66,7 @@ export class LocalCloudSync {
     return this.pendingService.read(workspace,scope);
   }
   start(id:string):LocalCloudJob {
+    if(this.updatePaused)throw new LocalStateError("ADIT is updating. Please try again shortly.",503);
     if(this.stopped)throw new LocalStateError("Cloud sync is stopping",409);
     const workspace=this.store.workspace(id);
     assertWorkspaceGit(workspace.path);
@@ -213,7 +217,7 @@ export class LocalCloudSync {
   schedule() {
     if(this.timer)return;
     this.timer=setInterval(()=>{
-      if(this.stopped||process.env.ADIT_CLOUD_AUTO_SYNC==="false"||process.env.ADIT_CLOUD_ENABLED==="false"||!localLoginStartupEnabled(this.store.directory)||!loadCredentials(this.store.directory))return;
+      if(this.stopped||this.updatePaused||process.env.ADIT_CLOUD_AUTO_SYNC==="false"||process.env.ADIT_CLOUD_ENABLED==="false"||!localLoginStartupEnabled(this.store.directory)||!loadCredentials(this.store.directory))return;
       for(const w of this.store.workspaces())if(w.started&&w.cloud.enabled&&w.cloud.mode==="automatic"&&!this.active.has(w.id)) {
         const status=this.status(w.id);
         if(!status.startedAt||Date.now()-Date.parse(status.startedAt)>=w.cloud.interval*60_000) {

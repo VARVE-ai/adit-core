@@ -32,6 +32,22 @@ function retryFixture(scan: ConstructorParameters<typeof Collector>[4],inspect?:
   cleanup.push(async()=>{await collector.close();vi.useRealTimers();store.close();rmSync(root,{recursive:true,force:true});});
   return {collector,store,workspace};
 }
+it("pauses timers and collection entry points during updates and resumes afterward", async () => {
+  const scan = vi.fn(async () => ({ counts: {}, errors: [], scanned: 0, updated: 0 }));
+  const test = retryFixture(scan);
+  expect(test.collector.busy).toBe(false);
+  test.collector.pauseForUpdate(true);
+  expect(test.collector.nextAt).toBeNull();
+  expect(() => test.collector.collect(test.workspace.id)).toThrow(/updating/);
+  expect(() => test.collector.discover(test.workspace.path)).toThrow(/updating/);
+  expect(scan).not.toHaveBeenCalled();
+  test.collector.pauseForUpdate(false);
+  test.collector.collect(test.workspace.id);
+  expect(test.collector.busy).toBe(true);
+  await test.collector.waitFor(test.workspace.id);
+  expect(test.collector.busy).toBe(false);
+  expect(scan).toHaveBeenCalledOnce();
+});
 it("automatically retries an incomplete first collection without treating deferred records as failure",async()=>{
   const scan=vi.fn().mockResolvedValueOnce({counts:{},errors:[],deferred:["codex: Source changed while reading; retry on the next collection"],scanned:1,updated:0})
     .mockResolvedValue({counts:{},errors:[],scanned:1,updated:0});

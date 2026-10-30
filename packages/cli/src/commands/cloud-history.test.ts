@@ -17,6 +17,29 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); process.exitCode = undefined; });
 
 describe("history commands", () => {
+  it("uses workspace and collaboration project labels without renaming commands or user content", async () => {
+    const cloud = new Command("cloud");
+    registerCloudHistoryCommands(cloud);
+    const projects = cloud.commands.find(command => command.name() === "projects")!;
+    const teams = cloud.commands.find(command => command.name() === "teams")!;
+    expect(projects.description()).toBe("Workspaces you can read");
+    expect(teams.description()).toBe("Collaboration projects you belong to");
+    expect(projects.commands[0].helpInformation()).toContain("--kind <kind>");
+    const result = {
+      projects: [{ id: "workspace", kind: "team", name: "研发团队项目", teams: [{ name: "研发团队" }], lastActivityAt: null }],
+      scope: { kind: "visible", description: "Visible workspaces" },
+    };
+    mocks.get.mockResolvedValue(result);
+    await cloudProjectsCommand({ scope: "visible" });
+    expect(output().join("\n")).toContain("Workspaces");
+    expect(output().join("\n")).toContain("shared workspace");
+    expect(output().join("\n")).toContain("研发团队项目");
+    expect(output().join("\n")).toContain("collaboration projects");
+    await cloudProjectsCommand({ scope: "visible", json: true });
+    expect(JSON.parse(output().at(-1)!)).toEqual(result);
+    expect(mocks.get).toHaveBeenLastCalledWith("/api/cli/projects?scope=visible");
+  });
+
   it("lists projects with filters and prints the server JSON", async () => {
     const result = { projects: [{ id: "p1", kind: "team", name: "Web" }], scope: { kind: "visible", description: "projects you can read" } };
     mocks.get.mockResolvedValue(result);

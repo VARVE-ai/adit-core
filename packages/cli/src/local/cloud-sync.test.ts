@@ -42,6 +42,17 @@ beforeEach(()=>{
 });
 afterEach(async()=>{await Promise.all(instances.splice(0).map(instance=>instance.close()));store.close();rmSync(root,{recursive:true,force:true});vi.restoreAllMocks();});
 function workspace(){return store.saveWorkspace({path:root,providers:["codex"],repositories:[root],cloud:{enabled:true,mode:"manual",interval:5}});}
+it("blocks new sync work during an automatic update without contacting Cloud", () => {
+  const selected = workspace();
+  const client = { get: vi.fn(), post: vi.fn() };
+  const collector = { collect: vi.fn(), waitFor: vi.fn() };
+  const sync = new LocalCloudSync(store, collector, () => client);
+  expect(sync.busy).toBe(false);
+  sync.pauseForUpdate(true);
+  expect(() => sync.start(selected.id)).toThrow(/updating/);
+  expect(client.get).not.toHaveBeenCalled();
+  expect(collector.collect).not.toHaveBeenCalled();
+});
 it("rejects cloud sync with only conversation sources before contacting Cloud", async () => {
   const w=store.saveWorkspace({path:root,providers:["codex"],repositories:[],cloud:{enabled:true,mode:"manual",interval:5}});
   const client={get:vi.fn(),post:vi.fn()},collector={collect:vi.fn(),waitFor:vi.fn()};

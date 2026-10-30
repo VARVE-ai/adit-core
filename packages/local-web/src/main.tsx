@@ -110,11 +110,19 @@ type Schedule = {
   nextAt?: string;
 };
 type LoginStartup = { enabled: boolean; supported: boolean; version: number; error?: string };
+type AutomaticUpdate = {
+  enabled: boolean; supported: boolean; version: number;
+  reason?: "source" | "unknown" | "disabled" | "permissions" | "detecting";
+  phase: "idle" | "checking" | "current" | "waiting" | "installing" | "updated" | "failed";
+  lastCheckedAt?: number; nextCheckAt?: number; latestVersion?: string;
+  updatedAt?: number; updatedVersion?: string; error?: string;
+};
 type State = {
   workspaces: Workspace[];
   schedule: Schedule;
   jobs: Job[];
   startup?: LoginStartup;
+  autoUpdate?: AutomaticUpdate;
 };
 type AccountData = {
   connected: boolean;
@@ -928,11 +936,11 @@ export function App() {
         <Modal title={t("删除工作目录")} onClose={() => {
           if (!deletePending) setDeletingWorkspace(undefined);
         }}>
-          <p>{t("删除项目“{0}”？", deletingWorkspace.name)}</p>
+          <p>{t("删除工作区“{0}”？", deletingWorkspace.name)}</p>
           <p className="workspace-delete-path">{deletingWorkspace.path}</p>
-          <p className="muted">{t("将删除此项目在本机 ADIT 中保存的会话、提交、统计、分析结果、分享记录和配置，并停止自动整理与同步。尚未同步的本地修改也会删除。")}</p>
-          <p className="muted">{t("云端数据和已发布的分享不会删除。项目文件、Git 仓库和 Agent 原始记录会保留。")}</p>
-          {deletePreview && (deletePreview.sharedSessions>0 || deletePreview.sharedRepositories>0) && <p className="muted">{t("其他项目仍在使用的共享记录会保留，仅解除与此项目的关联。")}</p>}
+          <p className="muted">{t("将删除此工作区在本机 ADIT 中保存的会话、提交、统计、分析结果、分享记录和配置，并停止自动整理与同步。尚未同步的本地修改也会删除。")}</p>
+          <p className="muted">{t("云端数据和已发布的分享不会删除。工作区文件、Git 仓库和 Agent 原始记录会保留。")}</p>
+          {deletePreview && (deletePreview.sharedSessions>0 || deletePreview.sharedRepositories>0) && <p className="muted">{t("其他工作区仍在使用的共享记录会保留，仅解除与此工作区的关联。")}</p>}
           {deleteError && <p role="alert" className="danger">{systemMessage(deleteError)}</p>}
           <footer>
             <button disabled={deletePending} onClick={() => setDeletingWorkspace(undefined)}>{t("取消")}</button>
@@ -955,7 +963,7 @@ export function App() {
               } finally {
                 setDeletePending(false);
               }
-            }}>{deletePending ? t("正在删除") : t("删除本地项目")}</button>
+            }}>{deletePending ? t("正在删除") : t("删除本地工作区")}</button>
           </footer>
         </Modal>
       )}
@@ -1447,7 +1455,7 @@ function WorkspaceEditor({
               </>
             )}
           </div>
-          {!fresh && editing && <p className="repo-hint">{t("目录改名或移动后，在这里选择新目录并保存。项目身份和已有记录会保留，已选仓库按原相对位置更新。")}</p>}
+          {!fresh && editing && <p className="repo-hint">{t("目录改名或移动后，在这里选择新目录并保存。工作区身份和已有记录会保留，已选仓库按原相对位置更新。")}</p>}
         </div>
       </section>
       {job && (!showCollectionProgress || job.error || job.warnings?.length || (progressActive&&(["inspection","achievements"].includes(job.phase||"")||(job.phase==="analysis"&&!job.activeRepository)))) && (
@@ -1669,13 +1677,13 @@ function WorkspaceEditor({
             </label>
           </div>
           <div className="directory-cloud-line">
-            <span className="label">{t("云端项目")}</span>
+            <span className="label">{t("云端工作区")}</span>
             <span>{sync?.serverProjectId ? workspace?.name : t("尚未关联")}</span>
             {!sync?.serverProjectId && <span className="muted">{t("首次推送时自动创建")}</span>}
             <button
               className="text-action cloud-row-action"
               disabled={!sync?.serverProjectId}
-              title={sync?.serverProjectId ? t("在云端查看") : t("尚未关联云端项目")}
+              title={sync?.serverProjectId ? t("在云端查看") : t("尚未关联云端工作区")}
               onClick={() => { if (account?.server && sync?.serverProjectId) window.open(`${account.server}/dashboard?projectId=${encodeURIComponent(sync.serverProjectId)}`, "_blank", "noopener,noreferrer"); }}
             >
               {t("在云端查看")}
@@ -2336,6 +2344,26 @@ function Runtime({ state, act }: { state: State; act: Act }) {
   const [runtime, setRuntime] = useState<any>();
   const [startupBusy, setStartupBusy] = useState(false);
   const startup = state.startup ?? { enabled: false, supported: false, version: 0 };
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const autoUpdate = state.autoUpdate;
+  const changeAutoUpdate = async (enabled: boolean) => {
+    if (!autoUpdate) return;
+    setUpdateBusy(true);
+    try {
+      await act(async () => { await api("/auto-update", "PATCH", { enabled, version: autoUpdate.version }); });
+    } finally { setUpdateBusy(false); }
+  };
+  const updatePhases = {
+    idle: "尚未检查更新", checking: "正在检查更新…", current: "已是最新稳定版", waiting: "等待后台任务完成后更新",
+    installing: "正在更新，完成后自动重启后台", updated: "更新完成", failed: "更新未完成，将稍后重试",
+  } as const;
+  const updateReasons = {
+    source: "源码版、开发版或链接安装不自动更新，请手动更新。",
+    unknown: "无法确认全局安装来源，不执行自动更新。",
+    disabled: "当前环境已禁用自动更新。",
+    permissions: "安装目录不可写或当前以管理员身份运行，请手动更新。",
+    detecting: "正在确认安装来源…",
+  } as const;
   const changeStartup = async (enabled: boolean) => {
     setStartupBusy(true);
     try {
@@ -2346,7 +2374,7 @@ function Runtime({ state, act }: { state: State; act: Act }) {
   };
   useEffect(() => {
     void api("/runtime").then(setRuntime);
-  }, []);
+  }, [autoUpdate?.updatedAt]);
   const save = (next: Partial<Schedule>) =>
     void act(async () => {
       await api("/collection/schedule", "PATCH", {
@@ -2421,6 +2449,27 @@ function Runtime({ state, act }: { state: State; act: Act }) {
           ? t("此选项对本机所有目录立即生效。勾选后才可自动同步；取消勾选会暂停所有目录的自动同步，仍可手动同步。")
           : t("当前系统不支持登录后自动启动，可使用手动同步。")}</p>
         {startup.error && <p role="alert" className="error">{systemMessage(startup.error)}</p>}
+      </section>
+      <section>
+        <h3>{t("自动更新")}</h3>
+        <div className="field">
+          <label className="startup-option">
+            <input type="checkbox" checked={!!autoUpdate?.supported && autoUpdate.enabled}
+              disabled={updateBusy || !autoUpdate?.supported || autoUpdate.phase === "installing"}
+              onChange={event => void changeAutoUpdate(event.target.checked)} />
+            <span>{t("自动更新到最新稳定版")}</span>
+          </label>
+        </div>
+        <p className="repo-hint">{t("每 24 小时检查一次；等待采集、整理和同步结束后更新，仅重启 ADIT 后台，不重启电脑或打开浏览器。")}</p>
+        {!autoUpdate?.supported && <p className="repo-hint">{t(updateReasons[autoUpdate?.reason ?? "detecting"])}</p>}
+        {autoUpdate?.supported && <div className="settings-rows">
+          <div className="field"><span>{t("更新状态")}</span><span>{t(autoUpdate.enabled || autoUpdate.phase === "installing" ? updatePhases[autoUpdate.phase] : "自动更新已关闭")}
+            {autoUpdate.latestVersion && <small>{t("最新版本：{0}", autoUpdate.latestVersion)}</small>}</span></div>
+          <div className="field"><span>{t("最近检查更新")}</span><span>{autoUpdate.lastCheckedAt ? time(new Date(autoUpdate.lastCheckedAt).toISOString()) : t("尚未检查更新")}</span></div>
+          {autoUpdate.enabled && autoUpdate.nextCheckAt && <div className="field"><span>{t("下次检查更新")}</span><span>{time(new Date(autoUpdate.nextCheckAt).toISOString())}</span></div>}
+          {autoUpdate.updatedAt && <div className="field"><span>{t("最近更新")}</span><span>{autoUpdate.updatedVersion} · {time(new Date(autoUpdate.updatedAt).toISOString())}</span></div>}
+        </div>}
+        {autoUpdate?.error && <p role="alert" className="error">{systemMessage(autoUpdate.error)}</p>}
       </section>
       <section>
         <h3>

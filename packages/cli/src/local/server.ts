@@ -47,6 +47,7 @@ import { LocalCloudSync } from "./cloud-sync.js";
 import { DeletionCheckpoint } from "./deletion-checkpoint.js";
 import { MaintenanceService } from "./maintenance-service.js";
 import { CLI_VERSION } from "../version.js";
+import { AutomaticUpdate } from "./auto-update.js";
 
 async function body(req: IncomingMessage, limit = 65536): Promise<Record<string, unknown>> {
   let data = "";
@@ -80,6 +81,7 @@ export async function startLocalServer(
     startupRegistration?: StartupRegistration;
     pendingWorkerUrl?: URL;
     maintenanceWorkerUrl?: URL;
+    autoUpdateOptions?: Omit<ConstructorParameters<typeof AutomaticUpdate>[1], "acquire">;
   } = {},
 ) {
   const store = new LocalStore(options.directory);
@@ -119,6 +121,22 @@ export async function startLocalServer(
   const secrets = new LocalSecrets(store.directory);
   const gistCredentialWork = new Set<string>();
   const publications = new PublicationApi(store, analytics.prices, !!options.instance);
+  let activeMutations = 0;
+  const autoUpdate = new AutomaticUpdate(store, {
+    ...options.autoUpdateOptions,
+    acquire: () => {
+      if (activeMutations || account.busy || collector.busy || cloudSync.busy || inspectionService.busy || maintenance?.busy || achievementWork.size || gistCredentialWork.size) return;
+      if (store.workspaces().some(workspace => publications.busy(workspace.id))) return;
+      collector.pauseForUpdate(true);
+      cloudSync.pauseForUpdate(true);
+      maintenance?.pauseForUpdate(true);
+      return () => {
+        collector.pauseForUpdate(false);
+        cloudSync.pauseForUpdate(false);
+        maintenance?.pauseForUpdate(false);
+      };
+    },
+  });
   const token = options.token || randomBytes(32).toString("hex");
   const instance = options.instance || randomBytes(16).toString("hex");
   let origin = "";
@@ -131,6 +149,7 @@ export async function startLocalServer(
     res.end(JSON.stringify(redactSecretValue(value)));
   };
   const server = createServer(async (req, res) => {
+    let mutation = false;
     try {
       if (req.headers.host !== new URL(origin).host)
         throw new LocalStateError("Invalid host", 403);
@@ -160,6 +179,11 @@ export async function startLocalServer(
           throw new LocalStateError("Invalid request origin", 403);
         const input = req.method === "GET" ? {} : await body(req, ["/api/local/sessions/turn", "/api/local/sessions/reply"].includes(path) && req.method === "PATCH" ? 2_097_152 : 65536);
         const route = path.replace("/api/local", "");
+        if (req.method !== "GET" && route !== "/stop") {
+          if (autoUpdate.updating) throw new LocalStateError("ADIT is updating. Please try again shortly.", 503);
+          activeMutations++;
+          mutation = true;
+        }
         // Older cached pages may still exchange a launch token. No credential
         // is needed or issued; let them finish loading until their next refresh.
         if (route === "/session" && req.method === "POST")
@@ -288,6 +312,7 @@ export async function startLocalServer(
             schedule: { ...store.schedule(), nextAt: collector.nextAt },
             jobs: collector.jobs(),
             startup: startup.status(),
+            autoUpdate: autoUpdate.status(),
           });
         }
         if (route === "/projects/git" && req.method === "GET") return json(res,workspaceGitStatus(url.searchParams.get("path") || ""));
@@ -295,6 +320,8 @@ export async function startLocalServer(
           return json(res,resolveLocalProject({path:url.searchParams.get("path") || undefined,workspaceId:url.searchParams.get("workspaceId") || undefined,directory:store.directory,requireRepository:url.searchParams.get("repository")==="1"}));
         if (route === "/startup" && req.method === "PATCH")
           return json(res, await startup.save(input));
+        if (route === "/auto-update" && req.method === "PATCH")
+          return json(res, autoUpdate.save(input));
         if (route === "/workspaces" && req.method === "POST") {
           startup.assertCloudMode(input);
           return json(res, registerWorkspace(store, input), 201);
@@ -472,6 +499,8 @@ export async function startLocalServer(
         { error: error instanceof Error ? error.message : "Request failed" },
         status,
       );
+    } finally {
+      if (mutation) activeMutations--;
     }
   });
   let closing: Promise<void> | undefined;
@@ -489,6 +518,8 @@ export async function startLocalServer(
   collector.schedule(true);
   if (options.instance) cloudSync.schedule();
   maintenance?.start();
+  if (options.instance) autoUpdate.start();
+  else void autoUpdate.initialize();
   if (options.instance) for (const workspace of store.workspaces().filter(w=>w.started)) {
     void inspectionService.start(workspace,"startup").catch(()=>{});
     const latest = store.jobs<CollectionJob>().find(j=>j.workspaceId===workspace.id && j.kind==="collect" && ["done","partial"].includes(j.status));
@@ -496,6 +527,7 @@ export async function startLocalServer(
   }
   function close(): Promise<void> {
     return (closing ??= (async () => {
+      await autoUpdate.close();
       account.cancel();
       await maintenance?.close();
       await cloudSync.close();
@@ -517,5 +549,5 @@ export async function startLocalServer(
       store.close();
     })());
   }
-  return { origin, instance, token, close, server, store, collector };
+  return { origin, instance, token, close, server, store, collector, autoUpdate };
 }
