@@ -71,11 +71,7 @@ export class CloudClient {
   private readonly maxRetries: number;
   private readonly credentialsDirectory: string;
 
-  constructor(
-    serverUrl: string,
-    credentials: CloudCredentials,
-    options?: CloudClientOptions,
-  ) {
+  constructor(serverUrl: string, credentials: CloudCredentials, options?: CloudClientOptions) {
     this.serverUrl = normalizeServerUrl(serverUrl);
     this.credentials = credentials;
     this.credentialsDirectory = options?.credentialsDirectory ?? localDataDir();
@@ -126,9 +122,7 @@ export class CloudClient {
         if (!retry.ok) {
           if (retry.status === 401 || retry.status === 403) {
             this.recordRequestAuthFailure(retry.status, retry.statusText);
-            throw new CloudAuthError(
-              `Authentication failed: ${retry.status} ${retry.statusText}`,
-            );
+            throw new CloudAuthError(`Authentication failed: ${retry.status} ${retry.statusText}`);
           }
           throw new CloudApiError(
             `HEAD ${path}: ${retry.status} ${retry.statusText}`,
@@ -139,9 +133,7 @@ export class CloudClient {
         return headersToRecord(retry.headers);
       }
       this.recordRequestAuthFailure(response.status, response.statusText);
-      throw new CloudAuthError(
-        `Authentication failed: ${response.status} ${response.statusText}`,
-      );
+      throw new CloudAuthError(`Authentication failed: ${response.status} ${response.statusText}`);
     }
 
     if (!response.ok) {
@@ -171,8 +163,8 @@ export class CloudClient {
   }
 
   /** DELETE request with auth; returns the JSON body when the server sends one. */
-  async delete<T = void>(path: string): Promise<T> {
-    return this.request<T>("DELETE", path);
+  async delete<T = void>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>("DELETE", path, body);
   }
 
   /** Get the current credentials (may have been refreshed) */
@@ -271,7 +263,8 @@ export class CloudClient {
         const response = await fetch(url, {
           method,
           headers,
-          body: body instanceof FormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
+          body:
+            body instanceof FormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
           ...(multipart ? { redirect: "error" as const } : {}),
           signal: this.requestSignal(),
         });
@@ -342,14 +335,18 @@ export class CloudClient {
           // says so with a code (inactive or deleted device); a bare 403 from a
           // business route is a permission denial and stays an API error whose
           // body carries the server's reason.
-          const authCode = response.status === 401
-            ? readBodyCode(responseBody)
-            : response.status === 403 ? readAuthCode(responseBody) : undefined;
+          const authCode =
+            response.status === 401
+              ? readBodyCode(responseBody)
+              : response.status === 403
+                ? readAuthCode(responseBody)
+                : undefined;
           if (response.status === 401 || (response.status === 403 && authCode)) {
             this.recordRequestAuthFailure(response.status, response.statusText, authCode);
-            throw new CloudAuthError(authCode === "client_deleted"
-              ? "Device has been unlinked. Please run 'adit cloud login' to connect again."
-              : `Authentication failed: ${response.status} ${response.statusText}`,
+            throw new CloudAuthError(
+              authCode === "client_deleted"
+                ? "Device has been unlinked. Please run 'adit cloud login' to connect again."
+                : `Authentication failed: ${response.status} ${response.statusText}`,
               { status: response.status, code: authCode },
             );
           }
@@ -429,16 +426,21 @@ export class CloudClient {
         const data = await readResponseBody(response);
         if (!response.ok) {
           const code = readBodyCode(data);
-          const message = code === "client_deleted"
-            ? "Device has been unlinked. Please run 'adit cloud login' to connect again."
-            : `Token refresh failed: ${response.status}. Please re-authenticate with 'adit cloud login'.`;
+          const message =
+            code === "client_deleted"
+              ? "Device has been unlinked. Please run 'adit cloud login' to connect again."
+              : `Token refresh failed: ${response.status}. Please re-authenticate with 'adit cloud login'.`;
           // Unlocked: we are already inside the credentials refresh lock.
-          recordAuthFailureUnlocked({
-            stage: "refresh",
-            message,
-            status: response.status,
-            code,
-          }, this.credentialsDirectory, this.credentials);
+          recordAuthFailureUnlocked(
+            {
+              stage: "refresh",
+              message,
+              status: response.status,
+              code,
+            },
+            this.credentialsDirectory,
+            this.credentials,
+          );
           throw new CloudAuthError(message, { status: response.status, code });
         }
 
@@ -447,14 +449,27 @@ export class CloudClient {
         const refreshToken = readString(tokenData.refreshToken);
         if (!accessToken || !refreshToken) {
           const message = "Token refresh failed: response missing accessToken or refreshToken.";
-          recordAuthFailureUnlocked({ stage: "refresh", message, code: "malformed_refresh_response" }, this.credentialsDirectory, this.credentials);
+          recordAuthFailureUnlocked(
+            { stage: "refresh", message, code: "malformed_refresh_response" },
+            this.credentialsDirectory,
+            this.credentials,
+          );
           throw new CloudAuthError(message);
         }
 
         let expiresAt: string;
-        try { expiresAt = resolveExpiresAt(tokenData); }
-        catch (error) {
-          recordAuthFailureUnlocked({ stage: "refresh", message: (error as Error).message, code: "malformed_refresh_response" }, this.credentialsDirectory, this.credentials);
+        try {
+          expiresAt = resolveExpiresAt(tokenData);
+        } catch (error) {
+          recordAuthFailureUnlocked(
+            {
+              stage: "refresh",
+              message: (error as Error).message,
+              code: "malformed_refresh_response",
+            },
+            this.credentialsDirectory,
+            this.credentials,
+          );
           throw error;
         }
         this.credentials = {
@@ -471,7 +486,11 @@ export class CloudClient {
       } catch (error) {
         if (error instanceof CloudAuthError) throw error;
         const message = `Token refresh failed: ${error instanceof Error ? error.message : String(error)}`;
-        recordAuthFailureUnlocked({ stage: "refresh", message }, this.credentialsDirectory, original);
+        recordAuthFailureUnlocked(
+          { stage: "refresh", message },
+          this.credentialsDirectory,
+          original,
+        );
         throw new CloudAuthError(message);
       }
     }, this.credentialsDirectory);
@@ -482,12 +501,16 @@ export class CloudClient {
   }
 
   private recordRequestAuthFailure(status: number, statusText: string, code?: string): void {
-    recordAuthFailure({
-      stage: "request",
-      message: `Authentication failed: ${status} ${statusText}`,
-      status,
-      code,
-    }, this.credentialsDirectory, this.credentials);
+    recordAuthFailure(
+      {
+        stage: "request",
+        message: `Authentication failed: ${status} ${statusText}`,
+        status,
+        code,
+      },
+      this.credentialsDirectory,
+      this.credentials,
+    );
   }
 }
 
@@ -533,13 +556,16 @@ function readBodyCode(body: unknown): string | undefined {
 function readAuthCode(body: unknown): string | undefined {
   const record = asRecord(body);
   const error = readString(record.error);
-  return readString(record.code) ?? readString(record.reason)
-    ?? (error && /^[a-z][a-z0-9_]*$/.test(error) ? error : undefined);
+  return (
+    readString(record.code) ??
+    readString(record.reason) ??
+    (error && /^[a-z][a-z0-9_]*$/.test(error) ? error : undefined)
+  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
+    ? (value as Record<string, unknown>)
     : {};
 }
 

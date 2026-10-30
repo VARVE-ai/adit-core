@@ -1,7 +1,8 @@
 import { basename, dirname } from "node:path";
 import { databaseSnapshot, hasTable } from "./source-io.js";
-import { table, decode, type Row } from "./provider-common.js";
+import { table, type Row } from "./provider-common.js";
 import { string } from "./types.js";
+import { zedFirstFolderPath } from "./zed-paths.js";
 import type { MetadataResult, SessionMetadata } from "./discovery-metadata.js";
 
 /** Queries only session/catalog metadata, never message/part/bubble bodies. */
@@ -24,7 +25,7 @@ export function readDatabaseMetadata(path:string,provider:string,signal?:AbortSi
       sessions=table(db,"conversations",["conversation_id","cwd","parent_conversation_id","user_initiated"],["conversation_id"]).map(r=>make(r.conversation_id,r.cwd,r.user_initiated===0?r.parent_conversation_id:undefined));
     } else if(provider==="zed") {
       sessions=table(db,"threads",["id","folder_paths","parent_id"],["id"]).map(r=>{
-        const paths=decode(r.folder_paths,[]);return make(r.id,Array.isArray(paths)?paths[0]:"",r.parent_id);
+        return make(r.id,zedFirstFolderPath(r.folder_paths),r.parent_id);
       });
     } else if(provider==="warp") {
       const directories=new Map<unknown,string>();

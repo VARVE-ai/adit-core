@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.0.0",
+    "node": "^22.13.0 || >=24.0.0",
     "pnpm": ">=11.0.0"
   },
   "scripts": {
@@ -17,10 +17,12 @@
     "build:local": "pnpm --filter @varveai/adit-cli... build && pnpm --filter @varveai/adit-local-web build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint packages/*/src/**/*.ts",
-    "lint:fix": "eslint packages/*/src/**/*.ts --fix",
-    "format": "prettier --write \"packages/*/src/**/*.ts\"",
-    "format:check": "prettier --check \"packages/*/src/**/*.ts\"",
+    "test:quality": "node --test scripts/quality.test.mjs",
+    "lint": "eslint \"packages/*/src/**/*.{ts,tsx}\"",
+    "lint:fix": "eslint \"packages/*/src/**/*.{ts,tsx}\" --fix",
+    "format": "node scripts/format-changed.mjs --write",
+    "format:check": "node scripts/format-changed.mjs --check",
+    "format:check:all": "prettier --check \"packages/*/src/**/*.{ts,tsx}\"",
     "typecheck": "pnpm -r run typecheck",
     "test:release": "node --test scripts/release.test.mjs"
   },
@@ -39,6 +41,10 @@
     "url": "https://github.com/VARVE-ai/adit-core"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.13.0",
+    "prettier": "3.9.10",
+    "typescript-eslint": "8.72.1",
     "vitest": "^4.0.18"
   }
 }

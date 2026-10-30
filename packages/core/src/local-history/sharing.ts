@@ -80,7 +80,7 @@ export class LocalSharing {
       const ids = [...segments, ...calls.flatMap(c => [c.id, c.source_call_id]).filter(Boolean)];
       const privacy = new PublicationPrivacy(ids, o.names), choicesPrivacy = new PublicationPrivacy(ids, o.names);
       // Constrain the indexed message lookup before inspecting bodies; the JSON join preserves segment order.
-      const blocks = this.db.prepare(`SELECT b.*,m.role,m.turn_id,m.ordinal,m.id owner_id FROM adit_history_blocks b JOIN adit_history_messages m ON m.id=b.message_id JOIN json_each(?) q ON q.value=m.session_id WHERE m.provider=? AND m.session_id IN (SELECT value FROM json_each(?)) AND NOT ${nativeContextSql()} ORDER BY CAST(q.key AS INTEGER),m.ordinal,b.block_index`).all(segmentJSON,provider,segmentJSON) as Row[];
+      const blocks = this.db.prepare(`SELECT b.id,b.message_id,b.block_index,b.kind,b.text_content,m.role,m.turn_id,m.ordinal,m.id owner_id FROM adit_history_blocks b JOIN adit_history_messages m ON m.id=b.message_id JOIN json_each(?) q ON q.value=m.session_id WHERE m.provider=? AND m.session_id IN (SELECT value FROM json_each(?)) AND NOT ${nativeContextSql()} ORDER BY CAST(q.key AS INTEGER),m.ordinal,b.block_index`).all(segmentJSON,provider,segmentJSON) as Row[];
       const getPrompt = (turn: Row) => submittedPromptText(provider, blocks.filter(b => b.owner_id === turn.prompt_message_id).map(b=>({type:b.kind,text:b.text_content||""}))) || "";
       const turns = nativeTurns.filter(t => getPrompt(t).trim());
       const chosen = turns.filter(t => o.scope === "all" || o.turnIds.includes(t.id));

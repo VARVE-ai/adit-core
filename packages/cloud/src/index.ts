@@ -51,18 +51,10 @@ export {
 
 // HTTP
 export { CloudClient, type CloudClientOptions, type RefreshTokenStatus } from "./http/client.js";
-export {
-  CloudAuthError,
-  CloudNetworkError,
-  CloudApiError,
-} from "./http/errors.js";
+export { CloudAuthError, CloudNetworkError, CloudApiError } from "./http/errors.js";
 
 // Sync
-export {
-  SyncEngine,
-  type SyncResult,
-  type SyncConflict,
-} from "./sync/engine.js";
+export { SyncEngine, type SyncResult, type SyncConflict } from "./sync/engine.js";
 export { runSyncCycle, type SyncCycleResult } from "./sync/sync-cycle.js";
 export {
   buildSyncBatch,
@@ -113,7 +105,40 @@ export {
   type GitSyncSkipReason,
 } from "./project-link/index.js";
 
-export { createCloudTask, listCloudTasks, showCloudTask, cloudTaskContext, updateCloudTask, uploadCloudTaskImage } from "./tasks.js";
+export {
+  CloudTaskTypeVerificationError,
+  taskTypeNameKey,
+  listCloudTaskTypes,
+  createCloudTaskType,
+  updateCloudTaskType,
+  deleteCloudTaskType,
+  createCloudTask,
+  listCloudTasks,
+  showCloudTask,
+  cloudTaskContext,
+  updateCloudTask,
+  uploadCloudTaskImage,
+  uploadCloudTaskAttachment,
+} from "./tasks.js";
 export * from "./cli-reads.js";
 export * from "./memories.js";
-export type { CloudTask, CloudTaskList, CloudTaskDetail, CloudTaskContext, CloudTaskPatch, CloudTaskState, CloudTaskCreate, CloudTaskCreated, CloudTaskAttachment } from "./tasks.js";
+export type {
+  CloudTaskTypeScope,
+  CloudTaskTypeOption,
+  CloudTaskTypes,
+  CloudTaskTypeMutation,
+  CloudTask,
+  CloudTaskList,
+  CloudTaskDetail,
+  CloudTaskTimelineOptions,
+  CloudTaskTimelineDifference,
+  CloudTaskTimelineChange,
+  CloudTaskTimelineEntry,
+  CloudTaskTimeline,
+  CloudTaskContext,
+  CloudTaskPatch,
+  CloudTaskState,
+  CloudTaskCreate,
+  CloudTaskCreated,
+  CloudTaskAttachment,
+} from "./tasks.js";

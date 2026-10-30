@@ -10,6 +10,7 @@ import {
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import Database from "better-sqlite3";
 import { localDataDir, LocalStore } from "@varveai/adit-core";
 import { startLocalServer } from "./server.js";
 
@@ -19,6 +20,7 @@ interface Instance {
   token: string;
   instance: string;
   version?: string;
+  busy?: boolean;
 }
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function readInstance(): Instance | null {
@@ -29,6 +31,17 @@ function readInstance(): Instance | null {
   } catch {
     return null;
   }
+}
+function busyInstance(info: Instance): Instance | null {
+  if (!Number.isSafeInteger(info.pid) || info.pid <= 0 || !alive(info.pid)) return null;
+  let db: Database.Database | undefined;
+  try {
+    db = new Database(join(localDataDir(), "local.sqlite"), { readonly: true, fileMustExist: true, timeout: 250 });
+    const row = db.prepare("SELECT data FROM adit_local_settings WHERE key='daemon-lock'").get() as { data: string } | undefined;
+    const lock = row ? JSON.parse(row.data) : null;
+    return lock?.pid === info.pid && lock?.instance === info.instance ? { ...info, busy: true } : null;
+  } catch { return null; }
+  finally { db?.close(); }
 }
 export async function daemonStatus(): Promise<Instance | null> {
   const info = readInstance();
@@ -41,7 +54,7 @@ export async function daemonStatus(): Promise<Instance | null> {
       ? { ...info, version: health.version }
       : null;
   } catch {
-    return null;
+    return busyInstance(info);
   }
 }
 function alive(pid: number): boolean {

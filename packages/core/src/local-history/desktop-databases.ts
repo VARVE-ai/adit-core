@@ -2,8 +2,18 @@ import {Decompress} from "fzstd";
 import {databaseSnapshot,hasTable} from "./source-io.js";
 import {array,decode,group,message,session,sorted,table,type Row} from "./provider-common.js";
 import {HistoryFormatError,record,string} from "./types.js";
+import {zedFirstFolderPath} from "./zed-paths.js";
 export const desktopDatabaseProviders=["warp","zed","omnigent","piebald"];
 const identity=(value:unknown)=>Buffer.isBuffer(value)?value.toString("hex"):String(value ?? "");
+// Zed uses externally tagged content variants; preserve native evidence in raw.
+function zedContent(value:unknown):unknown {
+ if(Array.isArray(value))return value.map(zedContent);
+ const block=record(value);
+ if(Object.hasOwn(block,"Text"))return {type:"text",text:typeof block.Text==="string"?block.Text:string(record(block.Text).text)};
+ if(Object.hasOwn(block,"Thinking"))return {type:"thinking",thinking:string(record(block.Thinking).text)};
+ if(Object.hasOwn(block,"ToolUse")){const tool=record(block.ToolUse);return {type:"tool_use",id:tool.id,name:tool.name,input:tool.input??tool.raw_input};}
+ return value;
+}
 export function readDesktopDatabase(path:string,provider:string,signal?:AbortSignal){
  return databaseSnapshot(path,db=>{
   if(provider === "warp"){
@@ -21,12 +31,12 @@ export function readDesktopDatabase(path:string,provider:string,signal?:AbortSig
     // fzstd's streaming callback bounds the decompressed payload before retaining it.
     new Decompress(output=>{total+=output.byteLength;if(total>128*1024*1024)throw new HistoryFormatError("Zed transcript exceeds decompressed limit");chunks.push(output);}).push(bytes,true);bytes=Buffer.concat(chunks);
    }else if(row.data_type && row.data_type!=="json")throw new HistoryFormatError("Unsupported Zed data type");
-   const doc=record(decode(bytes)),folders=decode(row.folder_paths,[]);
-   const cwd=Array.isArray(folders)?string(folders[0]):"";
+   const doc=record(decode(bytes));
+   const cwd=zedFirstFolderPath(row.folder_paths);
    const result=session(provider,row.id,cwd,array(doc.messages).map((wire,i)=>{
     const role=Object.hasOwn(wire,"User")?"user":"assistant",data=record(wire.User ?? wire.Agent);
-    return message(data,i,{role,content:wire.User ?? wire.Agent,raw:wire});
-   }),{title:row.summary,nativeMetadata:doc.token_usage || doc.usage});
+    return message(data,i,{key:string(data.id)||String(i),role,content:zedContent(data.content ?? wire.User ?? wire.Agent),timestamp:string(data.timestamp)||string(row.created_at)||string(row.updated_at)||undefined,raw:wire});
+   }),{title:string(row.summary)||string(doc.title),nativeMetadata:doc.token_usage || doc.usage});
    if(string(row.parent_id)){result.parentId=string(row.parent_id);result.relationship="subagent";}return result;
   });
   if(provider === "omnigent"){

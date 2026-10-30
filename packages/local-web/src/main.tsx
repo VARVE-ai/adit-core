@@ -1235,7 +1235,6 @@ function WorkspaceEditor({
           )
           .map((p) => p.id) : f.providers,
         repositories: applyRepositories ? (job.repositories || [])
-          .filter((r) => !r.error && !r.skipReason)
           .map((r) => r.path) : f.repositories,
       }));
       setWorkspaceDirty(true);
@@ -1294,6 +1293,7 @@ function WorkspaceEditor({
   };
   const save = async (collect = false, navigate = true) => {
     if(gitBlocked)throw new Error(gitCheck.error || "Git repository check is not complete");
+    if(collect && !form.repositories.length)throw new Error(t("请至少选择一个 Git 仓库。"));
     const result = await api<Workspace>(
       fresh ? "/workspaces" : `/workspaces/${form.id}`,
       fresh ? "POST" : "PATCH",
@@ -1327,7 +1327,7 @@ function WorkspaceEditor({
     : account.auth !== "valid" ? t("请先连接云端账号。")
     : fresh && (!form.name.trim() || !form.path.trim()) ? t("请先填写工作目录的名称和路径。")
     : gitBlocked ? gitHint || systemMessage("Checking Git repositories…")
-    : fresh && !form.providers.length && !form.repositories.length ? t("请至少选择一个 Git 仓库或会话来源。")
+    : !form.repositories.length ? t("请至少选择一个 Git 仓库。")
     : fresh && ["queued", "running"].includes(job?.status || "") ? t("请等待发现完成后再同步。")
     : workspace?.directoryAvailable === false ? t("工作目录不可用，请在设置中更新目录。") : "";
   const knownRepos: RepositoryInfo[] = [...new Map([
@@ -1487,6 +1487,7 @@ function WorkspaceEditor({
             {showCollectionProgress?<><span>{t("比对 {0} 个仓库的提交来源",form.repositories.length)}</span><span>{progressCount(repositorySummary,"commits")}</span></>:<>{form.repositories.length} {t("个已选")}</>}
           </div>
           {gitHint && <p role="status" className="muted">{gitHint}</p>}
+          {!gitBlocked && !form.repositories.length && <p role="status" className="muted">{t("请至少选择一个 Git 仓库。")}</p>}
           {knownRepos.length ? (
             (showCollectionProgress?knownRepos.filter(r=>form.repositories.includes(r.path)||r.skipReason):knownRepos).map((r) => (
               <label className={`selection-row repository-row${showCollectionProgress?" collection-item":""}`} key={r.path}>
@@ -1827,7 +1828,7 @@ function WorkspaceEditor({
               gitBlocked ||
               !form.path ||
               !form.name.trim() ||
-              (!form.providers.length && !form.repositories.length) ||
+              !form.repositories.length ||
               collectionRunning ||
               (!editing && workspace?.directoryAvailable === false) ||
               ["queued", "running"].includes(job?.status || "")

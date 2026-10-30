@@ -4,6 +4,7 @@ import {record,string,type HistoryMessage,type HistorySession} from "./types.js"
 import {hasCodexPromptContext,promptSummary} from "./prompt-summary.js";
 import {applyTranscriptEdits,isHistoryPrompt as isPrompt} from "./transcript-edits.js";
 import {persistHistoryCosts} from "./pricing.js";
+import {compactHistoryRaw,restoreHistoryRaw} from "./raw-data.js";
 
 const encode=(value:unknown)=>value === undefined ? null : JSON.stringify(value);
 const decode=(value:string|null)=>value === null ? undefined : JSON.parse(value);
@@ -52,15 +53,18 @@ export class StructuredHistory {
       LEFT JOIN adit_history_usage_observations o ON o.id=(SELECT first.id FROM adit_history_usage_observations first
         WHERE first.message_id=m.id ORDER BY first.rowid LIMIT 1)
       WHERE m.provider=? AND m.session_id=? ORDER BY m.ordinal`).all(provider,id) as Record<string,unknown>[];
-    const messages=rows.map(row=>({
-      ...JSON.parse(row.extra_json as string),key:row.source_key,role:row.role,
-      ...(row.source_timestamp!==null?{timestamp:row.source_timestamp}:{}),
-      ...(row.model!==null?{model:row.model}:{}),...(row.effort!==null?{effort:row.effort}:{}),
-      ...(row.parent_key!==null?{parentKey:row.parent_key}:{}),
-      ...(row.content_json!==null?{content:decode(row.content_json as string)}:{}),
-      ...(row.raw_usage_json!==null?{usage:decode(row.raw_usage_json as string)}:{}),
-      raw:JSON.parse(row.raw_json as string),
-    })) as HistoryMessage[];
+    const messages=rows.map(row=>{
+      const content=decode(row.content_json as string|null);
+      return {
+        ...JSON.parse(row.extra_json as string),key:row.source_key,role:row.role,
+        ...(row.source_timestamp!==null?{timestamp:row.source_timestamp}:{}),
+        ...(row.model!==null?{model:row.model}:{}),...(row.effort!==null?{effort:row.effort}:{}),
+        ...(row.parent_key!==null?{parentKey:row.parent_key}:{}),
+        ...(row.content_json!==null?{content}:{}),
+        ...(row.raw_usage_json!==null?{usage:decode(row.raw_usage_json as string)}:{}),
+        raw:restoreHistoryRaw(row.raw_json as string,content,row.raw_content_paths_json as string|null),
+      };
+    }) as HistoryMessage[];
     return {...JSON.parse(session.extra_json as string),id,provider,cwd:session.cwd as string,
       ...(session.parent_id!==null?{parentId:session.parent_id as string}:{}),
       ...(session.relationship!==null?{relationship:session.relationship as HistorySession["relationship"]}:{}),
@@ -136,7 +140,9 @@ export class StructuredHistory {
       }
       ledger.run(role,reason,entry.id,role,reason);
     }
-    const insertMessage=this.db.prepare(`INSERT INTO adit_history_messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    const insertMessage=this.db.prepare(`INSERT INTO adit_history_messages
+      (id,provider,session_id,source_key,ordinal,role,parent_key,turn_id,occurred_at,source_timestamp,model,effort,
+        request_id,response_id,content_json,raw_json,extra_json,raw_content_paths_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
     const insertBlock=this.db.prepare("INSERT INTO adit_history_blocks VALUES (?,?,?,?,?,?)");
     for(const [ordinal,message] of messages.entries()) {
       if(ordinal<prefix)continue;
@@ -162,15 +168,16 @@ export class StructuredHistory {
       const request=optional(wire.requestId ?? wire.request_id ?? payload.request_id ?? native.request_id);
       const response=optional(native.id ?? payload.response_id ?? wire.response_id);
       const {key,role,timestamp,model,effort,content,usage,parentKey,raw,...messageExtra}=message;
+      const contentJson=encode(content),storedRaw=compactHistoryRaw(JSON.stringify(raw),contentJson);
       insertMessage.run(mid,provider,id,key,ordinal,role,parentKey??null,turn,occurred,timestamp??null,model??null,effort??null,
-        request,response,encode(content),encode(raw),encode(messageExtra));
+        request,response,contentJson,storedRaw.rawJson,encode(messageExtra),storedRaw.pathsJson);
       this.db.prepare("INSERT INTO adit_history_message_digests VALUES (?,?)").run(mid,digests[ordinal]);
       const blocks=Array.isArray(content)?content:[content];
       const toolNodes:Record<string,unknown>[]=[];
       for(const [index,block] of blocks.entries()) {
         const data=record(block),kind=string(data.type)||string(data.kind)||(typeof block==="string"?"text":"structured");
         const body=text(block)||string(data.thinking)||null;
-        insertBlock.run(historyKey(mid,index),mid,index,kind,body,encode(block));
+        insertBlock.run(historyKey(mid,index),mid,index,kind,body,null);
         if(["tool_use","tool_result","toolCall","toolResult","function_call","function_call_output","custom_tool_call","custom_tool_call_output"].includes(kind) ||
           (provider==="deepseek-harness" && kind==="tool-call"))toolNodes.push(data);
       }

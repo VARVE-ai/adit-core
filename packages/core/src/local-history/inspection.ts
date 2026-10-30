@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { historyBlockDataSql } from "./block-data.js";
 import { createHmac, randomUUID } from "node:crypto";
 import type { LocalWorkspace } from "../local-state.js";
 import { LocalStateError } from "../local-state.js";
@@ -179,7 +180,10 @@ export class LocalInspection {
       )
       .iterate(provider, id) as Iterable<Row>;
     const blocks = this.db.prepare(
-      "SELECT * FROM adit_history_blocks WHERE message_id=? ORDER BY block_index",
+      `SELECT b.id,b.message_id,b.block_index,b.kind,b.text_content,
+       CASE WHEN coalesce(b.text_content,'')='' OR (m.provider='deepseek-harness' AND b.kind='tool-call')
+         THEN ${historyBlockDataSql()} END AS data_json
+       FROM adit_history_blocks b JOIN adit_history_messages m ON m.id=b.message_id WHERE b.message_id=? ORDER BY b.block_index`,
     );
     const calls = this.db.prepare(
       "SELECT * FROM adit_history_tool_calls WHERE message_id=? ORDER BY call_index",

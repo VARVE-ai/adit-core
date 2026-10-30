@@ -1,3 +1,4 @@
+import {execFileSync} from "node:child_process";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -5,13 +6,14 @@ import { join, parse } from "node:path";
 import { request } from "node:http";
 import { startLocalServer } from "./server.js";
 import * as githubCredential from "./github-credential.js";
-import { LocalStateError } from "@varveai/adit-core";
+import { LocalStateError, LocalPrices } from "@varveai/adit-core";
+import { StructuredHistory } from "../../../core/src/local-history/structured-store.js";
 
 let app: Awaited<ReturnType<typeof startLocalServer>>;
 let root: string;
 beforeEach(async () => {
   root = mkdtempSync(join(tmpdir(), "adit-api-test-"));
-  mkdirSync(join(root,".git"));
+  execFileSync("git",["init",root]);execFileSync("git",["-C",root,"remote","add","origin","https://example.invalid/test.git"]);
   // Discovery must not inspect the test runner's real agent logs.
   for (const name of [
     "CLAUDE_PROJECTS_DIR",
@@ -87,7 +89,7 @@ it("prevents concurrent credential changes or deletion while importing and unloc
   expect((await api(endpoint, "POST", {})).status).toBe(200);
 });
 it("checks directory availability on page state and repairs the path without replacing project identity",async()=>{
-  const original=join(root,"original"),moved=join(root,"moved");mkdirSync(join(original,".git"),{recursive:true});
+  const original=join(root,"original"),moved=join(root,"moved");execFileSync("git",["init",original]);execFileSync("git",["-C",original,"remote","add","origin","https://example.invalid/test.git"]);
   const w=app.store.saveWorkspace({path:original,providers:["codex"]});
   renameSync(original,moved);
   const state=await (await api("/state")).json() as any;
@@ -191,6 +193,32 @@ it("authenticates workspace deletion, removes collected history and cancels futu
   expect((await api(endpoint, "DELETE", { version: workspace.version })).status).toBe(404);
   expect((await api("/workspaces", "POST", { path: root })).status).toBe(201);
 });
+it("backfills legacy stored costs at startup without repeating the backfill for overview queries", async () => {
+  const workspace = app.store.saveWorkspace({ path: root, providers: ["claude"], repositories: [] });
+  const prices = new LocalPrices(app.store.db);
+  prices.install({
+    fixture: { mode: "chat", input_cost_per_token: 0.000002, output_cost_per_token: 0.000008 },
+  });
+  new StructuredHistory(app.store.db).write({
+    provider: "claude", id: "legacy", cwd: root,
+    messages: [{
+      key: "reply", role: "assistant", model: "fixture", content: "done", raw: {},
+      timestamp: "2026-10-18T01:00:00Z",
+      usage: { input_tokens: 100, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    }],
+  });
+  app.store.db.exec("UPDATE adit_history_usage_entries SET input_cost_microusd=NULL,output_cost_microusd=NULL,cache_read_cost_microusd=NULL,cache_write_cost_microusd=NULL,cost_microusd=NULL; DELETE FROM adit_history_cost_basis;");
+  await prices.close();
+  await app.close();
+  const persist = vi.spyOn(LocalPrices.prototype, "persist");
+  app = await startLocalServer({ directory: join(root, "state") });
+  expect(persist).toHaveBeenCalledOnce();
+  expect(app.store.db.prepare("SELECT cost_microusd FROM adit_history_usage_entries").get()).toEqual({ cost_microusd: 280 });
+  for (const range of ["all", "7d", "30d"]) {
+    expect((await api(`/overview?workspaceId=${workspace.id}&range=${range}&timezone=UTC`)).status).toBe(200);
+  }
+  expect(persist).toHaveBeenCalledOnce();
+});
 it("authenticates overview, validates scope and returns real empty structured metrics", async () => {
   const created = await api("/workspaces", "POST", {
     path: root,
@@ -236,7 +264,7 @@ it("authenticates overview, validates scope and returns real empty structured me
 });
 it("imports a selected local export into an explicit workspace through the authenticated API", async () => {
   const workspacePath = join(root, "import-work");
-  mkdirSync(join(workspacePath,".git"),{recursive:true});
+  execFileSync("git",["init",workspacePath]);execFileSync("git",["-C",workspacePath,"remote","add","origin","https://example.invalid/test.git"]);
   const created = await api("/workspaces", "POST", {
     path: workspacePath,
     name: "import target",
@@ -357,9 +385,9 @@ it("validates repository scope on create and update", async () => {
   expect((await (await api("/state")).json() as any).startup.enabled).toBe(true);
   const path = join(root, "workspace"),
     outside = join(root, "outside");
-  mkdirSync(join(path,".git"),{recursive:true});
+  mkdirSync(join(path,".git"),{recursive:true});execFileSync("git",["init",path]);execFileSync("git",["-C",path,"remote","add","origin","https://example.invalid/test.git"]);
   mkdirSync(outside);
-  mkdirSync(join(outside, ".git"));
+  execFileSync("git",["init",outside]);execFileSync("git",["-C",outside,"remote","add","origin","https://example.invalid/test.git"]);
   expect(
     (await api("/workspaces", "POST", { path, repositories: [outside] }))
       .status,
@@ -406,7 +434,7 @@ it("rejects unsupported sources and returns no credentials", async () => {
 it("runs local collection with no external engine and deduplicates requests", async () => {
   const path = join(root, "workspace"),
     source = join(root, "source");
-  mkdirSync(join(path,".git"),{recursive:true});
+  mkdirSync(join(path,".git"),{recursive:true});execFileSync("git",["init",path]);execFileSync("git",["-C",path,"remote","add","origin","https://example.invalid/test.git"]);
   mkdirSync(source);
   vi.stubEnv("CODEX_SESSIONS_DIR", source);
   writeFileSync(
@@ -421,7 +449,7 @@ it("runs local collection with no external engine and deduplicates requests", as
       .map((row) => JSON.stringify(row))
       .join("\n") + "\n",
   );
-  const workspace = app.store.saveWorkspace({ path, providers: ["codex"] });
+  const workspace = app.store.saveWorkspace({ path, providers: ["codex"], repositories: [path] });
   const first = app.collector.collect(workspace.id);
   expect(app.collector.collect(workspace.id).id).toBe(first.id);
   expect(await (await api(`/jobs/${first.id}`)).json()).toMatchObject({id:first.id,kind:"collect",workspaceId:workspace.id});
@@ -454,6 +482,9 @@ it("rejects Git-less creation and collection, exposes the reason, and preserves 
  const response=await api("/workspaces","POST",{path,providers:["codex"]});expect(response.status).toBe(409);expect(await response.json()).toMatchObject({error:expect.stringContaining("No Git repository")});expect(app.store.workspaces()).toEqual([]);
  expect(await (await api(`/projects/git?path=${encodeURIComponent(path)}`)).json()).toMatchObject({available:false,error:expect.stringContaining("No Git repository")});
  mkdirSync(join(path,".git"));const created=await (await api("/workspaces","POST",{path,repositories:[]})).json() as any;
+ const emptySelection=await api(`/workspaces/${created.id}/collect`,"POST",{});
+ expect(emptySelection.status).toBe(409);
+ expect(await emptySelection.json()).toMatchObject({error:expect.stringContaining("Select at least one Git repository")});
  rmSync(join(path,".git"),{recursive:true});expect((await api(`/workspaces/${created.id}/collect`,"POST",{})).status).toBe(409);
  expect(app.store.jobs()).toEqual([]);expect(app.store.workspace(created.id).id).toBe(created.id);
  const state=await (await api("/state")).json() as any;expect(state.workspaces[0].git.available).toBe(false);

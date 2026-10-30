@@ -1,6 +1,7 @@
 // Local service messages can come from saved jobs as well as new requests.
 // Translate these known messages at display time, keeping paths and details intact.
 export const systemMessages: Record<string, string> = {
+  "请至少选择一个 Git 仓库。": "Select at least one Git repository before organizing or syncing.",
   "未检测到 Git 仓库，无法创建项目或开始整理。请选择包含 Git 仓库的目录。": "No Git repository found. Select a directory containing a Git repository to create the project or start organizing.",
   "正在检查 Git 仓库…": "Checking Git repositories…",
   "未安装 GitHub 命令行工具，请安装并登录，或手动输入令牌。": "GitHub CLI is not installed. Install it and sign in, or enter a token manually.",

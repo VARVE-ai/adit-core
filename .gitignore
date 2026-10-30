@@ -40,7 +40,7 @@ coverage/
 .cache/
 packages/cli/local-assets/
 
-# Generated package documents
+# Package documents generated from the repository originals
 packages/core/LICENSE
 packages/engine/LICENSE
 packages/cloud/LICENSE

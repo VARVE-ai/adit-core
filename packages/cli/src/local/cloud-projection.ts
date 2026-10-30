@@ -4,6 +4,7 @@ import { analyticsSessions, nativeConversationId, projectUploadRepositories, sub
 import { branchFromCommitOutput } from "./commits.js";
 
 type Row = Record<string, any>;
+export type CloudReadStore = Pick<LocalStore, "db">;
 export const syncKey = (...parts: unknown[]) => createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 const iso = (time: number | null) => time !== null && Number.isFinite(time) ? new Date(time).toISOString() : null;
 const parse = (value: string | null) => { try { return value ? JSON.parse(value) : {}; } catch { return {}; } };
@@ -39,7 +40,7 @@ export class CloudSessionIndex {
   private transcripts = new Map<string, number[]>();
   private ids = new Map<string, CloudBaseline["sessions"]>();
   private paths = new Map<string, Map<string, Set<string>>>();
-  constructor(private store: LocalStore, private baseline: CloudBaseline) {
+  constructor(private store: CloudReadStore, private baseline: CloudBaseline) {
     baseline.sessions.forEach((session, ordinal) => {
       const rows = this.ids.get(session.id) ?? [];
       rows.push(session);this.ids.set(session.id,rows);
@@ -85,11 +86,11 @@ export class CloudSessionIndex {
   }
 }
 
-export function historicalCloudSessions(store: LocalStore, baseline: CloudBaseline, provider: string, nativeId: string, index = new CloudSessionIndex(store,baseline)) {
+export function historicalCloudSessions(store: CloudReadStore, baseline: CloudBaseline, provider: string, nativeId: string, index = new CloudSessionIndex(store,baseline)) {
   return index.matches(provider,nativeId);
 }
 
-export function cloudSessionCutoff(store: LocalStore, scope: string, baseline: CloudBaseline, source: Row, cloudId?: string, index = new CloudSessionIndex(store,baseline)) {
+export function cloudSessionCutoff(store: CloudReadStore, scope: string, baseline: CloudBaseline, source: Row, cloudId?: string, index = new CloudSessionIndex(store,baseline)) {
   const nativeId = nativeConversationId(source as {id:string;parent_id:string|null;relationship:string|null});
   const saved = store.db.prepare("SELECT cloud_id FROM adit_local_cloud_sessions WHERE scope=? AND provider=? AND native_id=?")
     .get(scope,source.provider,nativeId) as {cloud_id:string}|undefined;
@@ -102,7 +103,7 @@ export function cloudSessionCutoff(store: LocalStore, scope: string, baseline: C
 }
 
 /** Shared by upload and the read-only pending summary. Never confirm history while counting it. */
-export function cloudCommitSelection(store: LocalStore, scope: string, baseline: CloudBaseline,
+export function cloudCommitSelection(store: CloudReadStore, scope: string, baseline: CloudBaseline,
   repo: ReturnType<typeof projectUploadRepositories>[number]) {
   const db = store.db;
   const boundary = baseline.repositories.find(r => r.localRepositoryId === repo.localRepositoryId);
@@ -123,7 +124,7 @@ export function cloudCommitSelection(store: LocalStore, scope: string, baseline:
   };
 }
 
-export function cloudTurnUsage(store: LocalStore, turnId: string): Row[] {
+export function cloudTurnUsage(store: CloudReadStore, turnId: string): Row[] {
   return store.db.prepare(`SELECT u.*,o.request_id,o.response_id FROM adit_history_usage_entries u
     JOIN adit_history_usage_observations o ON o.id=u.id WHERE u.turn_id=? AND u.ledger_role='canonical' AND u.scope<>'session'
     ORDER BY u.occurred_at,u.id`).all(turnId) as Row[];
@@ -175,7 +176,7 @@ export function finalReply(messages: Row[], hasNextTurn: boolean): Row | undefin
 
 /** The same reply eligibility for upload and counters, reading only candidate metadata.
  * SQL projects completion fields; transcript bodies and tool results never leave SQLite here. */
-export function cloudFinalReply(store: LocalStore, turnId: string, hasNextTurn: boolean): {id:string;occurred_at:number|null;ordinal:number} | undefined {
+export function cloudFinalReply(store: CloudReadStore, turnId: string, hasNextTurn: boolean): {id:string;occurred_at:number|null;ordinal:number} | undefined {
   return historyFinalReply(store.db,turnId,hasNextTurn);
 }
 

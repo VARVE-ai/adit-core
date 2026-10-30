@@ -1,4 +1,4 @@
-import { assertWorkspaceGit, workspaceGitStatus } from "@varveai/adit-core";
+import { assertWorkspaceGit, assertSelectedRepositories, repositoryOriginUrl, workspaceGitStatus } from "@varveai/adit-core";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -89,6 +89,7 @@ export async function repositories(path: string): Promise<Repository[]> {
   const result: Repository[] = [];
   for (const dir of paths) {
     if (!existsSync(join(dir, ".git"))) continue;
+    if (!repositoryOriginUrl(dir)) continue;
     try {
       const email = await authorEmail(dir);
       if (!email) {
@@ -231,13 +232,14 @@ export class Collector {
     const w = this.store.workspace(id);
     if (!directoryAvailable(w.path)) throw new LocalStateError(directoryUnavailable,409);
     assertWorkspaceGit(w.path);
+    assertSelectedRepositories(w.path, w.repositories);
     if (!w.providers.length && !w.repositories.length)
       throw new LocalStateError("Select at least one source or repository");
     return this.enqueue(id, "collect");
   }
   collectAll(): CollectionJob[] {
     return this.store.workspaces()
-      .filter(w => w.started && workspaceGitStatus(w.path).available && (w.providers.length || w.repositories.length))
+      .filter(w => w.started && workspaceGitStatus(w.path).available && w.repositories.length)
       .map(w => this.collect(w.id));
   }
   private enqueue(id: string, kind: "collect" | "discover"): CollectionJob {
@@ -288,7 +290,10 @@ export class Collector {
   private async runBatch(jobs: CollectionJob[]): Promise<void> {
     // Recheck at execution time as directories can disappear after enqueueing.
     jobs = jobs.filter(job => {
-      const git = workspaceGitStatus(this.store.workspace(job.workspaceId).path);
+      const workspace=this.store.workspace(job.workspaceId);
+      let git = workspaceGitStatus(workspace.path);
+      try { assertSelectedRepositories(workspace.path,workspace.repositories); }
+      catch(error) { git={available:false,error:error instanceof Error?error.message:String(error)}; }
       if (git.available) return true;
       job.status="interrupted"; job.error=git.error; job.endedAt=new Date().toISOString();
       this.store.job(job);this.activeJobs.delete(`collect:${job.workspaceId}`);return false;
@@ -583,7 +588,7 @@ export class Collector {
     const timer=setTimeout(()=>{
       this.retries.set(id,{attempt});
       const workspace=this.store.workspaces().find(workspace=>workspace.id===id);
-      if(!workspace||!workspaceGitStatus(workspace.path).available||(!workspace.providers.length&&!workspace.repositories.length))return;
+      if(!workspace||!workspaceGitStatus(workspace.path).available||!workspace.repositories.length)return;
       try{this.collect(id);}catch{}
     },attempt*5000);
     timer.unref();

@@ -1,0 +1,3 @@
+**/dist/
+**/*.generated.ts
+packages/cli/local-assets/

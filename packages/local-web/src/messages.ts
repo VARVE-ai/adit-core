@@ -1,6 +1,7 @@
 // Chinese keys preserve the prototype copy. Only interface text belongs here;
 // native session titles, commit subjects, paths and account names are never keys.
 export const messages = {
+  "请至少选择一个 Git 仓库。": "Select at least one Git repository.",
   "部分记录或分析待补齐，将在后续整理重试；已整理内容可正常使用。": "Some records or analysis are pending and will be retried. Collected content remains available.",
   "第 {0} 轮提问": "Turn {0}",
   "前后各 1 轮问答": "1 turn before and after",
@@ -412,6 +413,8 @@ export const messages = {
   "实际云端推送尚未接入；不受日期和 Agent 筛选影响":
     "Cloud push is not available yet; unaffected by date and agent filters",
   "待推送 {0} 个会话、{1} 个提交": "{0} sessions · {1} commits pending",
+  "正在计算待推送数量…": "Calculating pending uploads…",
+  "待推送数量更新失败，稍后重试": "Pending count update failed; retrying later",
   "未开启云端存储": "Cloud storage is off",
   "登录云端": "Sign in to Cloud",
   "待核对云端历史": "Cloud history not checked yet",

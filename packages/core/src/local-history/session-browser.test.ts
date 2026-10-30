@@ -53,6 +53,23 @@ const m = (
   timestamp: "2026-10-20T10:00:00Z",
   ...extra,
 });
+it("preserves original raw content when editing multiple compacted blocks and collecting again", () => {
+  const { w, history, browser } = fixture();
+  const content = [{ type: "text", text: "first block ".repeat(40).trim() }, { type: "text", text: "second block ".repeat(40).trim() }];
+  const raw = { uuid: "prompt", message: { content, id: "native-request" }, parentUuid: null };
+  const session = { provider: "claude", id: "compact-edit", cwd: root, messages: [m("prompt", "user", content, { raw })] };
+  history.write(session);
+  expect(store.db.prepare("SELECT raw_content_paths_json FROM adit_history_messages").get()).toEqual({ raw_content_paths_json: '[["message","content"]]' });
+  const turn = browser.detail(w, "claude", session.id).turns[0];
+  const draft = browser.editTurn(w, "claude", session.id, turn.id);
+  browser.updateTurn(w, "claude", session.id, turn.id, draft.revision, draft.blocks.map((block, index) => ({ id: block.id, text: `edited ${index}` })));
+  const edited = history.read("claude", session.id)!;
+  expect(edited.messages[0].raw).toEqual(raw);
+  expect(edited.messages[0].content).toEqual([{ type: "text", text: "edited 0" }, { type: "text", text: "edited 1" }]);
+  expect(store.db.prepare("SELECT raw_content_paths_json FROM adit_history_messages").get()).toEqual({ raw_content_paths_json: null });
+  history.write(session);
+  expect(history.read("claude", session.id)).toEqual(edited);
+});
 it("previews one real turn on either side, masks excerpts and opens the exact page by turn ID", () => {
   const { w, history, browser } = fixture();
   const secret = "ghp_" + createHash("sha256").update("commit-context-fixture").digest("hex").slice(0, 36);
@@ -230,10 +247,21 @@ it("edits complete prompt/reply blocks, updates search, preserves tools/usage an
   expect(browser.list(w, { query: "revised question" }).items[0].title).toBe("revised question");
   expect(browser.editTurn(w, "claude", "editable", draft.turnId).blocks[1].text).toBe(replacement);
   expect(history.read("claude", "editable")!.messages[1].content).toEqual([{ type: "text", text: replacement }, { type: "text", text: "revised second block" }]);
+  expect(store.db.prepare("SELECT count(*) count FROM adit_history_blocks WHERE data_json IS NOT NULL").get()).toEqual({ count: 0 });
   history.write({ ...original, messages: [...original.messages, m("a3", "assistant", "newly collected reply")] });
   expect(browser.editTurn(w, "claude", "editable", draft.turnId).blocks[1].text).toBe(replacement);
   expect(browser.detail(w, "claude", "editable").turns[0].events.some(e => e.kind === "tool")).toBe(true);
   expect(original.messages[0].content).toBe("original question");
+});
+
+it("reads structured block details from messages while keeping unique legacy content readable", () => {
+  const { w, history, browser } = fixture();
+  const content = { type: "attachment", details: { mime: "image/png", size: 42 } };
+  history.write({ provider: "claude", id: "structured", cwd: root, messages: [m("prompt", "user", content)] });
+  const block = store.db.prepare("SELECT id FROM adit_history_blocks LIMIT 1").get() as { id: string };
+  expect(browser.content(w, "claude", "structured", block.id, "block").text).toBe(JSON.stringify(content, null, 2));
+  store.db.prepare("UPDATE adit_history_blocks SET data_json=? WHERE id=?").run('{"legacy":true}', block.id);
+  expect(browser.content(w, "claude", "structured", block.id, "block").text).toBe(JSON.stringify({ legacy: true }, null, 2));
 });
 
 it("edits and deletes only the selected reply block and reapplies it without losing tools or usage", () => {

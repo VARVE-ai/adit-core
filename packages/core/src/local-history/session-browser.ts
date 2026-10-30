@@ -1,4 +1,6 @@
 import type Database from "better-sqlite3";
+import { historyBlockDataSql } from "./block-data.js";
+import { compactHistoryRaw, restoreHistoryRaw } from "./raw-data.js";
 import { registerHistoryRedaction } from "./inspection-schema.js";
 import { historyTextMatch } from "./history-search.js";
 import { LocalStateError, type LocalWorkspace } from "../local-state.js";
@@ -604,7 +606,7 @@ export class LocalSessionBrowser {
       .get(turnId, provider, this.segments(provider,id)) as Row | undefined;
     if (!turn) throw new LocalStateError("Turn not found", 404);
     const session=this.session(w,provider,turn.session_id);
-    const blocks = this.db.prepare(`SELECT b.*,m.source_key,m.content_json,m.role FROM adit_history_blocks b JOIN adit_history_messages m ON m.id=b.message_id
+    const blocks = this.db.prepare(`SELECT b.id,b.message_id,b.block_index,b.kind,b.text_content,m.source_key,m.role FROM adit_history_blocks b JOIN adit_history_messages m ON m.id=b.message_id
       WHERE m.turn_id=? AND b.kind IN (${textKinds}) AND (m.id=? OR m.role='assistant')
       AND NOT EXISTS(SELECT 1 FROM adit_history_tool_calls c WHERE c.message_id=m.id AND m.provider IN ('codex','traex','augure-code'))
       ORDER BY m.ordinal,b.block_index`).all(turnId, turn.prompt_message_id) as Row[];
@@ -670,15 +672,19 @@ export class LocalSessionBrowser {
         this.db.prepare(`INSERT INTO adit_history_text_edits VALUES (?,?,?,?,?,?)
           ON CONFLICT(provider,session_id,message_key,block_index) DO UPDATE SET text_content=excluded.text_content,updated_at=excluded.updated_at`)
           .run(provider, id, block.source_key, block.block_index, text, Date.now());
-        this.db.prepare("UPDATE adit_history_blocks SET text_content=?,data_json=? WHERE id=?")
-          .run(text, JSON.stringify(replaceTextBlock(parse(block.data_json), text)), block.id);
+        this.db.prepare("UPDATE adit_history_blocks SET text_content=?,data_json=NULL WHERE id=?")
+          .run(text, block.id);
         // Read the current message so multiple changed text blocks cannot overwrite one another.
-        const message = this.db.prepare("SELECT content_json FROM adit_history_messages WHERE id=?").get(block.message_id) as Row;
+        const message = this.db.prepare("SELECT content_json,raw_json,raw_content_paths_json FROM adit_history_messages WHERE id=?").get(block.message_id) as Row;
         const content = parse(message.content_json);
         const parts = Array.isArray(content) ? [...content] : [content];
         parts[block.block_index] = replaceTextBlock(parts[block.block_index], text);
-        this.db.prepare("UPDATE adit_history_messages SET content_json=? WHERE id=?")
-          .run(JSON.stringify(Array.isArray(content) ? parts : parts[0]), block.message_id);
+        const contentJson = JSON.stringify(Array.isArray(content) ? parts : parts[0]);
+        const rawJson = message.raw_content_paths_json
+          ? JSON.stringify(restoreHistoryRaw(message.raw_json, content, message.raw_content_paths_json)) : message.raw_json;
+        const storedRaw = compactHistoryRaw(rawJson, contentJson);
+        this.db.prepare("UPDATE adit_history_messages SET content_json=?,raw_json=?,raw_content_paths_json=? WHERE id=?")
+          .run(contentJson, storedRaw.rawJson, storedRaw.pathsJson, block.message_id);
       }
       this.refreshSession(provider, id);
     })();
@@ -1019,7 +1025,7 @@ export class LocalSessionBrowser {
     } else {
       const block = this.db
         .prepare(
-          "SELECT b.text_content,b.data_json FROM adit_history_blocks b JOIN adit_history_messages m ON m.id=b.message_id WHERE b.id=? AND m.provider=? AND m.session_id IN (SELECT value FROM json_each(?))",
+          `SELECT b.text_content,CASE WHEN coalesce(b.text_content,'')='' THEN ${historyBlockDataSql()} END AS data_json FROM adit_history_blocks b JOIN adit_history_messages m ON m.id=b.message_id WHERE b.id=? AND m.provider=? AND m.session_id IN (SELECT value FROM json_each(?))`,
         )
         .get(eventId, provider, this.segments(provider,id)) as Row | undefined;
       if (!block) throw new LocalStateError("Event not found", 404);
