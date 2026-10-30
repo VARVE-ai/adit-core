@@ -55,7 +55,7 @@ export async function cloudTaskTypesCommand(
     const localProjectId =
       options.project ?? loadProjectContext("adit cloud tasks types")?.projectId;
     if (!localProjectId)
-      throw new Error("Add this working directory in Settings or provide an explicit project ID.");
+      throw new Error("Add this working directory in Settings or provide an explicit workspace ID.");
     const client = new CloudClient(credentials.serverUrl, credentials, {
       maxRetries: action === "list" ? 2 : 0,
     });
@@ -86,7 +86,7 @@ export async function cloudTaskTypesCommand(
     }
     if (options.json) console.log(JSON.stringify(result, null, 2));
     else if (action === "list") {
-      printTitle("Task types", catalog.scope.teamId ? "team" : "personal project");
+      printTitle("Task types", catalog.scope.teamId ? "collaboration project" : "workspace");
       printTable(
         [{ header: "name" }, { header: "color" }],
         catalog.options.map((option) => [option.name, option.color]),
@@ -107,7 +107,7 @@ export async function cloudTaskTypesCommand(
       const failure = describeFailure(error);
       const message =
         failure.status === 404
-          ? `${failure.message} Check the selected project/team; an older Cloud may need upgrading for task types.`
+          ? `${failure.message} Check the selected workspace/collaboration project; an older Cloud may need upgrading for task types.`
           : failure.message;
       const context =
         error instanceof CloudApiError && error.body && typeof error.body === "object"
@@ -128,7 +128,7 @@ export async function cloudTaskTypesCommand(
         error,
         options,
         `tasks types ${action}`,
-        "Check the current project/team; a missing endpoint may require a Cloud upgrade. Do not blindly retry writes.",
+        "Check the current workspace/collaboration project; a missing endpoint may require a Cloud upgrade. Do not blindly retry writes.",
       );
   }
 }
@@ -139,9 +139,9 @@ export function registerCloudTaskTypeCommands(tasks: Command) {
     .description("Manage type names and colors; existing tasks keep their snapshots");
   const scopeOptions = (command: Command) =>
     command
-      .option("--team <id>", "Select a team linked to this project")
-      .option("--project <id>", "Explicit local project ID")
-      .option("--personal", "Use the personal project")
+      .option("--team <id>", "Select a collaboration project linked to this workspace's repositories")
+      .option("--project <id>", "Explicit local workspace ID")
+      .option("--personal", "Use your workspace")
       .option("--json", "Output JSON");
   scopeOptions(types.command("list")).action((options) => cloudTaskTypesCommand("list", options));
   scopeOptions(

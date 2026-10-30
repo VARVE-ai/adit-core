@@ -121,6 +121,16 @@ export class Collector {
   private timer?: ReturnType<typeof setTimeout>;
   private abort = new AbortController();
   private stopping = false;
+  private updatePaused = false;
+  get busy() { return this.draining || this.activeJobs.size > 0; }
+  pauseForUpdate(paused: boolean) {
+    this.updatePaused = paused;
+    if (paused) {
+      for (const retry of this.retries.values()) clearTimeout(retry.timer);
+      this.retries.clear();
+    }
+    this.schedule();
+  }
   private retries = new Map<string, {attempt:number;timer?:ReturnType<typeof setTimeout>}>();
   readonly history: LocalHistory;
   nextAt: string | null = null;
@@ -243,6 +253,7 @@ export class Collector {
       .map(w => this.collect(w.id));
   }
   private enqueue(id: string, kind: "collect" | "discover"): CollectionJob {
+    if (this.updatePaused) throw new LocalStateError("ADIT is updating. Please try again shortly.", 503);
     if (this.stopping) throw new LocalStateError("Collection is stopping", 409);
     const active = this.active(id, kind);
     if (active) return active;
@@ -604,7 +615,7 @@ export class Collector {
       .filter(
         (w) => w.started && (w.providers.length || w.repositories.length),
       );
-    if (!config.enabled || !eligible.length || this.stopping) {
+    if (!config.enabled || !eligible.length || this.stopping || this.updatePaused) {
       this.nextAt = null;
       return;
     }

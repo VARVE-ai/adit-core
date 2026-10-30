@@ -57,7 +57,7 @@ export function registerCloudMemoryCommands(cloud: Command) {
   const memories = cloud.command("memories").description("Query personal facts and project standards, revisions and original evidence");
   const withScope = (command: Command) => command
     .addOption(new Option("--scope <scope>", "Memory scope").choices(["personal", "project"]).makeOptionMandatory())
-    .option("--project <id>", "Project ID; project scope defaults to this initialized project")
+    .option("--project <id>", "Workspace ID; --scope project defaults to this initialized workspace")
     .option("--json", "Output JSON");
   const withPage = (command: Command) => command.option("--offset <number>", "Result offset").option("--limit <number>", "Page size, 1-100");
   withScope(memories.command("show").description("Read the current Markdown or a specific version")).option("--version <number>", "Exact Markdown version")

@@ -56,6 +56,18 @@ the same setup without opening a browser and also retries incomplete setup when
 the package is already current. Skill or service
 failures are reported as incomplete setup, not a successful upgrade.
 
+**Settings → ADIT CLI → Automatic updates** is enabled by default for verified,
+writable global stable installations. The background service checks npm every
+24 hours, waits for collection, organization and sync to finish, installs the
+exact stable version in a separate process, and restarts only ADIT without opening
+a browser. Failed checks or upgrades back off from one hour to 24 hours; the last
+check, result and error appear in Settings. Disabling updates is remembered and
+does not disable login startup, collection or Cloud sync. Source checkouts,
+linked packages and unverified installations never auto-upgrade. Set
+`ADIT_DISABLE_AUTO_UPDATE=1` in a test service's environment to opt out explicitly.
+Use separate installations as well as separate data directories for production
+and development: changing a database path does not isolate an installed package.
+
 Root installations (including `sudo npm install`) report incomplete setup instead
 of creating Skills or a service under the wrong account. Install from your regular
 account using a writable npm global directory. CI skips user setup; source workspace
