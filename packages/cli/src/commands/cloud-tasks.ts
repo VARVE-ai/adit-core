@@ -23,6 +23,7 @@ import {
   reportFailure,
 } from "./cloud-read-output.js";
 import { prepareTaskAttachments, uploadTaskAttachments } from "./cloud-task-attachments.js";
+import { taskDueDate, validateTaskCalendarDate } from "./task-date-time.js";
 import {
   dim,
   joinParts,
@@ -41,7 +42,7 @@ import {
   type Row,
 } from "./cli-style.js";
 
-export { describeFailure };
+export { describeFailure, taskDueDate };
 
 type Options = {
   timelineLimit?: string;
@@ -77,17 +78,6 @@ type Options = {
   image?: string[];
   file?: string[];
 };
-
-export function taskDueDate(value: string, label = "Due"): string {
-  const date = new Date(`${value}T00:00:00.000Z`);
-  if (
-    !/^\d{4}-\d{2}-\d{2}$/.test(value) ||
-    Number.isNaN(date.getTime()) ||
-    date.toISOString().slice(0, 10) !== value
-  )
-    throw new Error(`${label} date must be a valid YYYY-MM-DD date`);
-  return date.toISOString();
-}
 
 export function taskPatchFromOptions(options: Options): CloudTaskPatch {
   for (const [value, clear, flag] of [
@@ -141,7 +131,7 @@ export function taskPatchFromOptions(options: Options): CloudTaskPatch {
       throw new Error(
         "Creation time must be an ISO 8601 timestamp with timezone, such as 2026-10-27T10:00:00+08:00",
       );
-    taskDueDate(options.createdAt.slice(0, 10), "Creation");
+    validateTaskCalendarDate(options.createdAt.slice(0, 10), "Creation");
     const createdAt = new Date(options.createdAt);
     if (!Number.isFinite(createdAt.getTime())) throw new Error("Invalid creation time");
     patch.createdAt = createdAt.toISOString();
@@ -251,7 +241,7 @@ export async function cloudTasksCommand(
           { label: "State", value: stateWord(created.task.progressState) },
           { label: "Priority", value: created.task.priority },
           { label: "Type", value: created.task.taskType ?? "Unclassified" },
-          { label: "Due", value: created.task.dueAt?.slice(0, 10) ?? "-" },
+          { label: "Due", value: localDateTime(created.task.dueAt) },
           {
             label: "Estimate",
             value:
@@ -431,9 +421,9 @@ function printTaskList(list: CloudTaskList, options: Options): void {
     list.tasks.map((task) => [
       task.taskId,
       stateWord(task.progressState),
-      task.dueAt ? task.dueAt.slice(0, 10) : "-",
+      localDateTime(task.dueAt),
       truncate(task.taskType ?? "Unclassified", 16),
-      truncate(task.title, summaryColumns(36 + 11 + 10 + 16 + 8)),
+      truncate(task.title, summaryColumns(36 + 11 + 16 + 16 + 8)),
     ]),
   );
   const more =
@@ -460,8 +450,8 @@ function printTaskDetail(detail: CloudTaskDetail): void {
     { label: "Priority", value: task.priority },
     { label: "Type", value: task.taskType ?? "Unclassified" },
     { label: "Type color", value: task.taskTypeColor ?? "-" },
-    { label: "Due", value: task.dueAt ? task.dueAt.slice(0, 10) : "-" },
-    { label: "Start", value: task.startAt?.slice(0, 10) ?? "-" },
+    { label: "Due", value: localDateTime(task.dueAt) },
+    { label: "Start", value: localDateTime(task.startAt) },
     {
       label: "Estimate",
       value: task.estimatedPersonDays == null ? "-" : `${task.estimatedPersonDays} person-days`,
@@ -542,9 +532,15 @@ function taskFieldOptions(command: Command) {
         "accepted",
       ]),
     )
-    .option("--due <date>", "Expected completion, YYYY-MM-DD")
+    .option(
+      "--due <date-time>",
+      "Expected completion: YYYY-MM-DD (local 00:00), 'YYYY-MM-DD HH:mm' (local time), or ISO with Z/+08:00",
+    )
     .option("--clear-due", "Remove expected completion")
-    .option("--start <date>", "Expected start, YYYY-MM-DD")
+    .option(
+      "--start <date-time>",
+      "Expected start: YYYY-MM-DD (local 00:00), 'YYYY-MM-DD HH:mm' (local time), or ISO with Z/+08:00",
+    )
     .option("--clear-start", "Remove expected start")
     .option("--estimate-days <days>", "Estimated person-days, 0 or more; decimals allowed")
     .option(
@@ -575,7 +571,10 @@ export function registerCloudTaskCommands(cloud: Command) {
       .description("Create an independent task in Cloud; assigned to you unless specified")
       .requiredOption("--title <text>", "Task title, 1-200 characters")
       .requiredOption("--key-points <text>", "Task requirements, 1-20000 characters")
-      .option("--team <id>", "Select a collaboration project linked to this workspace's repositories (see tasks scopes)")
+      .option(
+        "--team <id>",
+        "Select a collaboration project linked to this workspace's repositories (see tasks scopes)",
+      )
       .option("--project <id>", "Local workspace ID; defaults to this initialized workspace")
       .option("--personal", "Create in your workspace instead of its linked collaboration project")
       .option(
@@ -622,7 +621,10 @@ export function registerCloudTaskCommands(cloud: Command) {
   tasks
     .command("list")
     .description("List your tasks in the current workspace or a collaboration project")
-    .option("--team <id>", "Select a collaboration project linked to this workspace's repositories (see tasks scopes)")
+    .option(
+      "--team <id>",
+      "Select a collaboration project linked to this workspace's repositories (see tasks scopes)",
+    )
     .option("--project <id>", "Local workspace ID; defaults to this initialized workspace")
     .option("--personal", "Query workspace tasks instead of its linked collaboration project")
     .option("--type <name>", "Filter by a saved type name, including removed choices")
@@ -638,7 +640,9 @@ export function registerCloudTaskCommands(cloud: Command) {
     .action((options) => cloudTasksCommand("list", options));
   tasks
     .command("scopes")
-    .description("List collaboration projects linked to this workspace's repositories, not all account memberships")
+    .description(
+      "List collaboration projects linked to this workspace's repositories, not all account memberships",
+    )
     .option("--project <id>", "Local workspace ID; defaults to this initialized workspace")
     .option("--json", "Output JSON")
     .action((options) => cloudTasksCommand("scopes", options));

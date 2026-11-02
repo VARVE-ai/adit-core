@@ -118,13 +118,19 @@ Editable fields (omitted options preserve stored values):
 | State | --state not_started/in_progress/paused/done/accepted | Clear the assignee for unassigned |
 | Priority | --priority high/medium/low | Not allowed |
 | Assignee | --assignee <memberId> | --clear-assignee |
-| Expected start | --start YYYY-MM-DD | --clear-start |
-| Expected completion | --due YYYY-MM-DD | --clear-due |
+| Expected start | --start <date-or-date-time> | --clear-start |
+| Expected completion | --due <date-or-date-time> | --clear-due |
 | Workload | --estimate-days <days> OR --estimate-hours <hours> | --clear-estimate |
 | Task scope | Repeat --task-scope <text> to replace the entire list | --clear-scope |
 | Creation time | --created-at <ISO timestamp with timezone> | --clear-created-at |
 
 Creation time is editable only for independent tasks. Resolve dates in the user's timezone and pass a timezone explicitly for creation time. --task-scope describes pages/modules/APIs and is unrelated to --team/--project selection. Never guess member IDs; use assignableMembers from task details. Setting and clearing the same field together is rejected.
+
+Expected start and completion accept YYYY-MM-DD (00:00 in the CLI machine's local timezone), "YYYY-MM-DD HH:mm" (local time), or an ISO date-time with Z or an explicit offset. Prefer an explicit offset when the user's timezone is known or differs from the machine's. For example, 09:00 in China on October 3, 2026 is:
+
+    adit cloud tasks update <taskId> --due "2026-10-03T09:00+08:00" --expected-updated-at <updatedAt> --json
+
+The CLI converts this to 2026-10-03T01:00:00.000Z for storage. Display returned UTC timestamps in the user's timezone; do not add eight hours to the stored value. Plain CLI output shows local dates and hours/minutes; JSON preserves the UTC timestamp. Nonexistent or repeated local DST times require an explicit offset. Older CLI versions only accept dates; do not silently drop a requested time. An existing task's stored timestamp is not rewritten merely by viewing it.
 
 Estimates use the webpage's person-days: 1 person-day = 8 hours. For an explicitly requested two-hour estimate, use:
 
@@ -151,7 +157,7 @@ First list choices in the current project/team: adit cloud tasks types list --js
 - show and context: task is the task record: taskId, title, keyPointsText, scope and dependencies (lists of text), progressState, priority, assigneeId, dueAt and startAt (expected completion and start), estimatedPersonDays (null until the owner estimates), kind (task, or module when it groups tasks) and parentTaskId, confirmRequestedAt and confirmedAt (when completion was requested and confirmed), currentStatusDecision (a proposed state change awaiting confirmation: fromState, toState, createdAt, confirmedAt, revertedAt; null when none), createdAt, updatedAt, blueprintId, projectId and teamId. assignableMembers lists members you may transfer the task to (empty without manage rights); permissions carries canManage, canUpdateState and canUpdateDueAt (false once the task is done).
 - context: prd is null for an independent task, otherwise blueprintId, title, markdown (the current document), updatedAt, activeVersionId and latestVersionId; resources carry id, name, kind (attachment, material or sketch), mimeType, url (null when nothing can be served) and expiresAt (null for a public external URL).
 - update: task is the updated task in the same shape; recorded lists the history entries written, one per changed field (state, due, start, assign, priority, workload, edit); an empty list means nothing differed from the stored task.
-- Times are ISO 8601 in UTC; dueAt is midnight UTC of the calendar day you passed.
+- Times, including dueAt and startAt, are ISO 8601 instants in UTC. Date-only input uses the CLI machine's local midnight; older CLI versions stored date-only input at UTC midnight. Existing values are not migrated automatically.
 `;
 
 export const HISTORY_SKILL = `---
