@@ -27,6 +27,10 @@ it("keeps one detached instance and resumes collection after restart without a b
   // Never create a login entry in the developer's actual OS Startup directory.
   const initialSettings = new LocalStore(data);
   initialSettings.set("login-startup", { enabled: false, version: 1 });
+  // Simulate a previous boot's legacy records whose PID was reused by this test runner.
+  const stale = { pid: process.pid, instance: "previous-boot", url: "http://127.0.0.1:1", token: "old-token" };
+  initialSettings.set("daemon-lock", stale);
+  writeFileSync(join(data, "daemon.json"), JSON.stringify(stale));
   initialSettings.close();
   await exec("git", ["init", workspace], { windowsHide: true });
   await exec("git", ["-C", workspace, "remote", "add", "origin", "https://example.invalid/test.git"], { windowsHide: true });

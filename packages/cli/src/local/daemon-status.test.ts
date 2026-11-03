@@ -4,7 +4,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { LocalStore } from "@varveai/adit-core";
+import { ownsDaemonProcess } from "./daemon-process.js";
 import { daemonStatus, startDaemon } from "./daemon.js";
+
+vi.mock("./daemon-process.js", () => ({ ownsDaemonProcess: vi.fn() }));
 
 vi.mock("node:child_process", async importOriginal => ({
   ...await importOriginal<typeof import("node:child_process")>(),
@@ -22,6 +25,7 @@ beforeEach(() => {
   writeFileSync(join(root, "daemon.json"), JSON.stringify(instance));
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("Health timed out")));
   vi.mocked(spawn).mockClear();
+  vi.mocked(ownsDaemonProcess).mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -42,9 +46,9 @@ it("requires both the live process and matching instance lock for the busy fallb
   store.set("daemon-lock", { pid: instance.pid, instance: "different-instance" });
   expect(await daemonStatus()).toBeNull();
   store.set("daemon-lock", { pid: instance.pid, instance: instance.instance });
-  const kill = vi.spyOn(process, "kill").mockImplementation(() => { throw new Error("No such process"); });
+  vi.mocked(ownsDaemonProcess).mockReturnValue(false);
   expect(await daemonStatus()).toBeNull();
-  kill.mockRestore();
+  vi.mocked(ownsDaemonProcess).mockReturnValue(true);
   store.db.prepare("DELETE FROM adit_local_settings WHERE key='daemon-lock'").run();
   expect(await daemonStatus()).toBeNull();
 });
@@ -56,4 +60,9 @@ it("rejects mismatched health responses and returns the healthy service version"
   expect(await daemonStatus()).toBeNull();
   vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ service: "adit-local", instance: instance.instance, version: "1.1.4" })));
   expect(await daemonStatus()).toEqual({ ...instance, version: "1.1.4" });
+});
+
+it("rejects matching stale records when the PID belongs to another process", async () => {
+  vi.mocked(ownsDaemonProcess).mockReturnValue(false);
+  expect(await daemonStatus()).toBeNull();
 });
