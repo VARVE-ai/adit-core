@@ -18,6 +18,12 @@ function transcriptPath(path: string, nativeId?: string) {
   normalized = posix.normalize(normalized);
   return windows ? normalized.toLowerCase() : normalized;
 }
+/** Only Codex's standard rollout filename carries a verifiable native ID. */
+function transcriptNativeId(provider: string, path: string): string | undefined {
+  if (provider !== "codex") return;
+  const name = posix.basename(path.replaceAll("\\", "/"));
+  return /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})\.jsonl(?:\.zst)?$/i.exec(name)?.[1].toLowerCase();
+}
 export interface CloudBaseline {
   schemaVersion: number; accountId: string; before: string | null;
   serverProjectId?: string;
@@ -51,8 +57,15 @@ export class CloudSessionIndex {
           if (id === undefined) continue;
           this.add(this.identities,JSON.stringify([provider,id]),ordinal);
         }
-      } else if (typeof meta.transcriptPath === "string") {
-        this.add(this.transcripts,JSON.stringify([provider,transcriptPath(meta.transcriptPath)]),ordinal);
+      } else {
+        // Recovered legacy sessions saved their source here without a nativeId.
+        // Extract the ID before falling back to the machine-specific full path.
+        const path = typeof meta.transcriptPath === "string" ? meta.transcriptPath : meta.recovery?.source;
+        if (typeof path === "string" && path.trim()) {
+          const nativeId = transcriptNativeId(provider,path);
+          if (nativeId) this.add(this.identities,JSON.stringify([provider,nativeId]),ordinal);
+          else this.add(this.transcripts,JSON.stringify([provider,transcriptPath(path)]),ordinal);
+        }
       }
     });
   }
@@ -62,6 +75,8 @@ export class CloudSessionIndex {
   }
   byId(id: string) { return this.ids.get(id) ?? []; }
   matches(provider: string, nativeId: string) {
+    const identities = this.identities.get(JSON.stringify([provider,nativeId]));
+    if (identities?.length) return identities.map(ordinal=>this.baseline.sessions[ordinal]);
     let paths = this.paths.get(provider);
     if (!paths) {
       paths = new Map();
@@ -79,7 +94,7 @@ export class CloudSessionIndex {
       }
       this.paths.set(provider,paths);
     }
-    const ordinals = new Set(this.identities.get(JSON.stringify([provider,nativeId])) ?? []);
+    const ordinals = new Set<number>();
     for (const path of paths.get(nativeId) ?? [])
       for (const ordinal of this.transcripts.get(JSON.stringify([provider,path])) ?? []) ordinals.add(ordinal);
     return [...ordinals].sort((left,right)=>left-right).map(ordinal=>this.baseline.sessions[ordinal]);
@@ -182,6 +197,7 @@ export function cloudFinalReply(store: CloudReadStore, turnId: string, hasNextTu
 
 export class CloudProjection {
   private sessionIndex: CloudSessionIndex;
+  private skippedHistorical = new Set<string>();
   readonly warnings = new Set<string>();
   readonly mappings = new Map<string, CloudSession>();
   readonly commitBranches = new Map<string, string>();
@@ -189,6 +205,19 @@ export class CloudProjection {
     this.sessionIndex = new CloudSessionIndex(store,baseline);
   }
   private nativeKey(provider: string, id: string) { return `${provider}\0${id}`; }
+  private skipHistorical(s: Row) {
+    const before = this.baseline.before ? Date.parse(this.baseline.before) : NaN;
+    if (!Number.isFinite(before) || !iso(s.started_at) || !iso(s.last_activity_at) ||
+      s.started_at > before || s.last_activity_at > before) return;
+    const nativeId = nativeConversationId(s as {id:string;parent_id:string|null;relationship:string|null});
+    // An old segment cannot hide new content or an existing identity on its continuation.
+    const continuation = this.store.db.prepare(`SELECT 1 FROM adit_history_sessions s
+      WHERE s.provider=? AND s.relationship='continuation' AND s.parent_id=?
+        AND (s.started_at IS NULL OR s.last_activity_at IS NULL OR s.started_at>? OR s.last_activity_at>?
+          OR EXISTS(SELECT 1 FROM adit_local_cloud_sessions m WHERE m.scope=? AND m.provider=s.provider AND m.native_id=s.id)) LIMIT 1`)
+      .get(s.provider,nativeId,before,before,this.scope);
+    if (!continuation) this.skippedHistorical.add(this.nativeKey(s.provider,s.id));
+  }
   receipt(kind: string, id: string) {
     return !!this.store.db.prepare("SELECT 1 FROM adit_local_cloud_receipts WHERE scope=? AND kind=? AND id=?").get(this.scope, kind, id);
   }
@@ -214,9 +243,12 @@ export class CloudProjection {
     const nativeId=nativeConversationId(s as {id:string;parent_id:string|null;relationship:string|null});
     if(nativeId!==s.id) {
       const root=db.prepare("SELECT * FROM adit_history_sessions WHERE provider=? AND id=?").get(s.provider,nativeId) as Row|undefined;
-      const canonical=this.mapSession(root || {...s,id:nativeId,source_id:s.id,parent_id:null,relationship:null});
-      if(!canonical)return;
       const saved=db.prepare("SELECT * FROM adit_local_cloud_sessions WHERE scope=? AND provider=? AND native_id=?").get(this.scope,s.provider,s.id) as Row|undefined;
+      const canonical=this.mapSession(root || {...s,id:nativeId,source_id:s.id,parent_id:null,relationship:null});
+      if(!canonical) {
+        if (!saved && this.skippedHistorical.has(this.nativeKey(s.provider,nativeId))) this.skipHistorical(s);
+        return;
+      }
       if(saved && saved.cloud_id!==canonical.id) {
         this.warnings.add("This conversation was previously uploaded under separate segment identities. Reconcile the existing Cloud records before uploading its continuation.");
         return;
@@ -240,6 +272,7 @@ export class CloudProjection {
         const before = this.baseline.before ? Date.parse(this.baseline.before) : null;
         if (before !== null && (s.started_at === null || s.started_at <= before)) {
           if (s.last_activity_at > before) this.warnings.add("A session crosses the Cloud history boundary but its original identity could not be verified; its new content is pending.");
+          else this.skipHistorical(s);
           return;
         }
         id = `lh_${syncKey(this.scope, s.provider, s.id)}`;
@@ -355,6 +388,7 @@ export class CloudProjection {
           FROM adit_attribution_writers WHERE run_id=? AND repository=? AND sha=? AND provider IS NOT NULL GROUP BY provider,session_id`).all(run!.id,repo.path,c.sha) as Row[];
         const missingSource = [...groups, ...(a.submit_session_id ? [{provider:a.submit_provider,session_id:a.submit_session_id}] : [])]
           .some(g => !this.mappings.has(this.nativeKey(g.provider,g.session_id)) &&
+            !this.skippedHistorical.has(this.nativeKey(g.provider,g.session_id)) &&
             db.prepare("SELECT 1 FROM adit_history_turns WHERE provider=? AND session_id=? LIMIT 1").get(g.provider,g.session_id));
         if (missingSource) { this.warnings.add("Some commits reference a historical session whose Cloud identity could not be verified; those commits remain pending."); continue; }
         const associations=new Map<string,Row>();
