@@ -55,6 +55,90 @@ afterEach(() => {
 });
 
 describe("cloud task commands", () => {
+  it("shows local completion minutes while JSON preserves the UTC instant", async () => {
+    const originalZone = process.env.TZ;
+    const originalTTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+    process.env.TZ = "Asia/Shanghai";
+    try {
+      mocks.get.mockResolvedValue({
+        task: {
+          taskId,
+          title: "Timed task",
+          progressState: "in_progress",
+          priority: "medium",
+          dueAt: "2026-10-03T01:00:59.000Z",
+          updatedAt,
+        },
+        permissions: {},
+        assignableMembers: [],
+        timeline: { entries: [], nextCursor: null },
+      });
+      await cloudTasksCommand("show", {}, taskId);
+      const text = stripVTControlCharacters(
+        vi
+          .mocked(console.log)
+          .mock.calls.map((call) => call[0])
+          .join("\n"),
+      );
+      expect(text).toContain("2026-10-03 09:00");
+      expect(text).not.toContain("09:00:59");
+      await cloudTasksCommand("show", { json: true }, taskId);
+      expect(JSON.parse(vi.mocked(console.log).mock.calls.at(-1)![0]).task.dueAt).toBe(
+        "2026-10-03T01:00:59.000Z",
+      );
+    } finally {
+      if (originalTTY) Object.defineProperty(process.stdout, "isTTY", originalTTY);
+      else Reflect.deleteProperty(process.stdout, "isTTY");
+      if (originalZone === undefined) delete process.env.TZ;
+      else process.env.TZ = originalZone;
+    }
+  });
+
+  it("creates and updates concrete completion times with an explicit timezone", async () => {
+    mocks.post.mockResolvedValue({ task: { taskId } });
+    const cloud = new Command();
+    registerCloudTaskCommands(cloud);
+    await cloud.parseAsync(
+      [
+        "tasks",
+        "create",
+        "--title",
+        "Timed task",
+        "--key-points",
+        "Check time",
+        "--due",
+        "2026-10-03T09:00+08:00",
+        "--json",
+      ],
+      { from: "user" },
+    );
+    expect(mocks.post.mock.calls[0][1].dueAt).toBe("2026-10-03T01:00:00.000Z");
+    mocks.patch.mockResolvedValue({ task: { taskId } });
+    await cloud.parseAsync(
+      [
+        "tasks",
+        "update",
+        taskId,
+        "--start",
+        "2026-10-02T23:50-07:00",
+        "--due",
+        "2026-10-03T15:00+08:00",
+        "--expected-updated-at",
+        updatedAt,
+        "--json",
+      ],
+      { from: "user" },
+    );
+    expect(mocks.patch).toHaveBeenCalledExactlyOnceWith(`/api/cli/tasks/${taskId}`, {
+      patch: { startAt: "2026-10-03T06:50:00.000Z", dueAt: "2026-10-03T07:00:00.000Z" },
+      expectedUpdatedAt: updatedAt,
+    });
+    expect(() =>
+      taskPatchFromOptions({ start: "2026-10-03T10:00+08:00", due: "2026-10-03T01:00Z" }),
+    ).toThrow("later");
+  });
+
   it("creates with documents and images, deduplicates mixed flags and exposes both upload options", async () => {
     const directory = mkdtempSync(join(tmpdir(), "adit-task-files-"));
     try {
@@ -529,7 +613,7 @@ describe("cloud task commands", () => {
       localProjectId: "local-project",
       title: "Booking conflicts",
       keyPointsText: "Reject duplicate bookings",
-      dueAt: "2026-10-12T00:00:00.000Z",
+      dueAt: new Date("2026-10-12T00:00:00").toISOString(),
       priority: "high",
       teamId: undefined,
       scope: undefined,
@@ -720,7 +804,7 @@ describe("cloud task commands", () => {
   });
 
   it("validates scope, dates and empty patches without mutating tasks", async () => {
-    expect(taskDueDate("2028-02-29")).toBe("2028-02-29T00:00:00.000Z");
+    expect(taskDueDate("2028-02-29")).toBe(new Date("2028-02-29T00:00:00").toISOString());
     expect(() => taskDueDate("2026-02-29")).toThrow();
     expect(() => taskPatchFromOptions({ due: "2026-09-30", clearDue: true })).toThrow();
     expect(() => taskPatchFromOptions({})).toThrow();
@@ -749,8 +833,8 @@ describe("cloud task commands", () => {
       progressState: "accepted",
       priority: "high",
       assigneeId: taskId,
-      startAt: "2026-10-27T00:00:00.000Z",
-      dueAt: "2026-10-28T00:00:00.000Z",
+      startAt: new Date("2026-10-27T00:00:00").toISOString(),
+      dueAt: new Date("2026-10-28T00:00:00").toISOString(),
       estimatedPersonDays: 0.25,
       createdAt: "2026-10-27T02:00:00.000Z",
       scope: ["Page", "API"],
@@ -841,7 +925,7 @@ describe("cloud task commands", () => {
       scope: undefined,
       title: "Task",
       keyPointsText: "Details",
-      startAt: "2026-10-27T00:00:00.000Z",
+      startAt: new Date("2026-10-27T00:00:00").toISOString(),
       estimatedPersonDays: 0.25,
       taskScope: ["Page", "API"],
       assigneeId: taskId,

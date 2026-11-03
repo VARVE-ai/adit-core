@@ -118,13 +118,19 @@ Editable fields (omitted options preserve stored values):
 | State | --state not_started/in_progress/paused/done/accepted | Clear the assignee for unassigned |
 | Priority | --priority high/medium/low | Not allowed |
 | Assignee | --assignee <memberId> | --clear-assignee |
-| Expected start | --start YYYY-MM-DD | --clear-start |
-| Expected completion | --due YYYY-MM-DD | --clear-due |
+| Expected start | --start <date-or-date-time> | --clear-start |
+| Expected completion | --due <date-or-date-time> | --clear-due |
 | Workload | --estimate-days <days> OR --estimate-hours <hours> | --clear-estimate |
 | Task scope | Repeat --task-scope <text> to replace the entire list | --clear-scope |
 | Creation time | --created-at <ISO timestamp with timezone> | --clear-created-at |
 
 Creation time is editable only for independent tasks. Resolve dates in the user's timezone and pass a timezone explicitly for creation time. --task-scope describes pages/modules/APIs and is unrelated to --team/--project selection. Never guess member IDs; use assignableMembers from task details. Setting and clearing the same field together is rejected.
+
+Expected start and completion accept YYYY-MM-DD (00:00 in the CLI machine's local timezone), "YYYY-MM-DD HH:mm" (local time), or an ISO date-time with Z or an explicit offset. Prefer an explicit offset when the user's timezone is known or differs from the machine's. For example, 09:00 in China on October 3, 2026 is:
+
+    adit cloud tasks update <taskId> --due "2026-10-03T09:00+08:00" --expected-updated-at <updatedAt> --json
+
+The CLI converts this to 2026-10-03T01:00:00.000Z for storage. Display returned UTC timestamps in the user's timezone; do not add eight hours to the stored value. Plain CLI output shows local dates and hours/minutes; JSON preserves the UTC timestamp. Nonexistent or repeated local DST times require an explicit offset. Older CLI versions only accept dates; do not silently drop a requested time. An existing task's stored timestamp is not rewritten merely by viewing it.
 
 Estimates use the webpage's person-days: 1 person-day = 8 hours. For an explicitly requested two-hour estimate, use:
 
@@ -144,6 +150,19 @@ First list choices in the current project/team: adit cloud tasks types list --js
 - Tasks return separate taskType and taskTypeColor snapshots; unclassified means both null. Renaming, recoloring or removing options never changes existing tasks. Managing choices does not grant task editing rights.
 - No task-level --type-color, sorting, disable/restore or automatic bulk creation. On unsupported Cloud or an unconfirmed type save, report the error and taskId; never repeat task creation blindly. Do not change task state without a request.
 
+## Task groups
+
+Groups organize independent and blueprint tasks without changing their content, state or assignee. A task belongs to at most one group; tasks without a group keep the existing top-level layout. The website and CLI share the same Cloud data.
+
+- Query groups in the current project: adit cloud tasks groups list --json. Read a group and all its visible tasks: groups show <groupId> --json. Unlike tasks list, group details include other members' visible tasks and follow pagination automatically.
+- On explicit request create a group: groups create --name "Iteration 1" --json. Rename: groups update <groupId> --name "Iteration 2" --expected-updated-at <updatedAt> --json. Reorder: groups reorder <groupId> with exactly one of --before <id>, --after <id>, --first or --last.
+- Add or move tasks atomically: groups move <targetGroupId> --task <taskId> [--task <anotherTaskId>] --task-version <taskId>=<updatedAt> --json. Use versions from the last read; when omitted the CLI reads task versions immediately before writing. Each task requires its existing management permission, including blueprint-owner permission for blueprint tasks.
+- Remove: groups remove <sourceGroupId> --task <taskId> --task-version <taskId>=<updatedAt> --json. This rejects tasks no longer in the source group. It clears membership and keeps the task.
+- Delete: groups delete <groupId> --expected-updated-at <updatedAt> --json. The group creator or a team manager can delete it, clearing all memberships while keeping all tasks. Report the affected count.
+- All group commands accept --team, --project, --personal and --json, with the same workspace/team resolution as tasks. Use returned IDs, not names as IDs. Never switch account or server to bypass an error.
+- Task creation accepts --group <groupId>. tasks list accepts either --group <groupId> or --ungrouped and retains its default "my tasks" scope. Group membership is returned as groupId; null means no group, not a synthetic group.
+- Changes are all-or-nothing. On a stale group/task (409), missing group (404), cross-scope or permission failure (403), stop and read the affected data. After a timeout verify the outcome; never blindly repeat creation, deletion or a move. These operations do not authorize changing task progress.
+
 ## Response fields
 
 - create: project and scope identify where the independent task was created; task includes the new taskId, blueprintId null, assigneeId, progressState, title, keyPointsText, priority, startAt, dueAt, estimatedPersonDays and timestamps.
@@ -151,7 +170,7 @@ First list choices in the current project/team: adit cloud tasks types list --js
 - show and context: task is the task record: taskId, title, keyPointsText, scope and dependencies (lists of text), progressState, priority, assigneeId, dueAt and startAt (expected completion and start), estimatedPersonDays (null until the owner estimates), kind (task, or module when it groups tasks) and parentTaskId, confirmRequestedAt and confirmedAt (when completion was requested and confirmed), currentStatusDecision (a proposed state change awaiting confirmation: fromState, toState, createdAt, confirmedAt, revertedAt; null when none), createdAt, updatedAt, blueprintId, projectId and teamId. assignableMembers lists members you may transfer the task to (empty without manage rights); permissions carries canManage, canUpdateState and canUpdateDueAt (false once the task is done).
 - context: prd is null for an independent task, otherwise blueprintId, title, markdown (the current document), updatedAt, activeVersionId and latestVersionId; resources carry id, name, kind (attachment, material or sketch), mimeType, url (null when nothing can be served) and expiresAt (null for a public external URL).
 - update: task is the updated task in the same shape; recorded lists the history entries written, one per changed field (state, due, start, assign, priority, workload, edit); an empty list means nothing differed from the stored task.
-- Times are ISO 8601 in UTC; dueAt is midnight UTC of the calendar day you passed.
+- Times, including dueAt and startAt, are ISO 8601 instants in UTC. Date-only input uses the CLI machine's local midnight; older CLI versions stored date-only input at UTC midnight. Existing values are not migrated automatically.
 `;
 
 export const HISTORY_SKILL = `---

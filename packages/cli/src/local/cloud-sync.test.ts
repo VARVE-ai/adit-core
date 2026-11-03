@@ -83,7 +83,7 @@ it("indexes sources once per provider while preserving identity precedence, ambi
   const sessions=metadata.map((meta,ordinal)=>({id:`cloud-${ordinal}`,platform:'codex',metadata:JSON.stringify(meta),startedAt:at(1),deleted:false,sequence:ordinal,lastEventAt:at(5)}));
   const b={...baseline,sessions},prepare=vi.spyOn(store.db,'prepare'),index=new CloudSessionIndex(store,b);
   for(let attempt=0;attempt<100;attempt++) {
-    expect(index.matches('codex','native').map(session=>session.id)).toEqual(['cloud-0','cloud-1','cloud-3','cloud-6']);
+    expect(index.matches('codex','native').map(session=>session.id)).toEqual(['cloud-1','cloud-3','cloud-6']);
     expect(index.matches('codex','fork')).toEqual([]);
     expect(index.matches('codex','missing')).toEqual([]);
   }
@@ -311,27 +311,78 @@ it("uses each historical session's boundary instead of another session's latest 
 it("keeps an ambiguous spanning session pending rather than duplicating old history",()=>{
   write(true);const p=project({...baseline,before:at(5)});expect(p.sessions()).toHaveLength(0);expect([...p.warnings].join(" ")).toContain("identity");
 });
-it("recovers a legacy Windows transcript identity despite casing, extended prefix and the source marker",()=>{
+it.each(["transcriptPath", "recovery.source"])("recovers a legacy Windows %s identity despite casing, extended prefix and the source marker",(field)=>{
   write(true);
   store.db.prepare("INSERT INTO adit_history_sources VALUES ('codex',?,'native','test',1)")
     .run("c:\\users\\test\\sessions\\rollout-today.jsonl#native");
-  const b={...baseline,before:at(5),sessions:[{id:"legacy",platform:"codex",metadata:JSON.stringify({transcriptPath:"\\\\?\\C:\\Users\\Test\\sessions\\rollout-today.jsonl"}),startedAt:at(1),deleted:false,sequence:90}]};
+  const path="\\\\?\\C:\\Users\\Test\\sessions\\rollout-today.jsonl";
+  const metadata=field==="transcriptPath"?{transcriptPath:path}:{recovery:{source:path}};
+  const b={...baseline,before:at(5),sessions:[{id:"legacy",platform:"codex",metadata:JSON.stringify(metadata),startedAt:at(1),deleted:false,sequence:90}]};
   const p=project(b),s=p.sessions()[0];
   expect(s.session!.id).toBe("legacy");
   expect([...p.sessionBatches(s.source,s.session!)].flat().map(e=>e.text)).toEqual(["next question","next answer"]);
   expect([...p.warnings]).toEqual([]);
 });
-it("does not conflate forks or sessions sharing one archive when matching legacy paths",()=>{
+it.each(["transcriptPath", "recovery.source"])("does not conflate forks or sessions sharing one archive when matching %s",(field)=>{
   write(true);
   history.write({id:"native_fork",provider:"codex",cwd:root,messages:[{key:"p",role:"user",content:"fork",timestamp:at(1),raw:{}}]});
   const add=store.db.prepare("INSERT INTO adit_history_sources VALUES ('codex',?,?,'test',1)");
   add.run("C:/sessions/archive.jsonl#native","native");add.run("c:/sessions/archive.jsonl#native_fork","native_fork");
-  const old={id:"legacy",platform:"codex",metadata:JSON.stringify({transcriptPath:"C:/sessions/archive.jsonl"}),startedAt:at(1),deleted:false,sequence:90};
+  const metadata=field==="transcriptPath"?{transcriptPath:"C:/sessions/archive.jsonl"}:{recovery:{source:"C:/sessions/archive.jsonl"}};
+  const old={id:"legacy",platform:"codex",metadata:JSON.stringify(metadata),startedAt:at(1),deleted:false,sequence:90};
   const p=project({...baseline,before:at(5),sessions:[old]});
   expect(p.sessions()).toEqual([]);
-  old.metadata=JSON.stringify({nativeId:"native",transcriptPath:"C:/sessions/archive.jsonl"});
+  old.metadata=JSON.stringify({nativeId:"native",...metadata});
   const sessions=new CloudProjection(store,p.workspace,"scope",{...baseline,before:at(5),sessions:[old]}).sessions();
   expect(sessions).toHaveLength(1);expect(sessions[0].session).toMatchObject({id:"legacy",nativeId:"native"});
+});
+it("keeps explicit session identities and transcript paths ahead of recovery metadata",()=>{
+  write();
+  store.db.prepare("INSERT INTO adit_history_sources VALUES ('codex',?,'native','test',1)").run("C:/sessions/own.jsonl#native");
+  const recovery={source:"C:/sessions/own.jsonl"};
+  const metadata=[{nativeId:"other",recovery},{platformSessionId:"other",recovery},
+    {transcriptPath:"C:/sessions/other.jsonl",recovery},{recovery:{source:42}}];
+  const sessions=metadata.map((meta,i)=>({id:`legacy-${i}`,platform:"codex",metadata:JSON.stringify(meta),startedAt:at(1),deleted:false,sequence:0}));
+  expect(new CloudSessionIndex(store,{...baseline,sessions}).matches("codex","native")).toEqual([]);
+});
+it.each(["transcriptPath", "recovery.source"])("matches a native Codex ID from %s after the transcript moves",(field)=>{
+  const id="12345678-1234-1234-1234-123456789abc";
+  history.write({id,provider:"codex",cwd:root,messages:[{key:"p",role:"user",content:"old question",timestamp:at(1),raw:{}}]});
+  store.db.prepare("INSERT INTO adit_history_sources VALUES ('codex',?,?,'test',1)").run(`D:/moved/session.jsonl#${id}`,id);
+  const path=`C:\\old-machine\\sessions\\rollout-2026-10-16T00-00-01-${id.toUpperCase()}.jsonl.zst`;
+  const metadata=field==="transcriptPath"?{transcriptPath:path}:{recovery:{source:path}};
+  const b:CloudBaseline={...baseline,before:at(7),sessions:[{id:"existing",platform:"codex",metadata:JSON.stringify(metadata),startedAt:at(1),deleted:false,sequence:4,lastEventAt:at(1)}]};
+  const p=project(b),sessions=p.sessions();
+  expect(sessions).toHaveLength(1);
+  expect(sessions[0].session).toMatchObject({id:"existing",nativeId:id});
+  expect([...p.sessionBatches(sessions[0].source,sessions[0].session!)]).toEqual([]);
+  expect(cloudPending(store,p.workspace,p.scope,b)).toEqual({state:"ready",sessions:0,commits:0});
+});
+it("does not infer a native ID from arbitrary filenames or override an explicit identity",()=>{
+  const id="12345678-1234-1234-1234-123456789abc",path=`C:/old/rollout-2026-10-16T00-00-01-${id}.jsonl`;
+  const metadata=[{nativeId:"other",recovery:{source:path}},{platformSessionId:"other",recovery:{source:path}},
+    {recovery:{source:`C:/old/${id}.jsonl`}},{recovery:{source:`C:/old/${id}/archive.jsonl`}},
+    {provider:"claude",recovery:{source:path}}];
+  const sessions=metadata.map((m,i)=>({id:`existing-${i}`,platform:"codex",metadata:JSON.stringify(m),startedAt:at(1),deleted:false,sequence:0}));
+  const index=new CloudSessionIndex(store,{...baseline,sessions});
+  expect(index.matches("codex",id)).toEqual([]);
+  expect(index.matches("claude",id)).toEqual([]);
+});
+it("does not match a different native session merely because it shares a UUID-bearing rollout path",()=>{
+  const id="12345678-1234-1234-1234-123456789abc",path=`C:/old/rollout-2026-10-16T00-00-01-${id}.jsonl`;
+  history.write({id:"fork",provider:"codex",cwd:root,messages:[]});
+  store.db.prepare("INSERT INTO adit_history_sources VALUES ('codex',?,'fork','test',1)").run(`${path}#fork`);
+  const b={...baseline,sessions:[{id:"existing",platform:"codex",metadata:JSON.stringify({recovery:{source:path}}),startedAt:at(1),deleted:false,sequence:0}]};
+  expect(new CloudSessionIndex(store,b).matches("codex","fork")).toEqual([]);
+});
+it.each(["ambiguous","deleted"])("does not reuse a recovered native ID when the Cloud record is %s",(reason)=>{
+  const id="12345678-1234-1234-1234-123456789abc";
+  history.write({id,provider:"codex",cwd:root,messages:[{key:"p",role:"user",content:"old question",timestamp:at(1),raw:{}}]});
+  const old={id:"old",platform:"codex",metadata:JSON.stringify({recovery:{source:`C:/old/rollout-2026-10-16T00-00-01-${id}.jsonl`}}),startedAt:at(1),deleted:reason==="deleted",sequence:1,lastEventAt:at(1)};
+  const p=project({...baseline,before:at(7),sessions:reason==="ambiguous"?[old,{...old,id:"duplicate"}]:[old]});
+  expect(p.sessions()).toEqual([]);
+  expect([...p.warnings].join(" ")).toContain("ambiguous or deleted");
+  expect(store.db.prepare("SELECT count(*) n FROM adit_local_cloud_sessions").get()).toEqual({n:0});
 });
 it("uses edited text and omits a deleted turn before first upload",()=>{
   write(true);const w=workspace();
@@ -594,6 +645,97 @@ it("does not resend history when a legacy Cloud link cannot be identified as a s
   const {w,repos}=gitWorkspace();commit(repos[0].path,"f".repeat(40),8);
   const p=new CloudProjection(store,w,"scope",{...baseline,repositories:[{localRepositoryId:w.id,relativePath:".",before:at(5),sha:"a".repeat(40),legacy:true}]});
   expect([...p.commitBatches()]).toHaveLength(0);expect([...p.warnings].join(" ")).toContain("repository identity");
+});
+it("syncs a pending commit linked to a recovered historical session without resending the conversation",async()=>{
+  write();
+  store.db.prepare("INSERT INTO adit_history_sources VALUES ('codex',?,'native','test',1)").run("C:/sessions/recovered.jsonl#native");
+  const {w,repos}=gitWorkspace(),repo=repos[0],sha="7".repeat(40),scope=syncKey("http://localhost:3000","user",w.id);
+  commit(repo.path,sha,8);
+  store.db.prepare("INSERT INTO adit_attribution_writers VALUES ('run',?,?,'codex','native','a.ts',1,0,0)").run(repo.path,sha);
+  const b:CloudBaseline={...baseline,before:at(7),sessions:[{id:"recovered-session",platform:"codex",
+    metadata:JSON.stringify({recovery:{source:"c:\\SESSIONS\\recovered.jsonl"}}),startedAt:at(1),deleted:false,sequence:90,lastEventAt:at(5)}]};
+  store.db.prepare("INSERT INTO adit_local_cloud_scopes VALUES (?,?,?)").run(scope,w.id,JSON.stringify(b));
+  expect(cloudPending(store,w,scope,b)).toEqual({state:"ready",sessions:0,commits:1});
+  vi.mocked(collectRemoteBranchSnapshot).mockResolvedValue({branches:[],fingerprint:"empty"});
+  const client={get:vi.fn().mockResolvedValue(structuredClone(b)),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",
+    eventIds:payload.events.map((e:any)=>e.id),commitIds:payload.commits.map((c:any)=>`${c.localRepositoryId}:${c.sha}`)}))};
+  const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
+  sync.start(w.id);
+  expect(await sync.wait(w.id)).toMatchObject({status:"done",events:0,commits:1,warnings:[]});
+  const uploads=client.post.mock.calls.map(([,payload])=>payload);
+  expect(uploads.flatMap(p=>p.events)).toEqual([]);
+  expect(uploads.flatMap(p=>p.commits)).toHaveLength(1);
+  expect(uploads.flatMap(p=>p.commits)[0].attributions).toEqual([expect.objectContaining({sessionId:"recovered-session",certain:1})]);
+  expect(uploads.flatMap(p=>p.sessions).map(s=>s.id)).toEqual(["recovered-session"]);
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:0,commits:0});
+  sync.start(w.id);
+  expect(await sync.wait(w.id)).toMatchObject({status:"done",events:0,commits:0,warnings:[]});
+  expect(client.post.mock.calls.flatMap(([,p])=>p.commits)).toHaveLength(1);
+  expect(client.post.mock.calls.flatMap(([,p])=>p.events)).toEqual([]);
+});
+it.each([false,true])("uploads a commit after skipping only its unmatched historical dependencies (continuation: %s)",async(continuation)=>{
+  write();
+  if(continuation)history.write({id:"native_page",provider:"codex",cwd:root,parentId:"native",relationship:"continuation",
+    messages:[{key:"p",role:"user",content:"old continuation",timestamp:at(6),raw:{}}]});
+  history.write({id:"known",provider:"codex",cwd:root,messages:[{key:"p",role:"user",content:"known history",timestamp:at(2),raw:{}}]});
+  const {w,repos}=gitWorkspace(),repo=repos[0],sha="6".repeat(40),scope=syncKey("http://localhost:3000","user",w.id),skipped=continuation?"native_page":"native";
+  commit(repo.path,sha,8);
+  const writer=store.db.prepare("INSERT INTO adit_attribution_writers VALUES ('run',?,?,'codex',?,'a.ts',1,0,0)");
+  writer.run(repo.path,sha,skipped);writer.run(repo.path,sha,"known");
+  store.db.prepare("UPDATE adit_attribution_commits SET submit_provider='codex',submit_session_id=? WHERE sha=?").run(skipped,sha);
+  const b:CloudBaseline={...baseline,before:at(7),sessions:[{id:"known-cloud",platform:"codex",metadata:JSON.stringify({nativeId:"known"}),startedAt:at(2),deleted:false,sequence:1,lastEventAt:at(2)}]};
+  store.db.prepare("INSERT INTO adit_local_cloud_scopes VALUES (?,?,?)").run(scope,w.id,JSON.stringify(b));
+  expect(cloudPending(store,w,scope,b)).toEqual({state:"ready",sessions:0,commits:1});
+  vi.mocked(collectRemoteBranchSnapshot).mockResolvedValue({branches:[],fingerprint:"empty"});
+  const client={get:vi.fn().mockResolvedValue(structuredClone(b)),post:vi.fn(async(_url,payload)=>({schemaVersion:1,accountId:"user",
+    eventIds:payload.events.map((e:any)=>e.id),commitIds:payload.commits.map((c:any)=>`${c.localRepositoryId}:${c.sha}`)}))};
+  const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
+  sync.start(w.id);
+  expect(await sync.wait(w.id)).toMatchObject({status:"done",events:0,commits:1,warnings:[]});
+  const uploads=client.post.mock.calls.map(([,payload])=>payload),commits=uploads.flatMap(p=>p.commits);
+  expect(commits).toHaveLength(1);
+  expect(commits[0].attributions).toEqual([expect.objectContaining({sessionId:"known-cloud",certain:1,committed:false})]);
+  expect(uploads.flatMap(p=>p.events)).toEqual([]);
+  expect(uploads.flatMap(p=>p.sessions).map(s=>s.id)).toEqual(["known-cloud"]);
+  expect(await settledPending(sync,w.id)).toEqual({state:"ready",sessions:0,commits:0});
+  sync.start(w.id);
+  expect(await sync.wait(w.id)).toMatchObject({status:"done",events:0,commits:0,warnings:[]});
+  expect(client.post.mock.calls.flatMap(([,p])=>p.commits)).toHaveLength(1);
+});
+it.each(["continued", "ambiguous", "deleted", "missing-start", "missing-end", "new-segment", "mapped-segment", "new-segment-root", "mapped-segment-root"])("keeps a commit blocked when its dependency is %s instead of skipped historical data",(reason)=>{
+  write();
+  const {w,repos}=gitWorkspace(),sha="5".repeat(40),repo=repos[0];
+  commit(repo.path,sha,8);
+  let dependency="native";
+  if(reason.includes("segment")) {
+    dependency=reason.endsWith("-root")?"native":"native_page";
+    history.write({id:"native_page",provider:"codex",cwd:root,parentId:"native",relationship:"continuation",
+      messages:[{key:"p",role:"user",content:"continuation",timestamp:at(reason.startsWith("new-")?9:6),raw:{}}]});
+    if(reason.startsWith("mapped-"))store.db.prepare("INSERT INTO adit_local_cloud_sessions(scope,provider,native_id,cloud_id) VALUES ('scope','codex','native_page','existing-segment')").run();
+  }
+  store.db.prepare("INSERT INTO adit_attribution_writers VALUES ('run',?,?,'codex',?,'a.ts',1,0,0)").run(repo.path,sha,dependency);
+  if(reason==="missing-start")store.db.prepare("UPDATE adit_history_sessions SET started_at=NULL WHERE id='native'").run();
+  if(reason==="missing-end")store.db.prepare("UPDATE adit_history_sessions SET last_activity_at=NULL WHERE id='native'").run();
+  const old={id:"old",platform:"codex",metadata:JSON.stringify({nativeId:"native"}),startedAt:at(1),deleted:reason==="deleted",sequence:1,lastEventAt:at(5)};
+  const b:CloudBaseline={...baseline,before:at(reason==="continued"?3:7),
+    sessions:reason==="ambiguous"?[old,{...old,id:"duplicate"}]:reason==="deleted"?[old]:[]};
+  const projection=new CloudProjection(store,w,"scope",b);projection.sessions();
+  expect([...projection.commitBatches()]).toEqual([]);
+  expect([...projection.warnings].join(" ")).toContain("commits reference a historical session");
+  expect(cloudPending(store,w,"scope",b).commits).toBe(1);
+});
+it.each([false,true])("does not send a commit when uploading its required new session content fails (existing: %s)",async(existing)=>{
+  write(true);
+  const {w,repos}=gitWorkspace(),sha="4".repeat(40),scope=syncKey("http://localhost:3000","user",w.id);
+  commit(repos[0].path,sha,8);
+  store.db.prepare("INSERT INTO adit_attribution_writers VALUES ('run',?,?,'codex','native','a.ts',1,0,0)").run(repos[0].path,sha);
+  const b:CloudBaseline={...baseline,before:at(existing?5:0),sessions:existing?[{id:"old",platform:"codex",metadata:JSON.stringify({nativeId:"native"}),startedAt:at(1),deleted:false,sequence:1,lastEventAt:at(5)}]:[]};
+  const client={get:vi.fn().mockResolvedValue(b),post:vi.fn(async(_url,_payload)=>{throw new Error("offline");})};
+  const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn().mockResolvedValue(undefined)},()=>client);
+  sync.start(w.id);
+  expect(await sync.wait(w.id)).toMatchObject({status:"failed",commits:0,error:"offline"});
+  expect(client.post.mock.calls.flatMap(([,p])=>p.commits)).toEqual([]);
+  expect(cloudPending(store,w,scope,b)).toEqual({state:"ready",sessions:1,commits:1});
 });
 it("uploads separate writer/committer roles and recorded branch, but omits a deleted turn's commit event",()=>{
   write();history.write({id:"writer",provider:"codex",cwd:root,messages:[{key:"wp",role:"user",content:"write",timestamp:at(1),raw:{}},
