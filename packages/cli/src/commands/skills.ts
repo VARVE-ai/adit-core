@@ -150,6 +150,19 @@ First list choices in the current project/team: adit cloud tasks types list --js
 - Tasks return separate taskType and taskTypeColor snapshots; unclassified means both null. Renaming, recoloring or removing options never changes existing tasks. Managing choices does not grant task editing rights.
 - No task-level --type-color, sorting, disable/restore or automatic bulk creation. On unsupported Cloud or an unconfirmed type save, report the error and taskId; never repeat task creation blindly. Do not change task state without a request.
 
+## Task groups
+
+Groups organize independent and blueprint tasks without changing their content, state or assignee. A task belongs to at most one group; tasks without a group keep the existing top-level layout. The website and CLI share the same Cloud data.
+
+- Query groups in the current project: adit cloud tasks groups list --json. Read a group and all its visible tasks: groups show <groupId> --json. Unlike tasks list, group details include other members' visible tasks and follow pagination automatically.
+- On explicit request create a group: groups create --name "Iteration 1" --json. Rename: groups update <groupId> --name "Iteration 2" --expected-updated-at <updatedAt> --json. Reorder: groups reorder <groupId> with exactly one of --before <id>, --after <id>, --first or --last.
+- Add or move tasks atomically: groups move <targetGroupId> --task <taskId> [--task <anotherTaskId>] --task-version <taskId>=<updatedAt> --json. Use versions from the last read; when omitted the CLI reads task versions immediately before writing. Each task requires its existing management permission, including blueprint-owner permission for blueprint tasks.
+- Remove: groups remove <sourceGroupId> --task <taskId> --task-version <taskId>=<updatedAt> --json. This rejects tasks no longer in the source group. It clears membership and keeps the task.
+- Delete: groups delete <groupId> --expected-updated-at <updatedAt> --json. The group creator or a team manager can delete it, clearing all memberships while keeping all tasks. Report the affected count.
+- All group commands accept --team, --project, --personal and --json, with the same workspace/team resolution as tasks. Use returned IDs, not names as IDs. Never switch account or server to bypass an error.
+- Task creation accepts --group <groupId>. tasks list accepts either --group <groupId> or --ungrouped and retains its default "my tasks" scope. Group membership is returned as groupId; null means no group, not a synthetic group.
+- Changes are all-or-nothing. On a stale group/task (409), missing group (404), cross-scope or permission failure (403), stop and read the affected data. After a timeout verify the outcome; never blindly repeat creation, deletion or a move. These operations do not authorize changing task progress.
+
 ## Response fields
 
 - create: project and scope identify where the independent task was created; task includes the new taskId, blueprintId null, assigneeId, progressState, title, keyPointsText, priority, startAt, dueAt, estimatedPersonDays and timestamps.

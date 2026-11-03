@@ -14,6 +14,7 @@ import {
   type CloudTaskList,
   type CloudTaskPatch,
 } from "@varveai/adit-cloud";
+import { registerCloudTaskGroupCommands } from "./cloud-task-groups.js";
 import { registerCloudTaskTypeCommands, validateTaskTypeName } from "./cloud-task-types.js";
 import { loadProjectContext } from "./project-context.js";
 import {
@@ -45,6 +46,8 @@ import {
 export { describeFailure, taskDueDate };
 
 type Options = {
+  group?: string;
+  ungrouped?: boolean;
   timelineLimit?: string;
   timelineCursor?: string;
   json?: boolean;
@@ -211,6 +214,7 @@ export async function cloudTasksCommand(
           scope: options.personal ? "personal" : undefined,
         });
       const created = await createCloudTask(client, {
+        ...(options.group ? { groupId: options.group } : {}),
         localProjectId: localProjectId!,
         teamId: options.team,
         scope: options.personal ? "personal" : undefined,
@@ -268,7 +272,10 @@ export async function cloudTasksCommand(
         throw new Error("Use either --type or --unclassified");
       const limit = pageNumber(options.limit, 50, 100);
       if (limit === 0) throw new Error("Limit must be between 1 and 100");
+      if (options.group && options.ungrouped) throw new Error("Use either --group or --ungrouped");
       const list = await listCloudTasks(client, {
+        groupId: options.group,
+        ungrouped: options.ungrouped,
         localProjectId: localProjectId!,
         teamId: options.team,
         scope: options.personal ? "personal" : undefined,
@@ -565,9 +572,11 @@ export function registerCloudTaskCommands(cloud: Command) {
     .command("tasks")
     .description("Create independent tasks, query and update tasks assigned to you");
   registerCloudTaskTypeCommands(tasks);
+  registerCloudTaskGroupCommands(tasks);
   taskFieldOptions(
     tasks
       .command("create")
+      .option("--group <groupId>", "Create the task in this Cloud group")
       .description("Create an independent task in Cloud; assigned to you unless specified")
       .requiredOption("--title <text>", "Task title, 1-200 characters")
       .requiredOption("--key-points <text>", "Task requirements, 1-20000 characters")
@@ -620,6 +629,8 @@ export function registerCloudTaskCommands(cloud: Command) {
     .action((taskId, options) => cloudTasksCommand("attach", options, taskId));
   tasks
     .command("list")
+    .option("--group <groupId>", "Only tasks in this group")
+    .option("--ungrouped", "Only tasks without a group")
     .description("List your tasks in the current workspace or a collaboration project")
     .option(
       "--team <id>",

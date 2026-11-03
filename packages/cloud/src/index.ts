@@ -8,6 +8,7 @@
 // Config
 export { loadCloudConfig, DEFAULT_SERVER_URL, type CloudConfig } from "./config.js";
 export { normalizeServerUrl } from "@varveai/adit-core";
+export * from "./task-groups.js";
 export {
   resolveCloudProjectContext,
   repositoryPayloads,
