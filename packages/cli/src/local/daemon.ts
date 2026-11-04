@@ -13,8 +13,9 @@ import { randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
 import { localDataDir, LocalStore } from "@varveai/adit-core";
 import { startLocalServer } from "./server.js";
+import { inspectProcess, ownsDaemonProcess, type DaemonProcess } from "./daemon-process.js";
 
-interface Instance {
+interface Instance extends DaemonProcess {
   pid: number;
   url: string;
   token: string;
@@ -33,9 +34,9 @@ function readInstance(): Instance | null {
   }
 }
 function busyInstance(info: Instance): Instance | null {
-  if (!Number.isSafeInteger(info.pid) || info.pid <= 0 || !alive(info.pid)) return null;
   let db: Database.Database | undefined;
   try {
+    if (!ownsDaemonProcess(info)) return null;
     db = new Database(join(localDataDir(), "local.sqlite"), { readonly: true, fileMustExist: true, timeout: 250 });
     const row = db.prepare("SELECT data FROM adit_local_settings WHERE key='daemon-lock'").get() as { data: string } | undefined;
     const lock = row ? JSON.parse(row.data) : null;
@@ -57,25 +58,19 @@ export async function daemonStatus(): Promise<Instance | null> {
     return busyInstance(info);
   }
 }
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
 export async function runDaemon(port?: number): Promise<void> {
   const dir = localDataDir();
   mkdirSync(dir, { recursive: true });
   const instance = randomBytes(16).toString("hex");
+  const processIdentity = inspectProcess(process.pid)?.identity;
+  if (!processIdentity) throw new Error("Cannot identify local daemon process");
   const lockStore = new LocalStore(dir);
   const preferredPort = lockStore.get<number | undefined>("daemon-port", undefined);
   try {
     lockStore.db.transaction(() => {
-      const current = lockStore.get<{pid: number; instance: string} | null>("daemon-lock", null);
-      if (current && alive(current.pid)) throw new Error("A local daemon is already starting or running");
-      lockStore.set("daemon-lock", { pid: process.pid, instance });
+      const current = lockStore.get<(DaemonProcess & { instance: string }) | null>("daemon-lock", null);
+      if (current && ownsDaemonProcess(current)) throw new Error("A local daemon is already starting or running");
+      lockStore.set("daemon-lock", { pid: process.pid, instance, processIdentity });
     }).immediate();
   } finally { lockStore.close(); }
   const releaseLock = () => {
@@ -104,6 +99,7 @@ export async function runDaemon(port?: number): Promise<void> {
       join(dir, "daemon.json"),
       JSON.stringify({
         pid: process.pid,
+        processIdentity,
         url: app.origin,
         token,
         instance: app.instance,
@@ -115,7 +111,7 @@ export async function runDaemon(port?: number): Promise<void> {
         releaseLock();
       } catch {}
       try {
-        if (readInstance()?.pid === process.pid)
+        if (readInstance()?.instance === instance)
           unlinkSync(join(dir, "daemon.json"));
       } catch {}
     };
