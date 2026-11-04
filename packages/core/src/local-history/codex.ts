@@ -63,12 +63,26 @@ export function parseCodexRows(rows:Iterable<Record<string,unknown>>, parentTurn
   const ids = new Map(session.messages.map((m,i)=>[m.key,i]));
   const turns=new Set<string>(resume?session.metadata?.turnIds as string[]:[]);let replay=false,parent="",positive=false;
   let nativeMeta:Record<string,unknown>=resume?.state.meta??{};
+  const ancestorIds = new Set<string>();
+  const parentOf = (meta: Record<string, unknown>) => string(meta.forked_from_id) ||
+    string(record(record(record(meta.source).subagent).thread_spawn).parent_thread_id) ||
+    ((record(meta.source).subagent !== undefined || meta.thread_source === "subagent") ? string(meta.parent_thread_id) : "");
+  parent = parentOf(nativeMeta);
+  if (parent) ancestorIds.add(parent);
   for (const row of nativeRows(rows,provider)) {
     const payload = record(row.payload);
     const type = string(row.type);
     if (type === "session_meta") {
       const id = string(payload.id);
-      if(session.id&&id===parent){positive=true;replay=!!parentTurns;continue;}
+      if (session.id && id && ancestorIds.has(id)) {
+        const ancestorParent = parentOf(payload);
+        if (ancestorParent === session.id || ancestorParent === id)
+          throw new HistoryFormatError("Cyclic Codex session ancestry");
+        if (ancestorParent) ancestorIds.add(ancestorParent);
+        positive = true;
+        replay = !!parentTurns;
+        continue;
+      }
       if (session.id && id && session.id !== id)
         throw new HistoryFormatError(
           "Multiple Codex session identities in one source",
@@ -82,6 +96,7 @@ export function parseCodexRows(rows:Iterable<Record<string,unknown>>, parentTurn
             .parent_thread_id,
         ) || ((record(payload.source).subagent!==undefined || payload.thread_source==="subagent")?string(payload.parent_thread_id):"") || undefined;
       parent=string(payload.forked_from_id)||subagent||"";
+      if (parent) ancestorIds.add(parent);
       session.parentId=parent||undefined;
       if(parent)session.relationship=payload.forked_from_id?"fork":"subagent";
       if(payload.forked_from_id){positive=true;replay=!!parentTurns;}

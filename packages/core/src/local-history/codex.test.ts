@@ -60,3 +60,24 @@ describe("Codex desktop page context", () => {
     expect(parse(message("user", pageText, [pageKind])).messages).toEqual([]);
   });
 });
+
+
+describe("nested Codex ancestry", () => {
+  const meta = (id:string, parent?:string) => ({type:"session_meta",payload:{id,cwd:`/${id}`,...(parent?{forked_from_id:parent}: {})}});
+  const text = (...rows:unknown[]) => rows.map(row=>JSON.stringify(row)).join("\n");
+  it("accepts repeated proven ancestors while preserving child identity and excluding inherited turns", () => {
+    const result = parseCodex(text(meta("child","parent"), meta("parent","root"), meta("root"),
+      {type:"turn_context",payload:{turn_id:"inherited"}},message("user","parent prompt"),
+      meta("parent","root"),meta("root"),
+      {type:"turn_context",payload:{turn_id:"own"}},message("user","child prompt")),new Set(["inherited"]));
+    expect(result).toMatchObject({id:"child",cwd:"/child",parentId:"parent",relationship:"fork"});
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0].content).toEqual(message("user","child prompt").payload.content);
+  });
+  it("rejects unrelated identities instead of merging unrelated conversations", () => {
+    expect(()=>parseCodex(text(meta("child","parent"),meta("unrelated")))).toThrow("Multiple Codex session identities");
+  });
+  it("rejects ancestry pointing back to the child", () => {
+    expect(()=>parseCodex(text(meta("child","parent"),meta("parent","child")))).toThrow("Cyclic Codex");
+  });
+});

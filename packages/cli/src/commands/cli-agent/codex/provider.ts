@@ -467,6 +467,14 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
         collaborationErrorCode: "EXECUTION_ABORTED",
         interruptTurn: true,
       });
+      // Switching the active ID does not release the old thread's writer.
+      // Empty threads have no saved rollout to resume; keep those in memory.
+      const previousSessionId = this.activeSessionId ?? this.resumeSessionId ?? this.sdkSessionId;
+      if (previousSessionId && previousSessionId !== sessionId &&
+          this.loadedThreadIds.has(previousSessionId) && !this.emptyThreadIds.has(previousSessionId)) {
+        await this.appServer?.request("thread/unsubscribe", { threadId: previousSessionId });
+        this.loadedThreadIds.delete(previousSessionId);
+      }
       await this.ensureAppServer();
       if (this.loadedThreadIds.has(sessionId)) {
         this.noteThread({ id: sessionId }, null, { markLocalResumable: true });

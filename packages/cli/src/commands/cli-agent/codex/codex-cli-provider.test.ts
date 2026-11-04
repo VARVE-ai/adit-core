@@ -1596,7 +1596,11 @@ describe("CodexCliProvider takeover", () => {
       await provider.takeover();
       await provider.sendPrompt("test");
       await provider.switchSession(b);
+      expect(mocks.appRequest).toHaveBeenCalledWith("thread/unsubscribe", {threadId:a});
+      mocks.appRequest.mockClear();
       await provider.switchSession(a);
+      expect(mocks.appRequest).toHaveBeenCalledWith("thread/unsubscribe", {threadId:b});
+      expect(mocks.appRequest).toHaveBeenCalledWith("thread/resume", expect.objectContaining({threadId:a}));
       expect(provider.state.resumeSessionId).toBe(a);
       mocks.spawn.mockClear();
       await provider.releaseToLocal();
@@ -1604,6 +1608,22 @@ describe("CodexCliProvider takeover", () => {
     } finally {
       provider.stop();
     }
+  });
+
+  it("does not resume the target when releasing the old writer fails", async () => {
+    const provider = new CodexCliProvider({bin:"codex",args:[],cwd:"/tmp/project"});
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("test");
+      mocks.appRequest.mockClear();
+      const original = mocks.appRequest.getMockImplementation()!;
+      mocks.appRequest.mockImplementation((...args:unknown[]) => {
+        if (args[0] === "thread/unsubscribe") return Promise.reject(new Error("Cannot release writer"));
+        return original(...args);
+      });
+      await expect(provider.switchSession("target")).rejects.toThrow("Cannot release writer");
+      expect(mocks.appRequest).not.toHaveBeenCalledWith("thread/resume", expect.objectContaining({threadId:"target"}));
+    } finally { provider.stop(); }
   });
 
   it("recovers rollout history when the SQLite index does not contain the current thread", async () => {
