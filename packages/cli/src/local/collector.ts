@@ -1,4 +1,4 @@
-import { assertWorkspaceGit, assertSelectedRepositories, repositoryOriginUrl, workspaceGitStatus } from "@varveai/adit-core";
+import { assertWorkspaceGit, missingSelectedRepository, repositoryOriginUrl, workspaceGitStatus } from "@varveai/adit-core";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -242,7 +242,7 @@ export class Collector {
     const w = this.store.workspace(id);
     if (!directoryAvailable(w.path)) throw new LocalStateError(directoryUnavailable,409);
     assertWorkspaceGit(w.path);
-    assertSelectedRepositories(w.path, w.repositories);
+    if (!w.repositories.length) throw new LocalStateError(missingSelectedRepository, 409);
     if (!w.providers.length && !w.repositories.length)
       throw new LocalStateError("Select at least one source or repository");
     return this.enqueue(id, "collect");
@@ -250,7 +250,18 @@ export class Collector {
   collectAll(): CollectionJob[] {
     return this.store.workspaces()
       .filter(w => w.started && workspaceGitStatus(w.path).available && w.repositories.length)
-      .map(w => this.collect(w.id));
+      .map(w => {
+        try { return this.collect(w.id); }
+        catch (error) {
+          const job: CollectionJob = {
+            id: randomUUID(), workspaceId: w.id, kind: "collect", status: "interrupted",
+            startedAt: new Date().toISOString(), endedAt: new Date().toISOString(),
+            error: error instanceof Error ? error.message : "Collection could not start",
+          };
+          this.store.job(job);
+          return job;
+        }
+      });
   }
   private enqueue(id: string, kind: "collect" | "discover"): CollectionJob {
     if (this.updatePaused) throw new LocalStateError("ADIT is updating. Please try again shortly.", 503);
@@ -302,9 +313,7 @@ export class Collector {
     // Recheck at execution time as directories can disappear after enqueueing.
     jobs = jobs.filter(job => {
       const workspace=this.store.workspace(job.workspaceId);
-      let git = workspaceGitStatus(workspace.path);
-      try { assertSelectedRepositories(workspace.path,workspace.repositories); }
-      catch(error) { git={available:false,error:error instanceof Error?error.message:String(error)}; }
+      const git = workspaceGitStatus(workspace.path);
       if (git.available) return true;
       job.status="interrupted"; job.error=git.error; job.endedAt=new Date().toISOString();
       this.store.job(job);this.activeJobs.delete(`collect:${job.workspaceId}`);return false;
@@ -518,6 +527,13 @@ export class Collector {
   private async indexGit(repo: Repository): Promise<void> {
     delete repo.deferred;
     try {
+      // Old selections may contain local-only repositories. Skip each separately.
+      if (!repositoryOriginUrl(repo.path)) {
+        repo.count = null;
+        repo.error = `Repository skipped: no git remote 'origin' configured (${repo.path})`;
+        delete repo.skipReason;
+        return;
+      }
       const ownEmail = await authorEmail(repo.path);
       if (!ownEmail) {
         repo.count = null;
@@ -622,8 +638,9 @@ export class Collector {
     const delay = initial ? 1000 : config.interval * 60000;
     this.nextAt = new Date(Date.now() + delay).toISOString();
     this.timer = setTimeout(() => {
-      this.collectAll();
-      if(!this.draining)this.schedule();
+      try { this.collectAll(); }
+      catch (error) { console.error("Automatic collection could not start:", error); }
+      finally { if(!this.draining)this.schedule(); }
     }, delay);
   }
   async close(): Promise<void> {

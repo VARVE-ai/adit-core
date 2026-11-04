@@ -215,3 +215,33 @@ it("runs the login launcher only with consent and falls back safely if the previ
     rmSync(root, { recursive: true, force: true });
   }
 }, 45000);
+
+
+it("keeps the daemon reachable after startup collection encounters a legacy repository without origin", async () => {
+  const root = mkdtempSync(join(tmpdir(), "adit-daemon-no-origin-"));
+  const data = join(root, "data"), workspace = join(root, "workspace");
+  await exec("git", ["init", workspace], {windowsHide:true});
+  const settings = new LocalStore(data);
+  settings.set("login-startup", {enabled:false, version:1});
+  const project = settings.saveWorkspace({path:workspace, providers:[], repositories:[workspace]});
+  settings.markStarted(project.id);
+  settings.close();
+  const entry = fileURLToPath(new URL("../../dist/index.js", import.meta.url));
+  const cli = (...args:string[]) => exec(process.execPath, [entry,...args], {
+    env:{...process.env, ADIT_LOCAL_DATA_DIR:data, ADIT_DISABLE_AUTO_UPDATE:"1"}, windowsHide:true, timeout:20000,
+  });
+  try {
+    await cli("daemon", "start");
+    const info = JSON.parse(readFileSync(join(data,"daemon.json"),"utf8")) as {url:string};
+    await expect.poll(() => {
+      const db = new LocalStore(data);
+      try { return db.jobs<{status:string;error?:string}>()[0]; }
+      finally { db.close(); }
+    }, {timeout:10000}).toMatchObject({status:"failed", error:expect.stringContaining("no git remote 'origin'")});
+    expect((await fetch(info.url+"/health")).status).toBe(200);
+    expect((await cli("daemon", "status")).stdout).toContain("Running:");
+  } finally {
+    await cli("daemon", "stop");
+    rmSync(root,{recursive:true,force:true});
+  }
+}, 30000);

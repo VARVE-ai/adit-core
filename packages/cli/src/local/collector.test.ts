@@ -475,3 +475,50 @@ it("corrects saved missing-config failures without hiding real errors and retain
   expect(collector.repositoryInfo(workspace)).toContainEqual({ path: skipped, count: null, skipReason: "missing-git-email" });
   expect(collector.repositoryInfo(workspace)).toContainEqual({ path: join(root,"selected"), count: 3 });
 });
+
+
+it("collects valid child repositories from legacy selections containing a parent without origin", async () => {
+  const scan = vi.fn(async () => ({counts:{}, errors:[], scanned:0, updated:0}));
+  const f = retryFixture(scan);
+  const parent = f.workspace.path, child = join(parent, "child");
+  execFileSync("git", ["-C", parent, "remote", "remove", "origin"]);
+  execFileSync("git", ["init", child], {stdio:"pipe"});
+  const git = (...args:string[]) => execFileSync("git", ["-C", child, ...args], {stdio:"pipe"});
+  git("remote", "add", "origin", "https://example.invalid/child.git");
+  git("config", "user.email", "fixture@example.test");
+  git("config", "user.name", "Fixture");
+  git("-c", "core.hooksPath=NUL", "commit", "--allow-empty", "-m", "fixture");
+  const workspace = f.store.saveWorkspace({version:f.workspace.version, repositories:[parent,child]}, f.workspace.id);
+  f.store.markStarted(workspace.id);
+  // Both startup scheduling and later manual collection must accept old selections.
+  vi.useFakeTimers();
+  f.collector.schedule(true);
+  await vi.advanceTimersByTimeAsync(1000);
+  vi.useRealTimers();
+  await f.collector.waitFor(workspace.id);
+  const job = f.collector.jobs()[0];
+  expect(job).toMatchObject({status:"partial", repositories:[
+    {path:parent, count:null, error:expect.stringContaining("no git remote 'origin'")},
+    {path:child, count:1},
+  ]});
+  expect(f.store.workspace(workspace.id).repositories).toEqual([parent,child]);
+  f.collector.collect(workspace.id);
+  await f.collector.waitFor(workspace.id);
+  expect(scan).toHaveBeenCalledTimes(2);
+});
+
+it("isolates automatic collection entry failures and keeps the timer scheduled", async () => {
+  const f = retryFixture(async () => ({counts:{}, errors:[], scanned:0, updated:0}));
+  f.store.markStarted(f.workspace.id);
+  vi.spyOn(f.collector, "collect").mockImplementation(() => { throw new Error("Configuration changed"); });
+  expect(f.collector.collectAll()[0]).toMatchObject({status:"interrupted", error:"Configuration changed"});
+  expect(f.collector.jobs()[0]).toMatchObject({status:"interrupted", error:"Configuration changed"});
+  vi.useFakeTimers();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.spyOn(f.collector, "collectAll").mockImplementationOnce(() => {throw new Error("Transient failure");});
+  f.collector.schedule(true);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(log).toHaveBeenCalled();
+  expect(f.collector.nextAt).not.toBeNull();
+  log.mockRestore();
+});
