@@ -5,7 +5,7 @@ import {join} from "node:path";
 import {zstdCompressSync} from "node:zlib";
 import Database from "better-sqlite3";
 import {LocalHistory} from "./archive.js";
-import {codexFileRows,refreshCodexContinuations,refreshCodexContexts} from "./codex-file.js";
+import {readCodexSession,codexFileRows,refreshCodexContinuations,refreshCodexContexts} from "./codex-file.js";
 import {historyFinalReply,nativeContextSql} from "./message-semantics.js";
 import {StructuredHistory} from "./structured-store.js";
 import {parseCodex} from "./parsers.js";
@@ -173,4 +173,18 @@ it("skips empty Cursor placeholders and collects their content after it becomes 
   expect(await history.scan(root,sources)).toMatchObject({errors:[],updated:1});
   expect(history.session("cursor-ide","session")?.messages.map(message=>message.key)).toEqual(["u","empty","a"]);
  }finally{source.close();db.close();}
+});
+
+it("reads nested inherited rollouts without copying parent turns into the child", async () => {
+ const root=fixture(), parentPath=join(root,"rollout-parent.jsonl"), childPath=join(root,"rollout-child.jsonl");
+ const meta=(id:string,parent?:string)=>({type:"session_meta",payload:{id,cwd:root,...(parent?{forked_from_id:parent}:{})}});
+ const turn=(id:string)=>({type:"turn_context",payload:{turn_id:id}});
+ const msg=(text:string)=>({type:"response_item",payload:{type:"message",role:"user",content:text}});
+ const write=(path:string,rows:unknown[])=>writeFileSync(path,rows.map(row=>JSON.stringify(row)).join("\n")+"\n");
+ write(parentPath,[meta("parent","root"),meta("root"),turn("root-turn"),msg("root prompt"),turn("parent-turn"),msg("parent prompt")]);
+ write(childPath,[meta("child","parent"),meta("parent","root"),meta("root"),turn("root-turn"),msg("root prompt"),turn("parent-turn"),msg("parent prompt"),turn("child-turn"),msg("child prompt")]);
+ const [session]=await readCodexSession(childPath,"codex",root);
+ expect(session).toMatchObject({id:"child",parentId:"parent"});
+ expect(session.messages.map(message=>message.content)).toEqual(["child prompt"]);
+ expect(session.metadata?.lineageRetry).toBeUndefined();
 });
