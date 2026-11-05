@@ -1596,11 +1596,11 @@ describe("CodexCliProvider takeover", () => {
       await provider.takeover();
       await provider.sendPrompt("test");
       await provider.switchSession(b);
-      expect(mocks.appRequest).toHaveBeenCalledWith("thread/unsubscribe", {threadId:a});
+      expect(mocks.appStopAndWait).toHaveBeenCalled();
       mocks.appRequest.mockClear();
       await provider.switchSession(a);
-      expect(mocks.appRequest).toHaveBeenCalledWith("thread/unsubscribe", {threadId:b});
-      expect(mocks.appRequest).toHaveBeenCalledWith("thread/resume", expect.objectContaining({threadId:a}));
+      expect(mocks.appStopAndWait).toHaveBeenCalledTimes(2);
+      expect(mocks.appRequest).toHaveBeenCalledWith("thread/resume", expect.objectContaining({threadId:a, excludeTurns:true}));
       expect(provider.state.resumeSessionId).toBe(a);
       mocks.spawn.mockClear();
       await provider.releaseToLocal();
@@ -1610,17 +1610,30 @@ describe("CodexCliProvider takeover", () => {
     }
   });
 
+  it("waits for the previous writer to exit before resuming the target", async () => {
+    const provider = new CodexCliProvider({bin:"codex",args:[],cwd:"/tmp/project"});
+    let finishStop!: () => void;
+    try {
+      await provider.takeover();
+      await provider.sendPrompt("test");
+      mocks.appRequest.mockClear();
+      mocks.appStopAndWait.mockImplementationOnce(() => new Promise<void>(resolve => { finishStop = resolve; }));
+      const switching = provider.switchSession("target");
+      await vi.waitFor(() => expect(finishStop).toBeTypeOf("function"));
+      expect(mocks.appRequest).not.toHaveBeenCalledWith("thread/resume", expect.objectContaining({threadId:"target"}));
+      finishStop();
+      await switching;
+      expect(mocks.appRequest).toHaveBeenCalledWith("thread/resume", expect.objectContaining({threadId:"target",excludeTurns:true}));
+    } finally { finishStop?.(); provider.stop(); }
+  });
+
   it("does not resume the target when releasing the old writer fails", async () => {
     const provider = new CodexCliProvider({bin:"codex",args:[],cwd:"/tmp/project"});
     try {
       await provider.takeover();
       await provider.sendPrompt("test");
       mocks.appRequest.mockClear();
-      const original = mocks.appRequest.getMockImplementation()!;
-      mocks.appRequest.mockImplementation((...args:unknown[]) => {
-        if (args[0] === "thread/unsubscribe") return Promise.reject(new Error("Cannot release writer"));
-        return original(...args);
-      });
+      mocks.appStopAndWait.mockRejectedValueOnce(new Error("Cannot release writer"));
       await expect(provider.switchSession("target")).rejects.toThrow("Cannot release writer");
       expect(mocks.appRequest).not.toHaveBeenCalledWith("thread/resume", expect.objectContaining({threadId:"target"}));
     } finally { provider.stop(); }
@@ -2636,7 +2649,7 @@ describe("CodexCliProvider takeover", () => {
     }
   });
 
-  it("does not resume a loaded empty thread when switching back to it", async () => {
+  it("resumes previously loaded threads after replacing the app-server", async () => {
     const provider = new CodexCliProvider({
       bin: "codex",
       args: [],
@@ -2656,7 +2669,7 @@ describe("CodexCliProvider takeover", () => {
     mocks.appRequest.mockClear();
     await provider.switchSession("019e2110-d96f-7e40-882e-b524fa9148e4");
 
-    expect(mocks.appRequest).not.toHaveBeenCalledWith(
+    expect(mocks.appRequest).toHaveBeenCalledWith(
       "thread/resume",
       expect.objectContaining({
         threadId: "019e2110-d96f-7e40-882e-b524fa9148e4",

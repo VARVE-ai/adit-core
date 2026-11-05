@@ -461,29 +461,51 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     }
 
     if (this.ownerValue === "web") {
-      await this.finishActiveRunAsAborted({
-        errorMessage: "Codex session switched",
-        eventMessage: "Codex session switched.",
-        collaborationErrorCode: "EXECUTION_ABORTED",
-        interruptTurn: true,
-      });
-      // Switching the active ID does not release the old thread's writer.
-      // Empty threads have no saved rollout to resume; keep those in memory.
-      const previousSessionId = this.activeSessionId ?? this.resumeSessionId ?? this.sdkSessionId;
-      if (previousSessionId && previousSessionId !== sessionId &&
-          this.loadedThreadIds.has(previousSessionId) && !this.emptyThreadIds.has(previousSessionId)) {
-        await this.appServer?.request("thread/unsubscribe", { threadId: previousSessionId });
-        this.loadedThreadIds.delete(previousSessionId);
+      const switchStarted = performance.now();
+      let stageStarted = switchStarted;
+      let stage = "finish-active-run";
+      const timing = () => {
+        this.notices.debug(`Session switch timing: target=${sessionId} stage=${stage} elapsedMs=${Math.round(performance.now() - stageStarted)} totalMs=${Math.round(performance.now() - switchStarted)}`);
+        stageStarted = performance.now();
+      };
+      try {
+        await this.finishActiveRunAsAborted({
+          errorMessage: "Codex session switched",
+          eventMessage: "Codex session switched.",
+          collaborationErrorCode: "EXECUTION_ABORTED",
+          interruptTurn: true,
+        });
+        timing();
+        // Unsubscribing does not reliably release the native writer. Wait for
+        // the owning app-server process to exit before loading another thread.
+        const previousSessionId = this.activeSessionId ?? this.resumeSessionId ?? this.sdkSessionId;
+        if (previousSessionId !== sessionId && this.loadedThreadIds.size) {
+          stage = "release-writer";
+          await this.appServer?.stopAndWait();
+          timing();
+          this.appServer = null;
+          this.loadedThreadIds.clear();
+          this.emptyThreadIds.clear();
+        }
+        stage = "start-app-server";
+        await this.ensureAppServer();
+        timing();
+        stage = "resume-target";
+        if (this.loadedThreadIds.has(sessionId)) {
+          this.noteThread({ id: sessionId }, null, { markLocalResumable: true });
+        } else {
+          await this.resumeThread(sessionId);
+        }
+        timing();
+        this.setBusy(false);
+        this.setThinking(false);
+        this.notices.debug(`Session switch completed: target=${sessionId} totalMs=${Math.round(performance.now() - switchStarted)}`);
+        return;
+      } catch (error) {
+        timing();
+        this.notices.debug(`Session switch failed: target=${sessionId} stage=${stage} totalMs=${Math.round(performance.now() - switchStarted)}`);
+        throw error;
       }
-      await this.ensureAppServer();
-      if (this.loadedThreadIds.has(sessionId)) {
-        this.noteThread({ id: sessionId }, null, { markLocalResumable: true });
-      } else {
-        await this.resumeThread(sessionId);
-      }
-      this.setBusy(false);
-      this.setThinking(false);
-      return;
     }
   }
 
@@ -1198,6 +1220,9 @@ export class CodexCliProvider extends EventEmitter implements CliAgentProvider {
     const preferredModelId = this.activeModelId;
     const resumeParams = {
       threadId,
+      // History is displayed through the replay API. Loading it again here can
+      // produce tens of MB just to acquire a writer for an existing thread.
+      excludeTurns: true,
       cwd: this.opts.cwd,
       ...codexThreadModeOverrides(mode),
       persistExtendedHistory: true,
