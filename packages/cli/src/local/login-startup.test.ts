@@ -2,12 +2,27 @@ import { afterEach, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalStore } from "@varveai/adit-core";
+import { execFile } from "node:child_process";
+import { LocalStore, windowsLoginTaskState } from "@varveai/adit-core";
 import { LoginStartup, UserLoginRegistration, type StartupRegistration } from "./login-startup.js";
 
+vi.mock("node:child_process", async original => {
+  const actual = await original<typeof import("node:child_process")>();
+  const mocked = vi.fn(actual.execFile);
+  const { promisify } = await import("node:util");
+  // Node's native promisify implementation closes over the real execFile;
+  // explicitly route this test implementation through the mocked callback.
+  Object.defineProperty(mocked, promisify.custom, { value: (file: string, args: string[], options: object) =>
+    new Promise((resolve, reject) => mocked(file, args, options, (error, stdout, stderr) =>
+      error ? reject(error) : resolve({ stdout, stderr }))) });
+  return {...actual, execFile: mocked};
+});
+vi.mock("@varveai/adit-core", async original => { const actual = await original<typeof import("@varveai/adit-core")>(); return {...actual, windowsLoginTaskState: vi.fn(actual.windowsLoginTaskState)}; });
 const resources: { store: LocalStore; root: string }[] = [];
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.mocked(execFile).mockReset();
+  vi.mocked(windowsLoginTaskState).mockReset();
   for (const { store, root } of resources.splice(0)) {
     store.close();
     rmSync(root, { recursive: true, force: true });
@@ -29,7 +44,7 @@ function fixture() {
 it("enables the first-run default once and preserves disabled or externally removed registrations", async () => {
   const { startup, registration, store } = fixture();
   await Promise.all([startup.initialize(), startup.initialize()]);
-  expect(startup.status()).toEqual({ enabled: true, supported: true, version: 1 });
+  expect(startup.status()).toMatchObject({ enabled: true, supported: true, version: 1 });
   expect(registration.install).toHaveBeenCalledOnce();
   await registration.remove();
   await startup.initialize();
@@ -37,30 +52,30 @@ it("enables the first-run default once and preserves disabled or externally remo
   expect(registration.install).toHaveBeenCalledOnce();
   await startup.save({ enabled: false, version: 1 });
   await new LoginStartup(store, registration).initialize();
-  expect(startup.status()).toEqual({ enabled: false, supported: true, version: 2 });
+  expect(startup.status()).toMatchObject({ enabled: false, supported: true, version: 2 });
   expect(registration.install).toHaveBeenCalledOnce();
 });
 it("keeps failed first-run registration disabled and allows an explicit retry", async () => {
   const { startup, registration } = fixture();
   vi.mocked(registration.install).mockRejectedValueOnce(new Error("permission denied"));
-  await expect(startup.initialize()).resolves.toEqual({ enabled: false, supported: true, version: 1, error: "permission denied" });
+  await expect(startup.initialize()).resolves.toMatchObject({ enabled: false, supported: true, version: 1, error: "permission denied" });
   expect(() => startup.assertCloudMode({ cloud: { mode: "automatic" } })).toThrow();
   await startup.initialize();
   expect(registration.install).toHaveBeenCalledOnce();
   await startup.save({ enabled: true, version: 1 });
-  expect(startup.status()).toEqual({ enabled: true, supported: true, version: 2 });
+  expect(startup.status()).toMatchObject({ enabled: true, supported: true, version: 2 });
 });
 it("does not install a first-run entry on unsupported systems", async () => {
   const { startup, registration, store } = fixture();
   registration.supported = false;
-  await expect(startup.initialize()).resolves.toEqual({ enabled: false, supported: false, version: 0 });
+  await expect(startup.initialize()).resolves.toMatchObject({ enabled: false, supported: false, version: 0 });
   expect(registration.install).not.toHaveBeenCalled();
   expect(store.get("login-startup", null)).toBeNull();
 });
 it("keeps status reads inert, verifies registration, rejects stale saves and pauses all directories on disable", async () => {
   const { startup, registration, store, root } = fixture();
   const schedule = store.schedule();
-  expect(startup.status()).toEqual({ enabled: false, supported: true, version: 0 });
+  expect(startup.status()).toMatchObject({ enabled: false, supported: true, version: 0 });
   expect(registration.install).not.toHaveBeenCalled();
   expect(() => startup.assertCloudMode({ cloud: { mode: "automatic" } })).toThrow(/Start automatically/);
   await startup.save({ enabled: true, version: 0 });
@@ -116,18 +131,65 @@ it.each(["darwin", "linux"] as const)("writes a quiet, directory-specific %s log
   await registration.remove();
   expect(registration.installed()).toBe(false);
 });
-it.skipIf(process.platform !== "win32")("creates and removes a real Windows shortcut in an isolated temporary Startup folder", async () => {
+it("registers a current-user direct Node task and removes legacy shortcuts only after verification", async () => {
   const { root } = fixture();
-  const entry = join(root, "cli.js");
-  writeFileSync(entry, "");
-  const registration = new UserLoginRegistration(join(root, "用户's data"), { appData: root, entry });
+  const entry = join(root, "cli.js"); writeFileSync(entry, "");
+  let state: "missing" | "registered" = "missing";
+  vi.mocked(windowsLoginTaskState).mockImplementation(() => state);
+  const calls: string[][] = [];
+  vi.mocked(execFile).mockImplementation(((file: string, args: string[], options: unknown, done: (error: Error | null, stdout: string, stderr: string) => void) => {
+    calls.push(args);
+    if (args.join(" ").includes("RegisterTaskDefinition")) state = "registered";
+    if (args.join(" ").includes("DeleteTask")) state = "missing";
+    done(null, "enabled", "");
+  }) as typeof execFile);
+  const registration = new UserLoginRegistration(join(root, "用户's data"), { platform: "win32", appData: root, entry });
+  expect(registration.installed()).toBe(false);
   await registration.install();
+  expect(registration.path).toMatch(/^windows-task:ai.varve.adit./);
   expect(registration.installed()).toBe(true);
-  expect(readFileSync(registration.path).length).toBeGreaterThan(100);
-  await registration.install();
+  const script = calls[0].join(" ");
+  expect(script).not.toContain("EncodedCommand");
+  expect(script).toContain("$t.Principal.LogonType=3");
+  expect(script).toContain("$t.Principal.RunLevel=0");
+  expect(script).toContain("$action.Path=");
+  expect(script).toContain("start.cjs");
   await registration.remove();
   expect(registration.installed()).toBe(false);
-}, 30000);
+});
+it("migrates only enabled, existing legacy entries and keeps the old entry if registration fails", async () => {
+  const {root}=fixture(),entry=join(root,"cli.js");writeFileSync(entry,"");
+  let state:"missing"|"registered"="missing",allowed=false,fail=false;
+  vi.mocked(windowsLoginTaskState).mockImplementation(()=>state);
+  vi.mocked(execFile).mockImplementation(((_file:string,args:string[],_options:unknown,done:(error:Error|null,stdout:string,stderr:string)=>void)=>{
+    const script=args.join(" ");
+    if(script.includes("RegisterTaskDefinition")){
+      if(fail){done(new Error("registration denied"),"","");return;}
+      state="registered";
+    }
+    done(null,allowed?"enabled":"disabled","");
+  }) as typeof execFile);
+  const reg=new UserLoginRegistration(join(root,"data"),{platform:"win32",appData:root,entry});
+  const name=reg.path.slice("windows-task:".length);
+  const legacy=join(root,"Microsoft","Windows","Start Menu","Programs","Startup",name+".lnk");
+  expect(await reg.migrateLegacy()).toBe(false);
+  mkdirSync(join(root,"Microsoft","Windows","Start Menu","Programs","Startup"),{recursive:true});writeFileSync(legacy,"old-entry");
+  expect(await reg.migrateLegacy()).toBe(false);expect(existsSync(legacy)).toBe(true);
+  allowed=true;fail=true;
+  await expect(reg.migrateLegacy()).rejects.toThrow("registration denied");expect(existsSync(legacy)).toBe(true);
+  fail=false;expect(await reg.migrateLegacy()).toBe(true);expect(existsSync(legacy)).toBe(false);expect(reg.installed()).toBe(true);
+});
+it("preserves requested consent when a registration is missing or disabled and supports repair", async () => {
+  const {startup,registration} = fixture();
+  await startup.save({enabled:true,version:0});
+  await registration.remove();
+  expect(startup.status()).toMatchObject({requestedEnabled:true,enabled:false,registrationState:"missing"});
+  registration.state=()=>"disabled";
+  expect(startup.status()).toMatchObject({requestedEnabled:true,enabled:false,registrationState:"disabled"});
+  delete registration.state;
+  await startup.save({enabled:true,version:1});
+  expect(startup.status()).toMatchObject({requestedEnabled:true,enabled:true,registrationState:"registered"});
+});
 it("preserves an explicit test-environment update opt-out in the login launcher", async () => {
   const { root } = fixture();
   const entry = join(root, "cli.js");

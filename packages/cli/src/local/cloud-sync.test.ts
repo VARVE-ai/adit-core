@@ -638,6 +638,29 @@ function gitWorkspace() {
   store.db.prepare("INSERT INTO adit_attribution_runs(id,workspace_id,algorithm_version,input_fingerprint,status,started_at) VALUES ('run',?,1,'test','done',1)").run(w.id);
   return {w,repos:projectRepositories(store.db,w)};
 }
+it.each(["legacy", "versioned"])("syncs branch metadata from a %s collection checkpoint", async format => {
+  const { w, repos } = gitWorkspace(), repo = repos[0];
+  const sha = "a".repeat(40), other = "b".repeat(40);
+  const refs = `refs/heads/develop ${sha}\nrefs/heads/feature/test ${other}\nrefs/remotes/origin/develop ${sha}\nrefs/adit/checkpoint/test ${other}\n`;
+  const checkpoint = format === "legacy" ? [refs, sha, ""] : [2, refs, sha, ""];
+  store.db.prepare("INSERT INTO adit_local_git_checkpoints VALUES (?,?,?,?)")
+    .run(repo.path, "test@example.invalid", JSON.stringify(checkpoint), 0);
+  vi.mocked(collectRemoteBranchSnapshot).mockResolvedValue({ branches: [], fingerprint: "empty" });
+  const client = {
+    get: vi.fn().mockResolvedValue(structuredClone(baseline)),
+    post: vi.fn(async () => ({ schemaVersion: 1, accountId: "user", eventIds: [], commitIds: [] })),
+  };
+  const sync = new LocalCloudSync(store, { collect: vi.fn(), waitFor: vi.fn().mockResolvedValue(undefined) }, () => client);
+  sync.start(w.id);
+  expect((await sync.wait(w.id))?.status).toBe("done");
+  expect(client.post).toHaveBeenCalledWith("/api/sync/local", expect.objectContaining({
+    repositories: expect.arrayContaining([expect.objectContaining({
+      localRepositoryId: repo.localRepositoryId,
+      gitAuthorEmail: "test@example.invalid",
+      branches: [{ name: "develop", headSha: sha }, { name: "feature/test", headSha: other }],
+    })]),
+  }));
+});
 it("syncs configured Git author and default branch without new events, and refreshes changed metadata",async()=>{
   const {w,repos}=gitWorkspace(),repo=repos[0];
   for(const args of [["init","-b","feature/test"],["config","user.name","Configured Author"],["symbolic-ref","refs/remotes/origin/HEAD","refs/remotes/origin/main"]]) {
@@ -964,4 +987,28 @@ it("uses the same per-repository boundary as uploads, includes unmatched and una
   new CloudProjection(store,w,"scope",inherited).confirm("commit",[`${b.localRepositoryId}:${unmatched}`]);
   expect(cloudPending(store,w,"scope",inherited)).toEqual({state:"ready",sessions:0,commits:1});
   expect(cloudPending(store,w,"scope",{...baseline,repositories:[{localRepositoryId:"legacy",relativePath:".",before:at(5),sha:old,legacy:true}]}).state).toBe("unverified");
+});
+
+it("contains credential read failures in scheduled sync and retries without killing the service", async () => {
+  const registration = join(root, "login-entry"); writeFileSync(registration, "enabled");
+  store.set("login-startup", { enabled: true, registration });
+  const sync = new LocalCloudSync(store, { collect: vi.fn(), waitFor: vi.fn() });
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.mocked(loadCredentials).mockImplementationOnce(() => { throw Object.assign(new Error("disk I/O error"), {code:"SQLITE_IOERR_READ"}); }).mockReturnValue(null);
+  vi.useFakeTimers();
+  try {
+    sync.schedule();
+    expect(() => vi.advanceTimersByTime(15000)).not.toThrow();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("disk I/O error"));
+    const count = vi.mocked(loadCredentials).mock.calls.length;
+    expect(() => vi.advanceTimersByTime(15000)).not.toThrow();
+    expect(vi.mocked(loadCredentials).mock.calls.length).toBe(count + 1);
+  } finally { vi.useRealTimers(); }
+});
+
+it("returns an explicit sync error when credentials cannot be read, keeping local state available", () => {
+  const selected=workspace();
+  const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn()});
+  vi.mocked(loadCredentials).mockImplementation(()=>{throw new Error("secure storage unavailable");});
+  expect(sync.statuses().get(selected.id)).toMatchObject({status:"failed",error:"secure storage unavailable",pending:{state:"failed"}});
 });

@@ -69,7 +69,7 @@ export function OverviewCloudPush({ enabled, sync, accountState, onPush, onResto
   }
   return <span className="overview-cloud-quick" title={title}>
     <span role="status">{summary}</span>
-    <button disabled={!action || running || busy || sync?.restoring} onClick={action}>
+    <button disabled={!action || running || busy || !!sync?.restoring} onClick={action}>
       <Globe size={12} />{running ? t("正在同步新记录…") : label}
     </button>
   </span>;

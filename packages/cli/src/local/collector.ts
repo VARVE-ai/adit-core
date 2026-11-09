@@ -1,4 +1,4 @@
-import { assertWorkspaceGit, assertSelectedRepositories, repositoryOriginUrl, workspaceGitStatus } from "@varveai/adit-core";
+import { assertWorkspaceGit, missingSelectedRepository, repositoryOriginUrl, workspaceGitStatus } from "@varveai/adit-core";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -22,6 +22,7 @@ import {
   type SourceScanProgress,
 } from "@varveai/adit-core";
 import type { scanHistoryInBackground } from "./collection-scan.js";
+import { businessRefs, businessHistory, collectionHead, gitCollectionVersion } from "./git-collection-scope.js";
 
 const exec = promisify(execFile);
 export const localAssets = fileURLToPath(
@@ -96,9 +97,10 @@ export async function repositories(path: string): Promise<Repository[]> {
         result.push({ path: dir, count: null, skipReason: "missing-git-email" });
         continue;
       }
+      const head = await collectionHead(async (...args) => (await exec("git", ["-C", dir, ...args], { windowsHide: true, timeout: 15000 })).stdout);
       const { stdout } = await exec(
         "git",
-        ["-C", dir, "log", "--all", "--no-merges", "--format=%ae"],
+        ["-C", dir, "log", ...businessHistory, ...(head ? [head] : []), "--no-merges", "--format=%ae", "--"],
         { windowsHide: true, timeout: 15000, maxBuffer: 32 * 1024 * 1024 },
       );
       result.push({ path: dir, count: stdout.split("\n").filter(value => value.trim().toLowerCase() === email).length });
@@ -218,7 +220,8 @@ export class Collector {
       SELECT c.repository,c.sha,max(c.submit_session_id IS NOT NULL) AS matched
       FROM adit_attribution_commits c JOIN adit_attribution_runs r ON r.id=c.run_id
       JOIN adit_local_commits g ON g.repository=c.repository AND g.sha=c.sha
-      WHERE r.workspace_id=? AND r.status IN ('done','running') GROUP BY c.repository,c.sha
+      WHERE r.workspace_id=? AND (r.status IN ('done','running') OR
+        (r.status='failed' AND EXISTS (SELECT 1 FROM adit_attribution_resume m WHERE m.run_id=r.id))) GROUP BY c.repository,c.sha
     ) GROUP BY repository`).all(job.workspaceId) as {repository:string;completed:number;matched:number}[];
     const result:NonNullable<CollectionJob["repositoryProgress"]>={};
     for(const repo of job.repositories||[]) {
@@ -242,7 +245,7 @@ export class Collector {
     const w = this.store.workspace(id);
     if (!directoryAvailable(w.path)) throw new LocalStateError(directoryUnavailable,409);
     assertWorkspaceGit(w.path);
-    assertSelectedRepositories(w.path, w.repositories);
+    if (!w.repositories.length) throw new LocalStateError(missingSelectedRepository, 409);
     if (!w.providers.length && !w.repositories.length)
       throw new LocalStateError("Select at least one source or repository");
     return this.enqueue(id, "collect");
@@ -250,7 +253,18 @@ export class Collector {
   collectAll(): CollectionJob[] {
     return this.store.workspaces()
       .filter(w => w.started && workspaceGitStatus(w.path).available && w.repositories.length)
-      .map(w => this.collect(w.id));
+      .map(w => {
+        try { return this.collect(w.id); }
+        catch (error) {
+          const job: CollectionJob = {
+            id: randomUUID(), workspaceId: w.id, kind: "collect", status: "interrupted",
+            startedAt: new Date().toISOString(), endedAt: new Date().toISOString(),
+            error: error instanceof Error ? error.message : "Collection could not start",
+          };
+          this.store.job(job);
+          return job;
+        }
+      });
   }
   private enqueue(id: string, kind: "collect" | "discover"): CollectionJob {
     if (this.updatePaused) throw new LocalStateError("ADIT is updating. Please try again shortly.", 503);
@@ -302,9 +316,7 @@ export class Collector {
     // Recheck at execution time as directories can disappear after enqueueing.
     jobs = jobs.filter(job => {
       const workspace=this.store.workspace(job.workspaceId);
-      let git = workspaceGitStatus(workspace.path);
-      try { assertSelectedRepositories(workspace.path,workspace.repositories); }
-      catch(error) { git={available:false,error:error instanceof Error?error.message:String(error)}; }
+      const git = workspaceGitStatus(workspace.path);
       if (git.available) return true;
       job.status="interrupted"; job.error=git.error; job.endedAt=new Date().toISOString();
       this.store.job(job);this.activeJobs.delete(`collect:${job.workspaceId}`);return false;
@@ -518,6 +530,13 @@ export class Collector {
   private async indexGit(repo: Repository): Promise<void> {
     delete repo.deferred;
     try {
+      // Old selections may contain local-only repositories. Skip each separately.
+      if (!repositoryOriginUrl(repo.path)) {
+        repo.count = null;
+        repo.error = `Repository skipped: no git remote 'origin' configured (${repo.path})`;
+        delete repo.skipReason;
+        return;
+      }
       const ownEmail = await authorEmail(repo.path);
       if (!ownEmail) {
         repo.count = null;
@@ -529,18 +548,20 @@ export class Collector {
         windowsHide:true,timeout:60000,maxBuffer:64*1024*1024,signal:this.abort.signal,
       })).stdout;
       const refs = async () => {
-        const branches=await git("for-each-ref","--format=%(refname) %(objectname)");
-        let head="";try{head=await git("rev-parse","--verify","HEAD");}catch{/* Unborn repository. */}
+        const branches=await git("for-each-ref","--format=%(refname) %(objectname)",...businessRefs);
+        const head=await collectionHead(git);
         const shallow=(await git("rev-parse","--git-path","shallow")).trim();
         const shallowPath=resolve(repo.path,shallow);
-        return JSON.stringify([branches,head,existsSync(shallowPath)?readFileSync(shallowPath,"utf8"):""]);
+        return JSON.stringify([gitCollectionVersion,branches,head,existsSync(shallowPath)?readFileSync(shallowPath,"utf8"):""]);
       };
       const stamp=await refs();
       const old=this.store.db.prepare("SELECT identity,refs,commit_count FROM adit_local_git_checkpoints WHERE repository=?").get(repo.path) as {identity:string;refs:string;commit_count:number}|undefined;
       const known=new Set((this.store.db.prepare("SELECT sha FROM adit_local_commits WHERE repository=?").all(repo.path) as {sha:string}[]).map(row=>row.sha));
       if(old?.identity===ownEmail && old.refs===stamp && old.commit_count===known.size){repo.count=known.size;delete repo.error;return;}
       // Reachability is cheap metadata. Diff/body reads are restricted to missing own commits.
-      const identities=await git("log","--all","--no-merges","--format=%H%x00%ae");
+      const head=await collectionHead(git);
+      const identities=await git("log",...businessHistory,...(head?[head]:[]),"--no-merges","--format=%H%x00%ae","--");
+      const normalShas = JSON.stringify([...new Set(identities.split("\n").filter(Boolean).map(line=>line.slice(0,line.indexOf("\0"))))]);
       const reachable=new Set(identities.split("\n").filter(Boolean).filter(line=>line.slice(line.indexOf("\0")+1).trim().toLowerCase()===ownEmail).map(line=>line.slice(0,line.indexOf("\0"))));
       const added=[...reachable].filter(sha=>!known.has(sha));
       let stdout="",files="";
@@ -555,6 +576,15 @@ export class Collector {
       const saveFile=this.store.db.prepare("INSERT INTO adit_local_commit_files VALUES (?,?,?,?,?,?,?,?)");
       this.store.db.transaction(() => {
         for(const sha of known)if(!reachable.has(sha))this.store.db.prepare("DELETE FROM adit_local_commits WHERE repository=? AND sha=?").run(repo.path,sha);
+        // Upgrade old --all indexes atomically with the verified Git snapshot.
+        // Keep valid analysis, native sessions, sync receipts and original Git refs.
+        for (const suffix of ["commits", "writers", "alternatives", "turns"]) {
+          const table = `adit_attribution_${suffix}`;
+          if (this.store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table))
+            this.store.db.prepare(`DELETE FROM ${table} WHERE repository=? AND sha NOT IN (SELECT value FROM json_each(?))`).run(repo.path,normalShas);
+        }
+        if (this.store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='adit_attribution_failures'").get())
+          this.store.db.prepare(`DELETE FROM adit_attribution_failures WHERE repository=? AND sha NOT IN (SELECT value FROM json_each(?))`).run(repo.path,normalShas);
         const owned = new Set<string>();
         const indexed=Date.now(),fields=stdout.split("\0");
         for(let offset=0;offset+9<fields.length;offset+=10) {
@@ -600,7 +630,7 @@ export class Collector {
       this.retries.set(id,{attempt});
       const workspace=this.store.workspaces().find(workspace=>workspace.id===id);
       if(!workspace||!workspaceGitStatus(workspace.path).available||!workspace.repositories.length)return;
-      try{this.collect(id);}catch{}
+      try{this.collect(id);}catch{/* Settings or workspace availability may change before the retry. */}
     },attempt*5000);
     timer.unref();
     this.retries.set(id,{attempt,timer});
@@ -622,8 +652,9 @@ export class Collector {
     const delay = initial ? 1000 : config.interval * 60000;
     this.nextAt = new Date(Date.now() + delay).toISOString();
     this.timer = setTimeout(() => {
-      this.collectAll();
-      if(!this.draining)this.schedule();
+      try { this.collectAll(); }
+      catch (error) { console.error("Automatic collection could not start:", error); }
+      finally { if(!this.draining)this.schedule(); }
     }, delay);
   }
   async close(): Promise<void> {

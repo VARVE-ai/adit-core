@@ -1,8 +1,9 @@
 import { assertWorkspaceGit, assertSelectedRepositories, missingOriginRemote } from "@varveai/adit-core";
 import { randomUUID } from "node:crypto";
-import { LocalStore, LocalStateError, localLoginStartupEnabled, projectUploadRepositories } from "@varveai/adit-core";
+import { LocalStore, LocalStateError, localLoginStartupEnabled, projectUploadRepositories, redactSecrets } from "@varveai/adit-core";
 import { CloudClient, loadCredentials, collectDefaultBranch, collectRemoteBranchSnapshot, type UpgradeNotice, type ProjectDeletionPolicy, CloudApiError, workspaceForCloudTarget, saveTargetDeletionPolicy, targetDeletionPolicy } from "@varveai/adit-cloud";
 import { CloudProjection, createCloudSyncSchema, syncKey, type CloudBaseline, type CloudEvent, type CloudSession } from "./cloud-projection.js";
+import { collectionCheckpointRefs } from "./git-collection-scope.js";
 import type { Collector } from "./collector.js";
 import { getRemoteUrl, runGit } from "@varveai/adit-engine";
 import { CloudPendingService, type CloudPendingStatus } from "./cloud-pending-service.js";
@@ -33,6 +34,7 @@ export class LocalCloudSync {
   private restoreTasks=new Map<string,Promise<LocalCloudJob>>();
   private stopped=false;
   private updatePaused=false;
+  private scheduleFailure?:string;
   get busy() { return this.active.size > 0 || this.restoring.size > 0; }
   pauseForUpdate(paused:boolean) { this.updatePaused=paused; }
   private timer?:ReturnType<typeof setInterval>;
@@ -49,8 +51,16 @@ export class LocalCloudSync {
     }
   }
   statuses() {
-    const credentials=loadCredentials(this.store.directory);
-    return new Map(this.store.workspaces().map(w=>[w.id,this.status(w.id,credentials)]));
+    try {
+      const credentials=loadCredentials(this.store.directory);
+      return new Map(this.store.workspaces().map(w=>[w.id,this.status(w.id,credentials)]));
+    } catch (error) {
+      const message=redactSecrets(error instanceof Error?error.message:"Cloud sync status unavailable").slice(0,1000);
+      return new Map(this.store.workspaces().map(w=>[w.id,{
+        status:"failed" as const,error:message,nextAt:null,
+        pending:{state:"failed" as const,sessions:null,commits:null,error:message},
+      }]));
+    }
   }
   forget(id:string) {
     if(this.active.has(id)||this.restoring.has(id))throw new LocalStateError("Wait for this project's background tasks to finish before deleting it.",409);
@@ -66,7 +76,7 @@ export class LocalCloudSync {
     const target=credentials?{serverUrl:credentials.serverUrl,accountId:credentials.accountId??credentials.clientId}:null;
     const effective=target?workspaceForCloudTarget(this.store,workspace,target):workspace;
     const legacyUnverified=target && !targetDeletionPolicy(this.store,target,id) && (workspace.cloudDeletedAt || Object.values(workspace.repositoryPolicies??{}).some(p=>p.cloudDeletedAt));
-    return {...saved,pending:legacyUnverified?{state:"uninitialized" as const,sessions:null,commits:null}:this.pending(effective,credentials),nextAt:workspace.cloud.enabled&&workspace.cloud.mode==="automatic"&&localLoginStartupEnabled(this.store.directory)
+    return {...saved,...(this.scheduleFailure?{status:"failed" as const,error:this.scheduleFailure}:{}),pending:legacyUnverified?{state:"uninitialized" as const,sessions:null,commits:null}:this.pending(effective,credentials),nextAt:workspace.cloud.enabled&&workspace.cloud.mode==="automatic"&&localLoginStartupEnabled(this.store.directory)
       ?new Date((saved?Date.parse(saved.startedAt):Date.now())+workspace.cloud.interval*60_000).toISOString():null};
   }
   private pending(workspace:ReturnType<LocalStore["workspace"]>,credentials:ReturnType<typeof loadCredentials>):CloudPendingStatus {
@@ -191,7 +201,7 @@ export class LocalCloudSync {
           const checkpoint=this.store.db.prepare("SELECT refs,identity FROM adit_local_git_checkpoints WHERE repository=?").get(r.path) as {refs:string;identity:string}|undefined;
           const branches:{name:string;headSha:string}[]=[];
           if(checkpoint) {
-            const [refs]=JSON.parse(checkpoint.refs) as string[];
+            const refs=collectionCheckpointRefs(checkpoint.refs);
             for(const line of refs.split("\n")) {
               const match=/^refs\/heads\/(.+) ([a-f0-9]{40,64})$/.exec(line.trim());
               if(match)branches.push({name:match[1],headSha:match[2]});
@@ -323,16 +333,30 @@ export class LocalCloudSync {
     return this.start(id);
   }
   async wait(id:string) {await this.active.get(id);return this.jobs.get(id);}
+  private reportScheduleFailure(error: unknown) {
+    const message=redactSecrets(error instanceof Error?error.message:"Cloud sync scheduling failed").slice(0,1000);
+    // Logging remains available even when the local database cannot be read.
+    if(message!==this.scheduleFailure) console.error(`[Cloud sync scheduler] ${message}; retrying on the next tick`);
+    this.scheduleFailure=message;
+  }
   schedule() {
     if(this.timer)return;
     this.timer=setInterval(()=>{
+      try {
       if(this.stopped||this.updatePaused||process.env.ADIT_CLOUD_AUTO_SYNC==="false"||process.env.ADIT_CLOUD_ENABLED==="false"||!localLoginStartupEnabled(this.store.directory)||!loadCredentials(this.store.directory))return;
+      let failed=false;
       for(const w of this.store.workspaces())if(w.started&&w.cloud.enabled&&w.cloud.mode==="automatic"&&!this.active.has(w.id)) {
+        try {
         const status=this.status(w.id);
         if(status.status==="paused_deleted" || this.restoring.has(w.id))continue;
         if(!status.startedAt||Date.now()-Date.parse(status.startedAt)>=w.cloud.interval*60_000) {
-          try{this.start(w.id);}catch{/* Retry on the next scheduled tick after settings/account recovery. */}
+          this.start(w.id);
         }
+        } catch(error) { failed=true; this.reportScheduleFailure(error); }
+      }
+      if(!failed)this.scheduleFailure=undefined;
+      } catch(error) {
+        this.reportScheduleFailure(error);
       }
     },15000);this.timer.unref();
   }

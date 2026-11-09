@@ -6,6 +6,12 @@ export const messages = {
   "恢复云端项目并继续同步": "Restore Cloud project and resume sync",
   "正在恢复云端项目…": "Restoring Cloud project…",
   "恢复后不会自动重新挂载到团队": "Restoring does not automatically remount this project to teams.",
+  "系统启动项已被禁用，登录时无法自动启动。": "The system login entry is disabled. ADIT will not start automatically at sign-in.",
+  "无法确认系统启动项，请检查权限或修复启动项。": "Unable to verify login startup. Check permissions or repair the login entry.",
+  "系统启动项缺失，登录时无法自动启动。": "The system login entry is missing. ADIT will not start automatically at sign-in.",
+  "修复启动项": "Repair login startup",
+  "已分析 {0} / {1} 个提交": "Analyzed {0} / {1} commits",
+
   "自动更新": "Automatic updates",
   "自动更新到最新稳定版": "Automatically update to the latest stable release",
   "每 24 小时检查一次；等待采集、整理和同步结束后更新，仅重启 ADIT 后台，不重启电脑或打开浏览器。": "Checks every 24 hours and waits for collection, organization and sync to finish. Only the ADIT background service restarts; your computer is not restarted and no browser opens.",

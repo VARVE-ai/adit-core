@@ -27,6 +27,8 @@ import { commandOf } from "./submission-evidence.js";
 import { attributionNeeded, collectedCommits, rememberSubmissionRevision, savedRun, submissionRevision } from "./attribution-plan.js";
 import { callIdentities, readSubmissionCandidates, writeCalls } from "./attribution-input.js";
 import { AttributionEvidenceStore, type AttributionEvidence as Evidence } from "./attribution-evidence-store.js";
+import { resumableCommits, copyResumedCommits } from "./attribution-resume.js";
+import { parentMatchingLines } from "./attribution-parent-lines.js";
 const execute = promisify(execFile);
 export const ATTRIBUTION_VERSION = 5;
 const digest = (value: unknown) =>
@@ -156,6 +158,7 @@ function inputMetadata(store: LocalStore, workspace: LocalWorkspace) {
           SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]') FROM json_each(?)
         ) ORDER BY rowid`,
     ).all(scope) as Row[];
+    const evidenceRevision = digest([ATTRIBUTION_VERSION, workspace.path, workspace.providers, workspace.repositories, sessions, sources]);
     const fingerprint = digest([
       ATTRIBUTION_VERSION,
       workspace.path,
@@ -165,7 +168,7 @@ function inputMetadata(store: LocalStore, workspace: LocalWorkspace) {
       commits.map((commit) => [commit.repository, commit.sha, commit.committed_at, commit.authored_at]),
       sources,
     ]);
-    return { sessions, commits, sources, fingerprint, locations, scope };
+    return { sessions, commits, sources, fingerprint, evidenceRevision, locations, scope };
   })();
 }
 
@@ -216,7 +219,9 @@ async function git(repository: string, args: string[], signal?: AbortSignal) {
       windowsHide: true,
       encoding: "utf8",
       timeout: 60000,
-      maxBuffer: 64 * 1024 * 1024,
+      // Patch parsing is bounded as well as parent scanning. Oversized commits
+      // remain explicitly pending while other commits can finish and be reused.
+      maxBuffer: 8 * 1024 * 1024,
       signal,
     })
   ).stdout;
@@ -440,6 +445,8 @@ export async function analyzeAttribution(
   const snapshot = inputMetadata(store, w),
     identities = analysisIdentities(snapshot.sessions, callIdentities(store, snapshot.scope));
   const submissionInputRevision = submissionRevision(store, w);
+  const resume = options.force ? { commits: [], manifest: [] } : await resumableCommits(store, w.id, snapshot.evidenceRevision,
+    snapshot.commits.map(c => ({ repository: c.repository as string, sha: c.sha as string })), analyzed, new Set((options.recheck || []).map(c => key(c.repository, c.sha))));
   const targets = snapshot.commits.filter(
     (c) => !analyzed.has(key(c.repository, c.sha)),
   );
@@ -524,7 +531,7 @@ export async function analyzeAttribution(
     const match = matchSubmission(commit);
     return match.operation ? [{commit, ...match}] : [];
   }) : [];
-  if (!options.force && previous && !targets.length && !repairs.length) {
+  if (!options.force && previous && !targets.length && !repairs.length && !resume.commits.length) {
     rememberSubmissionRevision(store, w, submissionInputRevision);
     return {id: previous.id, cached: true};
   }
@@ -623,9 +630,7 @@ export async function analyzeAttribution(
   const backups = targets.length ? await backupEvidence(snapshot, w, add, relevantLocation, options.signal) : {missing: previous?.missing_backup_count || 0, manifest: []},
     fingerprint = digest([snapshot.fingerprint, backups.manifest]);
   const run = randomUUID();
-  db.prepare(
-    "DELETE FROM adit_attribution_runs WHERE workspace_id=? AND status='failed'",
-  ).run(w.id);
+
   db.prepare(
     "INSERT INTO adit_attribution_runs (id,workspace_id,algorithm_version,input_fingerprint,status,started_at,commit_count,missing_time_count,missing_backup_count) VALUES (?,?,?,?,?,?,?,?,?)",
   ).run(
@@ -635,13 +640,27 @@ export async function analyzeAttribution(
     fingerprint,
     "running",
     Date.now(),
-    targets.length + repairs.length,
+    targets.length + repairs.length + resume.commits.length,
     targets.length ? missingTime : previous?.missing_time_count || 0,
     backups.missing,
   );
   try {
-    let completed = 0;
+  db.transaction(() => {
+    const manifest = [...new Map([...resume.manifest, ...backups.manifest].map(item => [JSON.stringify(item), item])).values()];
+    db.prepare("INSERT INTO adit_attribution_resume VALUES (?,?,?)").run(run, snapshot.evidenceRevision, JSON.stringify(manifest));
+    copyResumedCommits(store, run, resume.commits);
+    db.prepare("UPDATE adit_attribution_runs SET completed_count=? WHERE id=?").run(resume.commits.length, run);
+    // The new run owns durable copies before obsolete partial snapshots are removed.
+    db.prepare("DELETE FROM adit_attribution_runs WHERE workspace_id=? AND status='failed' AND id<>?").run(w.id, run);
+  })();
+    let completed = resume.commits.length;
+    const failures: string[] = [];
     for (const commit of targets) {
+      try {
+      const retry = db.prepare("SELECT error,retry_at,input_revision FROM adit_attribution_failures WHERE workspace_id=? AND repository=? AND sha=?").get(w.id,commit.repository,commit.sha) as Row | undefined;
+      if (!options.force && !options.recheck?.length && retry && retry.input_revision === snapshot.evidenceRevision && retry.retry_at > Date.now()) {
+        failures.push(retry.error); continue;
+      }
       options.signal?.throwIfAborted();
       options.progress?.(commit.repository);
       const at = commit.committed_at ?? commit.authored_at;
@@ -680,31 +699,7 @@ export async function analyzeAttribution(
         const wanted = new Set(
           lines.filter((l) => !l.excluded).map((l) => l.text),
         );
-        let content = "";
-        try {
-          content = await git(
-            commit.repository,
-            [
-              "grep",
-              "--threads=1",
-              "--no-textconv",
-              "-I",
-              "-h",
-              "-e",
-              ".",
-              parents[0],
-              "--",
-              ...gitSourcePaths,
-            ],
-            options.signal,
-          );
-        } catch (error) {
-          if ((error as { code?: number }).code !== 1) throw error;
-        }
-        for (const raw of content.split("\n")) {
-          const line = normalizeLine(raw);
-          if (wanted.has(line)) oldLines.add(line);
-        }
+        for (const line of await parentMatchingLines(commit.repository, parents[0], gitSourcePaths, wanted, options.signal)) oldLines.add(line);
       }
 
       const exact = new Map<string, Evidence[]>(),
@@ -923,8 +918,22 @@ export async function analyzeAttribution(
         db.prepare(
           "UPDATE adit_attribution_runs SET completed_count=? WHERE id=?",
         ).run(++completed, run);
+        db.prepare("DELETE FROM adit_attribution_failures WHERE workspace_id=? AND repository=? AND sha=?").run(w.id,commit.repository,commit.sha);
       })();
+      } catch (error) {
+        if (options.signal?.aborted || String((error as {code?: string}).code || "").startsWith("SQLITE_")) throw error;
+        const code = (error as {code?: string | number}).code;
+        const reason = code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+          ? "Commit patch exceeds the 8 MiB analysis size limit; explicit review is required"
+          : code !== undefined ? `Git command failed (${code})` : error instanceof Error ? error.message.slice(0,300) : "Commit analysis failed";
+        const message = `${commit.sha.slice(0,12)}: ${reason}`;
+        failures.push(message);
+        const retryAt = reason.includes("analysis size limit") ? Number.MAX_SAFE_INTEGER : Date.now()+15*60_000;
+        db.prepare(`INSERT INTO adit_attribution_failures VALUES (?,?,?,?,?,?) ON CONFLICT(workspace_id,repository,sha)
+          DO UPDATE SET input_revision=excluded.input_revision,error=excluded.error,retry_at=excluded.retry_at`).run(w.id,commit.repository,commit.sha,snapshot.evidenceRevision,message,retryAt);
+      }
     }
+    if (failures.length) throw new Error(`${failures.length} commits pending analysis; completed results retained. ${failures[0]}`);
     // Never publish a mixed snapshot if collection/settings changed during the analysis.
     const currentWorkspace = store.workspace(w.id);
     if (

@@ -3,7 +3,7 @@ import {t} from "./i18n";
 
 export type RowProgress={completed:number;total:number|null;status:string;matched?:number};
 export function progressCount(progress:Pick<RowProgress,"completed"|"total">,unit:"sessions"|"commits") {
-  return t(unit==="sessions"?"{0} / {1} 个会话":"{0} / {1} 个提交",progress.completed,progress.total??"—");
+  return t(unit==="sessions"?"{0} / {1} 个会话":"已分析 {0} / {1} 个提交",progress.completed,progress.total??"—");
 }
 export function progressSum(rows:(RowProgress|undefined)[]) {
   return {completed:rows.reduce((n,row)=>n+(row?.completed||0),0),total:rows.some(row=>!row||row.total===null)?null:rows.reduce((n,row)=>n+row!.total!,0)};

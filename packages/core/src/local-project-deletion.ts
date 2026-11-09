@@ -91,7 +91,7 @@ export function deleteProjectData(db: Database.Database, workspace: LocalWorkspa
   }
   for (const path of plan.repositories) for (const table of ["adit_local_commit_files","adit_local_commit_parents","adit_local_commits","adit_local_git_checkpoints","adit_local_repositories"])
     remove(table,`${table==="adit_local_repositories"?"path":"repository"}=? COLLATE NOCASE`,path);
-  for (const table of ["adit_shares","adit_pr_descriptions","adit_pr_description_jobs","adit_attribution_runs","adit_history_secret_scan_runs","adit_achievement_evaluations","adit_achievement_progress","adit_achievement_unlocks","adit_achievement_evidence","adit_achievement_preferences","adit_achievement_export_items","adit_local_cloud_scopes"])
+  for (const table of ["adit_shares","adit_pr_descriptions","adit_pr_description_jobs","adit_attribution_runs","adit_attribution_failures","adit_history_secret_scan_runs","adit_achievement_evaluations","adit_achievement_progress","adit_achievement_unlocks","adit_achievement_evidence","adit_achievement_preferences","adit_achievement_export_items","adit_local_cloud_scopes"])
     remove(table,"workspace_id=?",workspace.id);
   for (const row of db.prepare("SELECT key,data FROM adit_local_settings").all() as {key:string;data:string}[]) {
     if ((row.key.startsWith("cloud-job:") && row.key.endsWith(`:${workspace.id}`)) ||

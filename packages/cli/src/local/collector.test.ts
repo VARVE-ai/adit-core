@@ -475,3 +475,85 @@ it("corrects saved missing-config failures without hiding real errors and retain
   expect(collector.repositoryInfo(workspace)).toContainEqual({ path: skipped, count: null, skipReason: "missing-git-email" });
   expect(collector.repositoryInfo(workspace)).toContainEqual({ path: join(root,"selected"), count: 3 });
 });
+
+
+it("collects valid child repositories from legacy selections containing a parent without origin", async () => {
+  const scan = vi.fn(async () => ({counts:{}, errors:[], scanned:0, updated:0}));
+  const f = retryFixture(scan);
+  const parent = f.workspace.path, child = join(parent, "child");
+  execFileSync("git", ["-C", parent, "remote", "remove", "origin"]);
+  execFileSync("git", ["init", child], {stdio:"pipe"});
+  const git = (...args:string[]) => execFileSync("git", ["-C", child, ...args], {stdio:"pipe"});
+  git("remote", "add", "origin", "https://example.invalid/child.git");
+  git("config", "user.email", "fixture@example.test");
+  git("config", "user.name", "Fixture");
+  git("-c", "core.hooksPath=NUL", "commit", "--allow-empty", "-m", "fixture");
+  const workspace = f.store.saveWorkspace({version:f.workspace.version, repositories:[parent,child]}, f.workspace.id);
+  f.store.markStarted(workspace.id);
+  // Both startup scheduling and later manual collection must accept old selections.
+  vi.useFakeTimers();
+  f.collector.schedule(true);
+  await vi.advanceTimersByTimeAsync(1000);
+  vi.useRealTimers();
+  await f.collector.waitFor(workspace.id);
+  const job = f.collector.jobs()[0];
+  expect(job).toMatchObject({status:"partial", repositories:[
+    {path:parent, count:null, error:expect.stringContaining("no git remote 'origin'")},
+    {path:child, count:1},
+  ]});
+  expect(f.store.workspace(workspace.id).repositories).toEqual([parent,child]);
+  f.collector.collect(workspace.id);
+  await f.collector.waitFor(workspace.id);
+  expect(scan).toHaveBeenCalledTimes(2);
+});
+
+it("isolates automatic collection entry failures and keeps the timer scheduled", async () => {
+  const f = retryFixture(async () => ({counts:{}, errors:[], scanned:0, updated:0}));
+  f.store.markStarted(f.workspace.id);
+  vi.spyOn(f.collector, "collect").mockImplementation(() => { throw new Error("Configuration changed"); });
+  expect(f.collector.collectAll()[0]).toMatchObject({status:"interrupted", error:"Configuration changed"});
+  expect(f.collector.jobs()[0]).toMatchObject({status:"interrupted", error:"Configuration changed"});
+  vi.useFakeTimers();
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.spyOn(f.collector, "collectAll").mockImplementationOnce(() => {throw new Error("Transient failure");});
+  f.collector.schedule(true);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(log).toHaveBeenCalled();
+  expect(f.collector.nextAt).not.toBeNull();
+  log.mockRestore();
+});
+
+it("corrects legacy internal-ref indexes once while preserving business analysis and incremental checkpoints", async () => {
+  const f=retryFixture(async()=>({counts:{},errors:[],scanned:0,updated:0}));
+  const repo=f.workspace.path;
+  const git=(...args:string[])=>execFileSync("git",["-C",repo,...args],{encoding:"utf8",stdio:["pipe","pipe","pipe"]}).trim();
+  git("config","user.name","Fixture");
+  writeFileSync(join(repo,"code.ts"),"export const business = true;\n"); git("add","code.ts"); git("-c","core.hooksPath=NUL","commit","-m","business");
+  const business=git("rev-parse","HEAD");
+  // A real commit object under an internal ref, with the same author as business commits.
+  const snapshot=git("commit-tree","HEAD^{tree}","-p",business,"-m","tool checkpoint");
+  git("update-ref","refs/adit/checkpoints/test",snapshot);
+  git("update-ref","refs/other-tool/index",snapshot);
+  git("update-ref","refs/adit/checkpoints/shared-business",business);
+  const collect=async()=>{f.collector.collect(f.workspace.id); await f.collector.waitFor(f.workspace.id);};
+  await collect();
+  expect((await repositories(repo))[0].count).toBe(1);
+  await analyzeAttribution(f.store,f.workspace);
+  const saved=f.store.db.prepare("SELECT * FROM adit_attribution_commits WHERE sha=?").get(business);
+  const index=f.store.db.prepare("SELECT indexed_at FROM adit_local_commits WHERE sha=?").get(business);
+  const checkpoint=f.store.db.prepare("SELECT refs FROM adit_local_git_checkpoints WHERE repository=?").get(repo);
+  const run=(saved as {run_id:string}).run_id;
+  f.store.db.prepare("INSERT INTO adit_local_commits SELECT repository,?,tree_sha,authored_at,author_name,author_email,committed_at,committer_name,committer_email,subject,body,indexed_at FROM adit_local_commits WHERE sha=?").run(snapshot,business);
+  f.store.db.prepare("INSERT INTO adit_attribution_commits SELECT run_id,repository,?,submit_provider,submit_session_id,submit_turn_id,submit_tool_call_id,match_method,matched_sha,eligible_lines,excluded_lines,certain_lines,likely_lines,possible_lines,moved_lines,unknown_lines FROM adit_attribution_commits WHERE run_id=? AND sha=?").run(snapshot,run,business);
+  f.store.db.prepare("UPDATE adit_local_git_checkpoints SET refs='legacy --all',commit_count=2 WHERE repository=?").run(repo);
+  await collect();
+  expect(f.store.db.prepare("SELECT sha FROM adit_local_commits").all()).toEqual([{sha:business}]);
+  expect(f.store.db.prepare("SELECT * FROM adit_attribution_commits").all()).toEqual([saved]);
+  expect(f.store.db.prepare("SELECT indexed_at FROM adit_local_commits WHERE sha=?").get(business)).toEqual(index);
+  expect(git("rev-parse","refs/adit/checkpoints/test")).toBe(snapshot);
+  git("update-ref","refs/other-tool/another",snapshot);
+  await collect();
+  expect(f.store.db.prepare("SELECT refs FROM adit_local_git_checkpoints WHERE repository=?").get(repo)).toEqual(checkpoint);
+  expect(f.store.db.prepare("SELECT * FROM adit_attribution_commits").all()).toEqual([saved]);
+  expect(f.store.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+});

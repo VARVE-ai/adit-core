@@ -163,6 +163,7 @@ export class CodexAppServerClient extends EventEmitter {
     if (!this.child?.stdin || !this.child.stdin.writable) {
       throw new Error("Codex app-server is not running");
     }
+    const requestStarted = performance.now();
     const id = this.nextId++;
     const payload = JSON.stringify({ id, method, params }) + "\n";
     const promise = new Promise<unknown>((resolve, reject) => {
@@ -173,7 +174,11 @@ export class CodexAppServerClient extends EventEmitter {
       this.pending.set(id, { resolve, reject, timer });
     });
     this.child.stdin.write(payload);
-    return promise;
+    try { return await promise; }
+    finally {
+      if (process.env.ADIT_DEBUG === "1")
+        console.error(`[adit codex] RPC timing: method=${method} elapsedMs=${Math.round(performance.now() - requestStarted)}`);
+    }
   }
 
   respond(id: string | number, result: unknown): void {

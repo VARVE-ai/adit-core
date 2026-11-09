@@ -109,7 +109,7 @@ type Schedule = {
   version: number;
   nextAt?: string;
 };
-type LoginStartup = { enabled: boolean; supported: boolean; version: number; error?: string };
+type LoginStartup = { enabled: boolean; requestedEnabled?: boolean; registrationState?: "registered" | "missing" | "disabled" | "unknown"; supported: boolean; version: number; error?: string };
 type AutomaticUpdate = {
   enabled: boolean; supported: boolean; version: number;
   reason?: "source" | "unknown" | "disabled" | "permissions" | "detecting";
@@ -2442,7 +2442,7 @@ function Runtime({ state, act }: { state: State; act: Act }) {
         <h3>{t("启动设置")}</h3>
         <div className="field">
           <label className="startup-option">
-            <input type="checkbox" checked={startup.enabled} disabled={startupBusy || !startup.supported}
+            <input type="checkbox" checked={startup.requestedEnabled ?? startup.enabled} disabled={startupBusy || !startup.supported}
               onChange={event => void changeStartup(event.target.checked)} />
             <span>{t("登录电脑后自动启动")}</span>
           </label>
@@ -2450,6 +2450,10 @@ function Runtime({ state, act }: { state: State; act: Act }) {
         <p className="repo-hint">{startup.supported
           ? t("此选项对本机所有目录立即生效。勾选后才可自动同步；取消勾选会暂停所有目录的自动同步，仍可手动同步。")
           : t("当前系统不支持登录后自动启动，可使用手动同步。")}</p>
+        {startup.requestedEnabled && !startup.enabled && <div role="alert">
+          <p className="error">{t(startup.registrationState === "disabled" ? "系统启动项已被禁用，登录时无法自动启动。" : startup.registrationState === "unknown" ? "无法确认系统启动项，请检查权限或修复启动项。" : "系统启动项缺失，登录时无法自动启动。")}</p>
+          <button disabled={startupBusy} onClick={() => void changeStartup(true)}>{t("修复启动项")}</button>
+        </div>}
         {startup.error && <p role="alert" className="error">{systemMessage(startup.error)}</p>}
       </section>
       <section>
