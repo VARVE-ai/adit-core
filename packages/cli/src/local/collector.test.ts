@@ -522,3 +522,38 @@ it("isolates automatic collection entry failures and keeps the timer scheduled",
   expect(f.collector.nextAt).not.toBeNull();
   log.mockRestore();
 });
+
+it("corrects legacy internal-ref indexes once while preserving business analysis and incremental checkpoints", async () => {
+  const f=retryFixture(async()=>({counts:{},errors:[],scanned:0,updated:0}));
+  const repo=f.workspace.path;
+  const git=(...args:string[])=>execFileSync("git",["-C",repo,...args],{encoding:"utf8",stdio:["pipe","pipe","pipe"]}).trim();
+  git("config","user.name","Fixture");
+  writeFileSync(join(repo,"code.ts"),"export const business = true;\n"); git("add","code.ts"); git("-c","core.hooksPath=NUL","commit","-m","business");
+  const business=git("rev-parse","HEAD");
+  // A real commit object under an internal ref, with the same author as business commits.
+  const snapshot=git("commit-tree","HEAD^{tree}","-p",business,"-m","tool checkpoint");
+  git("update-ref","refs/adit/checkpoints/test",snapshot);
+  git("update-ref","refs/other-tool/index",snapshot);
+  git("update-ref","refs/adit/checkpoints/shared-business",business);
+  const collect=async()=>{f.collector.collect(f.workspace.id); await f.collector.waitFor(f.workspace.id);};
+  await collect();
+  expect((await repositories(repo))[0].count).toBe(1);
+  await analyzeAttribution(f.store,f.workspace);
+  const saved=f.store.db.prepare("SELECT * FROM adit_attribution_commits WHERE sha=?").get(business);
+  const index=f.store.db.prepare("SELECT indexed_at FROM adit_local_commits WHERE sha=?").get(business);
+  const checkpoint=f.store.db.prepare("SELECT refs FROM adit_local_git_checkpoints WHERE repository=?").get(repo);
+  const run=(saved as {run_id:string}).run_id;
+  f.store.db.prepare("INSERT INTO adit_local_commits SELECT repository,?,tree_sha,authored_at,author_name,author_email,committed_at,committer_name,committer_email,subject,body,indexed_at FROM adit_local_commits WHERE sha=?").run(snapshot,business);
+  f.store.db.prepare("INSERT INTO adit_attribution_commits SELECT run_id,repository,?,submit_provider,submit_session_id,submit_turn_id,submit_tool_call_id,match_method,matched_sha,eligible_lines,excluded_lines,certain_lines,likely_lines,possible_lines,moved_lines,unknown_lines FROM adit_attribution_commits WHERE run_id=? AND sha=?").run(snapshot,run,business);
+  f.store.db.prepare("UPDATE adit_local_git_checkpoints SET refs='legacy --all',commit_count=2 WHERE repository=?").run(repo);
+  await collect();
+  expect(f.store.db.prepare("SELECT sha FROM adit_local_commits").all()).toEqual([{sha:business}]);
+  expect(f.store.db.prepare("SELECT * FROM adit_attribution_commits").all()).toEqual([saved]);
+  expect(f.store.db.prepare("SELECT indexed_at FROM adit_local_commits WHERE sha=?").get(business)).toEqual(index);
+  expect(git("rev-parse","refs/adit/checkpoints/test")).toBe(snapshot);
+  git("update-ref","refs/other-tool/another",snapshot);
+  await collect();
+  expect(f.store.db.prepare("SELECT refs FROM adit_local_git_checkpoints WHERE repository=?").get(repo)).toEqual(checkpoint);
+  expect(f.store.db.prepare("SELECT * FROM adit_attribution_commits").all()).toEqual([saved]);
+  expect(f.store.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+});

@@ -12,6 +12,7 @@ import { homedir } from "node:os";
 import { join, basename, resolve } from "node:path";
 import { generateProjectId, readProjectManifest, readWorkspaceManifest, workspaceManifestRelativePath } from "./config/project.js";
 import { assertProjectIdle, createProjectRegistry, pathKey, relocatedRepositories, relocateProjectHistory, saveProjectRepositories } from "./local-projects.js";
+import { loginTaskPrefix, windowsLoginTaskState } from "./login-task.js";
 
 export interface LocalWorkspace {
   id: string;
@@ -58,7 +59,10 @@ export function localLoginStartupEnabled(directory = localDataDir()): boolean {
     db = new Database(path, { readonly: true, fileMustExist: true, timeout: 1000 });
     const row = db.prepare("SELECT data FROM adit_local_settings WHERE key='login-startup'").get() as { data: string } | undefined;
     const settings = row ? JSON.parse(row.data) : null;
-    return settings?.enabled === true && typeof settings.registration === "string" && existsSync(settings.registration);
+    return settings?.enabled === true && typeof settings.registration === "string" &&
+      (settings.registration.startsWith(loginTaskPrefix)
+        ? windowsLoginTaskState(settings.registration.slice(loginTaskPrefix.length)) === "registered"
+        : existsSync(settings.registration));
   } catch { return false; }
   finally { db?.close(); }
 }

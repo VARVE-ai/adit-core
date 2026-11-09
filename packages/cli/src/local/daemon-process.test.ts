@@ -40,3 +40,25 @@ it("includes macOS boot time and process birth time and rejects MacinTalk legacy
     vi.mocked(execFileSync).mockReset();
   }
 });
+
+for (const scenario of ["exited", "reused", "same", "unknown", "legacy-unreadable"] as const) {
+  it(`verifies Windows ownership after EPERM: ${scenario}`, () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    const probe = vi.spyOn(process, "kill").mockImplementation(() => { throw Object.assign(new Error("kill EPERM"), { code: "EPERM" }); });
+    vi.mocked(execFileSync).mockImplementation((() => {
+      if (scenario === "unknown") throw new Error("Access denied");
+      if (scenario === "exited") return "";
+      return JSON.stringify({ identity: scenario === "reused" ? "another-process" : "original", command: null });
+    }) as typeof execFileSync);
+    try {
+      const owner = { pid: 7304, ...(scenario === "legacy-unreadable" ? {} : { processIdentity: "original" }) };
+      if (["unknown", "legacy-unreadable"].includes(scenario)) expect(() => ownsDaemonProcess(owner)).toThrow(/Cannot verify/);
+      else expect(ownsDaemonProcess(owner)).toBe(scenario === "same");
+    } finally {
+      probe.mockRestore();
+      Object.defineProperty(process, "platform", platform);
+      vi.mocked(execFileSync).mockReset();
+    }
+  });
+}

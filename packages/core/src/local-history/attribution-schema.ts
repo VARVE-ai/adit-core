@@ -26,6 +26,15 @@ export function createAttributionSchema(db: Database.Database): void {
       missing_backup_count INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS adit_attribution_runs_workspace ON adit_attribution_runs(workspace_id,started_at DESC);
+    CREATE TABLE IF NOT EXISTS adit_attribution_resume (
+      run_id TEXT PRIMARY KEY REFERENCES adit_attribution_runs(id) ON DELETE CASCADE,
+      input_revision TEXT NOT NULL, backup_manifest TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS adit_attribution_failures (
+      workspace_id TEXT NOT NULL, repository TEXT NOT NULL, sha TEXT NOT NULL,
+      input_revision TEXT NOT NULL, error TEXT NOT NULL, retry_at INTEGER NOT NULL,
+      PRIMARY KEY(workspace_id,repository,sha)
+    );
     CREATE TABLE IF NOT EXISTS adit_attribution_commits (
       run_id TEXT NOT NULL REFERENCES adit_attribution_runs(id) ON DELETE CASCADE,
       repository TEXT NOT NULL, sha TEXT NOT NULL,

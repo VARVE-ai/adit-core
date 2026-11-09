@@ -161,7 +161,7 @@ const overview = {
 };
 let empty = false;
 let accountConnected = true;
-let startup = { enabled: false, supported: true, version: 0 };
+let startup: {enabled:boolean;supported:boolean;version:number;requestedEnabled?:boolean;registrationState?:string} = { enabled: false, supported: true, version: 0 };
 let autoUpdate: { enabled: boolean; supported: boolean; version: number; phase: string; reason?: string } = { enabled: true, supported: true, version: 0, phase: "idle" };
 let savedWorkspace: typeof workspace & { cloudSync?: CloudSyncSummary; repositoryInfo?: {path:string;count:number|null;skipReason?:"missing-git-email"}[] } = workspace;
 let jobs: { id: string; workspaceId: string; kind: string; status: string; phase?:string; repositories?:{path:string;count:number|null}[]; providers?:Record<string,number>;pending?:Record<string,number>;sourceProgress?:Record<string,{completed:number;total:number|null;status:string}>;repositoryProgress?:Record<string,{completed:number;total:number|null;status:string;matched:number}> }[] = [];
@@ -197,7 +197,7 @@ const respond = (path: string, input?: any): unknown => {
   }
   if (path === "/startup") {
     if (startupSaveFails) throw new Error("Login startup registration failed");
-    startup = { ...startup, enabled: input.enabled, version: startup.version + 1 };
+    startup = { ...startup, enabled: input.enabled, requestedEnabled: input.enabled, registrationState: input.enabled ? "registered" : "missing", version: startup.version + 1 };
     if (!startup.enabled) savedWorkspace = { ...savedWorkspace, version: savedWorkspace.version + 1, cloud: { ...savedWorkspace.cloud, mode: "manual" } };
     return startup;
   }
@@ -739,6 +739,17 @@ describe("language switching across the local workbench", () => {
     await toggle();
     expect(text(root)).toContain("启动设置");
     expect(text(root)).toContain("登录电脑后自动启动");
+  });
+  it("keeps missing startup consent checked and repairs the OS entry explicitly", async () => {
+    startup = { enabled: false, requestedEnabled: true, registrationState: "missing", supported: true, version: 1 };
+    const root = await render("/settings/cli");
+    const checkbox = () => root.findAllByType("label").find(n => text(n).trim() === "Start automatically when you sign in")!.findByType("input");
+    expect(checkbox().props.checked).toBe(true);
+    expect(text(root)).toContain("The system login entry is missing");
+    const repair = root.findAllByType("button").find(n => text(n) === "Repair login startup")!;
+    await act(async()=>{ await repair.props.onClick(); });
+    expect(startup.enabled).toBe(true);
+    expect(text(root)).not.toContain("The system login entry is missing");
   });
   it("allows automatic updates to be disabled independently of login startup and sync", async () => {
     startup = { enabled: true, supported: true, version: 1 };
