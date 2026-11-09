@@ -165,7 +165,9 @@ it("authenticates achievement reads and validates workspace-scoped preferences",
 });
 it("enables startup by default and gates automatic sync on the current global setting, including API callers", async () => {
   const automatic = { enabled: true, mode: "automatic", interval: 5 };
-  expect((await (await api("/state")).json() as any).startup).toEqual({ enabled: true, supported: true, version: 1 });
+  expect((await (await api("/state")).json() as any).startup).toEqual({
+    enabled: true, requestedEnabled: true, registrationState: "registered", supported: true, version: 1,
+  });
   expect((await api("/startup", "PATCH", { enabled: false, version: 1 })).status).toBe(200);
   expect((await fetch(app.origin + "/api/local/startup", {
     method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true, version: 0 }),
@@ -180,8 +182,10 @@ it("enables startup by default and gates automatic sync on the current global se
   const saved = app.store.workspace(workspace.id);
   expect(saved.cloud.mode).toBe("manual");
   expect((await api(`/workspaces/${workspace.id}`, "PATCH", { version: saved.version, cloud: automatic })).status).toBe(409);
-  const state = await (await api("/state")).json() as { startup: { enabled: boolean } };
-  expect(state.startup.enabled).toBe(false);
+  const state = await (await api("/state")).json() as { startup: unknown };
+  expect(state.startup).toEqual({
+    enabled: false, requestedEnabled: false, registrationState: "missing", supported: true, version: 4,
+  });
 });
 it("lists available Windows drives and opens a drive letter at its root", async () => {
   const response = await api("/directories/list", "POST", { path: root });
