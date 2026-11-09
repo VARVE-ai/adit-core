@@ -1,7 +1,13 @@
 import { spawnSync } from "node:child_process";
 
 export type ProtectedKey = { scheme: string; value: string };
-function run(command: string, args: string[], input = ""): string {
+function storageFailure(command: string, result: { error?: NodeJS.ErrnoException; status: number | null; signal?: string | null }, operation = "unlock-key"): Error {
+  const rawCode = result.error?.code;
+  const code = rawCode && /^[A-Z_0-9]+$/.test(rawCode) ? rawCode : result.signal ? "INTERRUPTED" : result.status !== 0 ? "VAULT_COMMAND_FAILED" : "EMPTY_RESULT";
+  // Never include child output, input, or raw spawn errors: they may contain keys.
+  return Object.assign(new Error(`Unable to access secure Cloud credential storage (${process.platform}, ${operation}, ${command}, ${code}${typeof result.status === "number" ? `, exit ${result.status}` : ""}). Check the current OS user and agent sandbox permissions; no new login is required to diagnose this error.`), { code });
+}
+function run(command: string, args: string[], input = "", operation = "unlock-key"): string {
   const result = spawnSync(command, args, {
     input,
     encoding: "utf8",
@@ -10,7 +16,7 @@ function run(command: string, args: string[], input = ""): string {
     maxBuffer: 65536,
   });
   if (result.error || result.status !== 0 || !result.stdout.trim())
-    throw new Error("Unable to access secure Cloud credential storage");
+    throw storageFailure(command, result, operation);
   return result.stdout.trim();
 }
 
@@ -25,6 +31,7 @@ export function protectCredentialKey(id: string, key: Buffer): ProtectedKey {
         "powershell.exe",
         ["-NoProfile", "-NonInteractive", "-Command", script],
         key.toString("base64"),
+        "protect-key",
       ),
     };
   }
@@ -38,7 +45,7 @@ export function protectCredentialKey(id: string, key: Buffer): ProtectedKey {
       timeout: 15000,
     });
     if (result.error || result.status !== 0)
-      throw new Error("Unable to access secure Cloud credential storage");
+      throw storageFailure("security", result, "store-key");
   } else if (process.platform === "linux") {
     const result = spawnSync(
       "secret-tool",
@@ -53,7 +60,7 @@ export function protectCredentialKey(id: string, key: Buffer): ProtectedKey {
       { input: value, encoding: "utf8", windowsHide: true, timeout: 15000 },
     );
     if (result.error || result.status !== 0)
-      throw new Error("Unable to access secure Cloud credential storage");
+      throw storageFailure("secret-tool", result, "store-key");
   } else
     throw new Error(
       "Secure Cloud credential storage is unavailable on this platform",

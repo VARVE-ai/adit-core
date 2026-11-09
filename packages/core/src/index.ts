@@ -140,6 +140,7 @@ export {
 
 export { recordAgentRuntime, readAgentRuntimeVersions } from "./config/runtime-agents.js";
 export * from "./local-state.js";
+export * from "./login-task.js";
 export * from "./local-projects.js";
 export * from "./project-resolution.js";
 export * from "./local-registration.js";

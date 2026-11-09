@@ -1270,3 +1270,48 @@ it.each(["codex", "claude", "deepseek-harness"].flatMap(provider => [false, true
     expect(store.db.pragma("foreign_key_check")).toEqual([]);
   },
 );
+
+it("resumes complete commits from a failed first batch and continues past a failing commit", async () => {
+  const {git,sha,workspace,now}=fixture();
+  writeFileSync(join(root,"later.ts"),"export const laterBusinessCommit = true;\n");
+  git(["add","later.ts"]);git(["-c","core.hooksPath=NUL","commit","-m","later"]);
+  const later=git(["rev-parse","HEAD"]).trim(),bad="e".repeat(40);
+  const insert=store.db.prepare("INSERT INTO adit_local_commits SELECT repository,?,tree_sha,?,author_name,author_email,?,committer_name,committer_email,subject,body,indexed_at FROM adit_local_commits WHERE sha=?");
+  insert.run(bad,now-1000,now-1000,sha);insert.run(later,now+1000,now+1000,sha);
+  await expect(analyzeAttribution(store,workspace)).rejects.toThrow(/1 commits pending analysis/);
+  const first=store.db.prepare("SELECT sha,eligible_lines FROM adit_attribution_commits ORDER BY sha").all();
+  expect(first).toHaveLength(2);
+  expect(store.db.prepare("SELECT status,completed_count FROM adit_attribution_runs").get()).toEqual({status:"failed",completed_count:2});
+  const progress=vi.fn();
+  await expect(analyzeAttribution(store,workspace,{progress})).rejects.toThrow(/pending analysis/);
+  expect(progress).not.toHaveBeenCalled(); // Both completed commits and the backoff are reused.
+  store.db.prepare("DELETE FROM adit_local_commits WHERE sha=?").run(bad);
+  const result=await analyzeAttribution(store,workspace,{progress});
+  expect(result.cached).toBe(false);
+  expect(progress).not.toHaveBeenCalled();
+  expect(store.db.prepare("SELECT sha,eligible_lines FROM adit_attribution_commits ORDER BY sha").all()).toEqual(first);
+  expect(store.db.prepare("SELECT status,completed_count FROM adit_attribution_runs").get()).toEqual({status:"done",completed_count:2});
+  expect(store.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+});
+
+it("invalidates partial caches when native evidence changes", async () => {
+  const {sha,workspace,now,history}=fixture();
+  const bad="d".repeat(40);
+  store.db.prepare("INSERT INTO adit_local_commits SELECT repository,?,tree_sha,?,author_name,author_email,?,committer_name,committer_email,subject,body,indexed_at FROM adit_local_commits WHERE sha=?").run(bad,now+1,now+1,sha);
+  await expect(analyzeAttribution(store,workspace)).rejects.toThrow();
+  history.write({provider:"claude",id:"late-evidence",cwd:root,messages:[{key:"write",role:"assistant",timestamp:new Date(now-1000).toISOString(),content:[{type:"tool_use",id:"late-write",name:"Write",input:{file_path:"code.ts",content:"export const originalValue = 123;"}}],raw:{}}]});
+  store.db.prepare("DELETE FROM adit_local_commits WHERE sha=?").run(bad);
+  const progress=vi.fn();await analyzeAttribution(store,workspace,{progress});
+  expect(progress).toHaveBeenCalledOnce();
+  expect((await queryCommitSources(store,workspace,root,sha)).sources[0]).toMatchObject({sessionId:"late-evidence",certain:1});
+});
+
+it("keeps oversized patches explicitly pending without automatically reading them again", async () => {
+  const {workspace}=fixture("x".repeat(9*1024*1024));
+  await expect(analyzeAttribution(store,workspace)).rejects.toThrow(/8 MiB analysis size limit/);
+  expect(store.db.prepare("SELECT retry_at FROM adit_attribution_failures").get()).toEqual({retry_at:Number.MAX_SAFE_INTEGER});
+  const progress=vi.fn();
+  await expect(analyzeAttribution(store,workspace,{progress})).rejects.toThrow(/pending analysis/);
+  expect(progress).not.toHaveBeenCalled();
+  expect(store.db.prepare("SELECT count(*) n FROM adit_attribution_commits").get()).toEqual({n:0});
+});

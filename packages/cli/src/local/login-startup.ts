@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "no
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { LocalStore, LocalStateError } from "@varveai/adit-core";
+import { LocalStore, LocalStateError, loginTaskPrefix, windowsLoginTaskState, type LoginTaskState } from "@varveai/adit-core";
 
 const exec = promisify(execFile);
 const quotePS = (value: string) => `'${value.replaceAll("'", "''")}'`;
@@ -24,6 +24,8 @@ export interface StartupRegistration {
   supported: boolean;
   path: string;
   installed(): boolean;
+  state?(): LoginTaskState;
+  migrateLegacy?(): Promise<boolean>;
   install(): Promise<void>;
   remove(): Promise<void>;
 }
@@ -33,6 +35,7 @@ export class UserLoginRegistration implements StartupRegistration {
   readonly path: string;
   readonly supported: boolean;
   private readonly launcher: string;
+  private readonly legacyPath: string;
   private readonly label: string;
   constructor(
     private readonly directory: string,
@@ -50,13 +53,33 @@ export class UserLoginRegistration implements StartupRegistration {
     this.supported = ["win32", "darwin", "linux"].includes(platform);
     this.label = `ai.varve.adit.${createHash("sha256").update(resolve(directory)).digest("hex").slice(0, 12)}`;
     this.launcher = join(directory, "startup", "start.cjs");
+    this.legacyPath = join(options.appData ?? process.env.APPDATA ?? join(home, "AppData", "Roaming"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup", `${this.label}.lnk`);
     this.path = platform === "win32"
-      ? join(options.appData ?? process.env.APPDATA ?? join(home, "AppData", "Roaming"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup", `${this.label}.lnk`)
+      ? loginTaskPrefix + this.label
       : platform === "darwin"
         ? join(home, "Library", "LaunchAgents", `${this.label}.plist`)
         : join(options.configHome ?? process.env.XDG_CONFIG_HOME ?? join(home, ".config"), "autostart", `${this.label}.desktop`);
   }
-  installed(): boolean { return this.supported && existsSync(this.path); }
+  state(): LoginTaskState {
+    return this.path.startsWith(loginTaskPrefix) ? windowsLoginTaskState(this.label)
+      : existsSync(this.path) ? "registered" : "missing";
+  }
+  installed(): boolean { return this.supported && this.state() === "registered"; }
+  async migrateLegacy(): Promise<boolean> {
+    if (!this.path.startsWith(loginTaskPrefix)) return false;
+    const state = this.state();
+    if (state === "registered") {
+      if (existsSync(this.legacyPath)) unlinkSync(this.legacyPath);
+      return true;
+    }
+    if (!existsSync(this.legacyPath) || state !== "missing") return false;
+    // Respect a user/security product disabling the legacy Startup entry.
+    const script = `$ErrorActionPreference='Stop'; $p='HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\StartupFolder'; $v=if (Test-Path -LiteralPath $p -ErrorAction Stop) { Get-ItemProperty -LiteralPath $p -ErrorAction Stop } else { $null }; $b=$v.${quotePS(this.label + ".lnk")}; if ($b -and $b[0] -notin @(2,6)) { 'disabled' } else { 'enabled' }`;
+    const { stdout } = await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, timeout: 5000 });
+    if (stdout.trim() !== "enabled") return false;
+    await this.install();
+    return true;
+  }
   async install(): Promise<void> {
     if (!this.supported) throw new LocalStateError("Login startup is not supported on this platform");
     // The original CLI shim path survives npm upgrades (unlike a resolved pnpm store path).
@@ -66,32 +89,39 @@ export class UserLoginRegistration implements StartupRegistration {
     // No credentials or caller environment are persisted. Login starts only the daemon.
     writeAtomic(this.launcher, [
       'const { spawnSync } = require("node:child_process");',
+      'const { openSync, closeSync, appendFileSync } = require("node:fs");',
+      `const logPath = ${JSON.stringify(join(this.directory, "startup", "startup.log"))};`,
+      'const log = openSync(logPath, "a");',
       `process.env.ADIT_LOCAL_DATA_DIR = ${JSON.stringify(resolve(this.directory))};`,
       `process.env.ADIT_CLI_ENTRY = ${JSON.stringify(entry)};`,
       ...(process.env.ADIT_DISABLE_AUTO_UPDATE === "1" ? ['process.env.ADIT_DISABLE_AUTO_UPDATE = "1";'] : []),
-      `const result = spawnSync(${JSON.stringify(node)}, [${JSON.stringify(entry)}, "daemon", "start", "--on-login"], { env: process.env, windowsHide: true, stdio: "ignore" });`,
+      `const result = spawnSync(${JSON.stringify(node)}, [${JSON.stringify(entry)}, "daemon", "start", "--on-login"], { env: process.env, windowsHide: true, stdio: ["ignore", log, log] });`,
+      'closeSync(log);',
+      'if (result.error || result.status !== 0) appendFileSync(logPath, `${new Date().toISOString()} Login startup failed: ${result.error?.code || result.status}\\n`);',
       "process.exitCode = result.error ? 1 : result.status ?? 1;",
       "",
     ].join("\n"));
-    mkdirSync(dirname(this.path), { recursive: true });
+    if (!this.path.startsWith(loginTaskPrefix)) mkdirSync(dirname(this.path), { recursive: true });
     const platform = this.options.platform ?? process.platform;
     if (platform === "win32") {
-      // A shortcut runs a hidden PowerShell launcher; the child Node process also has no console.
-      const ps = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-      const launch = `Start-Process -FilePath ${quotePS(node)} -ArgumentList ${quotePS('"' + this.launcher + '"')} -WindowStyle Hidden`;
-      const args = `-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ${Buffer.from(launch, "utf16le").toString("base64")}`;
-      const temp = this.path.replace(/\.lnk$/, ".tmp.lnk");
+      // PowerShell is used only to register the OS task, never as its launch action.
       const script = [
-        "$ErrorActionPreference = 'Stop'",
-        `$shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut(${quotePS(temp)})`,
-        `$shortcut.TargetPath = ${quotePS(ps)}`,
-        `$shortcut.Arguments = ${quotePS(args)}`,
-        "$shortcut.WindowStyle = 7",
-        "$shortcut.Description = 'ADIT background service'",
-        "$shortcut.Save()",
+        "$ErrorActionPreference='Stop'",
+        "$s=New-Object -ComObject Schedule.Service; $s.Connect()",
+        "$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+        "$t=$s.NewTask(0); $t.RegistrationInfo.Description='ADIT background service'",
+        "$t.Principal.UserId=$sid; $t.Principal.LogonType=3; $t.Principal.RunLevel=0",
+        "$t.Settings.Enabled=$true; $t.Settings.Hidden=$true; $t.Settings.DisallowStartIfOnBatteries=$false; $t.Settings.StopIfGoingOnBatteries=$false; $t.Settings.ExecutionTimeLimit='PT2M'",
+        "$trigger=$t.Triggers.Create(9); $trigger.UserId=$sid; $trigger.Enabled=$true",
+        "$action=$t.Actions.Create(0)",
+        `$action.Path=${quotePS(node)}`,
+        `$action.Arguments=${quotePS('"' + this.launcher + '"')}`,
+        `$action.WorkingDirectory=${quotePS(resolve(this.directory))}`,
+        `$null=$s.GetFolder('\\').RegisterTaskDefinition(${quotePS(this.label)},$t,6,$sid,$null,3)`,
       ].join("\n");
-      await exec(ps, ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { windowsHide: true, timeout: 15000 });
-      renameSync(temp, this.path);
+      await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, timeout: 15000 });
+      if (windowsLoginTaskState(this.label, true) !== "registered") throw new LocalStateError("Login startup registration failed");
+      if (existsSync(this.legacyPath)) unlinkSync(this.legacyPath);
     } else if (platform === "darwin") {
       writeAtomic(this.path, `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>${this.label}</string><key>ProgramArguments</key><array><string>${xml(node)}</string><string>${xml(this.launcher)}</string></array><key>RunAtLoad</key><true/></dict></plist>\n`);
     } else {
@@ -99,12 +129,21 @@ export class UserLoginRegistration implements StartupRegistration {
     }
   }
   async remove(): Promise<void> {
-    if (existsSync(this.path)) unlinkSync(this.path);
+    if (this.path.startsWith(loginTaskPrefix)) {
+      const state = windowsLoginTaskState(this.label, true);
+      if (state === "unknown") throw new LocalStateError("Unable to query login startup registration");
+      if (state !== "missing") {
+        const script = `$ErrorActionPreference='Stop'; $s=New-Object -ComObject Schedule.Service; $s.Connect(); $s.GetFolder('\\').DeleteTask(${quotePS(this.label)},0)`;
+        await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, timeout: 15000 });
+        if (windowsLoginTaskState(this.label, true) !== "missing") throw new LocalStateError("Unable to remove login startup registration");
+      }
+      if (existsSync(this.legacyPath)) unlinkSync(this.legacyPath);
+    } else if (existsSync(this.path)) unlinkSync(this.path);
     // Keep the inert launcher so an already-dispatched login task cannot race file removal.
   }
 }
 
-export type LoginStartupStatus = { enabled: boolean; supported: boolean; version: number; error?: string };
+export type LoginStartupStatus = { enabled: boolean; requestedEnabled: boolean; registrationState: LoginTaskState; supported: boolean; version: number; error?: string };
 type SavedStartup = { enabled: boolean; version: number; registration?: string; error?: string };
 
 export class LoginStartup {
@@ -112,13 +151,26 @@ export class LoginStartup {
   constructor(private readonly store: LocalStore, private readonly registration: StartupRegistration = new UserLoginRegistration(store.directory)) {}
   status(): LoginStartupStatus {
     const saved = this.store.get<SavedStartup>("login-startup", { enabled: false, version: 0 });
-    return { enabled: saved.enabled && this.registration.installed(), supported: this.registration.supported, version: saved.version, ...(saved.error ? { error: saved.error } : {}) };
+    const registrationState = this.registration.state?.() ?? (this.registration.installed() ? "registered" : "missing");
+    return { enabled: saved.enabled && registrationState === "registered", requestedEnabled: saved.enabled, registrationState, supported: this.registration.supported, version: saved.version, ...(saved.error ? { error: saved.error } : {}) };
   }
   initialize(): Promise<LoginStartupStatus> {
     const task = this.queue.then(async () => {
       // Set the first-run default once. Explicitly disabled or externally removed
       // registrations must not be silently enabled again on each daemon restart.
-      if (this.store.get<SavedStartup | null>("login-startup", null) || !this.registration.supported) return this.status();
+      const saved = this.store.get<SavedStartup | null>("login-startup", null);
+      if (!this.registration.supported) return this.status();
+      if (saved) {
+        if (saved.enabled && saved.registration !== this.registration.path) {
+          try {
+            if (await this.registration.migrateLegacy?.())
+              this.store.set("login-startup", { ...saved, version: saved.version + 1, registration: this.registration.path, error: undefined });
+          } catch (error) {
+            this.store.set("login-startup", { ...saved, error: error instanceof Error ? error.message : "Login startup migration failed" });
+          }
+        }
+        return this.status();
+      }
       try {
         await this.registration.install();
         if (!this.registration.installed()) throw new LocalStateError("Login startup registration failed");
