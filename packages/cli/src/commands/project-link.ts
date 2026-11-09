@@ -150,7 +150,7 @@ export async function projectLinkCliHandler(opts: LinkOptions): Promise<LinkResu
   config = loadInitializedProjectConfig("adit cloud link", config.projectRoot);
   if (!config) return null;
   if (config.cloudDeletedAt) {
-    fail("this project identity was deleted from ADIT Cloud", `run ${strong("adit init")} to create a new project identity before linking again`);
+    fail("this project identity was deleted from ADIT Cloud", "local records are retained; open the local conversation window Settings to restore the Cloud project and resume sync");
     return null;
   }
 

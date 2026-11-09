@@ -641,6 +641,7 @@ export function App() {
           )}
           {selected && <CloudSyncStatus key={`${selected.id}:${route}`} workspaceName={selected.name}
             enabled={selected.cloud.enabled} sync={selected.cloudSync} accountState={account?.auth} pending={busy}
+            onRestore={account?.auth === "valid" ? () => void act(async () => {await api(`/workspaces/${selected.id}/restore-cloud`, "POST", {});}) : undefined}
             onSettings={() => go(`/settings/workspaces/${selected.id}`)} onAccount={() => go("/settings/account")}
             onPush={account?.auth === "valid" && selected.cloud.enabled ? () => void act(async () => {
               await api(`/workspaces/${selected.id}/sync`, "POST", {});
@@ -817,7 +818,7 @@ export function App() {
                                       : t("自动 · 每 {0} 分钟", w.cloud.interval)}
                                   </span>
                                   <span>·</span>
-                                  <span>{t(w.cloudSync?.status === "done" ? "同步完成" : w.cloudSync?.status === "failed" ? "同步失败" : w.cloudSync?.status === "partial" ? "部分记录待同步" : ["queued", "running"].includes(w.cloudSync?.status || "") ? "正在同步新记录…" : "尚未同步")}</span>
+                                  <span>{t(w.cloudSync?.status === "paused_deleted" ? "上传已暂停" : w.cloudSync?.status === "done" ? "同步完成" : w.cloudSync?.status === "failed" ? "同步失败" : w.cloudSync?.status === "partial" ? "部分记录待同步" : ["queued", "running"].includes(w.cloudSync?.status || "") ? "正在同步新记录…" : "尚未同步")}</span>
                                 </>
                               ) : <span>{t("未开启")}</span>}
                             </span>
@@ -1321,7 +1322,7 @@ function WorkspaceEditor({
     // The shared sync executor already collects and analyzes before uploading.
     // A new directory only needs registration here, never a second collector.
     const target = fresh ? await save(false, false) : workspace!;
-    try { await api(`/workspaces/${target.id}/sync`, "POST", {}); }
+    try { await api(`/workspaces/${target.id}/${sync?.status === "paused_deleted" ? "restore-cloud" : "sync"}`, "POST", {}); }
     finally {
       // Registration remains valid even if starting sync fails; retries must
       // use that saved identity instead of attempting to register it again.
@@ -1661,7 +1662,7 @@ function WorkspaceEditor({
         <div className="workspace-options">
           <div className="directory-cloud-line">
             <span className="label">{t("状态")}</span>
-            <Badge>{!savedCloud.enabled ? t("未开启") : syncing ? t("正在同步新记录…") : sync?.status === "done" ? t("同步完成") : sync?.status === "failed" ? t("同步失败") : sync?.status === "partial" ? t("部分记录待同步") : t("已开启")}</Badge>
+            <Badge>{!savedCloud.enabled ? t("未开启") : sync?.status === "paused_deleted" ? t("上传已暂停") : syncing ? t("正在同步新记录…") : sync?.status === "done" ? t("同步完成") : sync?.status === "failed" ? t("同步失败") : sync?.status === "partial" ? t("部分记录待同步") : t("已开启")}</Badge>
             <span className="muted">
               {account?.account
                 ? t("通过云端账号 {0} 存储", account.account)
@@ -1775,15 +1776,15 @@ function WorkspaceEditor({
             </div>}
           </div>}
           <p className="repo-hint">
-            {syncing ? t("正在同步新记录…") : sync?.error || (sync?.status === "done" || sync?.status === "partial"
+            {sync?.status === "paused_deleted" ? t("云端项目已删除，上传已暂停。本地记录仍然保留。") : syncing ? t("正在同步新记录…") : sync?.error || (sync?.status === "done" || sync?.status === "partial"
               ? t("已同步 {0} 条记录、{1} 个提交", sync.events || 0, sync.commits || 0) : t("尚未同步，本机记录保留。"))}
             {sync?.warnings?.map(warning => <span key={warning} className="repo-hint">{warning}</span>)}
           </p>
           <div className="directory-cloud-actions">
-            <button className="primary" disabled={syncing || cloudSaving || !!syncBlockedReason}
+            <button className="primary" disabled={syncing || sync?.restoring || cloudSaving || !!syncBlockedReason}
               title={syncBlockedReason || undefined}
               onClick={() => void act(startCloudSync)}>
-              {t("立即同步")}
+              {t(sync?.restoring ? "正在恢复云端项目…" : sync?.status === "paused_deleted" ? "恢复云端项目并继续同步" : "立即同步")}
             </button>
             <button disabled={syncing || cloudSaving || workspace?.cloud.mode !== "automatic"}
               onClick={() => void act(async () => {
@@ -1793,6 +1794,7 @@ function WorkspaceEditor({
               {t("暂停自动同步")}
             </button>
           </div>
+          {sync?.status === "paused_deleted" && <p className="repo-hint">{t("恢复后不会自动重新挂载到团队")}</p>}
           {(syncBlockedReason || fresh) && <p className="repo-hint cloud-sync-hint">
             {syncBlockedReason || t("点击后会先保存工作目录、整理本地记录，再同步到云端。")}
           </p>}

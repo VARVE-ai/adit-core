@@ -10,6 +10,7 @@ import { join } from "node:path";
 import type { AditConfig, LocalRepository, ProjectType } from "@varveai/adit-core";
 import { getRemoteUrl } from "@varveai/adit-engine";
 import { normalizeGitHubRepoKey } from "./project-link/repo-key.js";
+import { workspaceForCloudTarget, type CloudDeletionTarget } from "./project-deletion-policy.js";
 
 export interface CloudRepository extends LocalRepository {
   repositoryUrl: string | null;
@@ -32,12 +33,13 @@ export interface CloudProjectContext {
   };
 }
 
-export async function resolveCloudProjectContext(config: AditConfig): Promise<CloudProjectContext> {
+export async function resolveCloudProjectContext(config: AditConfig, target?: CloudDeletionTarget & { directory?: string }): Promise<CloudProjectContext> {
   const current=loadConfig(config.projectRoot);
   if(current.projectId!==config.projectId)throw new Error("Project identity changed. Reload before linking.");
-  const store=new LocalStore();
+  const store=new LocalStore(target?.directory);
   try{
-    const workspace=store.workspace(current.projectId);
+    const original=store.workspace(current.projectId);
+    const workspace=target ? workspaceForCloudTarget(store, original, target) : original;
     const selected=projectUploadRepositories(store.db,workspace);
     const repositories=await Promise.all(selected.map(enrichRepository));
     const entries=store.db.prepare("SELECT relative_path,repository_id FROM adit_local_project_repositories WHERE workspace_id=?").all(workspace.id) as {relative_path:string;repository_id:string}[];

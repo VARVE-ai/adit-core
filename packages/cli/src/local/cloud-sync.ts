@@ -1,16 +1,17 @@
 import { assertWorkspaceGit, assertSelectedRepositories, missingOriginRemote } from "@varveai/adit-core";
 import { randomUUID } from "node:crypto";
 import { LocalStore, LocalStateError, localLoginStartupEnabled, projectUploadRepositories } from "@varveai/adit-core";
-import { CloudClient, loadCredentials, collectDefaultBranch, collectRemoteBranchSnapshot, type UpgradeNotice } from "@varveai/adit-cloud";
+import { CloudClient, loadCredentials, collectDefaultBranch, collectRemoteBranchSnapshot, type UpgradeNotice, type ProjectDeletionPolicy, CloudApiError, workspaceForCloudTarget, saveTargetDeletionPolicy, targetDeletionPolicy } from "@varveai/adit-cloud";
 import { CloudProjection, createCloudSyncSchema, syncKey, type CloudBaseline, type CloudEvent, type CloudSession } from "./cloud-projection.js";
 import type { Collector } from "./collector.js";
 import { getRemoteUrl, runGit } from "@varveai/adit-engine";
 import { CloudPendingService, type CloudPendingStatus } from "./cloud-pending-service.js";
 import { sendLocalRuntimeReport } from "./cloud-runtime-report.js";
+import { pauseKey, readPause, projectDeletionFromError, projectDeletedMessage } from "./cloud-project-pause.js";
 import { localCommitBranches, type CommitBranch } from "./commit-branches.js";
 
 export interface LocalCloudJob {
-  id:string; workspaceId:string; kind:"cloud-sync"; status:"queued"|"running"|"done"|"partial"|"failed";
+  id:string; workspaceId:string; kind:"cloud-sync"; status:"queued"|"running"|"done"|"partial"|"failed"|"paused_deleted";
   startedAt:string; endedAt?:string; events:number; commits:number; error?:string; warnings:string[];
   serverProjectId?:string;
   upgrade?:UpgradeNotice; runtimeReportError?:string;
@@ -21,9 +22,18 @@ export class LocalCloudSync {
   private active=new Map<string,Promise<void>>();
   private jobs=new Map<string,LocalCloudJob>();
   private pendingService: CloudPendingService;
+  private deletionKey(credentials: NonNullable<ReturnType<typeof loadCredentials>>, id: string) {
+    const key = pauseKey(credentials.serverUrl, credentials.accountId ?? credentials.clientId, id);
+    const legacy = pauseKey(credentials.serverUrl, credentials.clientId, id);
+    // accountId may be learned after the first request; the server-issued client
+    // identity is account-specific, so its existing pause must still be honored.
+    return readPause(this.store, key) ? key : readPause(this.store, legacy) ? legacy : key;
+  }
+  private restoring=new Set<string>();
+  private restoreTasks=new Map<string,Promise<LocalCloudJob>>();
   private stopped=false;
   private updatePaused=false;
-  get busy() { return this.active.size > 0; }
+  get busy() { return this.active.size > 0 || this.restoring.size > 0; }
   pauseForUpdate(paused:boolean) { this.updatePaused=paused; }
   private timer?:ReturnType<typeof setInterval>;
   constructor(readonly store:LocalStore,private collector:Pick<Collector,"collect"|"waitFor">,
@@ -43,14 +53,20 @@ export class LocalCloudSync {
     return new Map(this.store.workspaces().map(w=>[w.id,this.status(w.id,credentials)]));
   }
   forget(id:string) {
-    if(this.active.has(id))throw new LocalStateError("Wait for this project's background tasks to finish before deleting it.",409);
+    if(this.active.has(id)||this.restoring.has(id))throw new LocalStateError("Wait for this project's background tasks to finish before deleting it.",409);
     this.jobs.delete(id);this.pendingService.forget(id);
   }
   status(id:string,credentials=loadCredentials(this.store.directory)) {
     const accountKey=credentials?syncKey(credentials.serverUrl,credentials.accountId??credentials.clientId):"disconnected";
     const saved=this.store.get<LocalCloudJob|null>(`cloud-job:${accountKey}:${id}`,null);
     const workspace=this.store.workspace(id);
-    return {...saved,pending:this.pending(workspace,credentials),nextAt:workspace.cloud.enabled&&workspace.cloud.mode==="automatic"&&localLoginStartupEnabled(this.store.directory)
+    const paused=credentials?readPause(this.store,this.deletionKey(credentials,id)):null;
+    if(paused) { this.pendingService.forget(id); return {...saved,status:"paused_deleted" as const,error:projectDeletedMessage,
+      restoring:this.restoring.has(id),pending:{state:"paused_deleted" as const,sessions:null,commits:null},nextAt:null}; }
+    const target=credentials?{serverUrl:credentials.serverUrl,accountId:credentials.accountId??credentials.clientId}:null;
+    const effective=target?workspaceForCloudTarget(this.store,workspace,target):workspace;
+    const legacyUnverified=target && !targetDeletionPolicy(this.store,target,id) && (workspace.cloudDeletedAt || Object.values(workspace.repositoryPolicies??{}).some(p=>p.cloudDeletedAt));
+    return {...saved,pending:legacyUnverified?{state:"uninitialized" as const,sessions:null,commits:null}:this.pending(effective,credentials),nextAt:workspace.cloud.enabled&&workspace.cloud.mode==="automatic"&&localLoginStartupEnabled(this.store.directory)
       ?new Date((saved?Date.parse(saved.startedAt):Date.now())+workspace.cloud.interval*60_000).toISOString():null};
   }
   private pending(workspace:ReturnType<LocalStore["workspace"]>,credentials:ReturnType<typeof loadCredentials>):CloudPendingStatus {
@@ -71,11 +87,14 @@ export class LocalCloudSync {
     const workspace=this.store.workspace(id);
     assertWorkspaceGit(workspace.path);
     assertSelectedRepositories(workspace.path, workspace.repositories);
-    if(workspace.cloudDeletedAt)throw new LocalStateError("This project was deleted from Cloud. Review its identity in Settings.",409);
     if(!workspace.cloud.enabled)throw new LocalStateError("Enable Cloud storage for this directory first.",409);
+    if(this.restoring.has(id))throw new LocalStateError("Cloud project restore is in progress.",409);
     if(this.active.has(id))return this.jobs.get(id)!;
     const credentials=loadCredentials(this.store.directory);
     if(!credentials)throw new LocalStateError("Connect a Cloud account first.",401);
+    const deletionKey=this.deletionKey(credentials,id);
+    const target={serverUrl:credentials.serverUrl,accountId:credentials.accountId??credentials.clientId};
+    if(readPause(this.store,deletionKey))throw new LocalStateError(projectDeletedMessage,409);
     const job:LocalCloudJob={id:randomUUID(),workspaceId:id,kind:"cloud-sync",status:"queued",startedAt:new Date().toISOString(),events:0,commits:0,warnings:[]};
     const accountKey=syncKey(credentials.serverUrl,credentials.accountId??credentials.clientId);
     const save=()=>{this.store.job(job);this.store.set(`cloud-job:${accountKey}:${id}`,job);};
@@ -95,8 +114,20 @@ export class LocalCloudSync {
         const collected=this.store.jobs<{workspaceId:string;kind:string;status:string;error?:string}>().find(j=>j.workspaceId===id&&j.kind==="collect");
         if(collected?.status==="partial")job.warnings.push(collected.error||"Local collection is incomplete; only available records can be synced.");
         unchanged();
+        try {
+          const {deletionPolicy}=await client.get<{deletionPolicy:ProjectDeletionPolicy}>(`/api/project-deletions?${new URLSearchParams({localProjectId:id})}`);
+          unchanged();
+          if(deletionPolicy?.localProjectId!==id || typeof deletionPolicy.projectDeleted!=="boolean" || !Array.isArray(deletionPolicy.deletedRepositories))throw new Error("Invalid Cloud deletion policy.");
+          saveTargetDeletionPolicy(this.store,target,deletionPolicy);
+          if(deletionPolicy.projectDeleted)throw new CloudApiError("Cloud project deleted",410,{code:"PROJECT_DELETED",deletionPolicy});
+        } catch(error) {
+          if(!(error instanceof CloudApiError && error.status===404))throw error;
+          if(workspace.cloudDeletedAt)throw new Error("Cloud must be upgraded to verify this project's deletion state.");
+        }
+        const uploadWorkspace=workspaceForCloudTarget(this.store,workspace,target);
         const identity=await client.get<CloudBaseline>(`/api/sync/local?${new URLSearchParams({localProjectId:workspace.id})}`);
         if(identity.schemaVersion!==1||!identity.accountId)throw new Error("This Cloud server does not support local history sync yet.");
+        if(credentials.accountId && identity.accountId!==credentials.accountId)throw new Error("Cloud account changed during history lookup");
         job.serverProjectId=identity.serverProjectId;
         const scope=syncKey(credentials.serverUrl,identity.accountId,workspace.id);
         const found=this.store.db.prepare("SELECT baseline FROM adit_local_cloud_scopes WHERE id=?").get(scope) as {baseline:string}|undefined;
@@ -118,6 +149,12 @@ export class LocalCloudSync {
             baseline.nextCursor=page.nextCursor;
           }
           unchanged();
+          const resumeBefore=this.store.get<string|null>(`${deletionKey}:resume-before`,null);
+          if(resumeBefore && !cached) {
+            const boundary=Date.parse(resumeBefore);
+            const clamp=(date:string|null)=>date && Date.parse(date)>boundary ? resumeBefore : date;
+            baseline={...baseline,before:clamp(baseline.before),sessions:baseline.sessions.map(session=>({...session,lastEventAt:clamp(session.lastEventAt??null)})),repositories:baseline.repositories.map(repo=>({...repo,before:clamp(repo.before)}))};
+          }
           if(baseline.sessions.some(session=>session.lastEventAt===undefined ||
             session.lastEventAt!==null&&!Number.isFinite(Date.parse(session.lastEventAt))))
             throw new Error("Update the Cloud server before syncing historical sessions: per-session sync boundaries are unavailable.");
@@ -135,9 +172,9 @@ export class LocalCloudSync {
             if(needsSessionBoundaries)this.store.db.prepare("UPDATE adit_local_cloud_sessions SET revision=0 WHERE scope=?").run(scope);
           })();
         }
-        const projection=new CloudProjection(this.store,workspace,scope,baseline);
+        const projection=new CloudProjection(this.store,uploadWorkspace,scope,baseline);
         const commitBranches:CommitBranch[]=[];
-        for(const repository of projectUploadRepositories(this.store.db,workspace)) {
+        for(const repository of projectUploadRepositories(this.store.db,uploadWorkspace)) {
           try {
             const branches=await localCommitBranches(this.store,repository);
             commitBranches.push(...branches);
@@ -146,7 +183,7 @@ export class LocalCloudSync {
             job.warnings.push(`Unable to resolve commit branches for ${repository.relativePath}; existing branch information is preserved.`);
           }
         }
-        const repositories=await Promise.all(projectUploadRepositories(this.store.db,workspace).map(async r=>{
+        const repositories=await Promise.all(projectUploadRepositories(this.store.db,uploadWorkspace).map(async r=>{
           let repositoryUrl=await getRemoteUrl(r.path).catch(()=>null);
           if(!repositoryUrl)throw new LocalStateError(`${missingOriginRemote} (${r.path})`,409);
           if(repositoryUrl?.includes("://")) { try {const url=new URL(repositoryUrl);url.username="";url.password="";repositoryUrl=url.toString();}catch{repositoryUrl=null;} }
@@ -208,10 +245,82 @@ export class LocalCloudSync {
         unchanged();
         Object.assign(job,await sendLocalRuntimeReport(this.store,workspace,credentials));
         job.warnings=[...new Set([...job.warnings,...projection.warnings])];job.status=job.warnings.length?"partial":"done";
-      } catch(error) {job.status="failed";job.error=error instanceof Error?error.message:"Cloud sync failed";}
+      } catch(error) {
+        const policy=projectDeletionFromError(error,id);
+        const current=loadCredentials(this.store.directory);
+        if(policy && current?.credentialId===credentials.credentialId && current?.serverUrl===credentials.serverUrl && this.store.workspace(id).version===workspace.version) {
+          saveTargetDeletionPolicy(this.store,target,policy);this.pendingService.forget(id);
+          job.status="paused_deleted";job.error=projectDeletedMessage;
+        } else {job.status="failed";job.error=error instanceof Error?error.message:"Cloud sync failed";}
+      }
       finally {job.endedAt=new Date().toISOString();save();this.active.delete(id);}
     });
     this.active.set(id,task);return job;
+  }
+  restore(id:string):Promise<LocalCloudJob> {
+    if(this.restoreTasks.has(id))return this.restoreTasks.get(id)!;
+    const task=this.performRestore(id).finally(()=>this.restoreTasks.delete(id));
+    this.restoreTasks.set(id,task);
+    return task;
+  }
+  private async performRestore(id:string) {
+    if(this.stopped||this.updatePaused||this.active.has(id)||this.restoring.has(id))throw new LocalStateError("Wait for the current operation to finish.",409);
+    const credentials=loadCredentials(this.store.directory);
+    if(!credentials)throw new LocalStateError("Connect a Cloud account first.",401);
+    const workspace=this.store.workspace(id);
+    const key=this.deletionKey(credentials,id);
+    const paused=readPause(this.store,key);
+    if(!paused)throw new LocalStateError("This project is not paused for deletion.",409);
+    const client=this.transport?.(credentials)??new CloudClient(credentials.serverUrl,credentials,{credentialsDirectory:this.store.directory,timeoutMs:30000,maxRetries:0});
+    const unchanged=()=>{
+      const current=loadCredentials(this.store.directory);
+      if(this.stopped||current?.credentialId!==credentials.credentialId||current?.serverUrl!==credentials.serverUrl||current?.clientId!==credentials.clientId||current?.accountId!==credentials.accountId||this.store.workspace(id).version!==workspace.version||readPause(this.store,key)?.revision!==paused.revision)
+        throw new LocalStateError("Account or project state changed. Refresh before restoring.",409);
+    };
+    this.restoring.add(id);
+    try {
+      let policy:ProjectDeletionPolicy;
+      let restoredProjectId: string | undefined;
+      try {
+        const result=await client.post<{serverProjectId:string;deletionPolicy:ProjectDeletionPolicy}>("/api/projects/restore",{localProjectId:id,deletionOperationId:paused.policy.deletionOperationId});
+        if(!result.serverProjectId)throw new Error("Cloud did not confirm the original project identity.");
+        restoredProjectId=result.serverProjectId;
+        policy=result.deletionPolicy;
+      } catch(error) {
+        if(error instanceof CloudApiError && error.status===404)throw new LocalStateError("This Cloud version does not support restoring projects. Update Cloud to continue.",409);
+        if(error instanceof CloudApiError && (error.body as {code?:string})?.code==="PROJECT_NOT_RECOVERABLE")throw error;
+        unchanged();
+        // A lost response must not cause an automatic retry of the restore mutation.
+        const result=await client.get<{deletionPolicy:ProjectDeletionPolicy}>(`/api/project-deletions?${new URLSearchParams({localProjectId:id})}`);
+        policy=result.deletionPolicy;
+        if(policy?.projectDeleted) {
+          if(policy.localProjectId===id)this.store.set(key,{policy,revision:randomUUID()});
+          throw error;
+        }
+      }
+      unchanged();
+      if(!policy || policy.localProjectId!==id || policy.projectDeleted || !Array.isArray(policy.deletedRepositories))
+        throw new Error("Cloud did not confirm project restoration.");
+      // Verify that the original row exists; an empty baseline is not a restoration.
+      const identity=await client.get<CloudBaseline>(`/api/sync/local?${new URLSearchParams({localProjectId:id})}`);
+      unchanged();
+      const expectedAccount=credentials.accountId ?? policy.accountId ?? paused.policy.accountId;
+      const expectedProject=paused.policy.serverProjectId ?? restoredProjectId ?? policy.serverProjectId;
+      if(identity.schemaVersion!==1 || !identity.serverProjectId || !expectedAccount || identity.accountId!==expectedAccount ||
+        expectedProject && identity.serverProjectId!==expectedProject ||
+        restoredProjectId && restoredProjectId!==identity.serverProjectId || policy.serverProjectId && policy.serverProjectId!==identity.serverProjectId)
+        throw new Error("Cloud project identity could not be verified.");
+      this.store.db.transaction(()=>{
+        saveTargetDeletionPolicy(this.store,{serverUrl:credentials.serverUrl,accountId:credentials.accountId??credentials.clientId},policy);
+        const currentKey=pauseKey(credentials.serverUrl,credentials.accountId??credentials.clientId,id);
+        if(paused.policy.deletedAt)this.store.set(`${currentKey}:resume-before`,paused.policy.deletedAt);
+        this.store.set(key,null);
+        this.store.set(pauseKey(credentials.serverUrl,credentials.clientId,id),null);
+      })();
+      // Keep the existing baseline and receipts: replacing `before` here loses paused-period history.
+      this.pendingService.forget(id);
+    } finally { this.restoring.delete(id); }
+    return this.start(id);
   }
   async wait(id:string) {await this.active.get(id);return this.jobs.get(id);}
   schedule() {
@@ -220,11 +329,12 @@ export class LocalCloudSync {
       if(this.stopped||this.updatePaused||process.env.ADIT_CLOUD_AUTO_SYNC==="false"||process.env.ADIT_CLOUD_ENABLED==="false"||!localLoginStartupEnabled(this.store.directory)||!loadCredentials(this.store.directory))return;
       for(const w of this.store.workspaces())if(w.started&&w.cloud.enabled&&w.cloud.mode==="automatic"&&!this.active.has(w.id)) {
         const status=this.status(w.id);
+        if(status.status==="paused_deleted" || this.restoring.has(w.id))continue;
         if(!status.startedAt||Date.now()-Date.parse(status.startedAt)>=w.cloud.interval*60_000) {
           try{this.start(w.id);}catch{/* Retry on the next scheduled tick after settings/account recovery. */}
         }
       }
     },15000);this.timer.unref();
   }
-  async close(){this.stopped=true;clearInterval(this.timer);await this.pendingService.close();await Promise.allSettled(this.active.values());}
+  async close(){this.stopped=true;clearInterval(this.timer);await this.pendingService.close();await Promise.allSettled([...this.active.values(),...this.restoreTasks.values()]);}
 }

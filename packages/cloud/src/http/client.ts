@@ -65,6 +65,9 @@ export interface RefreshTokenStatus {
 }
 
 export class CloudClient {
+  get deletionTarget() {
+    return { serverUrl: this.serverUrl, accountId: this.credentials.accountId ?? this.credentials.clientId, clientId: this.credentials.clientId, directory: this.credentialsDirectory };
+  }
   private credentials: CloudCredentials;
   private readonly serverUrl: string;
   private readonly timeoutMs: number;

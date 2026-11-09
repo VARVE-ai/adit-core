@@ -1,6 +1,16 @@
 // Local service messages can come from saved jobs as well as new requests.
 // Translate these known messages at display time, keeping paths and details intact.
 export const systemMessages: Record<string, string> = {
+  "云端项目已删除，上传已暂停；本地记录保留。请在设置中恢复云端项目后继续。": "Cloud project deleted. Uploads are paused; local records are retained. Restore the Cloud project in Settings to continue.",
+  "正在恢复云端项目，请稍候。": "Cloud project restore is in progress.",
+  "账号或项目状态已变化，请刷新后再恢复。": "Account or project state changed. Refresh before restoring.",
+  "此 Cloud 版本不支持恢复项目，请先升级 Cloud。": "This Cloud version does not support restoring projects. Update Cloud to continue.",
+  "原项目已无法恢复。": "The original project is no longer recoverable",
+  "项目删除状态已变化，请刷新后再恢复。": "Project deletion changed. Refresh before restoring.",
+  "未能确认原云端项目的身份，上传继续暂停。": "Cloud project identity could not be verified.",
+  "Cloud 未确认项目恢复成功，上传继续暂停。": "Cloud did not confirm project restoration.",
+  "Cloud 未确认原项目身份，上传继续暂停。": "Cloud did not confirm the original project identity.",
+  "此项目没有因云端删除而暂停。": "This project is not paused for deletion.",
   "ADIT 正在更新，请稍后重试。": "ADIT is updating. Please try again shortly.",
   "ADIT 正在更新，请等待完成后再修改此设置。": "ADIT is updating. Please wait before changing this setting.",
   "自动更新设置已变更，请刷新后重试。": "Automatic update settings changed. Refresh and try again.",

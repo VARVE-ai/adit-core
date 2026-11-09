@@ -1,4 +1,5 @@
-import { LocalStore, resolveLocalProject, type ProjectManifest } from "@varveai/adit-core";
+import { LocalStore, resolveLocalProject, normalizeServerUrl, type ProjectManifest, type LocalWorkspace } from "@varveai/adit-core";
+import { createHash, randomUUID } from "node:crypto";
 import type { CloudClient } from "./http/client.js";
 import { CloudApiError } from "./http/errors.js";
 
@@ -11,6 +12,8 @@ export interface DeletedRepositoryPolicy {
 
 export interface ProjectDeletionPolicy {
   localProjectId: string;
+  serverProjectId?: string;
+  accountId?: string;
   projectDeleted: boolean;
   deletionOperationId: string | null;
   deletedAt: string | null;
@@ -46,8 +49,40 @@ export async function refreshProjectDeletionPolicy(
     throw error;
   }
 
-  await applyProjectDeletionPolicy(projectRoot, response.deletionPolicy);
+  const target = client.deletionTarget;
+  if (target) {
+    if (response.deletionPolicy.localProjectId !== localProjectId) throw new Error("Cloud deletion policy does not match the project.");
+    const store = new LocalStore(target.directory);
+    try { saveTargetDeletionPolicy(store, target, response.deletionPolicy); } finally { store.close(); }
+  } else await applyProjectDeletionPolicy(projectRoot, response.deletionPolicy);
   return response.deletionPolicy;
+}
+
+export type CloudDeletionTarget = { serverUrl: string; accountId: string };
+export function cloudProjectStateKey(target: CloudDeletionTarget, workspaceId: string) {
+  return createHash("sha256").update(JSON.stringify([normalizeServerUrl(target.serverUrl), target.accountId, workspaceId])).digest("hex");
+}
+export function targetDeletionPolicy(store: LocalStore, target: CloudDeletionTarget, workspaceId: string) {
+  return store.get<ProjectDeletionPolicy | null>(`cloud-project-policy:${cloudProjectStateKey(target, workspaceId)}`, null);
+}
+export function saveTargetDeletionPolicy(store: LocalStore, target: CloudDeletionTarget, policy: ProjectDeletionPolicy) {
+  const key = cloudProjectStateKey(target, policy.localProjectId);
+  store.set(`cloud-project-policy:${key}`, policy);
+  // A normal lookup can pause uploads, but only explicit restoration may clear a pause.
+  if (policy.projectDeleted) store.set(`cloud-project-paused:${key}`, { policy, revision: randomUUID() });
+}
+/** Target policy is an upload-only projection; collection and local identity are unchanged. */
+export function workspaceForCloudTarget(store: LocalStore, workspace: LocalWorkspace, target: CloudDeletionTarget): LocalWorkspace {
+  const policy = targetDeletionPolicy(store, target, workspace.id);
+  if (!policy) return workspace;
+  const repositoryPolicies: NonNullable<LocalWorkspace["repositoryPolicies"]> = {};
+  for (const [path, value] of Object.entries(workspace.repositoryPolicies ?? {})) repositoryPolicies[path] = { syncEnabled: value.syncEnabled };
+  const entries = store.db.prepare("SELECT relative_path, repository_id FROM adit_local_project_repositories WHERE workspace_id=?").all(workspace.id) as Array<{ relative_path: string; repository_id: string }>;
+  for (const deleted of policy.deletedRepositories) {
+    const entry = entries.find(row => row.repository_id === deleted.localRepositoryId);
+    if (entry) repositoryPolicies[entry.relative_path] = { ...repositoryPolicies[entry.relative_path], cloudDeletedAt: deleted.deletedAt, cloudDeletionOperationId: deleted.deletionOperationId };
+  }
+  return { ...workspace, cloudDeletedAt: policy.projectDeleted ? policy.deletedAt ?? "deleted" : undefined, repositoryPolicies };
 }
 
 export async function applyProjectDeletionPolicy(

@@ -9,7 +9,8 @@ import { StructuredHistory } from "../../../core/src/local-history/structured-st
 import { CloudProjection, CloudSessionIndex, cloudFinalReply, cloudTurnUsage, createCloudSyncSchema, finalReply, syncKey, type CloudBaseline } from "./cloud-projection.js";
 import { cloudPending } from "./cloud-pending.js";
 import { LocalCloudSync as BaseLocalCloudSync } from "./cloud-sync.js";
-import { loadCredentials, collectRemoteBranchSnapshot } from "@varveai/adit-cloud";
+import { loadCredentials, collectRemoteBranchSnapshot, CloudApiError, saveTargetDeletionPolicy } from "@varveai/adit-cloud";
+import { pauseKey } from "./cloud-project-pause.js";
 import { runGit } from "@varveai/adit-engine";
 import { sendLocalRuntimeReport } from "./cloud-runtime-report.js";
 import { localCommitBranches } from "./commit-branches.js";
@@ -20,7 +21,11 @@ let root:string,store:LocalStore,history:StructuredHistory;
 const instances: BaseLocalCloudSync[] = [];
 class LocalCloudSync extends BaseLocalCloudSync {
   constructor(...parameters: ConstructorParameters<typeof BaseLocalCloudSync>) {
-    super(parameters[0],parameters[1],parameters[2],new URL("../../dist/local/cloud-pending-worker.js",import.meta.url));
+    const factory=parameters[2];
+    super(parameters[0],parameters[1],factory ? credentials => {
+      const client=factory(credentials);
+      return {...client,get:async <T,>(path:string):Promise<T> => path.startsWith('/api/project-deletions?') ? {deletionPolicy:{localProjectId:new URL(path,'http://test').searchParams.get('localProjectId'),projectDeleted:false,deletedAt:null,deletionOperationId:null,deletedRepositories:[]}} as T : client.get<T>(path)};
+    } : undefined,new URL("../../dist/local/cloud-pending-worker.js",import.meta.url));
     instances.push(this);
   }
 }
@@ -42,6 +47,101 @@ beforeEach(()=>{
 });
 afterEach(async()=>{await Promise.all(instances.splice(0).map(instance=>instance.close()));store.close();rmSync(root,{recursive:true,force:true});vi.restoreAllMocks();});
 function workspace(){return store.saveWorkspace({path:root,providers:["codex"],repositories:[root],cloud:{enabled:true,mode:"manual",interval:5}});}
+it("persists deletion pause, skips retries and pending scans, and isolates another cloud account",async()=>{
+  const w=workspace();
+  const policy={localProjectId:w.id,projectDeleted:true,deletionOperationId:'delete-1',deletedAt:at(1),deletedRepositories:[]};
+  const client={get:vi.fn().mockRejectedValue(new CloudApiError('deleted',410,{code:'PROJECT_DELETED',deletionPolicy:policy})),post:vi.fn()};
+  const collector={collect:vi.fn(),waitFor:vi.fn()};
+  const sync=new LocalCloudSync(store,collector,()=>client);
+  sync.start(w.id);await sync.wait(w.id);
+  expect(sync.status(w.id).status).toBe('paused_deleted');
+  expect(sync.status(w.id).pending.state).toBe('paused_deleted');
+  expect(sync.status(w.id).nextAt).toBeNull();
+  expect(()=>sync.start(w.id)).toThrow(/paused/);expect(client.post).not.toHaveBeenCalled();
+  await sync.close();
+  const reopened=new LocalCloudSync(store,collector,()=>client);
+  expect(reopened.status(w.id).status).toBe('paused_deleted');
+  vi.mocked(loadCredentials).mockReturnValue({...loadCredentials()!,accountId:'other',credentialId:'other'});
+  expect(reopened.status(w.id).pending.state).not.toBe('paused_deleted');
+});
+it("explicit restoration keeps receipts and the original baseline and starts one upload",async()=>{
+  const w=workspace(),target={serverUrl:'http://localhost:3000',accountId:'user'};
+  const policy={localProjectId:w.id,projectDeleted:true,deletionOperationId:'delete-1',deletedAt:at(1),deletedRepositories:[]};
+  saveTargetDeletionPolicy(store,target,policy);
+  const scope=syncKey(target.serverUrl,target.accountId,w.id),old={...baseline,before:at(0),serverProjectId:'same'};
+  store.db.prepare('INSERT INTO adit_local_cloud_scopes VALUES (?,?,?)').run(scope,w.id,JSON.stringify(old));
+  const client={get:vi.fn().mockResolvedValue({...baseline,before:at(9),serverProjectId:'same'}),post:vi.fn(async(path:string)=>path==='/api/projects/restore'?{serverProjectId:'same',deletionPolicy:{...policy,projectDeleted:false,deletedAt:null,deletionOperationId:null}}:{schemaVersion:1,accountId:'user',serverProjectId:'same',eventIds:[],commitIds:[]})};
+  const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn()},()=>client);
+  await sync.restore(w.id);await sync.wait(w.id);
+  expect(store.get(pauseKey(target.serverUrl,target.accountId,w.id),null)).toBeNull();
+  expect(JSON.parse((store.db.prepare('SELECT baseline FROM adit_local_cloud_scopes WHERE id=?').get(scope) as {baseline:string}).baseline).before).toBe(at(0));
+  expect(client.post.mock.calls.filter(([path])=>path==='/api/projects/restore')).toHaveLength(1);
+  expect(store.workspace(w.id).id).toBe(w.id);
+  expect(["done", "partial"]).toContain((await sync.wait(w.id))?.status);
+});
+it("pauses from the deletion precheck without loading a baseline or sending a batch",async()=>{
+  const w=workspace();
+  const policy={localProjectId:w.id,projectDeleted:true,deletionOperationId:'delete-1',deletedAt:at(1),deletedRepositories:[]};
+  const client={get:vi.fn().mockResolvedValue({deletionPolicy:policy}),post:vi.fn()};
+  const sync=new BaseLocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn()},()=>client);
+  instances.push(sync);
+  sync.start(w.id);await sync.wait(w.id);
+  expect(sync.status(w.id).status).toBe('paused_deleted');
+  expect(client.get).toHaveBeenCalledTimes(1);expect(client.get.mock.calls[0][0]).toContain('/api/project-deletions?');
+  expect(client.post).not.toHaveBeenCalled();
+});
+it("restoring without a cached baseline still uploads paused-period new and existing sessions", async () => {
+  const w = workspace(), target = { serverUrl: 'http://localhost:3000', accountId: 'user' };
+  const policy = { localProjectId: w.id, serverProjectId: 'same', projectDeleted: true, deletionOperationId: 'delete-1', deletedAt: at(5), deletedRepositories: [] };
+  saveTargetDeletionPolicy(store, target, policy);
+  history.write({ id: 'old', provider: 'codex', cwd: root, messages: [
+    { key: 'before', role: 'user', content: 'already uploaded', timestamp: at(1), raw: {} },
+    { key: 'during', role: 'user', content: 'old session during pause', timestamp: at(6), raw: {} },
+  ] });
+  history.write({ id: 'new', provider: 'codex', cwd: root, messages: [
+    { key: 'new', role: 'user', content: 'new session during pause', timestamp: at(7), raw: {} },
+  ] });
+  const fresh: CloudBaseline = { ...baseline, before: at(9), serverProjectId: 'same', sessions: [
+    { id: 'old-cloud', platform: 'codex', metadata: JSON.stringify({ nativeId: 'old' }), startedAt: at(1), deleted: false, sequence: 1, lastEventAt: at(9) },
+  ] };
+  const client = { get: vi.fn().mockResolvedValue(fresh), post: vi.fn(async (path, payload) => path === '/api/projects/restore'
+    ? { serverProjectId: 'same', deletionPolicy: { ...policy, projectDeleted: false, deletedAt: null, deletionOperationId: null } }
+    : { schemaVersion: 1, accountId: 'user', serverProjectId: 'same', eventIds: payload.events.map((event: { id: string }) => event.id), commitIds: [] }) };
+  const sync = new LocalCloudSync(store, { collect: vi.fn(), waitFor: vi.fn() }, () => client);
+  await sync.restore(w.id); await sync.wait(w.id);
+  expect(['done', 'partial']).toContain((await sync.wait(w.id))?.status);
+  const uploaded = client.post.mock.calls.filter(([path]) => path === '/api/sync/local').flatMap(([, payload]) => payload.events.map((event: { text: string }) => event.text));
+  expect(uploaded.sort()).toEqual(['new session during pause', 'old session during pause']);
+  const before = client.post.mock.calls.length;
+  sync.start(w.id); await sync.wait(w.id);
+  expect(client.post.mock.calls.slice(before).flatMap(([, payload]) => payload.events)).toEqual([]);
+});
+it.each(['wrong-project','offline','still-deleted'])("keeps the pause after an unverified restoration: %s",async(reason)=>{
+  const w=workspace(),target={serverUrl:'http://localhost:3000',accountId:'user'};
+  const policy={localProjectId:w.id,serverProjectId:'original',projectDeleted:true,deletionOperationId:'delete-1',deletedAt:at(1),deletedRepositories:[]};
+  saveTargetDeletionPolicy(store,target,policy);
+  const client={get:vi.fn(async(path:string)=>{
+    if(reason==='offline')throw new Error('offline');
+    if(path.startsWith('/api/project-deletions?'))return {deletionPolicy:policy};
+    return {...baseline,serverProjectId:'wrong'};
+  }),post:vi.fn(async()=>{
+    if(reason!=='wrong-project')throw new Error('connection lost');
+    return {serverProjectId:'original',deletionPolicy:{...policy,projectDeleted:false,deletedAt:null,deletionOperationId:null}};
+  })};
+  const sync=new BaseLocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn()},()=>client as any);
+  instances.push(sync);
+  await expect(sync.restore(w.id)).rejects.toThrow();
+  expect(sync.status(w.id).status).toBe('paused_deleted');
+  expect(client.post).toHaveBeenCalledTimes(1);
+});
+it("honors a client-scoped pause after learning its account ID",()=>{
+  const w=workspace();
+  saveTargetDeletionPolicy(store,{serverUrl:'http://localhost:3000',accountId:'device'},
+    {localProjectId:w.id,projectDeleted:true,deletionOperationId:'delete-1',deletedAt:at(1),deletedRepositories:[]});
+  const sync=new LocalCloudSync(store,{collect:vi.fn(),waitFor:vi.fn()},()=>({get:vi.fn(),post:vi.fn()}));
+  expect(sync.status(w.id).status).toBe('paused_deleted');
+  expect(()=>sync.start(w.id)).toThrow(/paused/);
+});
 it("blocks new sync work during an automatic update without contacting Cloud", () => {
   const selected = workspace();
   const client = { get: vi.fn(), post: vi.fn() };

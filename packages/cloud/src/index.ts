@@ -19,6 +19,11 @@ export {
   applyProjectDeletionPolicy,
   refreshProjectDeletionPolicy,
   CloudProjectDeletedError,
+  cloudProjectStateKey,
+  targetDeletionPolicy,
+  saveTargetDeletionPolicy,
+  workspaceForCloudTarget,
+  type CloudDeletionTarget,
   type DeletedRepositoryPolicy,
   type ProjectDeletionPolicy,
 } from "./project-deletion-policy.js";

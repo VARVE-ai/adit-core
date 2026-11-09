@@ -1,6 +1,11 @@
 // Chinese keys preserve the prototype copy. Only interface text belongs here;
 // native session titles, commit subjects, paths and account names are never keys.
 export const messages = {
+  "上传已暂停": "Uploads paused",
+  "云端项目已删除，上传已暂停。本地记录仍然保留。": "The Cloud project was deleted. Uploads are paused; local records are retained.",
+  "恢复云端项目并继续同步": "Restore Cloud project and resume sync",
+  "正在恢复云端项目…": "Restoring Cloud project…",
+  "恢复后不会自动重新挂载到团队": "Restoring does not automatically remount this project to teams.",
   "自动更新": "Automatic updates",
   "自动更新到最新稳定版": "Automatically update to the latest stable release",
   "每 24 小时检查一次；等待采集、整理和同步结束后更新，仅重启 ADIT 后台，不重启电脑或打开浏览器。": "Checks every 24 hours and waits for collection, organization and sync to finish. Only the ADIT background service restarts; your computer is not restarted and no browser opens.",
