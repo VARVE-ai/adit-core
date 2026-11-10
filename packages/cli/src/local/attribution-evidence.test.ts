@@ -85,6 +85,20 @@ it("does not treat request headers or runtime validation scripts as authored fil
     ),
   ).toBe(true);
 });
+it("extracts explicit script write destinations without guessing variables or counting reads", () => {
+  const paths = (cmd: string) => extractWritten("exec_command", { cmd })
+    .filter(part => part.kind === "file_write").map(part => part.path);
+  expect(paths('writeFileSync("design.pen", data); appendFileSync("other.pen", more)')).toEqual(["design.pen", "other.pen"]);
+  expect(paths('Path("design.pen").write_text(data)')).toEqual(["design.pen"]);
+  expect(paths('open("design.pen", "w").write(data)')).toEqual(["design.pen"]);
+  expect(paths('Set-Content -LiteralPath "design.pen" -Value $data')).toEqual(["design.pen"]);
+  expect(paths("Set-Content -LiteralPath 'C:\\temp\\design.pen' -Value $data")).toEqual(["C:\\temp\\design.pen"]);
+  expect(paths('cat <<EOF > "design.pen"\ndata\nEOF')).toEqual(["design.pen"]);
+  expect(paths('writeFileSync(target, data); readFileSync("design.pen")')).toEqual([]);
+  expect(paths('writeFileSync(`${name}.pen`, data)')).toEqual([]);
+  expect(paths('echo "writeFileSync(\'design.pen\', data)"')).toEqual([]);
+  expect(paths('// writeFileSync("design.pen", data)')).toEqual([]);
+});
 it("temporarily deduplicates copied calls and credits child work without mutating sessions", () => {
   const sessions = [
     { provider: "claude", id: "a", started_at: 1 },

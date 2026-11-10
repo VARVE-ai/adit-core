@@ -118,7 +118,7 @@ export function extractWritten(
   if (typeof value === "string")
     try {
       value = JSON.parse(value);
-    } catch {}
+    } catch { /* Native string inputs can also contain plain patch text. */ }
   const result: WrittenText[] = [];
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const path = value.file_path ?? value.path ?? null;
@@ -158,6 +158,27 @@ export function extractWritten(
     )
   )
     return result;
+  // Preserve explicit destination literals separately from script contents.
+  // A dynamic variable or a path merely mentioned in a string is not a target.
+  const scriptStrings = literals(script);
+  for (const item of scriptStrings) {
+    const before = script.slice(Math.max(0, item.start - 512), item.start);
+    const after = script.slice(item.end);
+    const line = before.slice(before.lastIndexOf("\n") + 1);
+    const lineStart = script.lastIndexOf("\n", item.start) + 1;
+    if (/^\s*(?:#|\/\/)/.test(script.slice(lineStart, item.start))) continue;
+    if (script[item.start] !== "'" && /[$`]/.test(item.text)) continue;
+    const powershell = /(?:^|[;|])\s*(?:Set-Content|Add-Content|Out-File)\s+(?:-(?:LiteralPath|Path|FilePath)\s+)?$/i.test(line);
+    const target =
+      (/\b(?:writeFile(?:Sync)?|appendFile(?:Sync)?|WriteAllText|WriteAllLines|WriteAllBytes|AppendAllText)\s*\(\s*$/.test(before) && /^\s*,/.test(after)) ||
+      (/\bopen\(\s*$/.test(before) && /^\s*,\s*["'](?:w|a)[+b]?["']/.test(after)) ||
+      (/\bPath\(\s*$/.test(before) && /^\s*\)\s*\.\s*(?:write_text|write_bytes)\s*\(/.test(after)) ||
+      powershell ||
+      (/(?:^|[;|])\s*(?:cat|printf|echo)\b[^\n]*>>?\s*$/.test(line));
+    // Backslashes in PowerShell paths are not JavaScript escape sequences.
+    const path = powershell ? script.slice(item.start + 1, item.end - 1) : item.text;
+    if (target && path) result.push({ kind: "file_write", path, text: "" });
+  }
   const collect = (source: string, depth: number) => {
     if (depth > 3) return;
     if (source.includes("*** Begin Patch")) {
@@ -170,7 +191,7 @@ export function extractWritten(
             collect(literal.text, depth + 1);
       return;
     }
-    const strings = literals(source);
+    const strings = depth === 0 ? scriptStrings : literals(source);
     const excluded = new Set<number>();
     const replacedNames = new Set(
       [

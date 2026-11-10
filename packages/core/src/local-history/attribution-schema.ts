@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 
 /** All derived results participate in the same atomic snapshot publication. */
-export const ATTRIBUTION_RESULT_TABLES = ["commits", "writers", "alternatives", "turns"] as const;
+export const ATTRIBUTION_RESULT_TABLES = ["commits", "writers", "alternatives", "turns", "inputs", "files"] as const;
 
 /** Derived analysis only. Native sessions are never merged, rewritten or removed here. */
 export function createAttributionSchema(db: Database.Database): void {
@@ -66,6 +66,18 @@ export function createAttributionSchema(db: Database.Database): void {
       provider TEXT NOT NULL, session_id TEXT NOT NULL,
       turn_id TEXT NOT NULL DEFAULT '',
       PRIMARY KEY(run_id,repository,sha,provider,session_id,turn_id)
+    );
+    CREATE TABLE IF NOT EXISTS adit_attribution_inputs (
+      run_id TEXT NOT NULL REFERENCES adit_attribution_runs(id) ON DELETE CASCADE,
+      repository TEXT NOT NULL, sha TEXT NOT NULL,
+      scope_revision TEXT NOT NULL, paths TEXT NOT NULL, evidence_revision TEXT NOT NULL,
+      PRIMARY KEY(run_id,repository,sha)
+    );
+    CREATE TABLE IF NOT EXISTS adit_attribution_files (
+      run_id TEXT NOT NULL REFERENCES adit_attribution_runs(id) ON DELETE CASCADE,
+      repository TEXT NOT NULL, sha TEXT NOT NULL, path TEXT NOT NULL,
+      reason TEXT NOT NULL, additions INTEGER, deletions INTEGER,
+      PRIMARY KEY(run_id,repository,sha,path)
     );
   `);
   })();
