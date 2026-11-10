@@ -3,7 +3,8 @@ import type { AttributionGitObjects, GitTreeFile } from "./attribution-git-objec
 /** Large files are associated by write path, never loaded for line attribution. */
 export const ATTRIBUTION_FILE_LIMIT = 8 * 1024 * 1024;
 type Git = (repository: string, args: string[], signal?: AbortSignal) => Promise<string>;
-export type FileOnlyChange = { path: string; additions: number | null; deletions: number | null; reason: "file_size" | "patch_size" };
+export type FileOnlyChange = { path: string; additions: number | null; deletions: number | null; reason: "file_size" | "file_patch_size" };
+export type PatchContext = { parents: string[]; parentFiles: Map<string, GitTreeFile>; parentPaths: string[] };
 type Change = { path: string; additions: number | null; deletions: number | null };
 const literal = (path: string) => `:(top,literal)${path}`;
 const show = ["-c", "core.quotePath=false", "show", "--no-show-signature", "--first-parent",
@@ -87,7 +88,8 @@ export class AttributionDiffReader {
     return sizes;
   }
 
-  async read(repository: string, sha: string, sourcePaths: string[], signal?: AbortSignal, indexed: Change[] = [], upcoming: string[] = []) {
+  async read(repository: string, sha: string, sourcePaths: string[], signal?: AbortSignal, indexed: Change[] = [], upcoming: string[] = [],
+    consume?: (patch: string, context: PatchContext) => Promise<void>) {
     // --raw inspects trees only. Unlike --numstat it does not ask Git to compute
     // textual diffs for the giant files we are about to skip.
     const metadata = await this.changes(repository, sha, sourcePaths, signal, upcoming);
@@ -102,6 +104,10 @@ export class AttributionDiffReader {
       const path = records[++i];
       if (!path) throw new Error("Git change metadata is missing a file path");
       const counts = statistics.get(path);
+      // Deleted files and deletion-only edits have no newly written content.
+      // Exclude them before size checks: a large deletion must not fall back to
+      // the historical writers of that path (or consume the patch budget).
+      if (/ D$/.test(records[i - 1]) || counts?.additions === 0) continue;
       changes.push({ path, additions: counts?.additions ?? null, deletions: counts?.deletions ?? null });
     }
     if (!changes.length) return { parents, patch: "", fileOnly: [] as FileOnlyChange[], parentPaths: sourcePaths, parentFiles: new Map<string, GitTreeFile>() };
@@ -115,35 +121,40 @@ export class AttributionDiffReader {
       else regular.push(change);
     }
     const parts: string[] = [];
-    let bytes = 0;
-    const skip = (files: Change[]) => fileOnly.push(...files.map(file => ({
-      path: file.path, additions: file.additions, deletions: file.deletions, reason: "patch_size" as const,
-    })));
-    const read = async (files: Change[]): Promise<void> => {
-      if (!files.length) return;
-      if (bytes >= ATTRIBUTION_FILE_LIMIT) { skip(files); return; }
-      // Also bound argv on Windows. Most commits need just one patch query.
-      if (files.reduce((size, file) => size + file.path.length + 20, 0) > 16000 && files.length > 1) {
-        const half = Math.ceil(files.length / 2);
-        await read(files.slice(0, half)); await read(files.slice(half)); return;
-      }
-      try {
-        const patch = await this.git(repository, [...show, "--format=", "--unified=0", sha, "--", ...files.map(file => literal(file.path))], signal);
-        const size = Buffer.byteLength(patch);
-        if (bytes + size > ATTRIBUTION_FILE_LIMIT) { skip(files); return; }
-        parts.push(patch); bytes += size;
-      } catch (error) {
-        if (signal?.aborted || (error as { code?: string }).code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw error;
-        // Several small files can overflow together; isolate them before applying
-        // the file-only policy. Never convert a Git error into a successful match.
-        if (files.length === 1) { skip(files); return; }
-        const half = Math.ceil(files.length / 2);
-        await read(files.slice(0, half)); await read(files.slice(half));
-      }
-    };
-    await read(regular);
-    return { parents, patch: parts.join("\n"), fileOnly, parentFiles: parent,
+    const context: PatchContext = { parents, parentFiles: parent,
       parentPaths: [...sourcePaths, ...[...parent].filter(([, file]) => file.size > ATTRIBUTION_FILE_LIMIT)
         .map(([path]) => `:(top,exclude,literal)${path}`)] };
+    const split = async (files: Change[]) => {
+      const half = Math.ceil(files.length / 2);
+      await read(files.slice(0, half)); await read(files.slice(half));
+    };
+    const read = async (files: Change[]): Promise<void> => {
+      signal?.throwIfAborted();
+      if (!files.length) return;
+      // Also bound argv on Windows. Most commits need just one patch query.
+      if (files.reduce((size, file) => size + file.path.length + 20, 0) > 16000 && files.length > 1) {
+        await split(files); return;
+      }
+      let patch: string | undefined;
+      try {
+        patch = await this.git(repository, [...show, "--format=", "--unified=0", sha, "--", ...files.map(file => literal(file.path))], signal);
+      } catch (error) {
+        if (signal?.aborted || (error as { code?: string }).code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw error;
+      }
+      if (patch === undefined || Buffer.byteLength(patch) > ATTRIBUTION_FILE_LIMIT) {
+        patch = undefined;
+        // A batch overflow is never a reason to exclude its individual files.
+        // Only an isolated file can be classified as having an oversized patch.
+        if (files.length > 1) await split(files);
+        else fileOnly.push({ ...files[0], reason: "file_patch_size" });
+        return;
+      }
+      // Production consumes each bounded batch before reading the next one.
+      // Keep consumer errors outside the Git overflow handler.
+      if (consume) await consume(patch, context);
+      else parts.push(patch);
+    };
+    await read(regular);
+    return { ...context, patch: parts.join("\n"), fileOnly };
   }
 }

@@ -1,5 +1,6 @@
 import { stat } from "node:fs/promises";
 import { ATTRIBUTION_RESULT_TABLES, type LocalStore } from "@varveai/adit-core";
+import { fileAttributionCorrections } from "./attribution-plan.js";
 
 type Commit = { repository: string; sha: string };
 export type CommitInput = { scope_revision: string; paths: string; evidence_revision: string };
@@ -31,6 +32,8 @@ export async function resumableCommits(
     )
     .all(workspace, version) as { id: string; backup_manifest: string }[];
   for (const run of runs) {
+    const corrections = new Set(fileAttributionCorrections(store, run.id)
+      .map(commit => commit.repository + "\0" + commit.sha));
     const manifest = JSON.parse(run.backup_manifest) as unknown[][];
     let legacyValid: boolean | undefined;
     const validateLegacyBackups = async () => {
@@ -56,6 +59,7 @@ export async function resumableCommits(
       const key = commit.repository + "\0" + commit.sha;
       if (!allowed.has(key) || analyzed.has(key) || excluded.has(key) || seen.has(key)) continue;
       seen.add(key);
+      if (corrections.has(key)) continue;
       const saved = selectInput.get(run.id, commit.repository, commit.sha) as
         CommitInput | undefined;
       // Legacy releases persisted complete commit transactions but no per-commit
