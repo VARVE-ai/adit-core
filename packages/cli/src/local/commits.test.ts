@@ -996,7 +996,9 @@ it("reports bounded phase timings for completion, reuse, errors and cancellation
   const timing = (event: AttributionTiming) => events.push(event);
   await analyzeAttribution(store, workspace, { timing });
   expect(events.at(-1)).toMatchObject({ type: "summary", status: "done",
-    operations: { gitDiff: { count: 1 } } });
+    operations: { gitDiff: { count: expect.any(Number) } } });
+  const summary = events.at(-1) as Extract<AttributionTiming, { type: "summary" }>;
+  expect(summary.operations.gitDiff!.count).toBeGreaterThan(0);
   expect(events.filter(event => event.type === "stage").map(event => event.stage))
     .toEqual(["prepare", "submissions", "evidence", "commits", "publish"]);
   expect(JSON.stringify(events)).not.toContain(root);
@@ -1010,6 +1012,8 @@ it("reports bounded phase timings for completion, reuse, errors and cancellation
   expect(commits).toHaveLength(1);
   expect(commits[0]).toMatchObject({ repository: root, sha, status: "done", counts: { parsedLines: 2, comparedLines: 2 } });
   expect(commits[0].git.map(command => command.operation)).toEqual(["changedFiles", "patch"]);
+  expect((events.at(-1) as Extract<AttributionTiming, { type: "summary" }>).operations.gitDiff!.count)
+    .toBe(commits[0].git.length);
   expect(commits[0].git.every(command => command.status === "done" && command.durationMs >= 0)).toBe(true);
   expect(commits[0].stages.persist).toBeGreaterThanOrEqual(0);
   expect(Math.abs(Object.values(commits[0].stages).reduce((sum, ms) => sum + ms, 0) - commits[0].totalMs)).toBeLessThan(0.1);
@@ -1570,6 +1574,171 @@ it("keeps ordinary code attribution in a mixed commit and skips giant files in l
   expect(progress).toHaveBeenCalledOnce();
   expect((await queryCommitSources(store, workspace, root, next)).unknown).toBe(1);
   expect((await queryCommitSources(store, workspace, root, mixed)).fileOnly).toHaveLength(1);
+  expect(store.db.pragma("foreign_key_check")).toEqual([]);
+});
+
+it("analyzes all regular files across an oversized commit and retains the trailing script", async () => {
+  const { workspace, sha, now, history, git } = fixture();
+  await analyzeAttribution(store, workspace);
+  const padding = ("{}".repeat(4096) + "\n").repeat(640);
+  const a = "export const firstBatchValue = true;", b = "export const secondBatchValue = true;";
+  const script = Array.from({ length: 203 }, (_, index) => `export const validationRule${index} = ${index};`).join("\n");
+  for (const [path, content] of [["a.ts", padding + a + "\n"], ["b.ts", padding + b + "\n"],
+    ["z-validate.mjs", script + "\n"], ["large.pen", "x".repeat(9 * 1024 * 1024)]])
+    writeFileSync(join(root, path), content);
+  git(["add", "a.ts", "b.ts", "z-validate.mjs", "large.pen"]);
+  git(["-c", "core.hooksPath=NUL", "commit", "-m", "large mixed commit"]);
+  const mixed = git(["rev-parse", "HEAD"]).trim();
+  store.db.prepare("INSERT INTO adit_local_commits SELECT repository,?,tree_sha,?,author_name,author_email,?,committer_name,committer_email,subject,body,indexed_at FROM adit_local_commits WHERE sha=?")
+    .run(mixed, now + 1000, now + 1000, sha);
+  const indexFile = store.db.prepare("INSERT INTO adit_local_commit_files VALUES (?,?,?,?,?,?,?,?)");
+  for (const [ordinal, [path, additions]] of ([['a.ts', 641], ['b.ts', 641], ['z-validate.mjs', 203], ['large.pen', 1]] as const).entries())
+    indexFile.run(root, mixed, ordinal, null, path, additions, 0, 0);
+  history.write({ provider: "codex", id: "batch-writer", cwd: root, messages: [
+    { key: "write", role: "assistant", timestamp: new Date(now).toISOString(), raw: {}, content:
+      [["a.ts", a], ["b.ts", b], ["z-validate.mjs", script], ["large.pen", "generated"]].map(([path, content]) =>
+        ({ type: "tool_use", id: path, name: "Write", input: { file_path: path, content } })) },
+  ] });
+  const events: AttributionTiming[] = [];
+  await analyzeAttribution(store, workspace, { traceCommits: true, timing: event => events.push(event) });
+  const result = await queryCommitSources(store, workspace, root, mixed);
+  expect(result).toMatchObject({ eligible: 205, matched: 205, excluded: 1281, unknown: 0,
+    sources: [{ sessionId: "batch-writer", certain: 205 }], fileOnly: [{ path: "large.pen", reason: "file_size" }] });
+  expect(result.sources[0].files).toContainEqual({ path: "z-validate.mjs", lines: 203 });
+  expect(result.fileOnly).toHaveLength(1);
+  const timing = events.find(event => event.type === "commit") as Extract<AttributionTiming, { type: "commit" }>;
+  expect(timing.counts.patchBytes).toBeGreaterThan(8 * 1024 * 1024);
+  expect(timing.git.filter(command => command.operation === "patch" && command.status === "done")).toHaveLength(3);
+  expect(attributionNeeded(store, workspace)).toBe(false);
+  expect(store.db.pragma("foreign_key_check")).toEqual([]);
+}, 20000);
+
+it.each(["done", "failed"])("rechecks legacy cumulative skips from a %s batch without reopening other commits", async status => {
+  const { workspace, sha, now, history, git } = fixture();
+  await analyzeAttribution(store, workspace);
+  writeFileSync(join(root, "script.mjs"), "export const recoveredScript = true;\n");
+  git(["add", "script.mjs"]); git(["-c", "core.hooksPath=NUL", "commit", "-m", "script"]);
+  const next = git(["rev-parse", "HEAD"]).trim();
+  store.db.prepare("INSERT INTO adit_local_commits SELECT repository,?,tree_sha,?,author_name,author_email,?,committer_name,committer_email,subject,body,indexed_at FROM adit_local_commits WHERE sha=?")
+    .run(next, now + 1000, now + 1000, sha);
+  store.db.prepare("INSERT INTO adit_local_commit_files VALUES (?,?,?,?,?,?,?,?)")
+    .run(root, next, 0, null, "script.mjs", 1, 0, 0);
+  history.write({ provider: "codex", id: "script-writer", cwd: root, messages: [
+    { key: "write", role: "assistant", timestamp: new Date(now).toISOString(), raw: {}, content: [
+      { type: "tool_use", id: "script", name: "Write", input: { file_path: "script.mjs", content: "export const recoveredScript = true;" } },
+    ] },
+  ] });
+  const before = await analyzeAttribution(store, workspace);
+  store.db.prepare("INSERT INTO adit_attribution_files VALUES (?,?,?,?,?,?,?)")
+    .run(before.id, root, next, "script.mjs", "patch_size", 1, 0);
+  for (const table of ["writers", "turns"])
+    store.db.prepare(`DELETE FROM adit_attribution_${table} WHERE run_id=? AND sha=?`).run(before.id, next);
+  store.db.prepare("UPDATE adit_attribution_commits SET eligible_lines=0,certain_lines=0,excluded_lines=1 WHERE run_id=? AND sha=?").run(before.id, next);
+  store.db.prepare("UPDATE adit_attribution_runs SET status=? WHERE id=?").run(status, before.id);
+  expect(attributionNeeded(store, workspace)).toBe(true);
+  const progress = vi.fn();
+  await analyzeAttribution(store, workspace, { progress });
+  expect(progress).toHaveBeenCalledOnce();
+  expect(await queryCommitSources(store, workspace, root, next))
+    .toMatchObject({ eligible: 1, matched: 1, excluded: 0, sources: [{ sessionId: "script-writer", certain: 1 }] });
+  expect(store.db.prepare("SELECT sha FROM adit_attribution_commits ORDER BY sha").all()).toHaveLength(2);
+  expect(attributionNeeded(store, workspace)).toBe(false);
+  expect((await analyzeAttribution(store, workspace)).cached).toBe(true);
+  // An isolated per-file patch overflow is already checked and must not cause
+  // repeated corrective analysis merely because its metadata is retained.
+  const run = store.db.prepare("SELECT id FROM adit_attribution_runs WHERE status='done'").get() as { id: string };
+  store.db.prepare("INSERT INTO adit_attribution_files VALUES (?,?,?,?,?,?,?)")
+    .run(run.id, root, next, "isolated.pen", "file_patch_size", 10, 10);
+  expect(attributionNeeded(store, workspace)).toBe(false);
+  expect(store.db.pragma("foreign_key_check")).toEqual([]);
+});
+
+it.each(["delete", "remove-lines"])("does not attribute a large %s change to its historical writer", async change => {
+  const content = "original generated content\n".repeat(350_000);
+  const { workspace, sha, now, history, git } = fixture(content);
+  store.db.prepare("INSERT INTO adit_local_commit_files VALUES (?,?,?,?,?,?,?,?)")
+    .run(root, sha, 0, null, "code.ts", 350_000, 0, 0);
+  history.write({ provider: "codex", id: "old-writer", cwd: root, messages: [
+    { key: "write", role: "assistant", timestamp: new Date(now - 1000).toISOString(), raw: {}, content: [
+      { type: "tool_use", id: "old-write", name: "Write", input: { file_path: "code.ts", content: "original generated content" } },
+    ] },
+  ] });
+  await analyzeAttribution(store, workspace);
+  expect((await queryCommitSources(store, workspace, root, sha)).sources[0]).toMatchObject({ sessionId: "old-writer" });
+  if (change === "delete") git(["rm", "code.ts"]);
+  else writeFileSync(join(root, "code.ts"), "original generated content\n");
+  writeFileSync(join(root, "new.ts"), "export const currentChange = true;\n");
+  git(["add", "-u"]); git(["add", "new.ts"]);
+  git(["-c", "core.hooksPath=NUL", "commit", "-m", "cleanup"]);
+  const cleanup = git(["rev-parse", "HEAD"]).trim();
+  store.db.prepare("INSERT INTO adit_local_commits SELECT repository,?,tree_sha,?,author_name,author_email,?,committer_name,committer_email,'cleanup',body,indexed_at FROM adit_local_commits WHERE sha=?")
+    .run(cleanup, now + 2000, now + 2000, sha);
+  store.db.prepare("INSERT INTO adit_local_commit_files VALUES (?,?,?,?,?,?,?,?)")
+    .run(root, cleanup, 0, null, "code.ts", 0, change === "delete" ? 350_000 : 349_999, 0);
+  store.db.prepare("INSERT INTO adit_local_commit_files VALUES (?,?,?,?,?,?,?,?)")
+    .run(root, cleanup, 1, null, "new.ts", 1, 0, 0);
+  history.write({ provider: "codex", id: "current-writer", cwd: root, messages: [
+    { key: "write", role: "assistant", timestamp: new Date(now + 1000).toISOString(), raw: {}, content: [
+      { type: "tool_use", id: "current-write", name: "Write", input: { file_path: "new.ts", content: "export const currentChange = true;" } },
+    ] },
+    { key: "commit", role: "assistant", timestamp: new Date(now + 2000).toISOString(), raw: {}, content: [
+      { type: "tool_use", id: "submit", name: "exec_command", input: { cmd: "git commit -m cleanup" } },
+    ] },
+    { key: "result", role: "tool", timestamp: new Date(now + 2000).toISOString(), raw: {}, content: [
+      { type: "tool_result", tool_use_id: "submit", content: `[feature/fixture ${cleanup.slice(0, 7)}] cleanup` },
+    ] },
+  ] });
+  await analyzeAttribution(store, workspace);
+  const sources = await queryCommitSources(store, workspace, root, cleanup);
+  expect(sources).toMatchObject({ eligible: 1, matched: 1, excluded: 0, sources: [{ sessionId: "current-writer", certain: 1 }] });
+  expect(sources.sources).toHaveLength(1);
+  expect(sources).not.toHaveProperty("fileOnly");
+  expect(queryCommits(store, workspace).commits.find(commit => commit.sha === cleanup)?.record)
+    .toMatchObject({ sessionId: "current-writer", method: "hash" });
+  expect((await queryCommitSources(store, workspace, root, sha)).sources[0]).toMatchObject({ sessionId: "old-writer" });
+  expect(attributionNeeded(store, workspace)).toBe(false);
+});
+
+it.each(["done", "failed"])("corrects saved deletion associations from a %s run without reanalyzing other SHAs", async status => {
+  const { workspace, sha, now, history, git } = fixture();
+  history.write({ provider: "codex", id: "writer", cwd: root, messages: [
+    { key: "prompt", role: "user", timestamp: new Date(now - 2000).toISOString(), raw: {}, content: "Write the original code" },
+    { key: "write", role: "assistant", timestamp: new Date(now - 1000).toISOString(), raw: {}, content: [
+      { type: "tool_use", id: "write", name: "Write", input: { file_path: "code.ts", content: "export const originalValue = 123;" } },
+    ] },
+  ] });
+  git(["rm", "code.ts"]); git(["-c", "core.hooksPath=NUL", "commit", "-m", "delete"]);
+  const deletion = git(["rev-parse", "HEAD"]).trim();
+  store.db.prepare("INSERT INTO adit_local_commits SELECT repository,?,tree_sha,?,author_name,author_email,?,committer_name,committer_email,'delete',body,indexed_at FROM adit_local_commits WHERE sha=?")
+    .run(deletion, now + 1000, now + 1000, sha);
+  store.db.prepare("INSERT INTO adit_local_commit_files VALUES (?,?,?,?,?,?,?,?)")
+    .run(root, deletion, 0, null, "code.ts", 0, 2, 0);
+  const first = await analyzeAttribution(store, workspace);
+  const original = store.db.prepare("SELECT * FROM adit_attribution_commits WHERE run_id=? AND sha=?").get(first.id, sha) as Record<string, unknown>;
+  const originalWriters = store.db.prepare("SELECT provider,session_id,file_path,certain_lines,likely_lines,possible_lines FROM adit_attribution_writers WHERE run_id=? AND sha=?").all(first.id, sha);
+  // Reproduce the version-5 result: a zero-line path association and its turn.
+  store.db.prepare("INSERT INTO adit_attribution_files VALUES (?,?,?,?,?,?,?)").run(first.id, root, deletion, "code.ts", "patch_size", 0, 2);
+  store.db.prepare("INSERT INTO adit_attribution_writers VALUES (?,?,?,?,?,?,?,?,?)").run(first.id, root, deletion, "codex", "writer", "code.ts", 0, 0, 0);
+  const turn = store.db.prepare("SELECT id FROM adit_history_turns WHERE session_id='writer'").get() as { id: string };
+  store.db.prepare("INSERT INTO adit_attribution_turns VALUES (?,?,?,?,?,?)").run(first.id, root, deletion, "codex", "writer", turn.id);
+  store.db.prepare("UPDATE adit_attribution_runs SET status=? WHERE id=?").run(status, first.id);
+  expect(attributionNeeded(store, workspace)).toBe(true);
+  if (status === "done") {
+    renameSync(join(root, ".git"), join(root, "git-unavailable"));
+    try { await expect(analyzeAttribution(store, workspace)).rejects.toThrow(/pending analysis/); }
+    finally { renameSync(join(root, "git-unavailable"), join(root, ".git")); }
+    expect((await queryCommitSources(store, workspace, root, deletion)).sources).toHaveLength(1);
+  }
+  const progress = vi.fn();
+  const result = await analyzeAttribution(store, workspace, { progress });
+  expect(progress).toHaveBeenCalledOnce();
+  expect(await queryCommitSources(store, workspace, root, deletion)).toMatchObject({ eligible: 0, matched: 0, sources: [] });
+  expect(store.db.prepare("SELECT * FROM adit_attribution_turns WHERE run_id=? AND sha=?").all(result.id, deletion)).toEqual([]);
+  const current = store.db.prepare("SELECT * FROM adit_attribution_commits WHERE run_id=? AND sha=?").get(result.id, sha) as Record<string, unknown>;
+  expect({ ...current, run_id: first.id }).toEqual(original);
+  expect(store.db.prepare("SELECT provider,session_id,file_path,certain_lines,likely_lines,possible_lines FROM adit_attribution_writers WHERE run_id=? AND sha=?").all(result.id, sha)).toEqual(originalWriters);
+  expect(attributionNeeded(store, workspace)).toBe(false);
+  expect((await analyzeAttribution(store, workspace)).cached).toBe(true);
   expect(store.db.pragma("foreign_key_check")).toEqual([]);
 });
 

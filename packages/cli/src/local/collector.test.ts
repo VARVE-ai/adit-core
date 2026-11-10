@@ -557,3 +557,42 @@ it("corrects legacy internal-ref indexes once while preserving business analysis
   expect(f.store.db.prepare("SELECT * FROM adit_attribution_commits").all()).toEqual([saved]);
   expect(f.store.db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
 });
+
+it("repairs legacy patch skips despite an unchanged collection checkpoint and stops after correction", async () => {
+  const scan = async () => ({ counts: {}, errors: [], scanned: 0, updated: 0 });
+  const f = retryFixture(scan), repo = f.workspace.path;
+  const progress = vi.fn();
+  const analyze = vi.fn(async workspace => { await analyzeAttribution(f.store, workspace, { progress }); });
+  const collector = new Collector(f.store, analyze, undefined, undefined, scan);
+  collector.providers = f.collector.providers;
+  cleanup.push(async () => { await collector.close(); });
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "core.hooksPath=NUL", ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+  git("config", "user.name", "Fixture");
+  writeFileSync(join(repo, "base.ts"), "export const originalCode = true;\n");
+  git("add", "base.ts"); git("commit", "-m", "base");
+  const base = git("rev-parse", "HEAD");
+  writeFileSync(join(repo, "script.mjs"), "export const ordinaryScript = true;\n");
+  git("add", "script.mjs"); git("commit", "-m", "script");
+  const sha = git("rev-parse", "HEAD");
+  const collect = async () => {
+    const job = collector.collect(f.workspace.id);
+    await collector.waitFor(f.workspace.id);
+    expect(collector.job(job.id).status).toBe("done");
+  };
+  await collect();
+  const before = f.store.db.prepare("SELECT * FROM adit_attribution_commits WHERE sha=?").get(base) as { run_id: string };
+  const checkpoint = f.store.db.prepare("SELECT fingerprint FROM adit_local_collection_checkpoints WHERE workspace_id=?").get(f.workspace.id);
+  f.store.db.prepare("INSERT INTO adit_attribution_files VALUES (?,?,?,?,?,?,?)")
+    .run(before.run_id, repo, sha, "script.mjs", "patch_size", 1, 0);
+  f.store.db.prepare("UPDATE adit_attribution_commits SET eligible_lines=0,unknown_lines=0,excluded_lines=1 WHERE sha=?").run(sha);
+  analyze.mockClear(); progress.mockClear();
+  await collect();
+  expect(analyze).toHaveBeenCalledOnce();
+  expect(progress).toHaveBeenCalledOnce();
+  expect(f.store.db.prepare("SELECT eligible_lines,unknown_lines,excluded_lines FROM adit_attribution_commits WHERE sha=?").get(sha))
+    .toEqual({ eligible_lines: 1, unknown_lines: 1, excluded_lines: 0 });
+  expect({ ...(f.store.db.prepare("SELECT * FROM adit_attribution_commits WHERE sha=?").get(base) as object), run_id: before.run_id }).toEqual(before);
+  expect(f.store.db.prepare("SELECT fingerprint FROM adit_local_collection_checkpoints WHERE workspace_id=?").get(f.workspace.id)).toEqual(checkpoint);
+  await collect();
+  expect(analyze).toHaveBeenCalledOnce();
+});

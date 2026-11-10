@@ -16,50 +16,69 @@ export function saveAttributionSummaries(
   lines: readonly AttributionLine[], candidates: readonly AttributionCandidate[], evidence: ReadonlyMap<string, Evidence>,
   fileWrites: readonly { path: string; provider: string; session: string; source: Evidence }[] = [],
 ): void {
-  const writers = new Map<string, Counts & { provider: string; session: string; path: string }>();
-  const alternatives = new Map<string, Counts & { writerProvider: string; writerSession: string; provider: string; session: string }>();
-  const turns = new Map<string, Evidence>();
-  const byLine = new Map(lines.map(line => [line.id, line]));
-  const increment = (value: Counts, tier: string) => {
-    if (tier === "certain" || tier === "likely" || tier === "possible") value[tier]++;
-  };
-  for (const write of fileWrites) {
-    writers.set(identity(write.provider, write.session, write.path), {
-      provider: write.provider, session: write.session, path: write.path, ...counts(),
-    });
-    turns.set(identity(write.source.provider, write.source.sessionId, write.source.turnId ?? ""), write.source);
-  }
-  for (const line of lines) {
-    if (line.provider && line.session) {
-      const key = identity(line.provider, line.session, line.path);
-      const summary = writers.get(key) ?? { provider: line.provider, session: line.session, path: line.path, ...counts() };
-      increment(summary, line.tier);
-      writers.set(key, summary);
-    }
-    if (line.evidence) {
-      const source = evidence.get(line.evidence);
-      if (!source) throw new Error("Missing selected attribution evidence");
-      // Preserve the original session/turn, even when the selected writer is a
-      // temporary analysis group representative. Native sessions remain separate.
-      turns.set(identity(source.provider, source.sessionId, source.turnId ?? ""), source);
-    }
-  }
-  for (const candidate of candidates) {
-    if (candidate.selected) continue;
-    const line = byLine.get(candidate.line);
-    if (!line?.provider || !line.session) throw new Error("Missing selected attribution writer");
-    const key = identity(line.provider, line.session, candidate.provider, candidate.session);
-    const summary = alternatives.get(key) ?? {
-      writerProvider: line.provider, writerSession: line.session,
-      provider: candidate.provider, session: candidate.session, ...counts(),
+  const summaries = new AttributionSummaries();
+  summaries.add(lines, candidates, evidence, fileWrites);
+  summaries.save(db, run, repository, sha);
+}
+
+/** Retain only summaries between patch batches, not their code or line matches. */
+export class AttributionSummaries {
+  private writers = new Map<string, Counts & { provider: string; session: string; path: string }>();
+  private alternatives = new Map<string, Counts & { writerProvider: string; writerSession: string; provider: string; session: string }>();
+  private turns = new Map<string, Evidence>();
+
+  add(lines: readonly AttributionLine[], candidates: readonly AttributionCandidate[], evidence: ReadonlyMap<string, Evidence>,
+    fileWrites: readonly { path: string; provider: string; session: string; source: Evidence }[] = []) {
+    const { writers, alternatives, turns } = this;
+    const byLine = new Map(lines.map(line => [line.id, line]));
+    const increment = (value: Counts, tier: string) => {
+      if (tier === "certain" || tier === "likely" || tier === "possible") value[tier]++;
     };
-    increment(summary, line.tier);
-    alternatives.set(key, summary);
+    for (const write of fileWrites) {
+      const id = identity(write.provider, write.session, write.path);
+      if (!writers.has(id)) writers.set(id, {
+        provider: write.provider, session: write.session, path: write.path, ...counts(),
+      });
+      const { provider, sessionId, turnId } = write.source;
+      turns.set(identity(provider, sessionId, turnId ?? ""), { provider, sessionId, turnId });
+    }
+    for (const line of lines) {
+      if (line.provider && line.session) {
+        const key = identity(line.provider, line.session, line.path);
+        const summary = writers.get(key) ?? { provider: line.provider, session: line.session, path: line.path, ...counts() };
+        increment(summary, line.tier);
+        writers.set(key, summary);
+      }
+      if (line.evidence) {
+        const source = evidence.get(line.evidence);
+        if (!source) throw new Error("Missing selected attribution evidence");
+        // Preserve the original session/turn, even when the selected writer is a
+        // temporary analysis group representative. Native sessions remain separate.
+        const { provider, sessionId, turnId } = source;
+        turns.set(identity(provider, sessionId, turnId ?? ""), { provider, sessionId, turnId });
+      }
+    }
+    for (const candidate of candidates) {
+      if (candidate.selected) continue;
+      const line = byLine.get(candidate.line);
+      if (!line?.provider || !line.session) throw new Error("Missing selected attribution writer");
+      const key = identity(line.provider, line.session, candidate.provider, candidate.session);
+      const summary = alternatives.get(key) ?? {
+        writerProvider: line.provider, writerSession: line.session,
+        provider: candidate.provider, session: candidate.session, ...counts(),
+      };
+      increment(summary, line.tier);
+      alternatives.set(key, summary);
+    }
   }
-  const writer = db.prepare("INSERT INTO adit_attribution_writers VALUES (?,?,?,?,?,?,?,?,?)");
-  for (const w of writers.values()) writer.run(run, repository, sha, w.provider, w.session, w.path, w.certain, w.likely, w.possible);
-  const alternative = db.prepare("INSERT INTO adit_attribution_alternatives VALUES (?,?,?,?,?,?,?,?,?,?)");
-  for (const a of alternatives.values()) alternative.run(run, repository, sha, a.writerProvider, a.writerSession, a.provider, a.session, a.certain, a.likely, a.possible);
-  const turn = db.prepare("INSERT INTO adit_attribution_turns VALUES (?,?,?,?,?,?)");
-  for (const t of turns.values()) turn.run(run, repository, sha, t.provider, t.sessionId, t.turnId ?? "");
+
+  save(db: LocalStore["db"], run: string, repository: string, sha: string) {
+    const { writers, alternatives, turns } = this;
+    const writer = db.prepare("INSERT INTO adit_attribution_writers VALUES (?,?,?,?,?,?,?,?,?)");
+    for (const w of writers.values()) writer.run(run, repository, sha, w.provider, w.session, w.path, w.certain, w.likely, w.possible);
+    const alternative = db.prepare("INSERT INTO adit_attribution_alternatives VALUES (?,?,?,?,?,?,?,?,?,?)");
+    for (const a of alternatives.values()) alternative.run(run, repository, sha, a.writerProvider, a.writerSession, a.provider, a.session, a.certain, a.likely, a.possible);
+    const turn = db.prepare("INSERT INTO adit_attribution_turns VALUES (?,?,?,?,?,?)");
+    for (const t of turns.values()) turn.run(run, repository, sha, t.provider, t.sessionId, t.turnId ?? "");
+  }
 }

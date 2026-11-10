@@ -23,6 +23,7 @@ import {
 } from "@varveai/adit-core";
 import type { scanHistoryInBackground } from "./collection-scan.js";
 import { businessRefs, businessHistory, collectionHead, gitCollectionVersion } from "./git-collection-scope.js";
+import { fileAttributionCorrectionNeeded } from "./attribution-plan.js";
 
 const exec = promisify(execFile);
 export const localAssets = fileURLToPath(
@@ -477,7 +478,7 @@ export class Collector {
         try { await this.inspect(workspace); }
         catch(error) { processingIssue("History inspection failed; previous results retained",error); }
       }
-      if(workspace&&processChanges&&this.analyze){
+      if(workspace&&this.analyze&&(processChanges||fileAttributionCorrectionNeeded(this.store,workspace))){
         job.phase="analysis";this.store.job(job);
         unchanged();
         try{await this.analyze(workspace,job);}catch(error){processingIssue("Commit analysis pending; previous results retained",error);}

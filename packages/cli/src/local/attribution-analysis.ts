@@ -19,9 +19,9 @@ import {
   eligibleLine,
   extractWritten,
 } from "./attribution-evidence.js";
-import { saveAttributionSummaries, type AttributionLine, type AttributionCandidate } from "./attribution-summaries.js";
+import { AttributionSummaries, type AttributionLine, type AttributionCandidate } from "./attribution-summaries.js";
 import { commandOf } from "./submission-evidence.js";
-import { attributionNeeded, collectedCommits, rememberSubmissionRevision, savedRun, submissionRevision } from "./attribution-plan.js";
+import { attributionNeeded, collectedCommits, fileAttributionCorrections, rememberSubmissionRevision, savedRun, submissionRevision } from "./attribution-plan.js";
 import { callIdentities, readSubmissionCandidates, writeCalls } from "./attribution-input.js";
 import { AttributionEvidenceStore, type AttributionEvidence as Evidence } from "./attribution-evidence-store.js";
 import { resumableCommits, copyResumedCommits, pruneResumedRuns, type CommitInput } from "./attribution-resume.js";
@@ -429,7 +429,7 @@ async function runAttribution(
     return { id: savedRun(store, w.id)?.id ?? null, cached: true };
   // New SHAs and explicit rechecks recompute code provenance. Late submission
   // evidence may fill an empty link without rewriting saved line attribution.
-  const { previous, analyzed } = db.transaction(() => {
+  const { previous, analyzed, recheckTargets } = db.transaction(() => {
     const previous = savedRun(store, w.id);
     const commits = collectedCommits(store, w);
     for (const target of options.recheck || [])
@@ -452,17 +452,23 @@ async function runAttribution(
           ).map((c) => key(c.repository, c.sha))
         : [],
     );
-    for (const target of options.recheck || [])
+    const collected = new Set(commits.map(commit => key(commit.repository, commit.sha)));
+    const corrections = previous && !options.force ? fileAttributionCorrections(store, previous.id)
+      .filter(commit => collected.has(key(commit.repository, commit.sha))) : [];
+    const recheckTargets = [...new Map([...(options.recheck || []), ...corrections]
+      .map(commit => [key(commit.repository, commit.sha), commit])).values()];
+    for (const target of recheckTargets)
       analyzed.delete(key(target.repository, target.sha));
     return {
       previous,
       analyzed,
+      recheckTargets,
     };
   })();
   const snapshot = inputMetadata(store, w),
     identities = analysisIdentities(snapshot.sessions, callIdentities(store, snapshot.scope));
   const submissionInputRevision = submissionRevision(store, w);
-  const rechecks = new Set((options.recheck || []).map(c => key(c.repository, c.sha)));
+  const rechecks = new Set(recheckTargets.map(c => key(c.repository, c.sha)));
   let targets = snapshot.commits.filter(
     (c) => !analyzed.has(key(c.repository, c.sha)),
   );
@@ -742,8 +748,8 @@ async function runAttribution(
     let completed = resume.commits.length;
     const failures: string[] = [];
     let trace: AttributionCommitTimer | undefined;
-    const diffReader = new AttributionDiffReader((repository, args, signal) => trace
-      ? trace.git(args, () => git(repository, args, signal)) : git(repository, args, signal), gitObjects);
+    const diffReader = new AttributionDiffReader((repository, args, signal) => timer.measure("gitDiff", () => trace
+      ? trace.git(args, () => git(repository, args, signal)) : git(repository, args, signal)), gitObjects);
     timer.phase("commits");
     for (const [commitIndex, commit] of targets.entries()) {
       trace = timer.commit(commit.repository, commit.sha);
@@ -766,30 +772,9 @@ async function runAttribution(
       trace?.phase("gitDiff");
       const upcoming = targets.slice(commitIndex + 1, commitIndex + 16)
         .filter(target => target.repository === commit.repository).map(target => target.sha);
-      const diff = await timer.measure("gitDiff", () => diffReader.read(commit.repository, commit.sha, gitSourcePaths, options.signal, indexedFiles, upcoming));
-      const { parents, fileOnly } = diff;
-      trace?.phase("parsePatch");
-      const lines = parseAddedLines(diff.patch);
-      if (trace) {
-        trace.count("patchBytes", Buffer.byteLength(diff.patch));
-        trace.count("parsedLines", lines.length);
-        trace.count("fileOnlyFiles", fileOnly.length);
-      }
-      trace?.phase("parentScan");
-      const oldLines = new Set<string>();
-      if (parents.length && lines.some((l) => !l.excluded)) {
-        const wanted = new Set(
-          lines.filter((l) => !l.excluded).map((l) => l.text),
-        );
-        for (const line of await timer.measure("parentScan", () =>
-          parentIndex.matching(commit.repository, parents[0], diff.parentFiles, diff.parentPaths, wanted, options.signal,
-            trace ? timing => trace!.parentScan(timing) : undefined))) oldLines.add(line);
-      }
-
-      trace?.phase("fileEvidence");
-      let fallback: AttributionMatchIndex | undefined;
-      let currentIndex: { path: string; index: AttributionMatchIndex } | undefined;
-      const evidenceById = new Map<string, Evidence>();
+      const summaries = new AttributionSummaries();
+      const totals = { eligible: 0, excluded: 0, certain: 0, likely: 0, possible: 0, moved: 0, unknown: 0 };
+      const parsedPaths = new Set<string>(), paths = new Set<string>();
       const inputSignatures = new Map<string, string>();
       let visitedInputFallback = false;
       function* trackInput(records: Iterable<Evidence>) {
@@ -798,162 +783,177 @@ async function runAttribution(
           yield item;
         }
       }
-      const comparedPaths = [...new Set(lines.filter(line => !line.excluded && !oldLines.has(line.text)).map(line => resolve(commit.repository, line.path)))];
+      const { fileOnly } = await diffReader.read(commit.repository, commit.sha, gitSourcePaths, options.signal, indexedFiles, upcoming, async (patch, diff) => {
+        options.signal?.throwIfAborted();
+        const { parents } = diff;
+        trace?.phase("parsePatch");
+        const lines = parseAddedLines(patch);
+        if (trace) {
+          trace.count("patchBytes", Buffer.byteLength(patch));
+          trace.count("parsedLines", lines.length);
+        }
+        for (const line of lines) parsedPaths.add(line.path);
+        trace?.phase("parentScan");
+        const oldLines = new Set<string>();
+        if (parents.length && lines.some((l) => !l.excluded)) {
+          const wanted = new Set(
+            lines.filter((l) => !l.excluded).map((l) => l.text),
+          );
+          for (const line of await timer.measure("parentScan", () =>
+            parentIndex.matching(commit.repository, parents[0], diff.parentFiles, diff.parentPaths, wanted, options.signal,
+              trace ? timing => trace!.parentScan(timing) : undefined))) oldLines.add(line);
+        }
+
+        trace?.phase("fileEvidence");
+        let fallback: AttributionMatchIndex | undefined;
+        let currentIndex: { path: string; index: AttributionMatchIndex } | undefined;
+        const evidenceById = new Map<string, Evidence>();
+        for (const line of lines)
+          if (!line.excluded && !oldLines.has(line.text)) paths.add(resolve(commit.repository, line.path));
+
+        const indexFor = (line: AddedLine) => {
+          const path = normalizedPath(resolve(commit.repository, line.path));
+          if (currentIndex?.path === path) return currentIndex.index;
+          const started = performance.now();
+          const selected = at == null ? { mode: "path", evidence: [] } : evidenceStore.forFile(commit.repository, path, at);
+          trace?.count(selected.mode === "fallback" ? "fallbackFiles" : "pathFiles");
+          if (selected.mode === "fallback" && fallback) trace?.count("reusedFallbackIndexes");
+          const countEvidence = trace ? () => trace!.count("candidateRecords") : undefined;
+          if (selected.mode === "fallback") visitedInputFallback = true;
+          const index = selected.mode === "fallback"
+            ? fallback ??= new AttributionMatchIndex(trackInput(selected.evidence), countEvidence)
+            : new AttributionMatchIndex(trackInput(selected.evidence), countEvidence);
+          // Diffs group lines by path. Keep only the active file's index plus one
+          // shared fallback; retain evidence bodies only for actual candidates.
+          currentIndex = { path, index };
+          timer.add("evidenceLookup", started);
+          trace?.lookup(started);
+          return index;
+        };
+        trace?.phase("matchLines");
+        const perLine = new Map<AddedLine, AttributionMatch[]>(),
+          support = new Map<string, number>();
+        for (const line of lines) {
+          if (line.excluded || oldLines.has(line.text)) continue;
+          trace?.count("comparedLines");
+          const index = indexFor(line);
+          let matches = index.matching(line.text);
+          for (const group of new Set(matches.map((c) => c.e.group))) {
+            const k = line.hunk + "\0" + group;
+            support.set(k, (support.get(k) || 0) + 1);
+          }
+          // Fuzzy candidates do not count as exact hunk support, as before.
+          if (!matches.length) matches = index.approximate(line.text);
+          trace?.count(matches.length ? "matchedLines" : "unmatchedLines");
+          perLine.set(line, matches);
+          for (const match of matches) evidenceById.set(digest([run, match.e.id]), match.e);
+        }
+        currentIndex = undefined; fallback = undefined;
+        trace?.phase("classifyLines");
+        const attributionRows: (AttributionLine & Row)[] = [];
+        const candidatesRows: (AttributionCandidate & Row)[] = [];
+        for (const line of lines) {
+          const id = digest([
+            run,
+            commit.repository,
+            commit.sha,
+            line.path,
+            line.number,
+          ]);
+          let tier = "unknown",
+            selected: AttributionMatch | undefined;
+          let candidates = perLine.get(line) || [];
+          if (line.excluded) {
+            tier = "excluded";
+            totals.excluded++;
+          } else {
+            totals.eligible++;
+            if (oldLines.has(line.text)) tier = "moved";
+            else {
+              const groups = new Map<string, AttributionMatch>();
+              for (const c of candidates) {
+                const old = groups.get(c.e.group);
+                if (
+                  !old ||
+                  c.score > old.score ||
+                  (c.score === old.score && c.e.at > old.e.at)
+                )
+                  groups.set(c.e.group, c);
+              }
+              candidates = [...groups.values()].sort(
+                (a, b) =>
+                  (support.get(line.hunk + "\0" + b.e.group) || 0) -
+                    (support.get(line.hunk + "\0" + a.e.group) || 0) ||
+                  b.score - a.score ||
+                  b.e.at - a.e.at ||
+                  a.e.id.localeCompare(b.e.id),
+              );
+              selected = candidates[0];
+              if (selected)
+                tier =
+                  selected.method === "token_overlap"
+                    ? "possible"
+                    : candidates.length === 1
+                      ? "certain"
+                      : "likely";
+            }
+            totals[
+              tier as "certain" | "likely" | "possible" | "moved" | "unknown"
+            ]++;
+          }
+          const who = selected
+            ? identities.representative(
+                key(selected.e.provider, selected.e.sessionId),
+              )
+            : null;
+          attributionRows.push({
+            id,
+            path: line.path,
+            number: line.number,
+            hunk: line.hunk,
+            hash: digest(line.text),
+            tier,
+            provider: who?.provider ?? null,
+            session: who?.id ?? null,
+            evidence: selected ? digest([run, selected.e.id]) : null,
+            method: selected?.method ?? null,
+            score: selected?.score ?? null,
+          });
+          for (const candidate of candidates) {
+            const who = identities.representative(
+              key(candidate.e.provider, candidate.e.sessionId),
+            );
+            candidatesRows.push({
+              line: id,
+              provider: who.provider,
+              session: who.id,
+              evidence: digest([run, candidate.e.id]),
+              support: support.get(line.hunk + "\0" + candidate.e.group) || 0,
+              at: candidate.e.at,
+              selected: Number(candidate === selected),
+            });
+          }
+        }
+        summaries.add(attributionRows, candidatesRows, evidenceById);
+        trace?.phase("gitDiff");
+      });
+      trace?.count("fileOnlyFiles", fileOnly.length);
+      totals.excluded += indexedFiles
+        .filter(file => generated(file.path) && !parsedPaths.has(file.path) && !fileOnly.some(skipped => skipped.path === file.path))
+        .reduce((sum, file) => sum + (file.additions || 0), 0);
+      totals.excluded += fileOnly.reduce((sum, file) => sum + (file.additions || 0), 0);
       const fileOnlyPaths = fileOnly.map(file => resolve(commit.repository, file.path));
-      const paths = [...new Set([...comparedPaths, ...fileOnlyPaths])];
-      const fileWrites: { path: string; provider: string; session: string; source: Evidence }[] = [];
+      for (const path of fileOnlyPaths) paths.add(path);
       const skippedPaths = new Map(fileOnly.map(file => [normalizedPath(resolve(commit.repository, file.path)), file.path]));
+      trace?.phase("fileEvidence");
       const lookupStarted = performance.now();
-      for (const evidence of fileOnlyPaths.length && at !== null ? evidenceStore.forFileWrites(commit.repository, fileOnlyPaths, at) : []) {
+      for (const evidence of fileOnlyPaths.length && at != null ? evidenceStore.forFileWrites(commit.repository, fileOnlyPaths, at) : []) {
         const who = identities.representative(key(evidence.provider, evidence.sessionId));
-        fileWrites.push({ path: skippedPaths.get(normalizedPath(evidence.filePath!))!, provider: who.provider, session: who.id, source: evidence });
+        summaries.add([], [], new Map(), [{
+          path: skippedPaths.get(normalizedPath(evidence.filePath!))!, provider: who.provider, session: who.id, source: evidence,
+        }]);
       }
       timer.add("evidenceLookup", lookupStarted);
-
-      const indexFor = (line: AddedLine) => {
-        const path = normalizedPath(resolve(commit.repository, line.path));
-        if (currentIndex?.path === path) return currentIndex.index;
-        const started = performance.now();
-        const selected = at == null ? { mode: "path", evidence: [] } : evidenceStore.forFile(commit.repository, path, at);
-        trace?.count(selected.mode === "fallback" ? "fallbackFiles" : "pathFiles");
-        if (selected.mode === "fallback" && fallback) trace?.count("reusedFallbackIndexes");
-        const countEvidence = trace ? () => trace!.count("candidateRecords") : undefined;
-        if (selected.mode === "fallback") visitedInputFallback = true;
-        const index = selected.mode === "fallback"
-          ? fallback ??= new AttributionMatchIndex(trackInput(selected.evidence), countEvidence)
-          : new AttributionMatchIndex(trackInput(selected.evidence), countEvidence);
-        // Diffs group lines by path. Keep only the active file's index plus one
-        // shared fallback; retain evidence bodies only for actual candidates.
-        currentIndex = { path, index };
-        timer.add("evidenceLookup", started);
-        trace?.lookup(started);
-        return index;
-      };
-      trace?.phase("matchLines");
-      const perLine = new Map<AddedLine, AttributionMatch[]>(),
-        support = new Map<string, number>();
-      for (const line of lines) {
-        if (line.excluded || oldLines.has(line.text)) continue;
-        trace?.count("comparedLines");
-        const index = indexFor(line);
-        let matches = index.matching(line.text);
-        for (const group of new Set(matches.map((c) => c.e.group))) {
-          const k = line.hunk + "\0" + group;
-          support.set(k, (support.get(k) || 0) + 1);
-        }
-        // Fuzzy candidates do not count as exact hunk support, as before.
-        if (!matches.length) matches = index.approximate(line.text);
-        trace?.count(matches.length ? "matchedLines" : "unmatchedLines");
-        perLine.set(line, matches);
-        for (const match of matches) evidenceById.set(digest([run, match.e.id]), match.e);
-      }
-      currentIndex = undefined; fallback = undefined;
-      trace?.phase("classifyLines");
-      const attributionRows: (AttributionLine & Row)[] = [];
-      const candidatesRows: (AttributionCandidate & Row)[] = [];
-      const totals = {
-        eligible: 0,
-        excluded: 0,
-        certain: 0,
-        likely: 0,
-        possible: 0,
-        moved: 0,
-        unknown: 0,
-      };
-      totals.excluded = (
-        db
-          .prepare(
-            "SELECT path,additions FROM adit_local_commit_files WHERE repository=? AND sha=?",
-          )
-          .all(commit.repository, commit.sha) as Row[]
-      )
-        .filter(
-          (f) => generated(f.path) && !lines.some((l) => l.path === f.path) && !fileOnly.some(file => file.path === f.path),
-        )
-        .reduce((sum, f) => sum + (f.additions || 0), 0);
-      totals.excluded += fileOnly.reduce((sum, file) => sum + (file.additions || 0), 0);
-      for (const line of lines) {
-        const id = digest([
-          run,
-          commit.repository,
-          commit.sha,
-          line.path,
-          line.number,
-        ]);
-        let tier = "unknown",
-          selected: AttributionMatch | undefined;
-        let candidates = perLine.get(line) || [];
-        if (line.excluded) {
-          tier = "excluded";
-          totals.excluded++;
-        } else {
-          totals.eligible++;
-          if (oldLines.has(line.text)) tier = "moved";
-          else {
-            const groups = new Map<string, AttributionMatch>();
-            for (const c of candidates) {
-              const old = groups.get(c.e.group);
-              if (
-                !old ||
-                c.score > old.score ||
-                (c.score === old.score && c.e.at > old.e.at)
-              )
-                groups.set(c.e.group, c);
-            }
-            candidates = [...groups.values()].sort(
-              (a, b) =>
-                (support.get(line.hunk + "\0" + b.e.group) || 0) -
-                  (support.get(line.hunk + "\0" + a.e.group) || 0) ||
-                b.score - a.score ||
-                b.e.at - a.e.at ||
-                a.e.id.localeCompare(b.e.id),
-            );
-            selected = candidates[0];
-            if (selected)
-              tier =
-                selected.method === "token_overlap"
-                  ? "possible"
-                  : candidates.length === 1
-                    ? "certain"
-                    : "likely";
-          }
-          totals[
-            tier as "certain" | "likely" | "possible" | "moved" | "unknown"
-          ]++;
-        }
-        const who = selected
-          ? identities.representative(
-              key(selected.e.provider, selected.e.sessionId),
-            )
-          : null;
-        attributionRows.push({
-          id,
-          path: line.path,
-          number: line.number,
-          hunk: line.hunk,
-          hash: digest(line.text),
-          tier,
-          provider: who?.provider ?? null,
-          session: who?.id ?? null,
-          evidence: selected ? digest([run, selected.e.id]) : null,
-          method: selected?.method ?? null,
-          score: selected?.score ?? null,
-        });
-        for (const candidate of candidates) {
-          const who = identities.representative(
-            key(candidate.e.provider, candidate.e.sessionId),
-          );
-          candidatesRows.push({
-            line: id,
-            provider: who.provider,
-            session: who.id,
-            evidence: digest([run, candidate.e.id]),
-            support: support.get(line.hunk + "\0" + candidate.e.group) || 0,
-            at: candidate.e.at,
-            selected: Number(candidate === selected),
-          });
-        }
-      }
       const { operation, method, matchedSha } = matchSubmission(commit);
       trace?.phase("inputRevision");
       // Content-matched files already supplied their exact input stamp while
@@ -965,10 +965,10 @@ async function runAttribution(
         for (const item of selected.evidence)
           if (!inputSignatures.has(item.id)) inputSignatures.set(item.id, evidenceSignature(item));
       }
-      const commitInput = inputFor({ repository: commit.repository, sha: commit.sha }, paths, inputSignatures);
+      const commitInput = inputFor({ repository: commit.repository, sha: commit.sha }, [...paths], inputSignatures);
       trace?.phase("persist");
       db.transaction(() => {
-        saveAttributionSummaries(db, run, commit.repository, commit.sha, attributionRows, candidatesRows, evidenceById, fileWrites);
+        summaries.save(db, run, commit.repository, commit.sha);
         const saveFile = db.prepare("INSERT INTO adit_attribution_files VALUES (?,?,?,?,?,?,?)");
         for (const file of fileOnly) saveFile.run(run, commit.repository, commit.sha, file.path, file.reason, file.additions, file.deletions);
         db.prepare(
@@ -1037,9 +1037,9 @@ async function runAttribution(
           "已有分析结果已更新，将在下一次采集后重试未完成的提交分析",
         );
       if (previous && !options.force) {
-        // Replace only explicitly rechecked commits at publication time. A failed
+        // Replace explicit rechecks and file-policy corrections at publication. A failed
         // recheck leaves the previous complete snapshot readable and untouched.
-        for (const target of options.recheck || []) {
+        for (const target of recheckTargets) {
           for (const table of ATTRIBUTION_RESULT_TABLES)
             db.prepare(
               `DELETE FROM adit_attribution_${table} WHERE run_id=? AND repository=? AND sha=?`,

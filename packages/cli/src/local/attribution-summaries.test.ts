@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { createAttributionSchema } from "../../../core/src/local-history/attribution-schema.js";
-import { saveAttributionSummaries } from "./attribution-summaries.js";
+import { AttributionSummaries, saveAttributionSummaries } from "./attribution-summaries.js";
 
 it("reduces many matched lines to file/session counts while preserving alternative counts and original evidence turns", () => {
   const db = new Database(":memory:");
@@ -32,6 +32,16 @@ it("reduces many matched lines to file/session counts while preserving alternati
     expect(db.prepare("SELECT session_id,turn_id FROM adit_attribution_turns ORDER BY session_id").all()).toEqual([
       { session_id: "original", turn_id: "turn-1" }, { session_id: "subtask", turn_id: "" },
     ]);
+    const tables = ["writers", "alternatives", "turns"];
+    const before = tables.map(table => db.prepare(`SELECT * FROM adit_attribution_${table} ORDER BY rowid`).all());
+    for (const table of tables) db.prepare(`DELETE FROM adit_attribution_${table}`).run();
+    const summaries = new AttributionSummaries();
+    for (let offset = 0; offset < lines.length; offset += 125)
+      summaries.add(lines.slice(offset, offset + 125), candidates.slice(offset * 2, (offset + 125) * 2), evidence);
+    // A file-only association must not reset an existing count when appended.
+    summaries.add([], [], evidence, [{ path: "a.ts", provider: "claude", session: "representative", source: evidence.get("first")! }]);
+    db.transaction(() => summaries.save(db, "run", "repo", "sha"))();
+    expect(tables.map(table => db.prepare(`SELECT * FROM adit_attribution_${table} ORDER BY rowid`).all())).toEqual(before);
     db.prepare("DELETE FROM adit_attribution_runs").run();
     for (const table of ["writers", "alternatives", "turns"]) expect(db.prepare(`SELECT * FROM adit_attribution_${table}`).all()).toEqual([]);
     expect(db.pragma("foreign_key_check")).toEqual([]);
