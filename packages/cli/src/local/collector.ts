@@ -578,7 +578,7 @@ export class Collector {
         for(const sha of known)if(!reachable.has(sha))this.store.db.prepare("DELETE FROM adit_local_commits WHERE repository=? AND sha=?").run(repo.path,sha);
         // Upgrade old --all indexes atomically with the verified Git snapshot.
         // Keep valid analysis, native sessions, sync receipts and original Git refs.
-        for (const suffix of ["commits", "writers", "alternatives", "turns"]) {
+        for (const suffix of ["commits", "writers", "alternatives", "turns", "inputs", "files"]) {
           const table = `adit_attribution_${suffix}`;
           if (this.store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table))
             this.store.db.prepare(`DELETE FROM ${table} WHERE repository=? AND sha NOT IN (SELECT value FROM json_each(?))`).run(repo.path,normalShas);

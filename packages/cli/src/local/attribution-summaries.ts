@@ -14,6 +14,7 @@ const identity = (...parts: string[]) => JSON.stringify(parts);
 export function saveAttributionSummaries(
   db: LocalStore["db"], run: string, repository: string, sha: string,
   lines: readonly AttributionLine[], candidates: readonly AttributionCandidate[], evidence: ReadonlyMap<string, Evidence>,
+  fileWrites: readonly { path: string; provider: string; session: string; source: Evidence }[] = [],
 ): void {
   const writers = new Map<string, Counts & { provider: string; session: string; path: string }>();
   const alternatives = new Map<string, Counts & { writerProvider: string; writerSession: string; provider: string; session: string }>();
@@ -22,6 +23,12 @@ export function saveAttributionSummaries(
   const increment = (value: Counts, tier: string) => {
     if (tier === "certain" || tier === "likely" || tier === "possible") value[tier]++;
   };
+  for (const write of fileWrites) {
+    writers.set(identity(write.provider, write.session, write.path), {
+      provider: write.provider, session: write.session, path: write.path, ...counts(),
+    });
+    turns.set(identity(write.source.provider, write.source.sessionId, write.source.turnId ?? ""), write.source);
+  }
   for (const line of lines) {
     if (line.provider && line.session) {
       const key = identity(line.provider, line.session, line.path);

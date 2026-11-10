@@ -18,17 +18,18 @@ import {
   normalizeLine,
   eligibleLine,
   extractWritten,
-  jsonTextValue,
-  wordTokens,
-  tokenOverlap,
 } from "./attribution-evidence.js";
 import { saveAttributionSummaries, type AttributionLine, type AttributionCandidate } from "./attribution-summaries.js";
 import { commandOf } from "./submission-evidence.js";
 import { attributionNeeded, collectedCommits, rememberSubmissionRevision, savedRun, submissionRevision } from "./attribution-plan.js";
 import { callIdentities, readSubmissionCandidates, writeCalls } from "./attribution-input.js";
 import { AttributionEvidenceStore, type AttributionEvidence as Evidence } from "./attribution-evidence-store.js";
-import { resumableCommits, copyResumedCommits } from "./attribution-resume.js";
-import { parentMatchingLines } from "./attribution-parent-lines.js";
+import { resumableCommits, copyResumedCommits, pruneResumedRuns, type CommitInput } from "./attribution-resume.js";
+import { AttributionGitObjects } from "./attribution-git-objects.js";
+import { AttributionParentIndex } from "./attribution-parent-index.js";
+import { AttributionTimer, type AttributionTiming, type AttributionCommitTimer, type CommitTiming } from "./attribution-timing.js";
+import { AttributionDiffReader, ATTRIBUTION_FILE_LIMIT } from "./attribution-diff.js";
+import { AttributionMatchIndex, type AttributionMatch } from "./attribution-match-index.js";
 const execute = promisify(execFile);
 export const ATTRIBUTION_VERSION = 5;
 const digest = (value: unknown) =>
@@ -219,9 +220,8 @@ async function git(repository: string, args: string[], signal?: AbortSignal) {
       windowsHide: true,
       encoding: "utf8",
       timeout: 60000,
-      // Patch parsing is bounded as well as parent scanning. Oversized commits
-      // remain explicitly pending while other commits can finish and be reused.
-      maxBuffer: 8 * 1024 * 1024,
+      // Large patches fall back to file-path association in AttributionDiffReader.
+      maxBuffer: ATTRIBUTION_FILE_LIMIT,
       signal,
     })
   ).stdout;
@@ -277,10 +277,6 @@ function writeLocation(
 function normalizedPath(value: string): string {
   const path = resolve(value);
   return process.platform === "win32" ? path.toLowerCase() : path;
-}
-
-function samePath(a: string, b: string): boolean {
-  return normalizedPath(a) === normalizedPath(b);
 }
 
 async function backupEvidence(
@@ -395,15 +391,36 @@ async function backupEvidence(
   return { missing, manifest };
 }
 
+type AnalysisOptions = {
+  signal?: AbortSignal;
+  force?: boolean;
+  recheck?: { repository: string; sha: string }[];
+  progress?: (repository: string) => void;
+  timing?: (event: AttributionTiming) => void;
+  traceCommits?: boolean;
+};
+
 export async function analyzeAttribution(
   store: LocalStore,
   w: LocalWorkspace,
-  options: {
-    signal?: AbortSignal;
-    force?: boolean;
-    recheck?: { repository: string; sha: string }[];
-    progress?: (repository:string)=>void;
-  } = {},
+  options: AnalysisOptions = {},
+) {
+  const timer = new AttributionTimer(options.timing, options.traceCommits);
+  try {
+    const result = await runAttribution(store, w, options, timer);
+    timer.finish(result.cached ? "unchanged" : "done");
+    return result;
+  } catch (error) {
+    timer.finish(options.signal?.aborted ? "cancelled" : "failed");
+    throw error;
+  }
+}
+
+async function runAttribution(
+  store: LocalStore,
+  w: LocalWorkspace,
+  options: AnalysisOptions,
+  timer: AttributionTimer,
 ) {
   createAttributionSchema(store.db);
   const db = store.db;
@@ -445,11 +462,11 @@ export async function analyzeAttribution(
   const snapshot = inputMetadata(store, w),
     identities = analysisIdentities(snapshot.sessions, callIdentities(store, snapshot.scope));
   const submissionInputRevision = submissionRevision(store, w);
-  const resume = options.force ? { commits: [], manifest: [] } : await resumableCommits(store, w.id, snapshot.evidenceRevision,
-    snapshot.commits.map(c => ({ repository: c.repository as string, sha: c.sha as string })), analyzed, new Set((options.recheck || []).map(c => key(c.repository, c.sha))));
-  const targets = snapshot.commits.filter(
+  const rechecks = new Set((options.recheck || []).map(c => key(c.repository, c.sha)));
+  let targets = snapshot.commits.filter(
     (c) => !analyzed.has(key(c.repository, c.sha)),
   );
+  timer.phase("submissions");
   const operations = readSubmissionCandidates(store, snapshot.scope).map(e => {
     const session = snapshot.sessions.find(s => s.provider === e.call.provider && s.id === e.call.session_id)!;
     return { ...e, group: identities.find(key(e.call.provider, e.call.session_id)),
@@ -531,14 +548,18 @@ export async function analyzeAttribution(
     const match = matchSubmission(commit);
     return match.operation ? [{commit, ...match}] : [];
   }) : [];
-  if (!options.force && previous && !targets.length && !repairs.length && !resume.commits.length) {
+  if (!options.force && previous && !targets.length && !repairs.length) {
     rememberSubmissionRevision(store, w, submissionInputRevision);
     return {id: previous.id, cached: true};
   }
+  timer.phase("evidence");
   const evidenceStore = new AttributionEvidenceStore();
+  let cleanupObjects: AttributionGitObjects | undefined;
   try {
+  const gitObjects = cleanupObjects = new AttributionGitObjects();
+  const parentIndex = new AttributionParentIndex(gitObjects);
   const targetPaths = new Map<string, Set<string> | null>();
-  const selectFiles = db.prepare("SELECT path FROM adit_local_commit_files WHERE repository=? AND sha=?");
+  const selectFiles = db.prepare("SELECT path,additions,deletions FROM adit_local_commit_files WHERE repository=? AND sha=?");
   for (const commit of targets) {
     if (targetPaths.get(commit.repository) === null) continue;
     const files = selectFiles.all(commit.repository, commit.sha) as Row[];
@@ -561,25 +582,32 @@ export async function analyzeAttribution(
       missingTime++;
       return;
     }
-    for (const raw of text.split(/\r?\n/)) {
-      const line = normalizeLine(raw);
-      if (!eligibleLine(line)) continue;
-      const id = digest([
-        source.provider,
-        source.sessionId,
-        source.toolId,
-        source.sourcePath,
-        source.kind,
-        source.filePath,
-        line,
-      ]);
-      evidenceStore.add({
-        ...source,
-        id,
-        text: line,
-        group: identities.find(key(source.provider, source.sessionId)),
-      });
+    const group = identities.find(key(source.provider, source.sessionId));
+    function* records(): Iterable<Evidence> {
+      if (source.filePath) {
+        yield { ...source, kind: "file_write", text: "",
+          id: digest(["file_write", source.provider, source.sessionId, source.toolId, source.sourcePath, source.filePath]),
+          group };
+      }
+      // The path remains useful even when its recorded contents are too large for
+      // line attribution. Do not expand giant native writes into individual rows.
+      if (Buffer.byteLength(text) > ATTRIBUTION_FILE_LIMIT) return;
+      for (const raw of text.split(/\r?\n/)) {
+        const line = normalizeLine(raw);
+        if (!eligibleLine(line)) continue;
+        const id = digest([
+          source.provider,
+          source.sessionId,
+          source.toolId,
+          source.sourcePath,
+          source.kind,
+          source.filePath,
+          line,
+        ]);
+        yield { ...source, id, text: line, group };
+      }
     }
+    evidenceStore.addAll(records());
   };
   const payload = db.prepare("SELECT * FROM adit_history_tool_calls WHERE id=?");
   const latest = targets.reduce((last, commit) => Math.max(last, commit.committed_at ?? commit.authored_at ?? 0), 0);
@@ -629,6 +657,61 @@ export async function analyzeAttribution(
   }
   const backups = targets.length ? await backupEvidence(snapshot, w, add, relevantLocation, options.signal) : {missing: previous?.missing_backup_count || 0, manifest: []},
     fingerprint = digest([snapshot.fingerprint, backups.manifest]);
+  const byCommit = new Map(snapshot.commits.map(commit => [key(commit.repository, commit.sha), commit]));
+  const evidenceSignature = (item: Evidence) => {
+    const representative = identities.representative(key(item.provider, item.sessionId));
+    return JSON.stringify([item.id, item.at, item.turnId, item.group, representative?.provider, representative?.id]);
+  };
+  const inputFor = (target: { repository: string; sha: string }, paths: string[] | null, prepared?: Map<string, string>): CommitInput => {
+    const commit = byCommit.get(key(target.repository, target.sha))!;
+    if (paths === null) {
+      const files = selectFiles.all(target.repository, target.sha) as Row[];
+      if (files.length) paths = [...new Set(files.filter(file => !generated(file.path)).map(file => normalizedPath(resolve(target.repository, file.path))))];
+    }
+    const at = commit.committed_at ?? commit.authored_at;
+    function* selectedEvidence() {
+      if (at == null || paths?.length === 0) return;
+      if (paths === null) { yield* evidenceStore.forRepository(target.repository, at); return; }
+      const seen = new Set<string>();
+      let visitedFallback = false;
+      for (const path of paths) {
+        const selected = evidenceStore.forFile(target.repository, path, at);
+        if (selected.mode === "fallback") {
+          if (visitedFallback) continue;
+          visitedFallback = true;
+        }
+        for (const item of selected.evidence) {
+          if (seen.has(item.id)) continue;
+          seen.add(item.id); yield item;
+        }
+      }
+    }
+    const signatures = prepared ? [...prepared.values()] : [];
+    if (!prepared) for (const item of selectedEvidence()) signatures.push(evidenceSignature(item));
+    return {
+      scope_revision: digest([ATTRIBUTION_VERSION, "path-first", w.path, [...w.providers].sort(), target.repository]),
+      paths: JSON.stringify(paths),
+      evidence_revision: digest([1, at, signatures.sort()]),
+    };
+  };
+  const sourceSessions = db.prepare(`SELECT submit_provider provider,submit_session_id session_id FROM adit_attribution_commits WHERE run_id=? AND repository=? AND sha=? AND submit_session_id IS NOT NULL
+    UNION SELECT provider,session_id FROM adit_attribution_writers WHERE run_id=? AND repository=? AND sha=?
+    UNION SELECT provider,session_id FROM adit_attribution_alternatives WHERE run_id=? AND repository=? AND sha=?
+    UNION SELECT writer_provider,writer_session_id FROM adit_attribution_alternatives WHERE run_id=? AND repository=? AND sha=?
+    UNION SELECT provider,session_id FROM adit_attribution_turns WHERE run_id=? AND repository=? AND sha=?`);
+  const resume = options.force ? { commits: [], manifest: [] } : await resumableCommits(store, w.id, ATTRIBUTION_VERSION,
+    snapshot.commits.map(c => ({ repository: c.repository as string, sha: c.sha as string })), analyzed, rechecks, inputFor,
+    (run, commit) => (sourceSessions.all(...Array.from({ length: 5 }, () => [run, commit.repository, commit.sha]).flat()) as Row[])
+      .every(source => sessions.has(key(source.provider, source.session_id))));
+  targets = targets.filter(commit => !analyzed.has(key(commit.repository, commit.sha)));
+  const resumedRepairs = resume.commits.flatMap(saved => {
+    const result = db.prepare("SELECT submit_session_id FROM adit_attribution_commits WHERE run_id=? AND repository=? AND sha=?")
+      .get(saved.run, saved.repository, saved.sha) as Row;
+    if (result.submit_session_id !== null) return [];
+    const commit = byCommit.get(key(saved.repository, saved.sha))!;
+    const match = matchSubmission(commit);
+    return match.operation ? [{ commit, ...match }] : [];
+  });
   const run = randomUUID();
 
   db.prepare(
@@ -649,119 +732,123 @@ export async function analyzeAttribution(
     const manifest = [...new Map([...resume.manifest, ...backups.manifest].map(item => [JSON.stringify(item), item])).values()];
     db.prepare("INSERT INTO adit_attribution_resume VALUES (?,?,?)").run(run, snapshot.evidenceRevision, JSON.stringify(manifest));
     copyResumedCommits(store, run, resume.commits);
+    const saveInput = db.prepare("INSERT OR REPLACE INTO adit_attribution_inputs VALUES (?,?,?,?,?,?)");
+    for (const commit of resume.commits)
+      saveInput.run(run, commit.repository, commit.sha, commit.input.scope_revision, commit.input.paths, commit.input.evidence_revision);
     db.prepare("UPDATE adit_attribution_runs SET completed_count=? WHERE id=?").run(resume.commits.length, run);
     // The new run owns durable copies before obsolete partial snapshots are removed.
-    db.prepare("DELETE FROM adit_attribution_runs WHERE workspace_id=? AND status='failed' AND id<>?").run(w.id, run);
+    pruneResumedRuns(store, w.id, run);
   })();
     let completed = resume.commits.length;
     const failures: string[] = [];
-    for (const commit of targets) {
+    let trace: AttributionCommitTimer | undefined;
+    const diffReader = new AttributionDiffReader((repository, args, signal) => trace
+      ? trace.git(args, () => git(repository, args, signal)) : git(repository, args, signal), gitObjects);
+    timer.phase("commits");
+    for (const [commitIndex, commit] of targets.entries()) {
+      trace = timer.commit(commit.repository, commit.sha);
+      const objectStats = trace ? { ...gitObjects.stats } : undefined;
+      let traceStatus: CommitTiming["status"] = "failed";
       try {
       const retry = db.prepare("SELECT error,retry_at,input_revision FROM adit_attribution_failures WHERE workspace_id=? AND repository=? AND sha=?").get(w.id,commit.repository,commit.sha) as Row | undefined;
-      if (!options.force && !options.recheck?.length && retry && retry.input_revision === snapshot.evidenceRevision && retry.retry_at > Date.now()) {
+      // Git failures belong to this repository/SHA. Chat activity cannot make
+      // an oversized immutable patch smaller or bypass its retry backoff.
+      const legacyLargePatch = retry?.error.includes("Commit patch exceeds the 8 MiB analysis size limit");
+      if (!options.force && !rechecks.has(key(commit.repository, commit.sha)) && retry && retry.retry_at > Date.now() && !legacyLargePatch) {
+        traceStatus = "deferred";
         failures.push(retry.error); continue;
       }
       options.signal?.throwIfAborted();
       options.progress?.(commit.repository);
       const at = commit.committed_at ?? commit.authored_at;
-      const patch = await git(
-        commit.repository,
-        [
-          "-c",
-          "core.quotePath=false",
-          "show",
-          "--format=",
-          "--first-parent",
-          "--diff-merges=first-parent",
-          "--no-ext-diff",
-          "--no-textconv",
-          "--no-renames",
-          "--unified=0",
-          commit.sha,
-          "--",
-          ...gitSourcePaths,
-        ],
-        options.signal,
-      );
-      const lines = parseAddedLines(patch);
-      const parents = (
-        await git(
-          commit.repository,
-          ["rev-list", "--parents", "-n", "1", commit.sha],
-          options.signal,
-        )
-      )
-        .trim()
-        .split(/\s+/)
-        .slice(1);
+      const indexedFiles = selectFiles.all(commit.repository, commit.sha) as { path: string; additions: number | null; deletions: number | null }[];
+      trace?.count("changedFiles", indexedFiles.length);
+      trace?.phase("gitDiff");
+      const upcoming = targets.slice(commitIndex + 1, commitIndex + 16)
+        .filter(target => target.repository === commit.repository).map(target => target.sha);
+      const diff = await timer.measure("gitDiff", () => diffReader.read(commit.repository, commit.sha, gitSourcePaths, options.signal, indexedFiles, upcoming));
+      const { parents, fileOnly } = diff;
+      trace?.phase("parsePatch");
+      const lines = parseAddedLines(diff.patch);
+      if (trace) {
+        trace.count("patchBytes", Buffer.byteLength(diff.patch));
+        trace.count("parsedLines", lines.length);
+        trace.count("fileOnlyFiles", fileOnly.length);
+      }
+      trace?.phase("parentScan");
       const oldLines = new Set<string>();
       if (parents.length && lines.some((l) => !l.excluded)) {
         const wanted = new Set(
           lines.filter((l) => !l.excluded).map((l) => l.text),
         );
-        for (const line of await parentMatchingLines(commit.repository, parents[0], gitSourcePaths, wanted, options.signal)) oldLines.add(line);
+        for (const line of await timer.measure("parentScan", () =>
+          parentIndex.matching(commit.repository, parents[0], diff.parentFiles, diff.parentPaths, wanted, options.signal,
+            trace ? timing => trace!.parentScan(timing) : undefined))) oldLines.add(line);
       }
 
-      const exact = new Map<string, Evidence[]>(),
-        values = new Map<string, Evidence[]>(),
-        tokens = new Map<string, Set<string>>(),
-        postings = new Map<string, Set<string>>(),
-        texts = new Map<string, Evidence[]>(),
-        evidenceById = new Map<string, Evidence>();
-      const paths = [...new Set(lines.filter(line => !line.excluded && !oldLines.has(line.text)).map(line => resolve(commit.repository, line.path)))];
-      for (const evidence of paths.length && at !== null ? evidenceStore.forCommit(commit.repository, paths, at) : []) {
-        evidenceById.set(digest([run, evidence.id]), evidence);
-        const matches = exact.get(evidence.text) || [];
-        matches.push(evidence);
-        exact.set(evidence.text, matches);
-        const value = jsonTextValue(evidence.text);
-        if (value) {
-          const same = values.get(value) || [];
-          same.push(evidence);
-          values.set(value, same);
+      trace?.phase("fileEvidence");
+      let fallback: AttributionMatchIndex | undefined;
+      let currentIndex: { path: string; index: AttributionMatchIndex } | undefined;
+      const evidenceById = new Map<string, Evidence>();
+      const inputSignatures = new Map<string, string>();
+      let visitedInputFallback = false;
+      function* trackInput(records: Iterable<Evidence>) {
+        for (const item of records) {
+          if (!inputSignatures.has(item.id)) inputSignatures.set(item.id, evidenceSignature(item));
+          yield item;
         }
-        if (!texts.has(evidence.text)) {
-          const words = wordTokens(evidence.text);
-          tokens.set(evidence.text, words);
-          for (const word of words) {
-            const posting = postings.get(word) || new Set<string>();
-            posting.add(evidence.text);
-            postings.set(word, posting);
-          }
-        }
-        texts.set(evidence.text, matches);
       }
+      const comparedPaths = [...new Set(lines.filter(line => !line.excluded && !oldLines.has(line.text)).map(line => resolve(commit.repository, line.path)))];
+      const fileOnlyPaths = fileOnly.map(file => resolve(commit.repository, file.path));
+      const paths = [...new Set([...comparedPaths, ...fileOnlyPaths])];
+      const fileWrites: { path: string; provider: string; session: string; source: Evidence }[] = [];
+      const skippedPaths = new Map(fileOnly.map(file => [normalizedPath(resolve(commit.repository, file.path)), file.path]));
+      const lookupStarted = performance.now();
+      for (const evidence of fileOnlyPaths.length && at !== null ? evidenceStore.forFileWrites(commit.repository, fileOnlyPaths, at) : []) {
+        const who = identities.representative(key(evidence.provider, evidence.sessionId));
+        fileWrites.push({ path: skippedPaths.get(normalizedPath(evidence.filePath!))!, provider: who.provider, session: who.id, source: evidence });
+      }
+      timer.add("evidenceLookup", lookupStarted);
 
-      type Candidate = { e: Evidence; method: string; score: number };
-      const perLine = new Map<AddedLine, Candidate[]>(),
+      const indexFor = (line: AddedLine) => {
+        const path = normalizedPath(resolve(commit.repository, line.path));
+        if (currentIndex?.path === path) return currentIndex.index;
+        const started = performance.now();
+        const selected = at == null ? { mode: "path", evidence: [] } : evidenceStore.forFile(commit.repository, path, at);
+        trace?.count(selected.mode === "fallback" ? "fallbackFiles" : "pathFiles");
+        if (selected.mode === "fallback" && fallback) trace?.count("reusedFallbackIndexes");
+        const countEvidence = trace ? () => trace!.count("candidateRecords") : undefined;
+        if (selected.mode === "fallback") visitedInputFallback = true;
+        const index = selected.mode === "fallback"
+          ? fallback ??= new AttributionMatchIndex(trackInput(selected.evidence), countEvidence)
+          : new AttributionMatchIndex(trackInput(selected.evidence), countEvidence);
+        // Diffs group lines by path. Keep only the active file's index plus one
+        // shared fallback; retain evidence bodies only for actual candidates.
+        currentIndex = { path, index };
+        timer.add("evidenceLookup", started);
+        trace?.lookup(started);
+        return index;
+      };
+      trace?.phase("matchLines");
+      const perLine = new Map<AddedLine, AttributionMatch[]>(),
         support = new Map<string, number>();
-      const allowed = (e: Evidence, line: AddedLine) =>
-        at !== null &&
-        e.at <= at &&
-        (e.filePath
-          ? samePath(e.filePath, resolve(commit.repository, line.path))
-          : e.repository === commit.repository);
       for (const line of lines) {
         if (line.excluded || oldLines.has(line.text)) continue;
-        let matches = (exact.get(line.text) || [])
-          .filter((e) => allowed(e, line))
-          .map((e) => ({ e, method: "exact", score: 1 }));
-        if (!matches.length) {
-          const value = jsonTextValue(line.text);
-          if (value)
-            matches = [
-              ...(values.get(value) || []),
-              ...(exact.get(value) || []),
-            ]
-              .filter((e) => allowed(e, line))
-              .map((e) => ({ e, method: "json_value", score: 1 }));
-        }
-        perLine.set(line, matches);
+        trace?.count("comparedLines");
+        const index = indexFor(line);
+        let matches = index.matching(line.text);
         for (const group of new Set(matches.map((c) => c.e.group))) {
           const k = line.hunk + "\0" + group;
           support.set(k, (support.get(k) || 0) + 1);
         }
+        // Fuzzy candidates do not count as exact hunk support, as before.
+        if (!matches.length) matches = index.approximate(line.text);
+        trace?.count(matches.length ? "matchedLines" : "unmatchedLines");
+        perLine.set(line, matches);
+        for (const match of matches) evidenceById.set(digest([run, match.e.id]), match.e);
       }
+      currentIndex = undefined; fallback = undefined;
+      trace?.phase("classifyLines");
       const attributionRows: (AttributionLine & Row)[] = [];
       const candidatesRows: (AttributionCandidate & Row)[] = [];
       const totals = {
@@ -781,9 +868,10 @@ export async function analyzeAttribution(
           .all(commit.repository, commit.sha) as Row[]
       )
         .filter(
-          (f) => generated(f.path) && !lines.some((l) => l.path === f.path),
+          (f) => generated(f.path) && !lines.some((l) => l.path === f.path) && !fileOnly.some(file => file.path === f.path),
         )
         .reduce((sum, f) => sum + (f.additions || 0), 0);
+      totals.excluded += fileOnly.reduce((sum, file) => sum + (file.additions || 0), 0);
       for (const line of lines) {
         const id = digest([
           run,
@@ -793,7 +881,7 @@ export async function analyzeAttribution(
           line.number,
         ]);
         let tier = "unknown",
-          selected: Candidate | undefined;
+          selected: AttributionMatch | undefined;
         let candidates = perLine.get(line) || [];
         if (line.excluded) {
           tier = "excluded";
@@ -802,33 +890,7 @@ export async function analyzeAttribution(
           totals.eligible++;
           if (oldLines.has(line.text)) tier = "moved";
           else {
-            if (!candidates.length) {
-              const words = wordTokens(line.text),
-                matches = new Set<string>();
-              const rare = [...words]
-                .sort(
-                  (a, b) =>
-                    (postings.get(a)?.size || 0) - (postings.get(b)?.size || 0),
-                )
-                .slice(0, Math.floor(words.size * 0.1) + 1);
-              for (const word of rare)
-                for (const text of postings.get(word) || []) matches.add(text);
-              for (const text of matches) {
-                const other = tokens.get(text)!;
-                if (
-                  Math.min(words.size, other.size) /
-                    Math.max(words.size, other.size) <
-                  0.9
-                )
-                  continue;
-                const score = tokenOverlap(words, other);
-                if (score < 0.9) continue;
-                for (const e of texts.get(text) || [])
-                  if (allowed(e, line))
-                    candidates.push({ e, method: "token_overlap", score });
-              }
-            }
-            const groups = new Map<string, Candidate>();
+            const groups = new Map<string, AttributionMatch>();
             for (const c of candidates) {
               const old = groups.get(c.e.group);
               if (
@@ -893,8 +955,22 @@ export async function analyzeAttribution(
         }
       }
       const { operation, method, matchedSha } = matchSubmission(commit);
+      trace?.phase("inputRevision");
+      // Content-matched files already supplied their exact input stamp while
+      // constructing the index. File-only changes still need their write scope.
+      if (at != null) for (const path of fileOnlyPaths) {
+        const selected = evidenceStore.forFile(commit.repository, path, at);
+        if (selected.mode === "fallback" && visitedInputFallback) continue;
+        if (selected.mode === "fallback") visitedInputFallback = true;
+        for (const item of selected.evidence)
+          if (!inputSignatures.has(item.id)) inputSignatures.set(item.id, evidenceSignature(item));
+      }
+      const commitInput = inputFor({ repository: commit.repository, sha: commit.sha }, paths, inputSignatures);
+      trace?.phase("persist");
       db.transaction(() => {
-        saveAttributionSummaries(db, run, commit.repository, commit.sha, attributionRows, candidatesRows, evidenceById);
+        saveAttributionSummaries(db, run, commit.repository, commit.sha, attributionRows, candidatesRows, evidenceById, fileWrites);
+        const saveFile = db.prepare("INSERT INTO adit_attribution_files VALUES (?,?,?,?,?,?,?)");
+        for (const file of fileOnly) saveFile.run(run, commit.repository, commit.sha, file.path, file.reason, file.additions, file.deletions);
         db.prepare(
           "INSERT INTO adit_attribution_commits VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         ).run(
@@ -915,12 +991,16 @@ export async function analyzeAttribution(
           totals.moved,
           totals.unknown,
         );
+        db.prepare("INSERT INTO adit_attribution_inputs VALUES (?,?,?,?,?,?)")
+          .run(run, commit.repository, commit.sha, commitInput.scope_revision, commitInput.paths, commitInput.evidence_revision);
         db.prepare(
           "UPDATE adit_attribution_runs SET completed_count=? WHERE id=?",
         ).run(++completed, run);
         db.prepare("DELETE FROM adit_attribution_failures WHERE workspace_id=? AND repository=? AND sha=?").run(w.id,commit.repository,commit.sha);
       })();
+      traceStatus = "done";
       } catch (error) {
+        if (options.signal?.aborted) traceStatus = "cancelled";
         if (options.signal?.aborted || String((error as {code?: string}).code || "").startsWith("SQLITE_")) throw error;
         const code = (error as {code?: string | number}).code;
         const reason = code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
@@ -931,9 +1011,15 @@ export async function analyzeAttribution(
         const retryAt = reason.includes("analysis size limit") ? Number.MAX_SAFE_INTEGER : Date.now()+15*60_000;
         db.prepare(`INSERT INTO adit_attribution_failures VALUES (?,?,?,?,?,?) ON CONFLICT(workspace_id,repository,sha)
           DO UPDATE SET input_revision=excluded.input_revision,error=excluded.error,retry_at=excluded.retry_at`).run(w.id,commit.repository,commit.sha,snapshot.evidenceRevision,message,retryAt);
+      } finally {
+        if (trace && objectStats) for (const name of Object.keys(objectStats) as (keyof typeof objectStats)[])
+          trace.count(name, gitObjects.stats[name] - objectStats[name]);
+        trace?.finish(traceStatus);
+        trace = undefined;
       }
     }
     if (failures.length) throw new Error(`${failures.length} commits pending analysis; completed results retained. ${failures[0]}`);
+    timer.phase("publish");
     // Never publish a mixed snapshot if collection/settings changed during the analysis.
     const currentWorkspace = store.workspace(w.id);
     if (
@@ -968,7 +1054,7 @@ export async function analyzeAttribution(
             `UPDATE adit_attribution_${table} SET run_id=? WHERE run_id=?`,
           ).run(run, previous.id);
       }
-      for (const {commit, operation, method, matchedSha} of repairs) {
+      for (const {commit, operation, method, matchedSha} of [...repairs, ...resumedRepairs]) {
         const call = operation!.call;
         db.prepare(`UPDATE adit_attribution_commits SET submit_provider=?,submit_session_id=?,submit_turn_id=?,submit_tool_call_id=?,match_method=?,matched_sha=?
           WHERE run_id=? AND repository=? AND sha=? AND submit_session_id IS NULL`)
@@ -979,8 +1065,9 @@ export async function analyzeAttribution(
         "UPDATE adit_attribution_runs SET status='done',finished_at=? WHERE id=?",
       ).run(Date.now(), run);
       db.prepare(
-        "DELETE FROM adit_attribution_runs WHERE workspace_id=? AND id<>?",
+        "DELETE FROM adit_attribution_runs WHERE workspace_id=? AND status='done' AND id<>?",
       ).run(w.id, run);
+      pruneResumedRuns(store, w.id, run);
     })();
     rememberSubmissionRevision(store, w, submissionInputRevision);
     return { id: run, cached: false };
@@ -992,9 +1079,11 @@ export async function analyzeAttribution(
       error instanceof Error ? error.message : "Analysis failed",
       run,
     );
+    pruneResumedRuns(store, w.id, run);
     throw error;
   }
   } finally {
     evidenceStore.close();
+    await cleanupObjects?.close();
   }
 }
