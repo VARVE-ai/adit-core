@@ -11,7 +11,7 @@
  */
 
 import type Database from "better-sqlite3";
-import { loadConfig } from "@varveai/adit-core";
+import { loadConfig, LocalStore } from "@varveai/adit-core";
 import type { ProjectType } from "@varveai/adit-core";
 import type { CloudClient } from "../http/client.js";
 import { CloudApiError } from "../http/errors.js";
@@ -20,6 +20,7 @@ import { repositoryPayloads, resolveCloudProjectContext } from "../project-conte
 import {
   CloudProjectDeletedError,
   refreshProjectDeletionPolicy,
+  cloudProjectStateKey,
 } from "../project-deletion-policy.js";
 import type {
   GitCommit,
@@ -256,10 +257,16 @@ export async function linkCommand(
     await refreshProjectDeletionPolicy(client, projectRoot, projectId);
   }
   const projectConfig = loadConfig(projectRoot);
-  if (projectConfig.cloudDeletedAt) {
-    throw new CloudProjectDeletedError(projectConfig.cloudDeletedAt);
-  }
-  const projectContext = await resolveCloudProjectContext(projectConfig);
+  if (client.deletionTarget) {
+    const store = new LocalStore(client.deletionTarget.directory);
+    try {
+      const target = client.deletionTarget;
+      const pause = store.get<{policy:{deletedAt:string|null}}|null>(`cloud-project-paused:${cloudProjectStateKey(target, projectId)}`, null)
+        ?? store.get<{policy:{deletedAt:string|null}}|null>(`cloud-project-paused:${cloudProjectStateKey({ ...target, accountId: target.clientId }, projectId)}`, null);
+      if (pause) throw new CloudProjectDeletedError(pause.policy.deletedAt);
+    } finally { store.close(); }
+  } else if (projectConfig.cloudDeletedAt) throw new CloudProjectDeletedError(projectConfig.cloudDeletedAt);
+  const projectContext = await resolveCloudProjectContext(projectConfig, client.deletionTarget);
   const registration = !options.dryRun && projectContext.registration
     ? await client.post<{ projectId: string }>("/api/project-link/registration", projectContext.registration)
     : null;

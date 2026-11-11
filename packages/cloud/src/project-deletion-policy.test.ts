@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import { LocalStore, loadConfig, writeProjectManifest, projectUploadRepositories } from "@varveai/adit-core";
-import { applyProjectDeletionPolicy } from "./project-deletion-policy.js";
+import { applyProjectDeletionPolicy, saveTargetDeletionPolicy, workspaceForCloudTarget, cloudProjectStateKey } from "./project-deletion-policy.js";
 let root:string,repo:string,store:LocalStore;
 const policy={localProjectId:"old",projectDeleted:false,deletionOperationId:null,deletedAt:null,deletedRepositories:[{deletionOperationId:"remove-api",localRepositoryId:"api-id",relativePath:"api",deletedAt:"2026-10-01"}]};
 beforeEach(()=>{root=mkdtempSync(join(tmpdir(),"adit-policy-registry-"));repo=join(root,"repo");mkdirSync(join(repo,"api"),{recursive:true});mkdirSync(join(repo,"web"));vi.stubEnv("ADIT_LOCAL_DATA_DIR",join(root,"state"));store=new LocalStore();writeProjectManifest(repo,{schemaVersion:3,projectId:"old",repositories:[{relativePath:"api",repositoryId:"api-id"},{relativePath:"web",repositoryId:"web-id"}],createdAt:"2026-01-01",updatedAt:"2026-01-01"});store.saveWorkspace({path:repo,repositories:[join(repo,"api"),join(repo,"web")]});});
@@ -20,4 +20,14 @@ it("does not apply another project or repository identity's deletion",async()=>{
 });
 it("blocks whole-project uploads while retaining local repositories",async()=>{
  await applyProjectDeletionPolicy(repo,{...policy,projectDeleted:true,deletedAt:"2026-10-02"});expect(loadConfig(repo).cloudDeletedAt).toBe("2026-10-02");expect(projectUploadRepositories(store.db,store.workspace("old"))).toEqual([]);expect(loadConfig(repo).repositories).toHaveLength(2);
+});
+it("isolates target deletion state and does not clear a persistent pause on an ordinary lookup",()=>{
+ const target={serverUrl:'https://cloud.example.invalid/',accountId:'owner'};
+ const deleted={...policy,projectDeleted:true,deletionOperationId:'delete-project',deletedAt:'2026-11-06T00:00:00.000Z'};
+ saveTargetDeletionPolicy(store,target,deleted);
+ expect(projectUploadRepositories(store.db,workspaceForCloudTarget(store,store.workspace('old'),target))).toEqual([]);
+ expect(projectUploadRepositories(store.db,workspaceForCloudTarget(store,store.workspace('old'),{...target,accountId:'other'}))).toHaveLength(2);
+ expect(store.workspace('old').cloudDeletedAt).toBeUndefined();
+ saveTargetDeletionPolicy(store,target,{...policy,deletedRepositories:[]});
+ expect(store.get(`cloud-project-paused:${cloudProjectStateKey(target,'old')}`,null)).not.toBeNull();
 });

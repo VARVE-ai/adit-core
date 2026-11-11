@@ -327,11 +327,12 @@ export async function startLocalServer(
           return json(res, registerWorkspace(store, input), 201);
         }
         const match =
-          /^\/workspaces\/([^/]+)(?:\/(collect|gist-credential|sync|deletion-preview))?$/.exec(route);
+          /^\/workspaces\/([^/]+)(?:\/(collect|gist-credential|sync|restore-cloud|deletion-preview))?$/.exec(route);
         if (match) {
           const id = match[1];
           const workspace = store.workspace(id);
           if (match[2] === "deletion-preview" && req.method === "GET") return json(res,store.deletionPreview(id));
+          if (match[2] === "restore-cloud" && req.method === "POST") return json(res, await cloudSync.restore(id), 202);
           if (match[2] === "sync" && req.method === "POST") return json(res, cloudSync.start(id), 202);
           if (match[2] === "sync" && req.method === "GET") return json(res, cloudSync.status(id));
           if (!match[2] && req.method === "GET") return json(res, {...workspace,directoryAvailable:directoryAvailable(workspace.path)});

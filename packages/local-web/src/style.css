@@ -448,7 +448,7 @@ section {
   border-bottom: 1px solid hsl(var(--border) / 0.5);
   font-size: 12px;
 }
-.selection-row > .muted {
+.selection-row > span.muted {
   margin-left: auto;
   flex-shrink: 0;
 }

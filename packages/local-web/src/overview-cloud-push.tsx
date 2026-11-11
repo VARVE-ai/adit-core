@@ -5,23 +5,25 @@ import { HeaderStatusPopover } from "./header-status-popover";
 
 export type CloudSyncSummary = {
   status?: string;
+  restoring?: boolean;
   endedAt?: string;
   error?: string;
   pending?: ({ state: "ready"; sessions: number; commits: number } |
-    { state: "disabled" | "disconnected" | "uninitialized" | "unverified" | "computing" | "failed"; sessions: null; commits: null }) & { refreshing?: boolean; error?: string };
+    { state: "disabled" | "disconnected" | "uninitialized" | "unverified" | "paused_deleted" | "computing" | "failed"; sessions: null; commits: null }) & { refreshing?: boolean; error?: string };
 };
 
 type CloudPushProps = {
   enabled: boolean; sync?: CloudSyncSummary; accountState?: string;
-  onPush?: () => void; onSettings: () => void; onAccount: () => void;
+  onRestore?: () => void; onPush?: () => void; onSettings: () => void; onAccount: () => void;
   pending?: boolean;
 };
 
 export function CloudSyncStatus(props: CloudPushProps & { workspaceName: string }) {
   const running = ["queued", "running"].includes(props.sync?.status || "");
   const needsAccount = !!props.accountState && props.accountState !== "valid";
-  const warning = props.enabled && (needsAccount || ["failed", "partial"].includes(props.sync?.status || ""));
+  const warning = props.enabled && (needsAccount || ["failed", "partial", "paused_deleted"].includes(props.sync?.status || ""));
   const summary = !props.enabled ? t("未开启云端存储") : needsAccount ? t("请先连接云端账号。")
+    : props.sync?.status === "paused_deleted" ? t("上传已暂停")
     : running ? t("正在同步新记录…") : props.sync?.status === "failed" ? t("同步失败")
     : props.sync?.status === "partial" ? t("部分记录待同步")
     : props.sync?.status === "done" ? t("同步完成") : t("尚未同步");
@@ -30,13 +32,13 @@ export function CloudSyncStatus(props: CloudPushProps & { workspaceName: string 
     status={!props.enabled ? undefined : running ? "working" : warning ? "warning" : props.sync?.status === "done" ? "done" : undefined}>
     {props.enabled && <p role="status" className="header-status-summary">{summary}</p>}
     {props.enabled && props.sync?.endedAt && <p className="muted">{t("上次同步")} {new Date(props.sync.endedAt).toLocaleString(locale())}</p>}
-    {props.enabled && props.sync?.error && <p className="error">{systemMessage(props.sync.error)}</p>}
+    {props.enabled && props.sync?.error && props.sync.status !== "paused_deleted" && <p className="error">{systemMessage(props.sync.error)}</p>}
     <OverviewCloudPush {...props} />
     <p className="muted">{t("按当前工作目录同步；不受日期和 Agent 筛选影响")}</p>
   </HeaderStatusPopover>;
 }
 
-export function OverviewCloudPush({ enabled, sync, accountState, onPush, onSettings, onAccount, pending: busy }: CloudPushProps) {
+export function OverviewCloudPush({ enabled, sync, accountState, onPush, onRestore, onSettings, onAccount, pending: busy }: CloudPushProps) {
   const running = ["queued", "running"].includes(sync?.status || "");
   const pending = sync?.pending;
   const needsAccount = !!accountState && accountState !== "valid";
@@ -48,6 +50,10 @@ export function OverviewCloudPush({ enabled, sync, accountState, onPush, onSetti
     summary = t("请先连接云端账号。"); label = t("登录云端"); action = onAccount;
   } else if (!accountState) {
     summary = t("正在读取云端账号状态…"); action = undefined;
+  } else if (sync?.status === "paused_deleted") {
+    summary = t("云端项目已删除，上传已暂停。本地记录仍然保留。");
+    label = t(sync.restoring ? "正在恢复云端项目…" : "恢复云端项目并继续同步");
+    action = onRestore; title = t("恢复后不会自动重新挂载到团队");
   } else if (pending?.state === "ready") {
     summary = t("待推送 {0} 个会话、{1} 个提交", number(pending.sessions), number(pending.commits));
     if (pending.refreshing) summary += ` · ${t("正在更新…")}`;
@@ -63,7 +69,7 @@ export function OverviewCloudPush({ enabled, sync, accountState, onPush, onSetti
   }
   return <span className="overview-cloud-quick" title={title}>
     <span role="status">{summary}</span>
-    <button disabled={!action || running || busy} onClick={action}>
+    <button disabled={!action || running || busy || !!sync?.restoring} onClick={action}>
       <Globe size={12} />{running ? t("正在同步新记录…") : label}
     </button>
   </span>;

@@ -14,11 +14,16 @@ function tempDbPath(): string {
 function legacyTokenDatabase(path: string): Database.Database {
   const db = new Database(path);
   db.pragma("foreign_keys = ON");
-  db.exec("CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL)");
-  for (const migration of migrations.filter(migration => migration.id <= 24)) {
-    db.exec(migration.sql);
-    db.prepare("INSERT INTO _migrations(id, name) VALUES (?, ?)").run(migration.id, migration.name);
-  }
+  // Build the legacy fixture atomically to avoid a disk sync for every schema
+  // statement on CI. The upgrade under test still reopens this on-disk database.
+  db.transaction(() => {
+    db.exec("CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL)");
+    const record = db.prepare("INSERT INTO _migrations(id, name) VALUES (?, ?)");
+    for (const migration of migrations.filter(migration => migration.id <= 24)) {
+      db.exec(migration.sql);
+      record.run(migration.id, migration.name);
+    }
+  })();
   return db;
 }
 

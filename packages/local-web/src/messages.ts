@@ -1,6 +1,11 @@
 // Chinese keys preserve the prototype copy. Only interface text belongs here;
 // native session titles, commit subjects, paths and account names are never keys.
 export const messages = {
+  "上传已暂停": "Uploads paused",
+  "云端项目已删除，上传已暂停。本地记录仍然保留。": "The Cloud project was deleted. Uploads are paused; local records are retained.",
+  "恢复云端项目并继续同步": "Restore Cloud project and resume sync",
+  "正在恢复云端项目…": "Restoring Cloud project…",
+  "恢复后不会自动重新挂载到团队": "Restoring does not automatically remount this project to teams.",
   "系统启动项已被禁用，登录时无法自动启动。": "The system login entry is disabled. ADIT will not start automatically at sign-in.",
   "无法确认系统启动项，请检查权限或修复启动项。": "Unable to verify login startup. Check permissions or repair the login entry.",
   "系统启动项缺失，登录时无法自动启动。": "The system login entry is missing. ADIT will not start automatically at sign-in.",
