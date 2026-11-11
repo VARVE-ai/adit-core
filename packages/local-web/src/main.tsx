@@ -1679,12 +1679,12 @@ function WorkspaceEditor({
           </div>
           <div className="directory-cloud-line">
             <span className="label">{t("云端工作区")}</span>
-            <span>{sync?.serverProjectId ? workspace?.name : t("尚未关联")}</span>
-            {!sync?.serverProjectId && <span className="muted">{t("首次推送时自动创建")}</span>}
+            <span>{sync?.serverProjectId || sync?.status === "paused_deleted" ? workspace?.name : t("尚未关联")}</span>
+            {!sync?.serverProjectId && sync?.status !== "paused_deleted" && <span className="muted">{t("首次推送时自动创建")}</span>}
             <button
               className="text-action cloud-row-action"
-              disabled={!sync?.serverProjectId}
-              title={sync?.serverProjectId ? t("在云端查看") : t("尚未关联云端工作区")}
+              disabled={!sync?.serverProjectId || sync?.status === "paused_deleted"}
+              title={sync?.status === "paused_deleted" ? t("恢复云端项目并继续同步") : sync?.serverProjectId ? t("在云端查看") : t("尚未关联云端工作区")}
               onClick={() => { if (account?.server && sync?.serverProjectId) window.open(`${account.server}/dashboard?projectId=${encodeURIComponent(sync.serverProjectId)}`, "_blank", "noopener,noreferrer"); }}
             >
               {t("在云端查看")}
