@@ -1,6 +1,22 @@
 import { spawn } from "node:child_process";
 import { normalizeLine } from "./attribution-evidence.js";
 
+export type ParentScanTiming = {
+  totalMs: number;
+  spawnMs: number | null;
+  firstOutputMs: number | null;
+  processingMs: number;
+  bytes: number;
+  lines: number;
+  wantedLines: number;
+  matchedLines: number;
+  exitCode: number | null;
+  failed: boolean;
+  mode?: "objects";
+  indexedBlobs?: number;
+  reusedBlobs?: number;
+};
+
 /** Stream parent content; retain only matching lines, never the whole repository. */
 export function parentMatchingLines(
   repository: string,
@@ -9,8 +25,11 @@ export function parentMatchingLines(
   wanted: Set<string>,
   signal?: AbortSignal,
   limits = { bytes: 512 * 1024 * 1024, line: 1024 * 1024, timeout: 60000 },
+  diagnostic?: (timing: ParentScanTiming) => void,
 ): Promise<Set<string>> {
   return new Promise((resolve, reject) => {
+    const started = diagnostic ? performance.now() : 0;
+    let spawnMs: number | null = null, firstOutputMs: number | null = null, processingMs = 0, lines = 0;
     const child = spawn(
       "git",
       [
@@ -28,6 +47,7 @@ export function parentMatchingLines(
       ],
       { cwd: repository, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], signal },
     );
+    if (diagnostic) child.once("spawn", () => { spawnMs = performance.now() - started; });
     const matches = new Set<string>();
     let pending = "",
       bytes = 0,
@@ -45,33 +65,40 @@ export function parentMatchingLines(
       limits.timeout,
     );
     const line = (text: string) => {
+      if (diagnostic) lines++;
       const normalized = normalizeLine(text);
       if (wanted.has(normalized)) matches.add(normalized);
     };
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       if (failure) return;
-      bytes += Buffer.byteLength(chunk);
-      if (bytes > limits.bytes) {
-        fail("Parent content exceeds the analysis size limit; commit analysis remains pending");
-        return;
-      }
-      pending += chunk;
-      let start = 0,
-        end: number;
-      while ((end = pending.indexOf("\n", start)) !== -1) {
-        if (end - start > limits.line) {
-          fail(
-            "A parent text line exceeds the analysis size limit; commit analysis remains pending",
-          );
+      const processingStarted = diagnostic ? performance.now() : 0;
+      if (diagnostic) firstOutputMs ??= processingStarted - started;
+      try {
+        bytes += Buffer.byteLength(chunk);
+        if (bytes > limits.bytes) {
+          fail("Parent content exceeds the analysis size limit; commit analysis remains pending");
           return;
         }
-        line(pending.slice(start, end));
-        start = end + 1;
+        pending += chunk;
+        let start = 0,
+          end: number;
+        while ((end = pending.indexOf("\n", start)) !== -1) {
+          if (end - start > limits.line) {
+            fail(
+              "A parent text line exceeds the analysis size limit; commit analysis remains pending",
+            );
+            return;
+          }
+          line(pending.slice(start, end));
+          start = end + 1;
+        }
+        pending = pending.slice(start);
+        if (pending.length > limits.line)
+          fail("A parent text line exceeds the analysis size limit; commit analysis remains pending");
+      } finally {
+        if (diagnostic) processingMs += performance.now() - processingStarted;
       }
-      pending = pending.slice(start);
-      if (pending.length > limits.line)
-        fail("A parent text line exceeds the analysis size limit; commit analysis remains pending");
     });
     child.stderr.resume(); // Do not retain or expose repository content in diagnostics.
     child.on("error", (error) => {
@@ -81,6 +108,20 @@ export function parentMatchingLines(
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (!failure && (code === 0 || code === 1) && pending) {
+        const processingStarted = diagnostic ? performance.now() : 0;
+        line(pending);
+        if (diagnostic) processingMs += performance.now() - processingStarted;
+      }
+      if (diagnostic) {
+        const round = (value: number) => Math.round(value * 100) / 100;
+        try {
+          diagnostic({ totalMs: round(performance.now() - started), spawnMs: spawnMs === null ? null : round(spawnMs),
+            firstOutputMs: firstOutputMs === null ? null : round(firstOutputMs), processingMs: round(processingMs),
+            bytes, lines, wantedLines: wanted.size, matchedLines: matches.size, exitCode: code,
+            failed: !!failure || (code !== 0 && code !== 1) });
+        } catch { /* Diagnostics cannot fail or change the parent query. */ }
+      }
       if (failure) reject(failure);
       else if (code !== 0 && code !== 1)
         reject(
@@ -89,7 +130,6 @@ export function parentMatchingLines(
           ),
         );
       else {
-        if (pending) line(pending);
         resolve(matches);
       }
     });

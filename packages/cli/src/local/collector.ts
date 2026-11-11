@@ -23,6 +23,7 @@ import {
 } from "@varveai/adit-core";
 import type { scanHistoryInBackground } from "./collection-scan.js";
 import { businessRefs, businessHistory, collectionHead, gitCollectionVersion } from "./git-collection-scope.js";
+import { fileAttributionCorrectionNeeded } from "./attribution-plan.js";
 
 const exec = promisify(execFile);
 export const localAssets = fileURLToPath(
@@ -477,7 +478,7 @@ export class Collector {
         try { await this.inspect(workspace); }
         catch(error) { processingIssue("History inspection failed; previous results retained",error); }
       }
-      if(workspace&&processChanges&&this.analyze){
+      if(workspace&&this.analyze&&(processChanges||fileAttributionCorrectionNeeded(this.store,workspace))){
         job.phase="analysis";this.store.job(job);
         unchanged();
         try{await this.analyze(workspace,job);}catch(error){processingIssue("Commit analysis pending; previous results retained",error);}
@@ -578,7 +579,7 @@ export class Collector {
         for(const sha of known)if(!reachable.has(sha))this.store.db.prepare("DELETE FROM adit_local_commits WHERE repository=? AND sha=?").run(repo.path,sha);
         // Upgrade old --all indexes atomically with the verified Git snapshot.
         // Keep valid analysis, native sessions, sync receipts and original Git refs.
-        for (const suffix of ["commits", "writers", "alternatives", "turns"]) {
+        for (const suffix of ["commits", "writers", "alternatives", "turns", "inputs", "files"]) {
           const table = `adit_attribution_${suffix}`;
           if (this.store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table))
             this.store.db.prepare(`DELETE FROM ${table} WHERE repository=? AND sha NOT IN (SELECT value FROM json_each(?))`).run(repo.path,normalShas);

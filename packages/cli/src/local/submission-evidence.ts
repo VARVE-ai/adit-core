@@ -60,7 +60,14 @@ function subjects(command: string, output: string): string[] {
   return [...new Set(values.filter(Boolean))];
 }
 
-export function nativeOutput(text: string): string {
+// Most native output is ordinary text. Avoid throwing a JSON parse exception
+// for every log line; valid JSON primitives still retain their old behavior.
+function parsedJSON(text: string): unknown {
+  if (!/^\s*(?:[{"\d-]|\[|true\b|false\b|null\b)/.test(text)) return undefined;
+  try { return JSON.parse(text); } catch { return undefined; }
+}
+
+function readOutput(text: string, visit?: (value: unknown, depth: number) => void): string {
   const unpack = (value: any): string =>
     typeof value === "string"
       ? value
@@ -72,21 +79,29 @@ export function nativeOutput(text: string): string {
               .map((k) => unpack(value[k]))
               .join("\n")
           : "";
-  try {
-    return unpack(JSON.parse(text)) || text;
-  } catch {}
+  const parsed = parsedJSON(text);
+  if (parsed !== undefined) {
+    visit?.(parsed, 1);
+    try { return unpack(parsed) || text; }
+    catch { /* Deep native output falls back to line-by-line decoding. */ }
+  }
   return text
     .split("\n")
     .map((line) => {
-      try {
-        return unpack(JSON.parse(line)) || line;
-      } catch {
-        return line.replace(/\\n/g, "\n").replace(/\\r/g, "\r");
+      const value = parsedJSON(line);
+      if (value !== undefined) {
+        visit?.(value, 1);
+        try { return unpack(value) || line; }
+        catch { /* Preserve the raw line if a deeply nested envelope cannot be unpacked. */ }
       }
+      return line.replace(/\\n/g, "\n").replace(/\\r/g, "\r");
     })
     .join("\n");
 }
 
+export function nativeOutput(text: string): string {
+  return readOutput(text);
+}
 
 // Only decode literal arguments. Recorded scripts are data and are never executed.
 function invocation(call: Row) {
@@ -175,8 +190,13 @@ function resultState(result: Row) {
   const visit = (value: any, depth = 0) => {
     if (depth > 8) return;
     if (typeof value === "string") {
-      try { visit(JSON.parse(value), depth + 1); } catch {
-        for (const line of value.split("\n")) { try { visit(JSON.parse(line), depth + 1); } catch {} }
+      const parsed = parsedJSON(value);
+      if (parsed !== undefined) visit(parsed, depth + 1);
+      else {
+        for (const line of value.split("\n")) {
+          const parsed = parsedJSON(line);
+          if (parsed !== undefined) visit(parsed, depth + 1);
+        }
       }
     } else if (Array.isArray(value)) value.forEach(v => visit(v, depth + 1));
     else if (value && typeof value === "object") {
@@ -186,11 +206,12 @@ function resultState(result: Row) {
       for (const key of ["output", "stdout", "text", "content"]) if (key in value) visit(value[key], depth + 1);
     }
   };
-  visit(text);
+  // Decode the outer envelope once for both visible output and execution state.
+  const output = readOutput(text, visit);
   for (const m of text.matchAll(/(?:Process running with session ID|Script running with cell ID)\s+([\w-]+)/g))
     refs.push({ kind: m[0].startsWith("Process") ? "shell" : "cell", id: m[1] });
   if (/Process exited with code [1-9]\d*/.test(text)) failed = true;
-  return { refs: [...new Map(refs.map(r => [r.kind + ":" + r.id, r])).values()], failed, text: nativeOutput(text) };
+  return { refs: [...new Map(refs.map(r => [r.kind + ":" + r.id, r])).values()], failed, text: output };
 }
 
 /** Follow native execution handles within one provider/session, retaining the initiating turn. */

@@ -38,6 +38,28 @@ export function savedRun(store: LocalStore, workspaceId: string): Row | undefine
   ).get(workspaceId) as Row | undefined;
 }
 
+/** Recheck the old cumulative patch limit and zero-addition path associations.
+ * New isolated overflows use file_patch_size, so this correction is one-time. */
+export function fileAttributionCorrections(store: LocalStore, runId: string) {
+  return store.db.prepare(`SELECT DISTINCT f.repository,f.sha FROM adit_attribution_files f
+    WHERE f.run_id=? AND (f.reason='patch_size' OR (f.additions=0 AND EXISTS (
+      SELECT 1 FROM adit_attribution_writers w WHERE w.run_id=f.run_id AND w.repository=f.repository
+        AND w.sha=f.sha AND w.file_path=f.path
+        AND w.certain_lines=0 AND w.likely_lines=0 AND w.possible_lines=0)))`)
+    .all(runId) as { repository: string; sha: string }[];
+}
+
+/** Collection's source fingerprint does not change when only the analysis policy
+ * changes. Permit these targeted repairs even for an unchanged checkpoint. */
+export function fileAttributionCorrectionNeeded(store: LocalStore, workspace: LocalWorkspace): boolean {
+  const previous = savedRun(store, workspace.id);
+  if (!previous) return false;
+  const collected = store.db.prepare(`SELECT 1 FROM adit_local_commits c
+    WHERE c.repository=? AND c.sha=? AND ${NON_MERGE_COMMIT_SQL}`);
+  return fileAttributionCorrections(store, previous.id).some(commit =>
+    workspace.repositories.includes(commit.repository) && !!collected.get(commit.repository, commit.sha));
+}
+
 export function submissionScope(store: LocalStore, scope: string): string {
   return JSON.stringify(store.db.prepare(
     `SELECT DISTINCT t.provider,t.session_id FROM adit_history_tool_calls t
@@ -99,6 +121,9 @@ export function attributionNeeded(store: LocalStore, workspace: LocalWorkspace):
   const commits = collectedCommits(store, workspace);
   if (!commits.length) return false;
   if (!previous) return true;
+  const corrections = new Set(fileAttributionCorrections(store, previous.id)
+    .map(commit => JSON.stringify([commit.repository, commit.sha])));
+  if (commits.some(commit => corrections.has(JSON.stringify([commit.repository, commit.sha])))) return true;
   const saved = store.db.prepare(
     "SELECT submit_session_id FROM adit_attribution_commits WHERE run_id=? AND repository=? AND sha=?",
   );

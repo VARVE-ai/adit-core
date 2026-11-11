@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { parentMatchingLines } from "./attribution-parent-lines.js";
+import { parentMatchingLines, type ParentScanTiming } from "./attribution-parent-lines.js";
 
 it("streams parent content beyond 64 MiB without dropping matching source lines", async () => {
   const root = mkdtempSync(join(tmpdir(), "adit-parent-stream-"));
@@ -19,9 +19,19 @@ it("streams parent content beyond 64 MiB without dropping matching source lines"
     git("add", ".");
     git("-c", "core.hooksPath=NUL", "commit", "-m", "large parent");
     const wanted = new Set(["export const sourceLine = true;", "not in parent"]);
-    expect(await parentMatchingLines(root, "HEAD", ["."], wanted)).toEqual(
+    const events: ParentScanTiming[] = [];
+    expect(await parentMatchingLines(root, "HEAD", ["."], wanted, undefined, undefined, event => {
+      events.push(event);
+      throw new Error("logger unavailable");
+    })).toEqual(
       new Set(["export const sourceLine = true;"]),
     );
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ wantedLines: 2, matchedLines: 1, exitCode: 0, failed: false });
+    expect(events[0].bytes).toBeGreaterThan(64 * 1024 * 1024);
+    expect(events[0].lines).toBeGreaterThan(500000);
+    expect(events[0].processingMs).toBeGreaterThan(0);
+    expect(events[0].totalMs).toBeGreaterThanOrEqual(events[0].processingMs);
     await expect(
       parentMatchingLines(root, "HEAD", ["."], wanted, undefined, {
         bytes: 1024,

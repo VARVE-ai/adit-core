@@ -76,6 +76,8 @@ function readCommitSources(
       sources: [],
       coverage: "",
     };
+  const fileOnly = db.prepare("SELECT path,reason,additions,deletions FROM adit_attribution_files WHERE run_id=? AND repository=? AND sha=? ORDER BY path")
+    .all(analysis.runId, repository, sha) as { path: string; reason: string; additions: number | null; deletions: number | null }[];
   const groups = db
     .prepare(
       `SELECT l.provider,l.session_id,s.title,s.first_prompt,sum(l.certain_lines) certain,sum(l.likely_lines) likely,sum(l.possible_lines) possible FROM adit_attribution_writers l LEFT JOIN adit_history_sessions s ON s.provider=l.provider AND s.id=l.session_id WHERE l.run_id=? AND l.repository=? AND l.sha=? AND l.provider IS NOT NULL GROUP BY l.provider,l.session_id ORDER BY sum(l.certain_lines+l.likely_lines+l.possible_lines) DESC,l.provider,l.session_id`,
@@ -88,11 +90,12 @@ function readCommitSources(
     certain: s.certain,
     likely: s.likely,
     possible: s.possible,
-    files: db
+    files: (db
       .prepare(
         "SELECT file_path path,sum(certain_lines+likely_lines+possible_lines) lines FROM adit_attribution_writers WHERE run_id=? AND repository=? AND sha=? AND provider=? AND session_id=? GROUP BY file_path ORDER BY lines DESC,file_path",
       )
-      .all(analysis.runId, repository, sha, s.provider, s.session_id),
+      .all(analysis.runId, repository, sha, s.provider, s.session_id) as Row[])
+      .map(file => fileOnly.some(skipped => skipped.path === file.path) ? { ...file, method: "file_path" } : file),
     alternatives: (
       db
         .prepare(
@@ -113,9 +116,12 @@ function readCommitSources(
     moved: commit.moved_lines,
     unknown: commit.unknown_lines,
     sources,
-    coverage:
+    ...(fileOnly.length ? { fileOnly } : {}),
+    coverage: [
       analysis.missingTimes || analysis.missingBackups
         ? `缺少时间的写入记录 ${analysis.missingTimes} 条；无法读取的备份 ${analysis.missingBackups} 个。缺失部分不推断归属。`
         : "",
+      fileOnly.length ? `${fileOnly.length} 个文件因体积或补丁过大，仅核对写入路径，未做逐行分析，不计入代码贡献行数。` : "",
+    ].filter(Boolean).join(" "),
   };
 }

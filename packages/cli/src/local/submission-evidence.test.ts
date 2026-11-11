@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { submissionCandidates } from "./submission-evidence.js";
+import { nativeOutput, submissionCandidates, streamedSubmissionCandidates } from "./submission-evidence.js";
 const call = (id: string, input: unknown, tool = "exec", at = 1, session = "s") => ({id, input_json: JSON.stringify(input), tool_name: tool, occurred_at: at, provider: "codex", session_id: session, turn_id: "original-turn"});
 const result = (id: string, output: unknown, at = 1) => ({tool_call_id: id, content_text: typeof output === "string" ? output : JSON.stringify(output), occurred_at: at});
 const start = 'text(await tools.exec_command({cmd:"git commit -m \\"fix: example\\"",workdir:"/repo"}));';
@@ -104,4 +104,33 @@ it("does not split unordered, conditional, truncated or nested output records", 
   const script = sequential('git commit -m "fix: example"', 'cat old.log');
   expect(submissionCandidates([call("batch",script)],[result("batch",batchOutput(a))])).toEqual([]);
   expect(submissionCandidates([call("batch",script)],[result("batch",{exit_code:1,output:batchOutput(a,b)})])).toEqual([]);
+});
+
+it.each([
+  ["ordinary log\\nsecond line\\r", "ordinary log\nsecond line\r"],
+  ['{"stdout":"first\\nsecond"}', "first\nsecond"],
+  ['{"content":[{"text":"first"},{"text":"second"}]}', "first\nsecond"],
+  ['Script completed\nOutput:\n{"output":"first"}\n{"stdout":"second"}', "Script completed\nOutput:\nfirst\nsecond"],
+  ['"string output\\nnext"', "string output\nnext"],
+  ["null\nfalse\n12\n{broken", "null\nfalse\n12\n{broken"],
+  ['{"output":""}', '{"output":""}'],
+  ['{"unrelated":"value"}', '{"unrelated":"value"}'],
+  ["[main 530378e] fix: example\nplain log", "[main 530378e] fix: example\nplain log"],
+])("preserves native output decoding for %s", (input, expected) => {
+  expect(nativeOutput(input)).toBe(expected);
+});
+
+it.each([false, true])("preserves nested execution state and streaming results (failed=%s)", failed => {
+  const calls = [call("start", start), call("wait", { cell_id: "cell-1" }, "wait", 3), call("poll", poll, "exec", 5)];
+  const outputs = [
+    result("start", { content: [{ text: JSON.stringify({ cell_id: "cell-1", output: "working" }) }] }, 2),
+    result("wait", 'ordinary logs\n' + JSON.stringify({ session_id: 7711, stdout: "waiting" }), 4),
+    result("poll", { output: "[main 530378e] fix: example", content: [JSON.stringify({ exit_code: failed ? 1 : 0 })] }, 6),
+  ];
+  const expected = submissionCandidates(calls, outputs);
+  expect(expected).toHaveLength(failed ? 0 : 1);
+  if (!failed) expect(expected[0]).toMatchObject({ hashes: ["530378e"], pending: false, call: { id: "start" } });
+  const streamed = streamedSubmissionCandidates(calls.map(call => ({ call, outputs: outputs.filter(result => result.tool_call_id === call.id) })));
+  expect(streamed.map(candidate => ({ hashes: candidate.hashes, subjects: candidate.subjects, pending: candidate.pending })))
+    .toEqual(expected.map(candidate => ({ hashes: candidate.hashes, subjects: candidate.subjects, pending: candidate.pending })));
 });
