@@ -19,7 +19,7 @@ describe("skill installation", () => {
   it("documents document uploads, compatible images and partial failure recovery", () => {
     expect(TASK_SKILL).toContain("--file");
     expect(TASK_SKILL).toContain("--image");
-    expect(TASK_SKILL).toContain("MD, TXT, DOCX, PDF, HTML and HTM");
+    expect(TASK_SKILL).toContain("MD, TXT, DOCX, PDF, HTML, HTM, XLSX and CSV");
     expect(TASK_SKILL).toContain("10 MB");
     expect(TASK_SKILL).toContain("20 MB");
     expect(TASK_SKILL).toContain("pendingFiles");

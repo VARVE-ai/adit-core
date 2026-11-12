@@ -197,7 +197,7 @@ export function registerCloudBlueprintCommands(cloud: Command) {
     )
     .option(
       "--file <path>",
-      "Attach MD/TXT/JSON/DOCX/PDF/HTML/HTM or PNG/JPG/JPEG/WebP/GIF; repeat for files",
+      "Attach MD/TXT/JSON/DOCX/PDF/HTML/HTM/XLSX/CSV or PNG/JPG/JPEG/WebP/GIF; repeat for files",
       (value: string, previous: string[]) => [...previous, value],
       [],
     )

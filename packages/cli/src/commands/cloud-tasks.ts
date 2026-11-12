@@ -600,7 +600,7 @@ export function registerCloudTaskCommands(cloud: Command) {
       .option("--personal", "Create in your workspace instead of its linked collaboration project")
       .option(
         "--file <path>",
-        "Attach an image (max 10 MB) or MD, TXT, DOCX, PDF, HTML, HTM document (max 20 MB); repeat for multiple files",
+        "Attach an image (max 10 MB) or MD, TXT, DOCX, PDF, HTML, HTM, XLSX, CSV document (max 20 MB); repeat for multiple files",
         (value: string, previous: string[]) => [...previous, value],
         [],
       )
@@ -627,7 +627,7 @@ export function registerCloudTaskCommands(cloud: Command) {
     )
     .option(
       "--file <path>",
-      "Local image (max 10 MB) or MD, TXT, DOCX, PDF, HTML, HTM document (max 20 MB); repeat for multiple files",
+      "Local image (max 10 MB) or MD, TXT, DOCX, PDF, HTML, HTM, XLSX, CSV document (max 20 MB); repeat for multiple files",
       (value: string, previous: string[]) => [...previous, value],
       [],
     )
