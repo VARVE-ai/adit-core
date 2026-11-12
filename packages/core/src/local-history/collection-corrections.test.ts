@@ -104,7 +104,7 @@ function harness(root:string){
  event('turn/start',{turn:1});event('step/start',{turn:1,step:1});
  event('user/message',{role:'user',content:[{type:'text',text:'Inspect'}]},'append');
  event('request/header',{header:{config:{model:'deepseek-test'}}});
- event('assistant/message',{turn:1,step:1,message:{role:'assistant',source:{model:'deepseek-test'},content:[{type:'tool-call',id:'call',name:'bash',arguments:{command:'echo '+secret}}]},usage:{inputTokens:10,cacheReadTokens:80,cacheWriteTokens:0,outputTokens:2,totalTokens:92}},'append');
+ event('assistant/message',{turn:1,step:1,message:{role:'assistant',source:{model:'deepseek-test'},content:[{type:'tool-call',id:'call',name:'bash',arguments:{command:'echo '+secret}}]},usage:{inputTokens:10,cacheReadTokens:80,outputTokens:2,totalTokens:92}},'append');
  event('tool/call',{turn:1,step:1,callId:'call'});
  event('tool/result',{turn:1,step:1,message:{role:'tool',source:{callId:'call'},toolCallId:'call',isError:true,content:[{type:'text',text:secret}]}},'append');
  event('step/end',{turn:1,step:1});event('turn/end',{turn:1});
@@ -125,7 +125,7 @@ it('upgrades unchanged Harness sources once and preserves finding dispositions, 
  const {db,store,archive,workspace,root}=fixture('deepseek-harness');const text=harness(root),path=join(root,'session.v4.jsonl');writeFileSync(path,text);
  await archive.scan(root,[{id:'deepseek-harness',paths:[root]}]);
  // Model the old derived rows while retaining its native messages and digests.
- db.exec("DELETE FROM adit_history_tool_calls; UPDATE adit_history_tool_results SET source_call_id=NULL,tool_call_id=NULL; UPDATE adit_history_usage_entries SET input_semantics='unknown',input_total_tokens=NULL,uncached_input_tokens=NULL; UPDATE adit_history_sources SET parser_version=6; UPDATE adit_history_file_checkpoints SET parser_version=6;");
+ db.exec("DELETE FROM adit_history_tool_calls; UPDATE adit_history_tool_results SET source_call_id=NULL,tool_call_id=NULL; UPDATE adit_history_usage_entries SET input_semantics='unknown',input_total_tokens=NULL,uncached_input_tokens=NULL; UPDATE adit_history_sources SET parser_version=7; UPDATE adit_history_file_checkpoints SET parser_version=7;");
  const inspection=new LocalInspection(db);inspection.scanSession('deepseek-harness','h');
  const findings=db.prepare('SELECT id FROM adit_history_secret_findings WHERE active=1 ORDER BY id').all() as {id:string}[];
  expect(findings).toHaveLength(2);

@@ -45,7 +45,10 @@ const pricingFields = [...fields, "cache_creation_input_token_cost_above_1hr"];
 // IDs keep their own prices; never select an arbitrary matching suffix.
 const officialModelIds = new Map([
   ["glm-5.3", "zai/glm-5.3"],
+  // Harness records the served version; DeepSeek publishes its price as deepseek-flash.
+  ["deepseek-v4-1-flash-261017", "deepseek/deepseek-flash"],
 ]);
+const PRICING_VERSION = 2;
 function valid(value: unknown): value is string | number {
   return (
     (typeof value === "number" ||
@@ -271,16 +274,16 @@ export class LocalPrices {
         for (const row of batch) {
           const fingerprint = createHash("sha256").update(JSON.stringify([row.provider,row.model,row.scope,row.input_total_tokens,
             row.uncached_input_tokens,row.output_tokens,row.cache_read_tokens,row.cache_write_tokens,row.cache_write_5m_tokens,row.cache_write_1h_tokens,row.completeness])).digest("hex");
-          const prior = read.get(row.id) as {fingerprint:string;pricing_status:string;price_snapshot_id:string|null;matched_model:string|null;costs_json:string}|undefined;
+          const prior = read.get(row.id) as {fingerprint:string;pricing_status:string;price_snapshot_id:string|null;matched_model:string|null;pricing_version:number;costs_json:string}|undefined;
           let values: (number|null)[];
-          if (prior?.fingerprint === fingerprint && (prior.pricing_status === "priced" || prior.price_snapshot_id === this.version)) {
+          if (prior?.fingerprint === fingerprint && (prior.pricing_status === "priced" || (prior.price_snapshot_id === this.version && prior.pricing_version === PRICING_VERSION))) {
             values = JSON.parse(prior.costs_json);
           } else {
             const snapshot = prior?.matched_model ? prior.price_snapshot_id : this.version;
             const cost = row.completeness === "complete" ? this.atSnapshot(row,snapshot) : null;
             values = columns.map(name => cost ? cost[name as keyof RequestCost] as number : null);
             save.run(row.id,fingerprint,cost ? "priced" : "unpriced",cost ? null : "missing_price_or_incomplete_usage",
-              cost?.matched_model ?? prior?.matched_model ?? null,snapshot,1,Date.now(),JSON.stringify(values));
+              cost?.matched_model ?? prior?.matched_model ?? null,snapshot,PRICING_VERSION,Date.now(),JSON.stringify(values));
           }
           if (columns.some((name,index) => (row as unknown as Record<string,unknown>)[name] !== values[index])) {
             update.run(...values,row.id);

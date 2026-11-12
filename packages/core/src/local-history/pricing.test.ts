@@ -115,3 +115,39 @@ it("fills previously unpriced usage when prices arrive and advances its sync rev
   expect(db.prepare("SELECT cost_microusd FROM adit_history_usage_entries").get()).toEqual({cost_microusd:2});
   expect((db.prepare("SELECT transcript_revision FROM adit_history_sessions").get() as {transcript_revision:number}).transcript_revision).toBeGreaterThan(before.transcript_revision);
 });
+
+it("prices the Harness Flash version with conserved tokens and reprocesses existing archives", () => {
+  const db = new Database(":memory:"); databases.push(db); createHistorySchema(db);
+  const prices = new LocalPrices(db), history = new StructuredHistory(db);
+  const official = { mode: "chat", litellm_provider: "deepseek", input_cost_per_token: 0.0000003,
+    output_cost_per_token: 0.0000012, cache_read_input_token_cost: 0.000000006 };
+  prices.install({ "deepseek/deepseek-flash": official,
+    "reseller/deepseek-v4-1-flash-261017": { ...official, input_cost_per_token: 0.001 } });
+  const usage = { inputTokens: 2086, outputTokens: 48, totalTokens: 10326, cacheReadTokens: 8192 };
+  const session = { id: "flash", provider: "deepseek-harness", cwd: "/project", messages: [
+    { key: "u", role: "user", content: "hello", raw: {} },
+    { key: "a", role: "assistant", content: "hi", raw: {}, model: "deepseek-v4-1-flash-261017", usage },
+  ] };
+  history.write(session);
+  const read = () => db.prepare("SELECT * FROM adit_history_usage_entries WHERE ledger_role='canonical'").get() as Record<string, unknown>;
+  expect(read()).toMatchObject({ model: "deepseek-v4-1-flash-261017", input_total_tokens: 10278,
+    uncached_input_tokens: 2086, cache_read_tokens: 8192, cache_write_tokens: 0, completeness: "complete", cost_microusd: 733 });
+  expect(db.prepare("SELECT raw_usage_json FROM adit_history_usage_observations").get()).toEqual({ raw_usage_json: JSON.stringify(usage) });
+  // An older unpriced result must be retried even when the price catalog did not change.
+  db.prepare("UPDATE adit_history_cost_basis SET pricing_status='unpriced',matched_model=NULL,pricing_version=1,costs_json='[null,null,null,null,null]'").run();
+  db.prepare("UPDATE adit_history_usage_entries SET cost_microusd=NULL").run();
+  prices.persist();
+  expect(read().cost_microusd).toBe(733);
+  expect(db.prepare("SELECT matched_model FROM adit_history_cost_basis").get()).toEqual({ matched_model: "deepseek/deepseek-flash" });
+  expect(new LocalPrices(db).estimate({ ...read(), provider: "deepseek-harness", scope: "message", model: "deepseek-v4-1-flash-261017" } as CostUsage)).toBe(733);
+  for (const incomplete of [{ ...usage, totalTokens: 10327 }, { ...usage, totalTokens: undefined }]) {
+    session.messages[1].usage = incomplete as typeof usage;
+    history.write(session);
+    expect(read()).toMatchObject({ cache_write_tokens: null, completeness: "partial", cost_microusd: null });
+  }
+  // Neither a different model version nor another channel can borrow the official price.
+  const request = { provider: "deepseek-harness", scope: "message", input_total_tokens: 10278, uncached_input_tokens: 2086,
+    output_tokens: 48, cache_read_tokens: 8192, cache_write_tokens: 0, cache_write_5m_tokens: null, cache_write_1h_tokens: null };
+  expect(prices.estimate({ ...request, model: "deepseek-v4-1-flash-unknown" })).toBeNull();
+  expect(prices.estimate({ ...request, model: "other/deepseek-v4-1-flash-261017" })).toBeNull();
+});

@@ -245,11 +245,14 @@ export class StructuredHistory {
     const read=numberAt(usage,"cache_read_input_tokens","cached_input_tokens","cache_read_tokens","cacheReadTokens","cacheRead","cachedContentTokenCount","accumulated_cache_read_tokens")
       ??numberAt(record(usage.cache),"read")
       ??numberAt(record(usage.prompt_tokens_details),"cached_tokens")??numberAt(record(usage.input_tokens_details),"cached_tokens");
-    const write=numberAt(usage,"cache_creation_input_tokens","cache_write_input_tokens","cache_write_tokens","cacheWriteTokens","cacheWrite","accumulated_cache_write_tokens")??numberAt(record(usage.cache),"write");
+    let write=numberAt(usage,"cache_creation_input_tokens","cache_write_input_tokens","cache_write_tokens","cacheWriteTokens","cacheWrite","accumulated_cache_write_tokens")??numberAt(record(usage.cache),"write");
     const cache=record(usage.cache_creation);
     const write5=numberAt(cache,"ephemeral_5m_input_tokens"),write1h=numberAt(cache,"ephemeral_1h_input_tokens");
     const reasoning=numberAt(usage,"reasoning_output_tokens","reasoning_tokens","reasoningTokens","reasoning")??numberAt(record(usage.completion_tokens_details),"reasoning_tokens");
     const reportedTotal=numberAt(usage,"total_tokens","totalTokens","totalTokenCount");
+    // Harness omits zero cache writes. Infer zero only when every reported token
+    // is already accounted for; missing or conflicting totals remain incomplete.
+    if(provider==="deepseek-harness"&&write===null&&reportedTotal!==null&&reported!==null&&read!==null&&output!==null&&sum(reported,read,output)===reportedTotal)write=0;
     const semantic=provider==="qoder"&&usage.adit_input_semantics==="includes_cache"?"includes_cache":["copilot","muse","poolside","junie","roocode","kilo-legacy","kimi","kimi-work"].includes(provider) && ["excludes_cache","unknown"].includes(string(usage.adit_input_semantics))?string(usage.adit_input_semantics):["claude","qoder","iflow","pi","omp","omo","prime-agent","stepcode","opencode","kilo","mimocode","icodemate","zcode","deepseek-harness"].includes(provider)?"excludes_cache":
       ["codex","traex","augure-code","gemini","deepseek"].includes(provider)?"includes_cache":"unknown";
     let inputTotal:number|null=null,uncached:number|null=null;
