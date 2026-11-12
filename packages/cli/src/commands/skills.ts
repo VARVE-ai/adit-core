@@ -22,7 +22,7 @@ export interface SkillDefinition {
 
 export const TASK_SKILL = `---
 name: adit-tasks
-description: Create or upload requirement blueprints to ADIT Cloud, manage custom task modules and groups, create independent tasks on request, query and implement the user's tasks, read their PRD and references, and edit task fields. Use for creating blueprints even with only a name, organizing tasks, listing unfinished tasks, implementing a task or updating its details. Not for unrelated local TODO lists, other members' progress (adit-reports), or session history (adit-history).
+description: Create or upload requirement blueprints to ADIT Cloud, add tasks to existing blueprints, manage custom task modules and groups, create independent tasks on request, query and implement the user's tasks, read their PRD and references, and edit task fields. Use for creating blueprints even with only a name, adding blueprint tasks, organizing tasks, listing unfinished tasks, implementing a task or updating its details. Not for unrelated local TODO lists, other members' progress (adit-reports), or session history (adit-history).
 ---
 
 # ADIT tasks
@@ -50,15 +50,21 @@ Display every matching task with continuous numbering, title, readable status an
 
 Keep the full taskId associated with each displayed task number. Reuse that exact ID for subsequent actions. Never substitute a title, array index, blueprintId or guessed ID. Ask when "this task" is ambiguous. Re-query when the prior ID is unavailable.
 
-## Create an independent task
+## Create a task
 
-Create only when the user asks to add a task to Cloud, not when they merely discuss work or ask you to implement it. Derive the title and key points from their request; ask for missing requirements rather than inventing them. Title is required (1-200 characters), as are key points (1-20000 characters). From the current initialized project run:
+Create only when the user asks to add a task to Cloud, not when they merely discuss work or ask you to implement it. Derive the title and key points from their request. Title is required (1-200 characters). Independent tasks also require key points (1-20000 characters); ask for missing requirements rather than inventing them. From the current initialized project run:
 
     adit cloud tasks create --title "Fix booking conflicts" --key-points "Prevent concurrent bookings for the same room and time slot" --json
 
-Creation also accepts --priority, --due, --start, --estimate-days or --estimate-hours, --created-at, --task-scope and --state, using the units and constraints below. Only set fields the user requested; unspecified dates and estimates stay empty, and priority defaults to medium. Title and key points cannot be empty on creation. Quote user-supplied text safely for the active shell; never evaluate it as a command.
+Creation also accepts --priority, --due, --start, --estimate-days or --estimate-hours, --created-at, --task-scope and --state, using the units and constraints below. Only set fields the user requested; unspecified dates and estimates stay empty, and priority defaults to medium. Quote user-supplied text safely for the active shell; never evaluate it as a command.
 
-Creation uses the same project/team resolution as list and defaults to the logged-in assignee, state not_started and blueprintId null. In a team, an explicit --assignee <memberId> assigns another member and --clear-assignee leaves it unassigned; use only confirmed member IDs. Personal tasks are self-assigned at creation, just like the webpage. No blueprint or PRD is created. With multiple linked teams, TEAM_SELECTION_REQUIRED returns only the current project's candidates: ask the user, then retry with --team <teamId>. Use --personal only for an explicit personal-task request and --project only for an explicitly selected project. For an explicit team request without a known team ID, use tasks scopes first; do not silently create a personal task or choose another team.
+Creation uses the same project/team resolution as list and defaults to the logged-in assignee and state not_started. Without --blueprint it creates an independent task with blueprintId null. In a team, an explicit --assignee <memberId> assigns another member and --clear-assignee leaves it unassigned; use only confirmed member IDs. Personal tasks are self-assigned at creation, just like the webpage. No blueprint or PRD is created. With multiple linked teams, TEAM_SELECTION_REQUIRED returns only the current project's candidates: ask the user, then retry with --team <teamId>. Use --personal only for an explicit personal-task request and --project only for an explicitly selected project. For an explicit team request without a known team ID, use tasks scopes first; do not silently create a personal task or choose another team.
+
+When the user asks to add a task to an existing blueprint, find its actual ID with blueprints list --json in the same workspace/scope, following nextOffset; ask only if multiple blueprints match. Append directly:
+
+    adit cloud tasks create --blueprint <blueprintId> --title "Fix app page bug" --key-points "Requirements supplied by the user" --json
+
+For a blueprint task, --key-points is optional when only a task name was supplied; leave the missing details empty. Existing tasks and blueprint documents are preserved. The server checks blueprint edit permission, selected scope and archive state. Verify the returned task.blueprintId matches the selected blueprint. Do not replace this request with an independent task, recreate the blueprint or use blueprint upload to append tasks. If the append fails, report the server's reason. The same optional fields, custom modules, group and --file attachments are supported.
 
 The command writes immediately to Cloud and records creation history; no sync is needed. Report the returned title, taskId, project/team, priority and due date. If the request times out or returns an uncertain server error, do not blindly retry: list tasks with --state all in the same scope, following pagination, and check whether it was created. If the outcome remains uncertain, tell the user before trying again. A 404 from an older Cloud may mean the creation endpoint is not deployed; do not bypass it with database writes or switch servers.
 
@@ -234,7 +240,7 @@ Independent task creation accepts repeated --module <moduleId>. List your tasks 
 
 ## Response fields
 
-- create: project and scope identify where the independent task was created; task includes the new taskId, blueprintId null, assigneeId, progressState, title, keyPointsText, priority, startAt, dueAt, estimatedPersonDays and timestamps.
+- create: project and scope identify where the task was created; task includes the new taskId, blueprintId (the selected blueprint, or null for independent tasks), assigneeId, progressState, title, keyPointsText, priority, startAt, dueAt, estimatedPersonDays and timestamps.
 - list: project names the project used to resolve the scope; scope carries projectId, teamId and teamName (teamName null means personal scope); tasks carry taskId, title, keyPointsText, progressState (not_started, in_progress, paused, done, accepted), priority (high, medium, low), dueAt, updatedAt, blueprintId and blueprintTitle (null for an independent task), projectId and teamId; total and nextOffset drive pagination.
 - show and context: task is the task record: taskId, title, keyPointsText, scope and dependencies (lists of text), progressState, priority, assigneeId, dueAt and startAt (expected completion and start), estimatedPersonDays (null until the owner estimates), kind (task, or module when it groups tasks) and parentTaskId, confirmRequestedAt and confirmedAt (when completion was requested and confirmed), currentStatusDecision (a proposed state change awaiting confirmation: fromState, toState, createdAt, confirmedAt, revertedAt; null when none), createdAt, updatedAt, blueprintId, projectId and teamId. assignableMembers lists members you may transfer the task to (empty without manage rights); permissions carries canManage, canUpdateState and canUpdateDueAt (false once the task is done).
 - context: prd is null for an independent task, otherwise blueprintId, title, markdown (the current document), updatedAt, activeVersionId and latestVersionId; resources carry id, name, kind (attachment, material or sketch), mimeType, url (null when nothing can be served) and expiresAt (null for a public external URL).

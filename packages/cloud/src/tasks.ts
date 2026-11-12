@@ -121,6 +121,7 @@ export interface CloudTaskPatch {
 }
 
 export interface CloudTaskCreate extends Omit<CloudTaskPatch, "scope" | "title" | "keyPointsText"> {
+  blueprintId?: string;
   moduleIds?: string[];
   groupId?: string | null;
   localProjectId: string;
