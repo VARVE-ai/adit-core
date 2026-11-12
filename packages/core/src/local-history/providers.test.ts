@@ -677,6 +677,23 @@ function recordedHarness(version: 3 | 4) {
   return rows;
 }
 describe("DeepSeek Harness event reconstruction", () => {
+  it.each(["runtime-context", "skill-catalog", "time-context", "model-selection", "user", undefined, "future-source"])(
+    "classifies injected context by native source %s without changing raw evidence", (kind) => {
+      const { rows, event } = harness();
+      const source = kind ? { kind } : undefined;
+      event("user/message", {
+        role: "user", content: [{ type: "text", text: "Current runtime context: example" }],
+        ...(source ? { source } : {}),
+      }, "append");
+      const raw = structuredClone(rows.at(-1));
+      const message = parseHarness(lines(...rows)).messages.at(-1)!;
+      const injected = ["runtime-context", "skill-catalog", "time-context", "model-selection"].includes(kind || "");
+      expect(message.role).toBe(injected ? "system" : "user");
+      expect(message.contextKind).toBe(injected ? "runtime" : undefined);
+      expect(message.content).toEqual([{ type: "text", text: "Current runtime context: example" }]);
+      expect(message.raw).toEqual(raw);
+    },
+  );
   it.each([3, 4] as const)("reads real-format v%s message envelopes and keeps tool results without duplicate job messages", (version) => {
     const rows = recordedHarness(version);
     const text = lines(...rows);

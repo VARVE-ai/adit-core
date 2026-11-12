@@ -141,3 +141,58 @@ it('upgrades unchanged Harness sources once and preserves finding dispositions, 
  expect(store.read('deepseek-harness','h')!.messages.find(m=>m.role==='user')!.content).toEqual([{type:'text',text:'Edited'}]);
  expect((await archive.scan(root,[{id:'deepseek-harness',paths:[root]}])).updated).toBe(0);
 });
+
+it('moves Harness injections into session context on upgrade without losing real prompts, replies, edits or cost',async()=>{
+ const {db,store,archive,workspace,root}=fixture('deepseek-harness');
+ const rows=harness(root).trim().split('\n').map(line=>JSON.parse(line));
+ const injected=(kind:string)=>({type:'user/message',surfaceOp:'append',data:{role:'user',source:{kind},content:[{type:'text',text:kind}]}});
+ rows.splice(1,0,injected('runtime-context'));
+ const userIndex=rows.findIndex(row=>row.type==='user/message' && !row.data.source);
+ rows.splice(userIndex+1,0,injected('skill-catalog'),injected('time-context'));
+ rows.push({type:'turn/start',data:{turn:2}},{type:'step/start',data:{turn:2,step:1}},
+  {type:'user/message',surfaceOp:'append',data:{role:'user',source:{kind:'user'},content:[{type:'text',text:'Current runtime context: my question'}]}},
+  injected('model-selection'),
+  {type:'assistant/message',surfaceOp:'append',data:{turn:2,step:1,message:{role:'assistant',content:[{type:'text',text:'Real reply'}]}}},
+  {type:'step/end',data:{turn:2,step:1}},{type:'turn/end',data:{turn:2}});
+ rows.slice(1).forEach((row,index)=>{row.seq=index;row.time=1800000000000+index;});
+ const text=rows.map(row=>JSON.stringify(row)).join('\n')+'\n',path=join(root,'session.v4.jsonl');
+ writeFileSync(path,text);
+ expect(await archive.scan(root,[{id:'deepseek-harness',paths:[root]}])).toMatchObject({updated:1,errors:[]});
+ const parsed=parseHarness(text),old=structuredClone(parsed);
+ for(const message of old.messages)if(message.contextKind==='runtime'){message.role='user';delete message.contextKind;}
+ store.write(old,{rebuild:true});
+ db.exec('UPDATE adit_history_sources SET parser_version=8; UPDATE adit_history_file_checkpoints SET parser_version=8');
+ // An identical older copy must not block an upgrade of the derived classification.
+ db.prepare('INSERT INTO adit_history_sources VALUES (?,?,?,?,?)').run('deepseek-harness',join(root,'missing-copy.jsonl')+'#h','h','old',8);
+ const first=parsed.messages.find(message=>message.role==='user')!;
+ db.prepare('INSERT INTO adit_history_text_edits VALUES (?,?,?,?,?,?)').run('deepseek-harness','h',first.key,0,'Edited question',1);
+ store.write(old);
+ const prices=new LocalPrices(db);prices.install({'deepseek-test':{mode:'chat',input_cost_per_token:0.000002,output_cost_per_token:0.00001,cache_read_input_token_cost:0.0000002}});
+ const browser=new LocalSessionBrowser(db,prices);
+ expect(browser.detail(workspace,'deepseek-harness','h').session.prompts).toBe(6);
+ expect(await archive.scan(root,[{id:'deepseek-harness',paths:[root]}])).toMatchObject({updated:1,errors:[]});
+ const after=store.read('deepseek-harness','h')!;
+ expect(after.messages.map(message=>message.key)).toEqual(parsed.messages.map(message=>message.key));
+ expect(after.messages.map(message=>message.raw)).toEqual(parsed.messages.map(message=>message.raw));
+ expect(after.messages.filter(message=>message.contextKind==='runtime')).toHaveLength(4);
+ for(const mode of ['normal','focused'] as const){
+  const detail=browser.detail(workspace,'deepseek-harness','h',mode);
+  expect(detail.session.prompts).toBe(2);expect(detail.totalTurns).toBe(2);expect(detail.cost).toBe(56);
+  expect(detail.turns.map(turn=>turn.prompt)).toEqual(['Edited question','Current runtime context: my question']);
+  expect(detail.turns[1].events.map(event=>event.text)).toEqual(['Real reply']);
+  if(mode==='normal')expect(detail.context.map(event=>event.text)).toEqual(['runtime-context','skill-catalog','time-context','model-selection']);
+  expect(detail.turns.flatMap(turn=>turn.events).some(event=>event.kind==='system')).toBe(false);
+ }
+ expect((await archive.scan(root,[{id:'deepseek-harness',paths:[root]}])).updated).toBe(0);
+ const changed=structuredClone(rows);changed[1].data.content[0].text='Changed native context';
+ writeFileSync(path,changed.map(row=>JSON.stringify(row)).join('\n')+'\n');
+ expect((await archive.scan(root,[{id:'deepseek-harness',paths:[root]}])).errors).toEqual(['deepseek-harness: Conflicting copies of the same session; existing archive retained']);
+ expect(store.read('deepseek-harness','h')).toEqual(after);
+ db.prepare('DELETE FROM adit_history_sources WHERE path=?').run(join(root,'missing-copy.jsonl')+'#h');
+ // Recollecting an appended injection must retain the same two real turns.
+ rows.push(injected('time-context'));rows.at(-1).seq=rows.length-2;rows.at(-1).time=1800000000000+rows.length;
+ writeFileSync(path,rows.map(row=>JSON.stringify(row)).join('\n')+'\n');
+ expect(await archive.scan(root,[{id:'deepseek-harness',paths:[root]}])).toMatchObject({updated:1,errors:[]});
+ expect(browser.detail(workspace,'deepseek-harness','h').session.prompts).toBe(2);
+ expect(browser.context(workspace,'deepseek-harness','h').events).toHaveLength(5);
+});
