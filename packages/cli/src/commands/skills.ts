@@ -22,7 +22,7 @@ export interface SkillDefinition {
 
 export const TASK_SKILL = `---
 name: adit-tasks
-description: Upload local requirement blueprints to ADIT Cloud, manage custom task modules and groups, create independent tasks on request, query and implement the user's tasks, read their PRD and references, and edit task fields. Use for uploading blueprints, organizing tasks, listing unfinished tasks, implementing a task or updating its details. Not for unrelated local TODO lists, other members' progress (adit-reports), or session history (adit-history).
+description: Create or upload requirement blueprints to ADIT Cloud, manage custom task modules and groups, create independent tasks on request, query and implement the user's tasks, read their PRD and references, and edit task fields. Use for creating blueprints even with only a name, organizing tasks, listing unfinished tasks, implementing a task or updating its details. Not for unrelated local TODO lists, other members' progress (adit-reports), or session history (adit-history).
 ---
 
 # ADIT tasks
@@ -76,13 +76,23 @@ To add files to an existing task you can upload to, or retry pending files after
 
 Creation and attachment upload are separate writes. An upload failure returns ok:false, taskCreated:true, the existing taskId, successful attachments, failedFile and pendingFiles, with a nonzero exit code. Image-only uploads also retain failedImage and pendingImages for compatibility. Report this partial result; do not recreate the task. Retry only pendingFiles using attach (use pendingImages when reading an older CLI result). The same filename and bytes uploaded by the same user to the same task are deduplicated, including retries after a lost response. If attach fails, stop and report the returned reason. Never claim all files were attached when only task creation succeeded. Older CLI versions may not recognize --file, and older Cloud CLI endpoints may reject documents even when their webpage accepts them. Report the version limitation; do not rename a document to an image, bypass permissions, or switch servers.
 
-## Upload a local requirement blueprint
+## Create or upload a requirement blueprint
 
-On a request to upload a locally prepared blueprint, use the current initialized workspace and existing Cloud login:
+On an explicit request to create a blueprint, its name alone is sufficient. Create it in the current initialized workspace using the existing Cloud login and the same project/team resolution as tasks. Requirements, modules, tasks and attachments are optional and can remain empty; do not require the user to finish planning or split tasks before creation. Ask for a name only if none was supplied, or for scope when the current project cannot resolve it uniquely.
+
+For a name-only request, write a JSON manifest containing only the user's title:
+
+    { "title": "Booking requirements" }
+
+Then create it without requiring any attachment:
+
+    adit cloud blueprints upload --input "./blueprint.json" --json
+
+When the user supplies requirement files, include their actual readable paths:
 
     adit cloud blueprints upload --input "./blueprint.json" --file "./requirements.md" --json
 
-The JSON manifest accepts title, baseIntent, modules, tasks and attachments. Preserve the user's requirement content. Read actual local files; do not invent requirements or paths. A minimal example of the shape (replace all example content with the user's data):
+The JSON manifest requires only title and optionally accepts baseIntent, modules, tasks and attachments. Preserve supplied content; leave omitted content empty instead of inventing requirements, modules, tasks or paths. A populated example when the user supplies these details (replace all example content with the user's data):
 
     {
       "title": "Booking requirements",

@@ -157,11 +157,11 @@ export async function cloudBlueprintUploadCommand(options: Options) {
 export function registerCloudBlueprintCommands(cloud: Command) {
   cloud
     .command("blueprints")
-    .description("Upload locally prepared requirement blueprints to Cloud")
+    .description("Create or upload requirement blueprints to Cloud")
     .command("upload")
     .requiredOption(
       "--input <path>",
-      "Blueprint JSON: title, baseIntent, modules, tasks, attachments",
+      "Blueprint JSON: title required; baseIntent, modules, tasks, attachments optional",
     )
     .option(
       "--file <path>",

@@ -103,6 +103,35 @@ it("uploads real text and multi-module tasks with explicit scope and request ide
   expect(result().clientRequestId).toBe(a);
   expect(mocks.options).toHaveBeenCalledWith({ maxRetries: 0 });
 });
+it("creates a blueprint from only its name without generating optional content", async () => {
+  const input = join(directory, "blueprint.json");
+  writeFileSync(input, JSON.stringify({ title: "  减肥 App  " }));
+  mocks.post.mockResolvedValue({
+    blueprint: { id: a, title: "减肥 App" },
+    tasks: [],
+    attachments: [],
+    reused: false,
+  });
+  await blueprints().parseAsync(
+    ["blueprints", "upload", "--input", input, "--request-id", b, "--json"],
+    { from: "user" },
+  );
+  expect(mocks.post).toHaveBeenCalledExactlyOnceWith("/api/cli/blueprints", {
+    title: "减肥 App",
+    attachments: [],
+    localProjectId: "current-project",
+    teamId: undefined,
+    scope: undefined,
+    clientRequestId: b,
+  });
+  expect(result()).toMatchObject({
+    blueprint: { id: a, title: "减肥 App" },
+    tasks: [],
+    attachments: [],
+    clientRequestId: b,
+  });
+  expect(process.exitCode).toBeUndefined();
+});
 it("validates local files and blocks manifest scope overrides before any Cloud write", async () => {
   const input = join(directory, "blueprint.json");
   writeFileSync(input, JSON.stringify({ title: "Test", localProjectId: "foreign" }));
