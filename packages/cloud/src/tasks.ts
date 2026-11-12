@@ -3,6 +3,7 @@ import type { CloudClient } from "./http/client.js";
 export type CloudTaskState =
   "unassigned" | "not_started" | "in_progress" | "paused" | "done" | "accepted";
 export interface CloudTask {
+  modules?: Array<{ id: string; name: string }>;
   groupId?: string | null;
   taskType?: string | null;
   taskTypeColor?: string | null;
@@ -120,6 +121,7 @@ export interface CloudTaskPatch {
 }
 
 export interface CloudTaskCreate extends Omit<CloudTaskPatch, "scope" | "title" | "keyPointsText"> {
+  moduleIds?: string[];
   groupId?: string | null;
   localProjectId: string;
   teamId?: string;
@@ -176,6 +178,7 @@ export function listCloudTasks(
     taskType?: string;
     unclassified?: boolean;
     groupId?: string;
+    moduleId?: string;
     ungrouped?: boolean;
     offset?: number;
     limit?: number;
