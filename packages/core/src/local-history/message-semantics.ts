@@ -50,7 +50,11 @@ export function historyFinalReply(db: Database.Database, turnId: string, hasNext
     ORDER BY coalesce(json_extract(m.extra_json,'$.finalReply'),0) DESC,m.ordinal DESC LIMIT 1)
     SELECT id,ordinal,occurred_at,
       coalesce(json_extract(raw_json,prefix||'.phase'),json_extract(raw_json,prefix||'.channel'),json_extract(raw_json,'$.phase')) phase,
-      coalesce(json_extract(raw_json,prefix||'.stop_reason'),json_extract(raw_json,prefix||'.finish_reason'),json_extract(raw_json,'$.finish_reason')) stop,
+      coalesce(json_extract(raw_json,prefix||'.stop_reason'),json_extract(raw_json,prefix||'.finish_reason'),json_extract(raw_json,'$.finish_reason'),
+        CASE WHEN json_extract(raw_json,'$.type')='assistant/message' THEN coalesce(
+          json_extract(raw_json,'$.data.message.source.replayState.response.stopReason'),
+          (SELECT json_extract(value,'$.chunk.reason.kind') FROM json_each(raw_json,'$.data.stream')
+            WHERE json_extract(value,'$.chunk.type')='finish' ORDER BY CAST(key AS INTEGER) DESC LIMIT 1)) END) stop,
       json_type(extra_json,'$.finalReply')='true' explicit,
       EXISTS(SELECT 1 FROM adit_history_messages later WHERE later.turn_id=? AND later.ordinal>candidate.ordinal
         AND (later.role='tool' OR EXISTS(SELECT 1 FROM adit_history_tool_calls c WHERE c.message_id=later.id))) tool_after
