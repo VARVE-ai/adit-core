@@ -35,6 +35,7 @@ export type PreparedTaskAttachment = { path: string; file: File };
 export async function prepareTaskAttachments(
   paths: string[] = [],
   imagePaths: string[] = [],
+  options: { allowJson?: boolean } = {},
 ): Promise<PreparedTaskAttachment[]> {
   for (const path of imagePaths) {
     if (!IMAGE_EXTENSION.test(extname(path)))
@@ -46,7 +47,11 @@ export async function prepareTaskAttachments(
   for (const path of new Set([...paths, ...imagePaths].map((value) => resolve(value)))) {
     const extension = extname(path);
     const image = IMAGE_EXTENSION.test(extension);
-    if (!image && !DOCUMENT_EXTENSION.test(extension))
+    if (
+      !image &&
+      !DOCUMENT_EXTENSION.test(extension) &&
+      !(options.allowJson && /^\.json$/i.test(extension))
+    )
       throw new Error(
         `Unsupported attachment: ${path}. Use PNG, JPG, JPEG, WebP, GIF, MD, TXT, DOCX, PDF, HTML or HTM.`,
       );

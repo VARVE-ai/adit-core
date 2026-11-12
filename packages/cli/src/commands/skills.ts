@@ -105,15 +105,22 @@ modules declares custom catalog entries by name; same-name entries already in th
 
 Each task requires title (1-200 characters) and optionally keyPointsText, priority (high/medium/low), progressState (unassigned/not_started/in_progress/paused/done/accepted), startAt, dueAt and estimatedPersonDays. Dates in this JSON must be ISO UTC instants with Z, estimates use person-days. Only include statuses/estimates supplied by the user; omitted tasks default to self-assigned and not_started. Keep startAt no later than dueAt. Upload supports up to 1000 tasks and 100 declared modules.
 
---file can repeat for UTF-8 MD, TXT or JSON blueprint documents. Inline attachments use displayName and contentText. At most 20 attachments, at most 1,000,000 characters per body (local files also at most 1,000,000 bytes), and 5 MiB of combined UTF-8 content. Other task-attachment formats listed above are not accepted by blueprint upload. Input JSON must not contain account/project/team selectors; use --team, --personal or --project with the same resolution rules as tasks. With TEAM_SELECTION_REQUIRED, select only among this workspace's returned candidates.
+--file can repeat for MD, TXT, JSON, DOCX, PDF, HTML, HTM, PNG, JPG, JPEG, WebP and GIF. All task attachment formats are supported: images up to 10 MiB, documents up to 20 MiB, with original bytes preserved. Validate every file before creating the blueprint. A blueprint supports up to 50 active attachments. A document preview parsing failure retains the original file and returns parseStatus:failed; report that preview limitation. Legacy inline attachments use displayName and contentText, limited to MD/TXT/JSON, 20 inline entries, 1,000,000 characters per body and 5 MiB combined UTF-8 content. Use --file for other formats. Input JSON must not contain account/project/team selectors; use --team, --personal or --project with the same resolution rules as tasks. With TEAM_SELECTION_REQUIRED, select only among this workspace's returned candidates.
 
-Blueprint, attachments, module declarations and task memberships are written atomically. It appears as a locally created blueprint in Cloud with attachments and tasks. The response returns blueprint.id, effective projectId/teamId, concrete task IDs and selected modules, attachments and clientRequestId. This does not run a Cloud agent, mark existing tasks complete or require history sync.
+Blueprint, inline attachments, module declarations and task memberships are written atomically; --file attachments are uploaded afterward as separate writes. It appears as a locally created blueprint in Cloud with attachments and tasks. The response returns blueprint.id, effective projectId/teamId, concrete task IDs and selected modules, attachments and clientRequestId. This does not run a Cloud agent, mark existing tasks complete or require history sync.
+
+To attach files to an existing blueprint, find its real ID in the selected workspace (list returns nextOffset; follow it when needed). If several blueprints match the name, ask which one rather than guessing:
+
+    adit cloud blueprints list --json
+    adit cloud blueprints attach <blueprintId> --file "./prototype.html" --file "./requirements.pdf" --json
+
+Use actual readable local paths, not invented files. Append requires blueprint edit permission; an archived blueprint cannot be changed. A partial upload returns ok:false, blueprintCreated:true for creation, blueprintId, successful attachments, failedFile and pendingFiles, with a nonzero exit code. Report the partial result and retry only pendingFiles with attach; do not recreate the blueprint. Same-name, same-byte uploads by the same user to the same blueprint are deduplicated, including retries after a lost response. If attach fails, stop and report the returned reason.
 
 Uploads disable automatic retries. If the outcome is uncertain, reuse the returned clientRequestId with unchanged manifest, attachment bytes and scope:
 
     adit cloud blueprints upload --input "./blueprint.json" --file "./requirements.md" --request-id <clientRequestId> --json
 
-The server returns the original result with reused:true instead of making a duplicate. A reused request ID with changed content or scope returns 409; stop and resolve it. Keep the request ID available before a retry; --request-id can also be supplied on the first upload. Report unsupported endpoints instead of bypassing the Cloud API or changing servers.
+The server returns the original blueprint with reused:true instead of making a duplicate; subsequent file uploads are deduplicated independently. A reused request ID with a changed JSON manifest or scope returns 409; stop and resolve it. File bytes are not part of that manifest hash, so preserve the original files when retrying an uncertain creation. Keep the request ID available before a retry; --request-id can also be supplied on the first upload. Report unsupported endpoints instead of bypassing the Cloud API or changing servers.
 
 ## Implement a selected task
 

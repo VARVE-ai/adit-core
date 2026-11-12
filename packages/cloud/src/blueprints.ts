@@ -41,3 +41,39 @@ export function uploadCloudBlueprint(
 ): Promise<CloudBlueprintUploaded> {
   return client.post("/api/cli/blueprints", input);
 }
+
+export interface CloudBlueprintAttachment {
+  id: string;
+  displayName: string;
+  parseStatus: string;
+  parseError: string | null;
+}
+export function uploadCloudBlueprintAttachment(
+  client: CloudClient,
+  blueprintId: string,
+  file: File,
+): Promise<{ attachment: CloudBlueprintAttachment }> {
+  const form = new FormData();
+  form.set("file", file);
+  return client.postForm(
+    `/api/cli/blueprints/${encodeURIComponent(blueprintId)}/attachments`,
+    form,
+  );
+}
+export function listCloudBlueprints(
+  client: CloudClient,
+  query: URLSearchParams,
+): Promise<{
+  blueprints: Array<{
+    id: string;
+    title: string;
+    projectId: string | null;
+    teamId: string | null;
+    userId: string;
+    state: string;
+  }>;
+  total: number;
+  nextOffset: number | null;
+}> {
+  return client.get(`/api/cli/blueprints?${query}`);
+}

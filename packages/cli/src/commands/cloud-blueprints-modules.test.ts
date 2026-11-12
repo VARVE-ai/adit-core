@@ -6,6 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
+  postForm: vi.fn(),
   patch: vi.fn(),
   delete: vi.fn(),
   options: vi.fn(),
@@ -18,6 +19,7 @@ vi.mock("@varveai/adit-cloud", async (original) => ({
   CloudClient: class {
     get = mocks.get;
     post = mocks.post;
+    postForm = mocks.postForm;
     patch = mocks.patch;
     delete = mocks.delete;
     constructor(_url: string, _credentials: unknown, options: unknown) {
@@ -73,6 +75,9 @@ it("uploads real text and multi-module tasks with explicit scope and request ide
     attachments: [{ id: b }],
     reused: false,
   });
+  mocks.postForm.mockResolvedValue({
+    attachment: { id: b, displayName: "requirements.md", parseStatus: "ready", parseError: null },
+  });
   await blueprints().parseAsync(
     [
       "blueprints",
@@ -96,10 +101,12 @@ it("uploads real text and multi-module tasks with explicit scope and request ide
     scope: "personal",
     teamId: undefined,
     clientRequestId: a,
-    attachments: [
-      { displayName: "requirements.md", contentText: "# Requirements\n\nFull body 尾部" },
-    ],
+    attachments: [],
   });
+  expect(mocks.postForm.mock.calls[0][0]).toBe(`/api/cli/blueprints/${a}/attachments`);
+  expect(await mocks.postForm.mock.calls[0][1].get("file").text()).toBe(
+    "# Requirements\n\nFull body 尾部",
+  );
   expect(result().clientRequestId).toBe(a);
   expect(mocks.options).toHaveBeenCalledWith({ maxRetries: 0 });
 });
@@ -143,9 +150,81 @@ it("validates local files and blocks manifest scope overrides before any Cloud w
   );
   expect(result().ok).toBe(false);
   expect(mocks.post).not.toHaveBeenCalled();
-  const file = join(directory, "bad.txt");
+  const file = join(directory, "bad.png");
   writeFileSync(file, Buffer.from([0xff, 0xfe]));
-  await expect(prepareBlueprintInput({ input, file: [file] })).rejects.toThrow();
+  await blueprints().parseAsync(
+    ["blueprints", "upload", "--input", input, "--file", file, "--json"],
+    { from: "user" },
+  );
+  expect(result().ok).toBe(false);
+  expect(mocks.post).not.toHaveBeenCalled();
+});
+
+it("supports every task document format plus JSON, preserves bytes, and appends without creating a blueprint", async () => {
+  const bytes = Buffer.from([0xff, 0x00, 0x42, 0x0a]);
+  for (const extension of ["md", "txt", "json", "docx", "pdf", "html", "htm"]) {
+    const file = join(directory, `document.${extension}`);
+    writeFileSync(file, bytes);
+    mocks.postForm.mockResolvedValue({
+      attachment: {
+        id: b,
+        displayName: `document.${extension}`,
+        parseStatus: "ready",
+        parseError: null,
+      },
+    });
+    await blueprints().parseAsync(["blueprints", "attach", a, "--file", file, "--json"], {
+      from: "user",
+    });
+    const [path, form] = mocks.postForm.mock.calls.at(-1)!;
+    expect(path).toBe(`/api/cli/blueprints/${a}/attachments`);
+    expect(Buffer.from(await form.get("file").arrayBuffer())).toEqual(bytes);
+    expect(result().ok).toBe(true);
+  }
+  expect(mocks.post).not.toHaveBeenCalled();
+});
+
+it("reports partial file failure with an existing blueprint ID and pending files", async () => {
+  const input = join(directory, "blueprint.json"),
+    first = join(directory, "one.html"),
+    second = join(directory, "two.pdf");
+  writeFileSync(input, '{"title":"Existing after creation"}');
+  writeFileSync(first, "<h1>Reference</h1>");
+  writeFileSync(second, "%PDF");
+  mocks.post.mockResolvedValue({ blueprint: { id: a }, tasks: [], attachments: [], reused: false });
+  mocks.postForm
+    .mockResolvedValueOnce({ attachment: { id: b, displayName: "one.html" } })
+    .mockRejectedValueOnce(new Error("Offline"));
+  await blueprints().parseAsync(
+    ["blueprints", "upload", "--input", input, "--file", first, "--file", second, "--json"],
+    { from: "user" },
+  );
+  expect(result()).toMatchObject({
+    ok: false,
+    blueprintCreated: true,
+    blueprintId: a,
+    attachments: [{ id: b }],
+    failedFile: second,
+    pendingFiles: [second],
+  });
+  expect(mocks.post).toHaveBeenCalledTimes(1);
+  expect(mocks.postForm).toHaveBeenCalledTimes(2);
+  expect(process.exitCode).toBe(1);
+});
+
+it("lists the current scope with pagination so an existing empty blueprint can be selected", async () => {
+  mocks.get.mockResolvedValue({
+    blueprints: [{ id: a, title: "Empty blueprint" }],
+    total: 2,
+    nextOffset: 1,
+  });
+  await blueprints().parseAsync(["blueprints", "list", "--personal", "--limit", "1", "--json"], {
+    from: "user",
+  });
+  expect(mocks.get).toHaveBeenCalledWith(
+    "/api/cli/blueprints?localProjectId=current-project&offset=0&limit=1&scope=personal",
+  );
+  expect(result().nextOffset).toBe(1);
 });
 it("preserves request ID and scope candidates when Cloud cannot resolve an upload scope", async () => {
   const { CloudApiError } = await import("@varveai/adit-cloud");

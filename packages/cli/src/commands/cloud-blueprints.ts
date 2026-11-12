@@ -1,17 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { open } from "node:fs/promises";
-import { basename } from "node:path";
 import { Command } from "commander";
 import {
   CloudClient,
   CloudApiError,
   loadCredentials,
   uploadCloudBlueprint,
+  uploadCloudBlueprintAttachment,
+  listCloudBlueprints,
+  type CloudBlueprintAttachment,
   type CloudBlueprintInput,
 } from "@varveai/adit-cloud";
 import { loadProjectContext } from "./project-context.js";
 import { NotLoggedInError, describeFailure } from "./cloud-read-output.js";
 import { printTitle, printRows, printEnd, printError } from "./cli-style.js";
+import { prepareTaskAttachments, type PreparedTaskAttachment } from "./cloud-task-attachments.js";
 
 type Options = {
   input: string;
@@ -61,15 +64,11 @@ export async function prepareBlueprintInput(
     throw new Error("Blueprint title must contain 1-200 characters.");
   const attachments = manifest.attachments ?? [];
   if (!Array.isArray(attachments)) throw new Error("attachments must be an array.");
-  const files: Array<{ displayName: string; contentText: string }> = [];
-  for (const path of options.file ?? []) {
-    const displayName = basename(path);
-    if (!/\.(md|txt|json)$/i.test(displayName))
-      throw new Error("Blueprint attachments support MD, TXT and JSON UTF-8 text files.");
-    files.push({ displayName, contentText: await readText(path, 1000000) });
-  }
-  const combined = [...attachments, ...files];
-  if (combined.length > 20) throw new Error("A blueprint supports at most 20 attachments.");
+  const combined = attachments;
+  if (combined.length > 20)
+    throw new Error(
+      "A blueprint supports at most 20 inline text attachments. Use --file for up to 50 files.",
+    );
   let size = 0;
   for (const value of combined) {
     if (
@@ -99,6 +98,9 @@ export async function cloudBlueprintUploadCommand(options: Options) {
       throw new Error("--request-id must be a UUID.");
     if (options.team && options.personal) throw new Error("Select either --team or --personal");
     const manifest = await prepareBlueprintInput(options);
+    const files = await prepareTaskAttachments(options.file, [], { allowJson: true });
+    if ((manifest.attachments?.length ?? 0) + files.length > 50)
+      throw new Error("A blueprint supports at most 50 attachments.");
     const credentials = loadCredentials();
     if (!credentials) throw new NotLoggedInError();
     const localProjectId =
@@ -115,6 +117,35 @@ export async function cloudBlueprintUploadCommand(options: Options) {
       scope: options.personal ? "personal" : undefined,
       clientRequestId,
     });
+    const uploaded = await uploadBlueprintFiles(client, result.blueprint.id, files);
+    result.attachments = [
+      ...new Map(
+        [...result.attachments, ...uploaded.attachments].map((attachment) => [
+          attachment.id,
+          attachment,
+        ]),
+      ).values(),
+    ];
+    if (!uploaded.ok) {
+      if (options.json)
+        console.log(
+          JSON.stringify(
+            {
+              ...result,
+              ...uploaded,
+              attachments: result.attachments,
+              blueprintCreated: true,
+              clientRequestId,
+            },
+            null,
+            2,
+          ),
+        );
+      else
+        printError("Blueprint attachment upload failed", `${uploaded.error}\n${uploaded.recovery}`);
+      process.exitCode = 1;
+      return;
+    }
     if (options.json) console.log(JSON.stringify({ ...result, clientRequestId }, null, 2));
     else {
       printTitle("Blueprint", result.blueprint.id, result.blueprint.title);
@@ -155,9 +186,10 @@ export async function cloudBlueprintUploadCommand(options: Options) {
   }
 }
 export function registerCloudBlueprintCommands(cloud: Command) {
-  cloud
+  const blueprints = cloud
     .command("blueprints")
-    .description("Create or upload requirement blueprints to Cloud")
+    .description("Create or upload requirement blueprints to Cloud");
+  blueprints
     .command("upload")
     .requiredOption(
       "--input <path>",
@@ -165,7 +197,7 @@ export function registerCloudBlueprintCommands(cloud: Command) {
     )
     .option(
       "--file <path>",
-      "Attach a UTF-8 MD/TXT/JSON document; repeat for multiple files",
+      "Attach MD/TXT/JSON/DOCX/PDF/HTML/HTM or PNG/JPG/JPEG/WebP/GIF; repeat for files",
       (value: string, previous: string[]) => [...previous, value],
       [],
     )
@@ -178,4 +210,133 @@ export function registerCloudBlueprintCommands(cloud: Command) {
     )
     .option("--json", "Output JSON")
     .action((options) => cloudBlueprintUploadCommand(options));
+  blueprints
+    .command("attach <blueprintId>")
+    .requiredOption(
+      "--file <path>",
+      "Attach documents or images; repeat for multiple files",
+      (value: string, previous: string[]) => [...previous, value],
+      [],
+    )
+    .option("--json", "Output JSON")
+    .action(async (blueprintId: string, options: { file: string[]; json?: boolean }) => {
+      try {
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(blueprintId))
+          throw new Error("Blueprint ID must be a UUID.");
+        const files = await prepareTaskAttachments(options.file, [], { allowJson: true });
+        const credentials = loadCredentials();
+        if (!credentials) throw new NotLoggedInError();
+        const result = await uploadBlueprintFiles(
+          new CloudClient(credentials.serverUrl, credentials, { maxRetries: 0 }),
+          blueprintId,
+          files,
+        );
+        if (options.json) console.log(JSON.stringify(result, null, 2));
+        else if (result.ok)
+          printEnd(
+            `Uploaded ${result.attachments.length} attachments to blueprint ${blueprintId}.`,
+          );
+        else
+          printError("Blueprint attachment upload failed", `${result.error}\n${result.recovery}`);
+        if (!result.ok) process.exitCode = 1;
+      } catch (error) {
+        const failure = describeFailure(error);
+        if (options.json)
+          console.log(
+            JSON.stringify({
+              ok: false,
+              blueprintId,
+              error: failure.message,
+              status: failure.status,
+              code: failure.code,
+            }),
+          );
+        else printError("Blueprint attachment upload failed", failure.message);
+        process.exitCode = 1;
+      }
+    });
+  blueprints
+    .command("list")
+    .option("--project <id>", "Local workspace ID")
+    .option("--team <id>", "Linked collaboration project")
+    .option("--personal", "Use your workspace")
+    .option("--offset <number>", "Pagination offset", "0")
+    .option("--limit <number>", "Page size (1-100)", "50")
+    .option("--json", "Output JSON")
+    .action(async (options) => {
+      try {
+        if (options.team && options.personal) throw new Error("Select either --team or --personal");
+        const localProjectId =
+          options.project ?? loadProjectContext("adit cloud blueprints list")?.projectId;
+        if (!localProjectId) throw new Error("Select a workspace with --project.");
+        const credentials = loadCredentials();
+        if (!credentials) throw new NotLoggedInError();
+        const query = new URLSearchParams({
+          localProjectId,
+          offset: options.offset,
+          limit: options.limit,
+        });
+        if (options.team) query.set("teamId", options.team);
+        if (options.personal) query.set("scope", "personal");
+        const result = await listCloudBlueprints(
+          new CloudClient(credentials.serverUrl, credentials, { maxRetries: 0 }),
+          query,
+        );
+        if (options.json) console.log(JSON.stringify(result, null, 2));
+        else {
+          for (const item of result.blueprints) printTitle("Blueprint", item.id, item.title);
+          printEnd(`Total: ${result.total}. Next offset: ${result.nextOffset ?? "none"}`);
+        }
+      } catch (error) {
+        const failure = describeFailure(error);
+        const context =
+          error instanceof CloudApiError && error.body && typeof error.body === "object"
+            ? error.body
+            : {};
+        if (options.json)
+          console.log(
+            JSON.stringify({
+              ...context,
+              ok: false,
+              error: failure.message,
+              status: failure.status,
+              code: failure.code,
+            }),
+          );
+        else printError("Blueprint list failed", failure.message);
+        process.exitCode = 1;
+      }
+    });
+}
+
+async function uploadBlueprintFiles(
+  client: CloudClient,
+  blueprintId: string,
+  files: PreparedTaskAttachment[],
+) {
+  const attachments: CloudBlueprintAttachment[] = [];
+  for (let index = 0; index < files.length; index++) {
+    try {
+      const { attachment } = await uploadCloudBlueprintAttachment(
+        client,
+        blueprintId,
+        files[index].file,
+      );
+      attachments.push(attachment);
+    } catch (error) {
+      const failure = describeFailure(error);
+      return {
+        ok: false as const,
+        blueprintId,
+        attachments,
+        failedFile: files[index].path,
+        pendingFiles: files.slice(index).map((file) => file.path),
+        error: failure.message,
+        status: failure.status,
+        code: failure.code ?? "BLUEPRINT_ATTACHMENT_UPLOAD_FAILED",
+        recovery: `The blueprint exists. Retry only pending files with adit cloud blueprints attach ${blueprintId} --file <path>. Identical uploads are deduplicated. Do not recreate the blueprint.`,
+      };
+    }
+  }
+  return { ok: true as const, blueprintId, attachments };
 }
