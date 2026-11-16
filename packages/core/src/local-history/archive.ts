@@ -14,7 +14,7 @@ import { geminiWorkspace, insideDirectory, sourceFiles } from "./sources.js";
 import type { HistorySession } from "./types.js";
 import { readOpenCodeDatabase, readOpenCodeStorage } from "./opencode.js";
 import { cursorWorkspace, parseCursor, readCursorIDE } from "./cursor.js";
-import { decodeHarness, parseHarness } from "./deepseek-harness.js";
+import { decodeHarness, normalizeHarnessContext, parseHarness } from "./deepseek-harness.js";
 import { piProviders, readPi } from "./pi.js";
 import { parseProjectJSONL } from "./project-jsonl.js";
 import { readSourceJSON } from "./source-io.js";
@@ -32,7 +32,7 @@ export type {SourceScanProgress,SourceProgressListener} from "./scan-progress.js
 
 const PARSER_VERSION = 6;
 // Recollect existing archives once for native titles and blank-title normalization.
-const parserVersion = (provider: string) => provider==="zed" ? 7 : provider==="cursor-ide" ? 7 : provider==="qoder" ? 8 : provider==="codex" ? 10 : provider==="deepseek-harness" ? 7 : ["traex", "augure-code"].includes(provider) ? 9 :
+const parserVersion = (provider: string) => provider==="zed" ? 7 : provider==="cursor-ide" ? 7 : provider==="qoder" ? 8 : provider==="codex" ? 10 : provider==="deepseek-harness" ? 10 : ["traex", "augure-code"].includes(provider) ? 9 :
   ["claude","cowork","qoder","icodemate","opencode","kilo","mimocode","copilot","vscode-copilot","positron","roocode","kilo-legacy","junie","muse","poolside","visualstudio-copilot","kimi","kimi-work"].includes(provider)?7:PARSER_VERSION;
 export interface ScanSource {
   id: string;
@@ -467,6 +467,7 @@ export class LocalHistory {
       // evidence must still agree, so an older copy cannot erase a newer transcript.
       const comparable=(value:HistorySession,withoutUsage=false)=>{
         const copy=JSON.parse(JSON.stringify(value)) as HistorySession;
+        if(copy.provider==="deepseek-harness")copy.messages=copy.messages.map(normalizeHarnessContext);
         if(copy.metadata){delete copy.metadata.title;if(!Object.keys(copy.metadata).length)delete copy.metadata;}
         if(withoutUsage)for(const message of copy.messages){delete message.usage;delete message.usageRecords;}
         return copy;

@@ -184,7 +184,10 @@ export function finalReply(messages: Row[], hasNextTurn: boolean): Row | undefin
   if (!candidate) return;
   const raw = parse(candidate.raw_json), payload = raw.payload ?? raw.message ?? raw;
   const phase = payload.phase ?? payload.channel ?? raw.phase;
-  const stop = payload.stop_reason ?? payload.finish_reason ?? raw.finish_reason;
+  const data = raw.data;
+  const harnessStop = raw.type === "assistant/message" ? data?.message?.source?.replayState?.response?.stopReason ??
+    (Array.isArray(data?.stream) ? data.stream.findLast((item: Row) => item.chunk?.type === "finish")?.chunk?.reason?.kind : undefined) : undefined;
+  const stop = payload.stop_reason ?? payload.finish_reason ?? raw.finish_reason ?? harnessStop;
   if (replyCompleted(phase,stop,parse(candidate.extra_json).finalReply === true,hasNextTurn,
     messages.some(m => m.ordinal > candidate.ordinal && (m.has_tool || m.role === "tool")))) return candidate;
 }

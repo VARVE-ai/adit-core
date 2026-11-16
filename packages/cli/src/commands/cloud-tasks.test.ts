@@ -622,6 +622,25 @@ describe("cloud task commands", () => {
     expect(mocks.get).not.toHaveBeenCalled();
   });
 
+  it("appends a name-only task to an existing blueprint without creating another blueprint", async () => {
+    const blueprintId = "b1111111-1111-4111-8111-111111111111";
+    mocks.post.mockResolvedValue({ task: { taskId, blueprintId } });
+    const cloud = new Command();
+    registerCloudTaskCommands(cloud);
+    await cloud.parseAsync(["tasks", "create", "--blueprint", blueprintId, "--title", "App page bug", "--json"], { from: "user" });
+    expect(mocks.post).toHaveBeenCalledExactlyOnceWith("/api/cli/tasks", {
+      localProjectId: "local-project", blueprintId, title: "App page bug", keyPointsText: "", teamId: undefined, scope: undefined,
+    });
+    expect(mocks.clientOptions).toHaveBeenCalledWith({ maxRetries: 0 });
+    expect(JSON.parse(vi.mocked(console.log).mock.calls[0][0]).task.blueprintId).toBe(blueprintId);
+  });
+
+  it("rejects malformed blueprint IDs before any task write", async () => {
+    await cloudTasksCommand("create", { blueprint: "not-an-id", title: "Bug", json: true });
+    expect(process.exitCode).toBe(1);
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+
   it("preserves explicit personal and team scopes during creation", async () => {
     mocks.post.mockResolvedValue({ task: { taskId } });
     await cloudTasksCommand("create", {

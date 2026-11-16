@@ -10,7 +10,7 @@ import { describeFailure } from "./cloud-read-output.js";
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024;
 const IMAGE_EXTENSION = /^\.(png|jpe?g|webp|gif)$/i;
-const DOCUMENT_EXTENSION = /^\.(md|txt|docx|pdf|html|htm)$/i;
+const DOCUMENT_EXTENSION = /^\.(md|txt|docx|pdf|html|htm|xlsx|csv)$/i;
 
 // Match the image signatures accepted by the existing web attachment service.
 function imageType(bytes: Uint8Array): string | null {
@@ -35,20 +35,25 @@ export type PreparedTaskAttachment = { path: string; file: File };
 export async function prepareTaskAttachments(
   paths: string[] = [],
   imagePaths: string[] = [],
+  options: { allowJson?: boolean } = {},
 ): Promise<PreparedTaskAttachment[]> {
   for (const path of imagePaths) {
     if (!IMAGE_EXTENSION.test(extname(path)))
       throw new Error(
-        `Unsupported image: ${path}. Use --file for MD, TXT, DOCX, PDF, HTML or HTM documents.`,
+        `Unsupported image: ${path}. Use --file for MD, TXT, DOCX, PDF, HTML, HTM, XLSX or CSV documents.`,
       );
   }
   const attachments: PreparedTaskAttachment[] = [];
   for (const path of new Set([...paths, ...imagePaths].map((value) => resolve(value)))) {
     const extension = extname(path);
     const image = IMAGE_EXTENSION.test(extension);
-    if (!image && !DOCUMENT_EXTENSION.test(extension))
+    if (
+      !image &&
+      !DOCUMENT_EXTENSION.test(extension) &&
+      !(options.allowJson && /^\.json$/i.test(extension))
+    )
       throw new Error(
-        `Unsupported attachment: ${path}. Use PNG, JPG, JPEG, WebP, GIF, MD, TXT, DOCX, PDF, HTML or HTM.`,
+        `Unsupported attachment: ${path}. Use PNG, JPG, JPEG, WebP, GIF, MD, TXT, ${options.allowJson ? "JSON, " : ""}DOCX, PDF, HTML, HTM, XLSX or CSV.`,
       );
     const limit = image ? MAX_IMAGE_BYTES : MAX_DOCUMENT_BYTES;
     const sizeError = `Attachment must be a file between 1 byte and ${image ? 10 : 20} MB: ${path}`;

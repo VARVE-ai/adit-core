@@ -20,7 +20,7 @@ export interface HistoryMessage {
   parentKey?: string;
   raw: Record<string, unknown>;
   finalReply?: boolean;
-  contextKind?: "compaction";
+  contextKind?: "compaction" | "runtime";
   previewExcluded?: boolean;
 }
 

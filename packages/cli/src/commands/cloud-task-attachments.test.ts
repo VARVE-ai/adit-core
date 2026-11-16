@@ -19,7 +19,7 @@ function file(name: string, bytes: string | Uint8Array) {
 }
 
 describe("task attachment preparation", () => {
-  it.each(["md", "MD", "txt", "docx", "pdf", "html", "htm"])(
+  it.each(["md", "MD", "txt", "docx", "pdf", "html", "htm", "xlsx", "XLSX", "csv"])(
     "accepts Cloud's %s documents without changing their bytes",
     async (extension) => {
       const bytes = Buffer.from("# 原始资料\r\nDocument content\n");

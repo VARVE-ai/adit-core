@@ -15,6 +15,7 @@ import {
   type CloudTaskPatch,
 } from "@varveai/adit-cloud";
 import { registerCloudTaskGroupCommands } from "./cloud-task-groups.js";
+import { registerCloudTaskModuleCommands } from "./cloud-task-modules.js";
 import { registerCloudTaskTypeCommands, validateTaskTypeName } from "./cloud-task-types.js";
 import { loadProjectContext } from "./project-context.js";
 import {
@@ -46,6 +47,9 @@ import {
 export { describeFailure, taskDueDate };
 
 type Options = {
+  blueprint?: string;
+  module?: string[];
+  moduleId?: string;
   group?: string;
   ungrouped?: boolean;
   timelineLimit?: string;
@@ -201,9 +205,11 @@ export async function cloudTasksCommand(
     if (action === "create") {
       if (options.team && options.personal) throw new Error("Select either --team or --personal");
       const title = options.title?.trim(),
-        keyPointsText = options.keyPoints?.trim();
+        keyPointsText = options.keyPoints?.trim() ?? "";
+      if (options.blueprint && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(options.blueprint))
+        throw new Error("Use the full blueprint ID returned by adit cloud blueprints list");
       if (!title || title.length > 200) throw new Error("Task title must contain 1-200 characters");
-      if (!keyPointsText || keyPointsText.length > 20000)
+      if ((!options.blueprint && !keyPointsText) || keyPointsText.length > 20000)
         throw new Error("Task key points must contain 1-20000 characters");
       const { scope: taskScope, ...fields } = taskPatchFromOptions(options);
       const files = await prepareTaskAttachments(options.file, options.image);
@@ -214,6 +220,8 @@ export async function cloudTasksCommand(
           scope: options.personal ? "personal" : undefined,
         });
       const created = await createCloudTask(client, {
+        ...(options.blueprint ? { blueprintId: options.blueprint } : {}),
+        ...(options.module?.length ? { moduleIds: options.module } : {}),
         ...(options.group ? { groupId: options.group } : {}),
         localProjectId: localProjectId!,
         teamId: options.team,
@@ -262,7 +270,7 @@ export async function cloudTasksCommand(
               ]
             : []),
         ]);
-        printEnd(`${marks.ok} Independent task created`);
+        printEnd(`${marks.ok} ${created.task.blueprintId ? "Blueprint task" : "Independent task"} created`);
         return;
       }
       result = uploaded ? { ...created, attachments: uploaded.attachments } : created;
@@ -274,6 +282,7 @@ export async function cloudTasksCommand(
       if (limit === 0) throw new Error("Limit must be between 1 and 100");
       if (options.group && options.ungrouped) throw new Error("Use either --group or --ungrouped");
       const list = await listCloudTasks(client, {
+        moduleId: options.moduleId,
         groupId: options.group,
         ungrouped: options.ungrouped,
         localProjectId: localProjectId!,
@@ -570,16 +579,24 @@ function taskFieldOptions(command: Command) {
 export function registerCloudTaskCommands(cloud: Command) {
   const tasks = cloud
     .command("tasks")
-    .description("Create independent tasks, query and update tasks assigned to you");
+    .description("Create independent or blueprint tasks, query and update tasks assigned to you");
   registerCloudTaskTypeCommands(tasks);
   registerCloudTaskGroupCommands(tasks);
+  registerCloudTaskModuleCommands(tasks);
   taskFieldOptions(
     tasks
       .command("create")
+      .option("--blueprint <id>", "Add the task to an existing blueprint from blueprints list")
+      .option(
+        "--module <moduleId>",
+        "Associate a custom module; repeat for multiple modules",
+        (value: string, previous: string[]) => [...previous, value],
+        [],
+      )
       .option("--group <groupId>", "Create the task in this Cloud group")
-      .description("Create an independent task in Cloud; assigned to you unless specified")
+      .description("Create a Cloud task; use --blueprint to append to an existing blueprint")
       .requiredOption("--title <text>", "Task title, 1-200 characters")
-      .requiredOption("--key-points <text>", "Task requirements, 1-20000 characters")
+      .option("--key-points <text>", "Task requirements, up to 20000 characters; required for independent tasks")
       .option(
         "--team <id>",
         "Select a collaboration project linked to this workspace's repositories (see tasks scopes)",
@@ -588,7 +605,7 @@ export function registerCloudTaskCommands(cloud: Command) {
       .option("--personal", "Create in your workspace instead of its linked collaboration project")
       .option(
         "--file <path>",
-        "Attach an image (max 10 MB) or MD, TXT, DOCX, PDF, HTML, HTM document (max 20 MB); repeat for multiple files",
+        "Attach an image (max 10 MB) or MD, TXT, DOCX, PDF, HTML, HTM, XLSX, CSV document (max 20 MB); repeat for multiple files",
         (value: string, previous: string[]) => [...previous, value],
         [],
       )
@@ -615,7 +632,7 @@ export function registerCloudTaskCommands(cloud: Command) {
     )
     .option(
       "--file <path>",
-      "Local image (max 10 MB) or MD, TXT, DOCX, PDF, HTML, HTM document (max 20 MB); repeat for multiple files",
+      "Local image (max 10 MB) or MD, TXT, DOCX, PDF, HTML, HTM, XLSX, CSV document (max 20 MB); repeat for multiple files",
       (value: string, previous: string[]) => [...previous, value],
       [],
     )
@@ -629,6 +646,7 @@ export function registerCloudTaskCommands(cloud: Command) {
     .action((taskId, options) => cloudTasksCommand("attach", options, taskId));
   tasks
     .command("list")
+    .option("--module-id <id>", "Only tasks associated with this custom module")
     .option("--group <groupId>", "Only tasks in this group")
     .option("--ungrouped", "Only tasks without a group")
     .description("List your tasks in the current workspace or a collaboration project")
