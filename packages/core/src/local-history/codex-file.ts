@@ -155,14 +155,25 @@ export async function readCodexSession(path:string,provider:string,root:string,s
  let parent="",nativeId="";
  for(const row of codexFileRows(path,signal))if(row.type==="session_meta"){const meta=record(row.payload);if(isCodexInternalReview(meta.source))return [];nativeId=string(meta.id);parent=string(meta.forked_from_id)||string(record(record(record(meta.source).subagent).thread_spawn).parent_thread_id);break;}
  let turns:Set<string>|undefined;
- if(parent)for await(const candidate of sourceFiles(provider,root,signal)){
-  if(candidate===path||!basename(candidate).includes(parent))continue;
-  let match=false;const found=new Set<string>();
-  for(const row of codexFileRows(candidate,signal)){
-   const payload=record(row.payload);if(row.type==="session_meta"&&!match){if(payload.id!==parent)break;match=true;}
-   if(row.type==="turn_context"&&string(payload.turn_id))found.add(string(payload.turn_id));
+ if(parent){
+  // Codex can archive a child independently from its parent. The two rollout
+  // files then live in sibling directories under the same Codex home.
+  const roots=(["sessions","archived_sessions"].includes(basename(root)))
+    ? [root,join(dirname(root),basename(root)==="sessions"?"archived_sessions":"sessions")]
+    : [root];
+  for(const lineageRoot of roots){
+   for await(const candidate of sourceFiles(provider,lineageRoot,signal)){
+    if(candidate===path||!basename(candidate).includes(parent))continue;
+    let match=false;const found=new Set<string>();
+    for(const row of codexFileRows(candidate,signal)){
+     const payload=record(row.payload);if(row.type==="session_meta"&&!match){if(payload.id!==parent)break;match=true;}
+     if(row.type==="turn_context"&&string(payload.turn_id))found.add(string(payload.turn_id));
+    }
+    if(match){turns=found;break;}
+   }
+   // A matching parent, including one with no turns, must not be replaced by a sibling copy.
+   if(turns!==undefined)break;
   }
-  if(match){turns=found;break;}
  }
  const session=parseCodexRows(codexFileRows(path,signal),turns,path,provider);session.provider=provider;
  session.metadata={...session.metadata,title:await codexThreadTitle(path,string(session.metadata?.nativeSessionId)||nativeId,signal)};

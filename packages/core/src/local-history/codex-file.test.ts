@@ -188,3 +188,58 @@ it("reads nested inherited rollouts without copying parent turns into the child"
  expect(session.messages.map(message=>message.content)).toEqual(["child prompt"]);
  expect(session.metadata?.lineageRetry).toBeUndefined();
 });
+
+it.each(["sessions","archived_sessions"])("resolves a parent from the sibling directory for a child in %s", async childDirectory => {
+ const home=fixture(),active=join(home,"sessions"),archived=join(home,"archived_sessions");
+ mkdirSync(active);mkdirSync(archived);
+ const childRoot=childDirectory==="sessions"?active:archived,parentRoot=childDirectory==="sessions"?archived:active;
+ const parentPath=join(parentRoot,"rollout-parent.jsonl"),childPath=join(childRoot,"rollout-child.jsonl");
+ const meta=(id:string,parent?:string)=>({type:"session_meta",payload:{id,cwd:home,...(parent?{forked_from_id:parent}:{})}});
+ const turn=(id:string)=>({type:"turn_context",payload:{turn_id:id}});
+ const msg=(text:string)=>({type:"response_item",payload:{type:"message",role:"user",content:text}});
+ const write=(path:string,rows:unknown[])=>writeFileSync(path,rows.map(row=>JSON.stringify(row)).join("\n")+"\n");
+ write(parentPath,[meta("parent"),turn("parent-turn"),msg("parent prompt")]);
+ write(childPath,[meta("child","parent"),turn("parent-turn"),msg("parent prompt"),turn("child-turn"),msg("child prompt")]);
+ const [session]=await readCodexSession(childPath,"codex",childRoot);
+ expect(session).toMatchObject({id:"child",parentId:"parent"});
+ expect(session.messages.map(message=>message.content)).toEqual(["child prompt"]);
+ expect(session.metadata?.lineageRetry).toBeUndefined();
+});
+
+it.each([
+ ["sessions","stale"],["sessions","malformed"],
+ ["archived_sessions","stale"],["archived_sessions","malformed"],
+])("keeps the parent in %s without reading a %s sibling copy",async(childDirectory,duplicateKind)=>{
+ const home=fixture(),root=join(home,childDirectory),sibling=join(home,childDirectory==="sessions"?"archived_sessions":"sessions");
+ mkdirSync(root);mkdirSync(sibling);
+ const parentPath=join(root,"rollout-parent.jsonl"),childPath=join(root,"rollout-child.jsonl"),duplicatePath=join(sibling,"rollout-parent.jsonl");
+ const meta=(id:string,parent?:string)=>({type:"session_meta",payload:{id,cwd:home,...(parent?{forked_from_id:parent}:{})}});
+ const turn=(id:string)=>({type:"turn_context",payload:{turn_id:id}});
+ const msg=(text:string)=>({type:"response_item",payload:{type:"message",role:"user",content:text}});
+ const write=(path:string,rows:unknown[])=>writeFileSync(path,rows.map(row=>JSON.stringify(row)).join("\n")+"\n");
+ write(parentPath,[meta("parent"),turn("parent-turn"),msg("inherited prompt")]);
+ write(childPath,[meta("child","parent"),turn("parent-turn"),msg("inherited prompt"),turn("child-turn"),msg("child prompt")]);
+ if(duplicateKind==="stale")write(duplicatePath,[meta("parent"),turn("older-turn"),msg("older prompt")]);
+ else writeFileSync(duplicatePath,JSON.stringify(meta("parent"))+"\ninvalid json\n");
+ const captured=await trackSourceReads(childPath,()=>readCodexSession(childPath,"codex",root));
+ const [session]=captured.value;
+ expect(session).toMatchObject({id:"child",parentId:"parent"});
+ expect(session.messages.map(message=>message.content)).toEqual(["child prompt"]);
+ expect(session.metadata?.lineageRetry).toBeUndefined();
+ expect(captured.manifest.map(([path])=>path)).toContain(parentPath);
+ expect(captured.manifest.map(([path])=>path)).not.toContain(duplicatePath);
+});
+
+it("stops searching even when the matching parent has no turns",async()=>{
+ const home=fixture(),root=join(home,"sessions"),sibling=join(home,"archived_sessions");
+ mkdirSync(root);mkdirSync(sibling);
+ const parentPath=join(root,"rollout-parent.jsonl"),childPath=join(root,"rollout-child.jsonl"),duplicatePath=join(sibling,"rollout-parent.jsonl");
+ const meta=(id:string,parent?:string)=>({type:"session_meta",payload:{id,cwd:home,...(parent?{forked_from_id:parent}:{})}});
+ writeFileSync(parentPath,JSON.stringify(meta("parent"))+"\n");
+ writeFileSync(childPath,[meta("child","parent"),{type:"turn_context",payload:{turn_id:"child-turn"}},
+  {type:"response_item",payload:{type:"message",role:"user",content:"child prompt"}}].map(row=>JSON.stringify(row)).join("\n")+"\n");
+ writeFileSync(duplicatePath,"invalid json\n");
+ const [session]=await readCodexSession(childPath,"codex",root);
+ expect(session.messages.map(message=>message.content)).toEqual(["child prompt"]);
+ expect(session.metadata?.lineageRetry).toBeUndefined();
+});

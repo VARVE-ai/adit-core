@@ -19,6 +19,21 @@ const controls = new Set(
 controls.add("job/registered");
 controls.add("job/settled");
 
+const runtimeSources = new Set([
+  "runtime-context",
+  "skill-catalog",
+  "time-context",
+  "model-selection",
+]);
+
+/** The native user role also carries injected context; keep its raw envelope intact. */
+export function normalizeHarnessContext(message: HistoryMessage): HistoryMessage {
+  const raw = message.raw;
+  return raw.type === "user/message" && runtimeSources.has(string(record(record(raw.data).source).kind))
+    ? { ...message, role: "system", contextKind: "runtime" }
+    : message;
+}
+
 function integer(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
     throw new HistoryFormatError(`Invalid DeepSeek Harness ${label}`);
@@ -248,14 +263,14 @@ export function parseHarness(text: string): HistorySession {
       const m = type === "user/message" ? data : record(data.message);
       if (!Array.isArray(m.content))
         throw new HistoryFormatError("DeepSeek message content is missing");
-      const msg: HistoryMessage = {
+      const msg: HistoryMessage = normalizeHarnessContext({
         key: `event:${e.seq}`,
         role: type === "tool/result" ? "tool" : type.split("/")[0],
         content: m.content,
         timestamp: timestamp(e.time),
         model: string(record(m.source).model) || undefined,
         raw: e,
-      };
+      });
       if (type === "assistant/message") {
         const r = response(data, e);
         let embeddedUsage: Record<string, unknown> | undefined;

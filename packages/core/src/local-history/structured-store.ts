@@ -152,14 +152,16 @@ export class StructuredHistory {
         turns.set(turn,{prompt:mid,last:mid,start:occurred,end:occurred,previous:occurred!==null?{id:mid,at:occurred}:null,duration:0,missing:occurred===null});
         this.db.prepare("INSERT INTO adit_history_turns VALUES (?,?,?,?,?,?,?,?,?,?)").run(turn,provider,id,mid,mid,turnOrdinal,occurred,occurred,null,"incomplete");
       }
-      if(turn) {
-        const state=turns.get(turn)!;state.last=mid;
+      // Injected runtime messages belong to session context, even between prompts.
+      const messageTurn=message.contextKind==="runtime"?null:turn;
+      if(messageTurn) {
+        const state=turns.get(messageTurn)!;state.last=mid;
         if(occurred!==null) {
           state.end=occurred;
           if(state.previous && state.previous.id!==mid && occurred>=state.previous.at) {
             const duration=Math.min(occurred-state.previous.at,300_000);state.duration+=duration;
             this.db.prepare("INSERT INTO adit_history_work_intervals VALUES (?,?,?,?,?,?,?)").run(
-              historyKey(turn,state.previous.id,mid),turn,state.previous.id,mid,state.previous.at,occurred,duration);
+              historyKey(messageTurn,state.previous.id,mid),messageTurn,state.previous.id,mid,state.previous.at,occurred,duration);
           } else if(state.previous && state.previous.id!==mid)state.missing=true;
           state.previous={id:mid,at:occurred};
         } else state.missing=true;
@@ -169,7 +171,7 @@ export class StructuredHistory {
       const response=optional(native.id ?? payload.response_id ?? wire.response_id);
       const {key,role,timestamp,model,effort,content,usage,parentKey,raw,...messageExtra}=message;
       const contentJson=encode(content),storedRaw=compactHistoryRaw(JSON.stringify(raw),contentJson);
-      insertMessage.run(mid,provider,id,key,ordinal,role,parentKey??null,turn,occurred,timestamp??null,model??null,effort??null,
+      insertMessage.run(mid,provider,id,key,ordinal,role,parentKey??null,messageTurn,occurred,timestamp??null,model??null,effort??null,
         request,response,contentJson,storedRaw.rawJson,encode(messageExtra),storedRaw.pathsJson);
       this.db.prepare("INSERT INTO adit_history_message_digests VALUES (?,?)").run(mid,digests[ordinal]);
       const blocks=Array.isArray(content)?content:[content];
@@ -205,20 +207,20 @@ export class StructuredHistory {
           let input=record(args);if(typeof args==="string")try{input=record(JSON.parse(args));}catch{/* Native custom tool inputs may be plain text. */}
           const name=optional(node.name??fn.name),command=optional(input.command??input.cmd),path=optional(input.file_path??input.path);
           this.db.prepare("INSERT INTO adit_history_tool_calls VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
-            toolId,mid,provider,id,turn,index,nativeId,name,command,path,optional(input.cwd??input.workdir),occurred,"unknown",encode(args));
+            toolId,mid,provider,id,messageTurn,index,nativeId,name,command,path,optional(input.cwd??input.workdir),occurred,"unknown",encode(args));
           if(nativeId)calls.set(nativeId,toolId);
           const written=input.new_string??input.newText??input.content;
           if(path && typeof written==="string" && /edit|write/i.test(name||""))
             this.db.prepare("INSERT INTO adit_history_edit_evidence VALUES (?,?,?,?,?,?,?,?,?,?)").run(
-              toolId,toolId,provider,id,turn,path,occurred,"native_write",written,historyKey(written));
+              toolId,toolId,provider,id,messageTurn,path,occurred,"native_write",written,historyKey(written));
           if(command && /(?:^|[;&|\s])git\s+(?:-[^\s]+\s+)*commit(?:\s|$)/.test(command))
-            this.db.prepare("INSERT INTO adit_history_commit_operations VALUES (?,?,?,?,?,?,?,?)").run(toolId,toolId,provider,id,turn,occurred,command,"observed");
+            this.db.prepare("INSERT INTO adit_history_commit_operations VALUES (?,?,?,?,?,?,?,?)").run(toolId,toolId,provider,id,messageTurn,occurred,command,"observed");
         }
       }
       if(message.usageRecords?.length)for(const entry of message.usageRecords)
-        this.usage(session,mid,turn,entry.key,entry.usage,entry.model??model??null,entry.requestId??null,entry.responseId??null,
+        this.usage(session,mid,messageTurn,entry.key,entry.usage,entry.model??model??null,entry.requestId??null,entry.responseId??null,
           time(entry.timestamp)??occurred,"message",usageGroups);
-      else if(usage!==undefined)this.usage(session,mid,turn,message.key,usage,model??null,request,response,occurred,"message",usageGroups);
+      else if(usage!==undefined)this.usage(session,mid,messageTurn,message.key,usage,model??null,request,response,occurred,"message",usageGroups);
     }
     // Results can precede their calls in native container order. Resolve against collected identities afterwards.
     for(const [nativeId,toolId] of calls)
@@ -245,11 +247,14 @@ export class StructuredHistory {
     const read=numberAt(usage,"cache_read_input_tokens","cached_input_tokens","cache_read_tokens","cacheReadTokens","cacheRead","cachedContentTokenCount","accumulated_cache_read_tokens")
       ??numberAt(record(usage.cache),"read")
       ??numberAt(record(usage.prompt_tokens_details),"cached_tokens")??numberAt(record(usage.input_tokens_details),"cached_tokens");
-    const write=numberAt(usage,"cache_creation_input_tokens","cache_write_input_tokens","cache_write_tokens","cacheWriteTokens","cacheWrite","accumulated_cache_write_tokens")??numberAt(record(usage.cache),"write");
+    let write=numberAt(usage,"cache_creation_input_tokens","cache_write_input_tokens","cache_write_tokens","cacheWriteTokens","cacheWrite","accumulated_cache_write_tokens")??numberAt(record(usage.cache),"write");
     const cache=record(usage.cache_creation);
     const write5=numberAt(cache,"ephemeral_5m_input_tokens"),write1h=numberAt(cache,"ephemeral_1h_input_tokens");
     const reasoning=numberAt(usage,"reasoning_output_tokens","reasoning_tokens","reasoningTokens","reasoning")??numberAt(record(usage.completion_tokens_details),"reasoning_tokens");
     const reportedTotal=numberAt(usage,"total_tokens","totalTokens","totalTokenCount");
+    // Harness omits zero cache writes. Infer zero only when every reported token
+    // is already accounted for; missing or conflicting totals remain incomplete.
+    if(provider==="deepseek-harness"&&write===null&&reportedTotal!==null&&reported!==null&&read!==null&&output!==null&&sum(reported,read,output)===reportedTotal)write=0;
     const semantic=provider==="qoder"&&usage.adit_input_semantics==="includes_cache"?"includes_cache":["copilot","muse","poolside","junie","roocode","kilo-legacy","kimi","kimi-work"].includes(provider) && ["excludes_cache","unknown"].includes(string(usage.adit_input_semantics))?string(usage.adit_input_semantics):["claude","qoder","iflow","pi","omp","omo","prime-agent","stepcode","opencode","kilo","mimocode","icodemate","zcode","deepseek-harness"].includes(provider)?"excludes_cache":
       ["codex","traex","augure-code","gemini","deepseek"].includes(provider)?"includes_cache":"unknown";
     let inputTotal:number|null=null,uncached:number|null=null;
