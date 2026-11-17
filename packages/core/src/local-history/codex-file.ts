@@ -161,14 +161,18 @@ export async function readCodexSession(path:string,provider:string,root:string,s
   const roots=(["sessions","archived_sessions"].includes(basename(root)))
     ? [root,join(dirname(root),basename(root)==="sessions"?"archived_sessions":"sessions")]
     : [root];
-  for(const lineageRoot of roots)for await(const candidate of sourceFiles(provider,lineageRoot,signal)){
-   if(candidate===path||!basename(candidate).includes(parent))continue;
-   let match=false;const found=new Set<string>();
-   for(const row of codexFileRows(candidate,signal)){
-    const payload=record(row.payload);if(row.type==="session_meta"&&!match){if(payload.id!==parent)break;match=true;}
-    if(row.type==="turn_context"&&string(payload.turn_id))found.add(string(payload.turn_id));
+  for(const lineageRoot of roots){
+   for await(const candidate of sourceFiles(provider,lineageRoot,signal)){
+    if(candidate===path||!basename(candidate).includes(parent))continue;
+    let match=false;const found=new Set<string>();
+    for(const row of codexFileRows(candidate,signal)){
+     const payload=record(row.payload);if(row.type==="session_meta"&&!match){if(payload.id!==parent)break;match=true;}
+     if(row.type==="turn_context"&&string(payload.turn_id))found.add(string(payload.turn_id));
+    }
+    if(match){turns=found;break;}
    }
-   if(match){turns=found;break;}
+   // A matching parent, including one with no turns, must not be replaced by a sibling copy.
+   if(turns!==undefined)break;
   }
  }
  const session=parseCodexRows(codexFileRows(path,signal),turns,path,provider);session.provider=provider;
