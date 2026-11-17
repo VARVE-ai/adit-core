@@ -188,3 +188,19 @@ it("reads nested inherited rollouts without copying parent turns into the child"
  expect(session.messages.map(message=>message.content)).toEqual(["child prompt"]);
  expect(session.metadata?.lineageRetry).toBeUndefined();
 });
+
+it("resolves a parent from the sibling Codex archive directory", async () => {
+ const home=fixture(),active=join(home,"sessions"),archived=join(home,"archived_sessions");
+ mkdirSync(active);mkdirSync(archived);
+ const parentPath=join(active,"rollout-parent.jsonl"),childPath=join(archived,"rollout-child.jsonl");
+ const meta=(id:string,parent?:string)=>({type:"session_meta",payload:{id,cwd:home,...(parent?{forked_from_id:parent}:{})}});
+ const turn=(id:string)=>({type:"turn_context",payload:{turn_id:id}});
+ const msg=(text:string)=>({type:"response_item",payload:{type:"message",role:"user",content:text}});
+ const write=(path:string,rows:unknown[])=>writeFileSync(path,rows.map(row=>JSON.stringify(row)).join("\n")+"\n");
+ write(parentPath,[meta("parent"),turn("parent-turn"),msg("parent prompt")]);
+ write(childPath,[meta("child","parent"),turn("parent-turn"),msg("parent prompt"),turn("child-turn"),msg("child prompt")]);
+ const [session]=await readCodexSession(childPath,"codex",archived);
+ expect(session).toMatchObject({id:"child",parentId:"parent"});
+ expect(session.messages.map(message=>message.content)).toEqual(["child prompt"]);
+ expect(session.metadata?.lineageRetry).toBeUndefined();
+});
