@@ -5,9 +5,6 @@
  *   1. Check credentials (handled by caller)
  *   2. Negotiate project ID with server
  *   3. Upload git metadata (branches + commits)
- *   4. Discover project documents
- *   5. Upload documents (with user confirmation in interactive mode)
- *   6. Quality check (and optional AI summary generation)
  */
 
 import type Database from "better-sqlite3";
@@ -30,8 +27,6 @@ import type {
   NegotiateResponse,
   LinkInitResponse,
   CommitUploadResponse,
-  DocumentUploadResponse,
-  DiscoveredDocument,
   WorkspaceRepositoryFailure,
   WorkspaceRepositoryResult,
 } from "./types.js";
@@ -48,12 +43,10 @@ import {
   resolveCommitBranches,
   projectNameFromRemoteUrl,
 } from "./git-collector.js";
-import { discoverDocuments, loadDocSettings } from "./doc-discovery.js";
 import {
   getProjectLinkCache,
   upsertProjectLinkCache,
   clearProjectLinkCache,
-  updateCachedDocHashes,
 } from "./cache.js";
 import { normalizeGitHubRepoKey } from "./repo-key.js";
 
@@ -108,10 +101,6 @@ export class WorkspaceLinkPartialFailureError extends Error {
     this.repositoryResults = repositoryResults;
     this.repositoryFailures = repositoryFailures;
   }
-}
-
-function cloudDocumentSourcePath(repository: CloudRepository, sourcePath: string): string {
-  return repository.relativePath === "." ? sourcePath : `${repository.relativePath}/${sourcePath}`;
 }
 
 function filterWorkspaceDuplicateCommits(
@@ -328,8 +317,6 @@ async function linkRepositoryCommand(
   const shouldWrapStepErrors = internalOptions.silent === true || options.silent === true;
   const runStep = <T>(step: string, operation: () => Promise<T>): Promise<T> =>
     runLinkStep(step, operation, shouldWrapStepErrors);
-  const runStepSync = <T>(step: string, operation: () => T): T =>
-    runLinkStepSync(step, operation, shouldWrapStepErrors);
   const failStep = (step: string, cause: unknown): never => {
     if (shouldWrapStepErrors) throw new LinkStepError(step, cause);
     throw cause instanceof Error ? cause : new Error(String(cause));
@@ -378,7 +365,7 @@ async function linkRepositoryCommand(
   // ──────────────────────────────────────────────────────────
 
   currentStep = "Negotiate project ID";
-  log(options.dryRun ? "\n[Step 1/4] Previewing local project (no server registration)..." : "\n[Step 1/4] Negotiating project ID with server...");
+  log(options.dryRun ? "\n[Step 1/2] Previewing local project (no server registration)..." : "\n[Step 1/2] Negotiating project ID with server...");
   const step1Start = startStep();
 
   const remoteUrl = repository.repositoryUrl?.trim() ?? "";
@@ -478,7 +465,7 @@ async function linkRepositoryCommand(
   // ──────────────────────────────────────────────────────────
 
   currentStep = "Collect git metadata";
-  log("\n[Step 2/4] Uploading git metadata...");
+  log("\n[Step 2/2] Uploading git metadata...");
   const step2Start = startStep();
 
   // 3a. Branches — collect once and reuse for commit branch resolution.
@@ -667,88 +654,6 @@ async function linkRepositoryCommand(
   endStep("Upload git metadata", step2Start);
 
   // ──────────────────────────────────────────────────────────
-  // Step 4: Discover project documents
-  // ──────────────────────────────────────────────────────────
-
-  let documentCount = 0;
-  let discoveredDocs: DiscoveredDocument[] = [];
-  const step3Start = startStep();
-
-  if (!options.skipDocs) {
-    currentStep = "Discover documents";
-    log("\n[Step 3/4] Discovering project documents...");
-
-    const docSettings = runStepSync(currentStep, () => loadDocSettings(projectRoot));
-    discoveredDocs = runStepSync(currentStep, () => discoverDocuments(projectRoot, cache.docHashes, docSettings));
-
-    if (discoveredDocs.length === 0) {
-      log("  No documents found matching patterns.");
-    } else {
-      log(`  Found ${discoveredDocs.length} document${discoveredDocs.length !== 1 ? "s" : ""}:`);
-      for (const doc of discoveredDocs) {
-        const sizeKB = (doc.sizeBytes / 1024).toFixed(1);
-        const tag = doc.status === "new" ? "[NEW]    " :
-          doc.status === "changed" ? "[CHANGED]" :
-            "[SKIP]   ";
-        log(`    ${tag} ${doc.sourcePath} (${sizeKB} KB)`);
-      }
-
-      // Warn if many documents matched
-      if (discoveredDocs.length > 50) {
-        log(`\n  Warning: ${discoveredDocs.length} documents found. Consider narrowing patterns in settings.json`);
-      }
-    }
-
-    // ──────────────────────────────────────────────────────────
-    // Step 5: Upload documents
-    // ──────────────────────────────────────────────────────────
-
-    const toUpload = discoveredDocs.filter((d) => d.status !== "unchanged");
-
-    if (toUpload.length === 0) {
-      log("\n[Step 4/4] All documents up to date.");
-      documentCount = discoveredDocs.length;
-    } else if (options.dryRun) {
-      log(`\n[Step 4/4] [dry-run] Would upload ${toUpload.length} document${toUpload.length !== 1 ? "s" : ""}`);
-      documentCount = discoveredDocs.length;
-    } else {
-      log(`\n[Step 4/4] Uploading ${toUpload.length} document${toUpload.length !== 1 ? "s" : ""}...`);
-
-      currentStep = "Upload documents";
-      const response = await runStep(currentStep, () =>
-        client.post<DocumentUploadResponse>(
-          "/api/project-link/documents",
-          {
-            localProjectId,
-            localRepositoryId: repositoryId,
-            relativePath: repository.relativePath,
-            documents: toUpload.map((d) => ({
-              fileName: d.fileName,
-              sourcePath: cloudDocumentSourcePath(repository, d.sourcePath),
-              content: d.content,
-              contentHash: d.contentHash,
-            })),
-          },
-        )
-      );
-
-      const s = response.summary;
-      log(`  ${s.total} documents processed (${s.created} new, ${s.updated} updated, ${s.unchanged} unchanged)`);
-      documentCount = discoveredDocs.length;
-
-      // Update cached hashes
-      const newHashes = { ...cache.docHashes };
-      for (const doc of discoveredDocs) {
-        newHashes[doc.sourcePath] = doc.contentHash;
-      }
-      updateCachedDocHashes(db, localProjectId, serverUrl, newHashes, repositoryId);
-      cache.docHashes = newHashes;
-    }
-  } else {
-    log("\n[Step 3/4] Skipping document upload (--skip-docs)");
-    log("\n[Step 4/4] Skipping document upload (--skip-docs)");
-  }
-  endStep("Discover & upload documents", step3Start);
 
 
   const totalDurationMs = Math.round(performance.now() - totalStart);
@@ -764,7 +669,6 @@ async function linkRepositoryCommand(
   log(`Server:     ${serverUrl}`);
   log(`Branches:   ${branchCount}`);
   log(`Commits:    ${commitCount}`);
-  log(`Documents:  ${documentCount}`);
   log("──────────────────────────────────────────");
   for (const t of stepTimings) {
     log(`  ${t.step.padEnd(28)} ${formatDuration(t.durationMs)}`);
@@ -783,7 +687,7 @@ async function linkRepositoryCommand(
     serverUrl,
     branchCount,
     commitCount,
-    documentCount,
+    documentCount: 0,
     stepTimings,
     totalDurationMs,
     ...(negotiate.similarProjects && negotiate.similarProjects.length > 0
@@ -901,7 +805,6 @@ function logWorkspaceSummary(
   log(`Repositories: ${successful} succeeded, ${failed} failed`);
   log(`Branches:     ${result.branchCount}`);
   log(`Commits:      ${result.commitCount}`);
-  log(`Documents:    ${result.documentCount}`);
   log(`Total:        ${formatDuration(result.totalDurationMs)}`);
 
   if (failures.length > 0) {
@@ -926,17 +829,6 @@ async function runLinkStep<T>(
 ): Promise<T> {
   try {
     return await operation();
-  } catch (error) {
-    if (wrapErrors && !(error instanceof LinkStepError)) {
-      throw new LinkStepError(step, error);
-    }
-    throw error;
-  }
-}
-
-function runLinkStepSync<T>(step: string, operation: () => T, wrapErrors: boolean): T {
-  try {
-    return operation();
   } catch (error) {
     if (wrapErrors && !(error instanceof LinkStepError)) {
       throw new LinkStepError(step, error);

@@ -57,7 +57,7 @@ export interface GitSyncResult {
  *
  * Ref heads are the cursor. The cursor is advanced only after both the branch
  * snapshot and every commit batch succeed, so a failed upload is retried by a
- * later sync or a manual `adit cloud link`.
+ * later sync or a manual `adit cloud sync`.
  */
 export async function syncLinkedGitMetadata(
   db: Database.Database,

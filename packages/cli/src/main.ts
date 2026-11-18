@@ -9,7 +9,7 @@
 
 import { Command, Option } from "commander";
 import { localLoginStartupEnabled } from "@varveai/adit-core";
-import { serveCommand, startDaemon, stopDaemon, daemonStatus } from "./local/daemon.js";
+import { serveCommand, startDaemon, stopDaemon } from "./local/daemon.js";
 import { registerPrCommand } from "./commands/pr.js";
 import { registerHistoryCommands } from "./commands/history.js";
 import { initCommand } from "./commands/init.js";
@@ -51,9 +51,9 @@ import { registerCloudBlueprintCommands } from "./commands/cloud-blueprints.js";
 import { registerCloudHistoryCommands } from "./commands/cloud-history.js";
 import { registerCloudMemoryCommands } from "./commands/cloud-memories.js";
 import { registerCloudReportCommands } from "./commands/cloud-reports.js";
+import { registerCloudProjectDocumentCommands } from "./commands/cloud-project-documents.js";
 import { dbClearEventsCommand } from "./commands/db.js";
 import { perfCommand, perfClearCommand } from "./commands/perf.js";
-import { projectLinkCliHandler } from "./commands/project-link.js";
 import { selfUpdateCommand } from "./commands/self-update.js";
 import { isCliEntrypoint } from "./entrypoint.js";
 import { launchTui } from "./tui/index.js";
@@ -101,7 +101,6 @@ export function createProgram(): Command {
       if (options.onLogin && !localLoginStartupEnabled()) return;
       console.log((await startDaemon()).url);
     });
-  daemon.command("status").action(async () => { const status = await daemonStatus(); console.log(status ? `${status.busy ? "Running (busy)" : "Running"}: ${status.url} (PID ${status.pid})` : "Stopped"); });
   daemon.command("stop").action(async () => { await stopDaemon(); console.log("Stopped"); });
   daemon.command("restart").description("Restart the local background service (same as adit restart)").action(restartService);
 
@@ -224,11 +223,11 @@ export function createProgram(): Command {
 
   program
     .command("status")
-    .description("Show ADIT status for the current workspace")
+    .description("Show local service status and current workspace information")
     .option("--json", "Output as JSON")
-    .action(withUpdateWarning("status", (opts) =>
+    .action((opts) =>
       statusCommand({ json: opts.json }),
-    ));
+    );
 
   program
     .command("doctor")
@@ -307,6 +306,7 @@ export function createProgram(): Command {
   registerCloudHistoryCommands(cloudCmd);
   registerCloudMemoryCommands(cloudCmd);
   registerCloudReportCommands(cloudCmd);
+  registerCloudProjectDocumentCommands(cloudCmd);
 
   cloudCmd
     .command("login")
@@ -354,24 +354,6 @@ export function createProgram(): Command {
     claude: withUpdateWarning("cloud.claude", cloudClaudeCommand),
     codex: withUpdateWarning("cloud.codex", cloudCodexCommand),
   });
-
-  cloudCmd
-    .command("link")
-    .description("Link this workspace to adit-cloud")
-    .option("-f, --force", "Clear cache and re-link from scratch")
-    .option("--skip-docs", "Skip document upload")
-    .option("--skip-commits", "Skip commit history upload")
-    .option("--dry-run", "Preview without uploading")
-    .option("--json", "Output result as JSON")
-    .action(withUpdateWarning("cloud.link", async (opts) => {
-      await projectLinkCliHandler({
-        force: opts.force,
-        skipDocs: opts.skipDocs,
-        skipCommits: opts.skipCommits,
-        dryRun: opts.dryRun,
-        json: opts.json,
-      });
-    }));
 
   // Debug and maintenance commands
   const debugCmd = program
@@ -543,11 +525,11 @@ Options:
 Commands:
   server|serve [options]     Open the local web UI (starts the service if needed)
   restart                    Restart the local background service
-  daemon                     Start, stop or inspect the background service
+  daemon                     Start, stop or restart the background service
   init [options]             Register this Git workspace in ADIT Local
   uninstall [options]        Uninstall ADIT from the current workspace
 
-  status [options]           Show workspace status
+  status [options]           Show local service status and current workspace information
   timeline|list [options]    List collected native sessions
   show <id>                  Show a collected native session or turn by its exact ID
   search [options] <query>   Search collected native sessions

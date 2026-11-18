@@ -24,16 +24,24 @@ interface Instance extends DaemonProcess {
   busy?: boolean;
 }
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-function readInstance(): Instance | null {
+function readInstance(reportErrors = false): Instance | null {
   try {
-    return JSON.parse(
+    const info = JSON.parse(
       readFileSync(join(localDataDir(), "daemon.json"), "utf8"),
     );
-  } catch {
+    if (reportErrors && (!info || !Number.isSafeInteger(info.pid) || info.pid <= 0 ||
+      typeof info.instance !== "string" || !info.instance || typeof info.url !== "string" ||
+      !/^http:\/\/127\.0\.0\.1:\d+$/.test(info.url))) {
+      throw new Error("Invalid daemon record");
+    }
+    return info;
+  } catch (error) {
+    if (reportErrors && (error as NodeJS.ErrnoException).code !== "ENOENT")
+      throw new Error("Cannot read local daemon record. Check daemon.json and its access permissions.", { cause: error });
     return null;
   }
 }
-function busyInstance(info: Instance): Instance | null {
+function busyInstance(info: Instance, reportErrors = false): Instance | null {
   let db: Database.Database | undefined;
   try {
     if (!ownsDaemonProcess(info)) return null;
@@ -41,22 +49,30 @@ function busyInstance(info: Instance): Instance | null {
     const row = db.prepare("SELECT data FROM adit_local_settings WHERE key='daemon-lock'").get() as { data: string } | undefined;
     const lock = row ? JSON.parse(row.data) : null;
     return lock?.pid === info.pid && lock?.instance === info.instance ? { ...info, busy: true } : null;
-  } catch { return null; }
+  } catch (error) {
+    if (reportErrors) throw new Error("Cannot verify daemon process ownership. Check the local database and process access permissions.", { cause: error });
+    return null;
+  }
   finally { db?.close(); }
 }
-export async function daemonStatus(): Promise<Instance | null> {
-  const info = readInstance();
+export async function daemonStatus(options: { reportErrors?: boolean } = {}): Promise<Instance | null> {
+  const info = readInstance(options.reportErrors);
   if (!info) return null;
+  let health: { service: string; instance: string; version?: string };
   try {
-    const health = (await fetch(`${info.url}/health`, {
+    health = (await fetch(`${info.url}/health`, {
       signal: AbortSignal.timeout(1500),
     }).then((r) => r.json())) as { service: string; instance: string; version?: string };
-    return health.service === "adit-local" && health.instance === info.instance
-      ? { ...info, version: health.version }
-      : null;
   } catch {
-    return busyInstance(info);
+    const busy = busyInstance(info, options.reportErrors);
+    if (options.reportErrors && !busy && ownsDaemonProcess(info))
+      throw new Error("Daemon process is alive but its service health and ownership lock could not be verified.");
+    return busy;
   }
+  if (health?.service === "adit-local" && health.instance === info.instance)
+    return { ...info, version: health.version };
+  if (options.reportErrors) throw new Error("Daemon health response does not match the recorded service.");
+  return null;
 }
 export async function runDaemon(port?: number): Promise<void> {
   const dir = localDataDir();
@@ -109,11 +125,11 @@ export async function runDaemon(port?: number): Promise<void> {
     const cleanup = () => {
       try {
         releaseLock();
-      } catch {}
+      } catch { /* Shutdown must continue; the next launch can reclaim this process's stale lock. */ }
       try {
         if (readInstance()?.instance === instance)
           unlinkSync(join(dir, "daemon.json"));
-      } catch {}
+      } catch { /* A concurrently removed record does not prevent process shutdown. */ }
     };
     app.server.on("close", () => {
       cleanup();
@@ -125,7 +141,7 @@ export async function runDaemon(port?: number): Promise<void> {
   } catch (e) {
     try {
       releaseLock();
-    } catch {}
+    } catch { /* Preserve the original startup failure; a stale process lock is reclaimable. */ }
     throw e;
   }
 }

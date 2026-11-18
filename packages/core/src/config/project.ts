@@ -2,7 +2,7 @@
  * Local project manifest and repository resolution.
  *
  * A local ADIT project is defined by `.adit/project.json`. `adit init` owns
- * project identity, membership, and sync selection. `adit cloud link` may
+ * project identity, membership, and sync selection. Cloud synchronization may
  * append Cloud deletion tombstones without changing those decisions.
  */
 

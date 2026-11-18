@@ -167,7 +167,8 @@ The machine ID is stored globally; an existing global `client-id` is adopted onc
 | `adit init` | Choose Git repositories and session sources, then start organizing |
 | `adit server` | Start the background service if needed and open the local workbench |
 | `adit tui` | Open the same local workbench |
-| `adit status`, `adit config` | Read shared project state and paths |
+| `adit status` | Show local service state, address, port and PID, plus current workspace information; use `--json` for scripts |
+| `adit config` | Read shared project configuration and paths |
 | `adit doctor --fix` | Check shared storage and remove obsolete collection hooks |
 | `adit list`, `adit timeline` | List collected native sessions |
 | `adit search <text>` | Search collected sessions |
@@ -177,6 +178,15 @@ The machine ID is stored globally; an existing global `client-id` is adopted onc
 | `adit export session <session-id> --output history.json` | Export native turns, including full paginated content |
 | `adit export event <turn-id> --output turn.json` | Compatibility command using an exact native turn ID |
 | `adit uninstall --yes` | Delete only this project's local ADIT data through the shared deletion service |
+
+`adit status` works outside initialized workspaces and never starts the service or
+opens a browser. It reports running, busy, stopped or inspection-error states.
+`adit status --json` retains workspace fields and `backgroundRunning`, and adds
+`daemon` with `state`, `url`, `port` and `pid`. On inspection failure,
+`daemon.state` is `error`, `backgroundRunning` is `null`, and the command exits
+nonzero. An uninitialized directory reports `workspaceState: "uninitialized"`
+while still showing service status. Use `adit status` for service inspection;
+the `daemon` group provides only `start`, `stop` and `restart`.
 
 Legacy event IDs are not guessed or converted to native IDs. Old actor/event
 filters, per-turn snapshots, environment snapshots and `debug db clear-events`
@@ -241,11 +251,26 @@ that boundary. Local edits/deletions after upload do not delete Cloud history.
 project database. `ADIT_CLOUD_URL` selects the server before login; disconnect before
 changing servers. Browser and CLI must use the same data root and Cloud address.
 
-`adit cloud link` retains Git branch/commit and document association, including
-`--force`, `--skip-docs`, `--skip-commits`, `--dry-run` and `--json`. It reads registered
-repository identity, validates paths/remotes, and caches confirmed link state in the
-shared database. It never creates project-local storage. Cloud-deleted/excluded
-repositories are omitted from uploads while local history remains readable.
+Run `adit cloud sync` from an initialized workspace after signing in and enabling
+Cloud storage in the local workbench's Settings. Synchronization registers the
+workspace in Cloud and uploads its selected repositories, Git metadata and history.
+Cloud-deleted/excluded repositories are omitted while local history remains readable.
+
+Project documents are uploaded explicitly, separately from history synchronization.
+Choose a team or personal workspace first:
+
+```sh
+adit cloud project-documents upload --team <teamId> --file "./requirements.md"
+adit cloud project-documents upload --personal --file "./requirements.md"
+```
+
+Team uploads require an accessible team ID, without a local project ID or an
+initialized current directory. Personal uploads use the current initialized
+workspace, or `--project <localProjectId>` to select one explicitly. No destination
+is selected automatically. Use `project-documents folders list`, `folders create --name <name>`, `list`, and `move <documentId> --folder-id <folderId>` (or `--root`)
+with the same explicit `--team` or `--personal` scope to manage directories and
+document placement. Markdown uploads preserve the supplied contents; use
+`--replace <documentId>` to update an existing document.
 
 </details>
 
