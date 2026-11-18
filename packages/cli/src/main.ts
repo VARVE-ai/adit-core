@@ -51,9 +51,9 @@ import { registerCloudBlueprintCommands } from "./commands/cloud-blueprints.js";
 import { registerCloudHistoryCommands } from "./commands/cloud-history.js";
 import { registerCloudMemoryCommands } from "./commands/cloud-memories.js";
 import { registerCloudReportCommands } from "./commands/cloud-reports.js";
+import { registerCloudProjectDocumentCommands } from "./commands/cloud-project-documents.js";
 import { dbClearEventsCommand } from "./commands/db.js";
 import { perfCommand, perfClearCommand } from "./commands/perf.js";
-import { projectLinkCliHandler } from "./commands/project-link.js";
 import { selfUpdateCommand } from "./commands/self-update.js";
 import { isCliEntrypoint } from "./entrypoint.js";
 import { launchTui } from "./tui/index.js";
@@ -307,6 +307,7 @@ export function createProgram(): Command {
   registerCloudHistoryCommands(cloudCmd);
   registerCloudMemoryCommands(cloudCmd);
   registerCloudReportCommands(cloudCmd);
+  registerCloudProjectDocumentCommands(cloudCmd);
 
   cloudCmd
     .command("login")
@@ -354,24 +355,6 @@ export function createProgram(): Command {
     claude: withUpdateWarning("cloud.claude", cloudClaudeCommand),
     codex: withUpdateWarning("cloud.codex", cloudCodexCommand),
   });
-
-  cloudCmd
-    .command("link")
-    .description("Link this workspace to adit-cloud")
-    .option("-f, --force", "Clear cache and re-link from scratch")
-    .option("--skip-docs", "Skip document upload")
-    .option("--skip-commits", "Skip commit history upload")
-    .option("--dry-run", "Preview without uploading")
-    .option("--json", "Output result as JSON")
-    .action(withUpdateWarning("cloud.link", async (opts) => {
-      await projectLinkCliHandler({
-        force: opts.force,
-        skipDocs: opts.skipDocs,
-        skipCommits: opts.skipCommits,
-        dryRun: opts.dryRun,
-        json: opts.json,
-      });
-    }));
 
   // Debug and maintenance commands
   const debugCmd = program

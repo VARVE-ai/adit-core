@@ -243,7 +243,7 @@ describe("linkCommand workspace repository requests", () => {
       const output = log.mock.calls.map((call) => String(call[0] ?? "")).join("\n");
       expect(output.match(/Link complete!/gu)).toHaveLength(1);
       expect(output).not.toContain("Project link complete!");
-      expect(output).not.toContain("[Step 1/4]");
+      expect(output).not.toContain("[Step 1/2]");
       expect(output).toContain("[1/2] a linking...");
       expect(output).toContain("[2/2] b linking...");
       expect(output).toContain("[1/2] a ok | branches 1 | commits 1 | docs 0 |");
@@ -324,12 +324,12 @@ describe("linkCommand workspace repository requests", () => {
       );
 
       const output = log.mock.calls.map((call) => String(call[0] ?? "")).join("\n");
-      expect(output).toContain("[Step 1/4] Negotiating project ID with server...");
+      expect(output).toContain("[Step 1/2] Negotiating project ID with server...");
       expect(client.post).toHaveBeenCalledWith("/api/project-link/negotiate", expect.objectContaining({
         projectName: "repo-name",
         remoteUrl: "git@github.com:VARVE-ai/adit-core.git",
       }));
-      expect(output).toContain("Documents:  1");
+
       expect(output).toContain("Project link complete!");
       expect(output).not.toContain("Link complete!");
     } finally {
@@ -394,7 +394,7 @@ describe("linkCommand workspace repository requests", () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 
     try {
-      // Same fingerprint inside the cooldown window → branch upload skipped.
+      // Same fingerprint inside the cooldown window �?branch upload skipped.
       mockGetProjectLinkCache.mockReturnValue(freshCache());
       mockCollectGitRefsFingerprint.mockResolvedValue("fingerprint-old");
       const unchangedClient = makeClient();
@@ -411,7 +411,7 @@ describe("linkCommand workspace repository requests", () => {
         expect.anything(),
       );
 
-      // Changed fingerprint bypasses the cooldown → branches upload again.
+      // Changed fingerprint bypasses the cooldown �?branches upload again.
       mockGetProjectLinkCache.mockReturnValue(freshCache());
       mockCollectGitRefsFingerprint.mockResolvedValue("fingerprint-new");
       const changedClient = makeClient();
@@ -767,7 +767,7 @@ describe("linkCommand workspace repository requests", () => {
     );
   });
 
-  it("prefixes workspace document source paths with repository relative paths", async () => {
+  it("does not upload workspace documents through project link", async () => {
     const client = {
       post: vi.fn(async (path: string) => {
         if (path === "/api/project-link/negotiate") {
@@ -843,15 +843,7 @@ describe("linkCommand workspace repository requests", () => {
       { json: true },
     );
 
-    expect(client.post).toHaveBeenCalledWith(
-      "/api/project-link/documents",
-      expect.objectContaining({
-        documents: [expect.objectContaining({
-          fileName: "README.md",
-          sourcePath: "packages/core/README.md",
-        })],
-      }),
-    );
+    expect(client.post).not.toHaveBeenCalledWith("/api/project-link/documents", expect.anything());
   });
 
   it("deduplicates workspace commit uploads by SHA across repositories with the same canonical repo key", async () => {

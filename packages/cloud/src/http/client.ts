@@ -36,6 +36,8 @@ export interface CloudClientOptions {
    * after 10 seconds, so long backoff loops are wasted work.
    */
   maxRetries?: number;
+  /** Additional headers sent with API requests (for example an explicit team view). */
+  headers?: Record<string, string>;
 }
 
 interface TokenRefreshResponse {
@@ -73,6 +75,7 @@ export class CloudClient {
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
   private readonly credentialsDirectory: string;
+  private readonly headers: Record<string, string>;
 
   constructor(serverUrl: string, credentials: CloudCredentials, options?: CloudClientOptions) {
     this.serverUrl = normalizeServerUrl(serverUrl);
@@ -80,6 +83,7 @@ export class CloudClient {
     this.credentialsDirectory = options?.credentialsDirectory ?? localDataDir();
     this.timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.headers = { ...(options?.headers ?? {}) };
   }
 
   private requestSignal(): AbortSignal {
@@ -97,6 +101,7 @@ export class CloudClient {
 
     const url = `${this.serverUrl}${path}`;
     const headers: Record<string, string> = {
+      ...this.headers,
       Authorization: `Bearer ${this.credentials.accessToken}`,
     };
 
@@ -118,6 +123,7 @@ export class CloudClient {
         const retry = await fetch(url, {
           method: "HEAD",
           headers: {
+            ...this.headers,
             Authorization: `Bearer ${this.credentials.accessToken}`,
           },
           signal: this.requestSignal(),
@@ -259,6 +265,7 @@ export class CloudClient {
         const url = currentUrl;
         const multipart = body instanceof FormData;
         const headers: Record<string, string> = {
+          ...this.headers,
           Authorization: `Bearer ${this.credentials.accessToken}`,
           ...(multipart ? {} : { "Content-Type": "application/json" }),
         };

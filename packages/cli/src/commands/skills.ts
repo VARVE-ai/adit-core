@@ -22,7 +22,7 @@ export interface SkillDefinition {
 
 export const TASK_SKILL = `---
 name: adit-tasks
-description: Create or upload requirement blueprints to ADIT Cloud, add tasks to existing blueprints, manage custom task modules and groups, create independent tasks on request, query and implement the user's tasks, read their PRD and references, and edit task fields. Use for creating blueprints even with only a name, adding blueprint tasks, organizing tasks, listing unfinished tasks, implementing a task or updating its details. Not for unrelated local TODO lists, other members' progress (adit-reports), or session history (adit-history).
+description: Manage ADIT Cloud blueprints, tasks and project documents. Use to create or upload blueprints, add or edit tasks, manage task modules and groups, implement assigned work, upload project documents, create document directories or move documents between directories. Not for unrelated local TODO lists, other members' progress (adit-reports), or session history (adit-history).
 ---
 
 # ADIT tasks
@@ -127,6 +127,38 @@ Uploads disable automatic retries. If the outcome is uncertain, reuse the return
     adit cloud blueprints upload --input "./blueprint.json" --file "./requirements.md" --request-id <clientRequestId> --json
 
 The server returns the original blueprint with reused:true instead of making a duplicate; subsequent file uploads are deduplicated independently. A reused request ID with a changed JSON manifest or scope returns 409; stop and resolve it. File bytes are not part of that manifest hash, so preserve the original files when retrying an uncertain creation. Keep the request ID available before a retry; --request-id can also be supplied on the first upload. Report unsupported endpoints instead of bypassing the Cloud API or changing servers.
+
+## Upload a project document
+
+When the user explicitly asks to add a document to the current project's Project Documents library, upload the actual local Markdown file with the CLI. This is separate from task attachments and blueprint attachments:
+
+    adit cloud project-documents upload --personal --file "./requirements.md" --json
+
+Before uploading or creating a directory, ask whether the destination is a team or a personal workspace unless the user already specified it. Never infer this choice from the current workspace or its linked teams. This differs from blueprint/task scope resolution. Reuse an explicit choice for follow-up operations on the same documents. For a team, use adit cloud teams list --json to resolve the selected team; ask if its identity is ambiguous. Team operations require only --team <teamId>, not projectId, an initialized current directory or a project mount. For a personal workspace use --personal in the confirmed initialized workspace, or --project <localProjectId> for a workspace explicitly selected by the user. Omitting the destination is an error, not automatic team selection:
+
+    adit cloud project-documents upload --team <teamId> --file "./requirements.md" --json
+
+Only .md files up to 2,000,000 characters are accepted by the current Project Documents API. Preserve the file contents and use the real path supplied by the user; do not invent a file or convert another format. --display-name changes the library name, --source-path enables repeat uploads to version the same personal document, --replace <documentId> updates an existing document (identical contents return unchanged), and --folder-id places a new document in an existing directory. Team uploads cannot use --project, --personal, --source-path or a personal folder. To move an existing document, use move rather than uploading it again.
+
+The response reports status (created, new_version or unchanged) and projectDocument.id. A name conflict is a failed upload; report existingDocId and ask whether to use --replace, rather than silently replacing a document. The command writes directly to Cloud and does not require adit cloud sync. On a timeout, use project-documents list in the same scope and verify the existing document/version before retrying; do not blindly create duplicates. History synchronization does not upload project documents; use the explicit project-documents commands.
+
+### Document directories and moving documents
+
+After the user selects a destination, resolve actual document and directory IDs in that scope. These examples use personal scope; for a selected team replace --personal with --team <teamId>:
+
+    adit cloud project-documents folders list --personal --json
+    adit cloud project-documents list --personal --json
+
+Create a directory when requested (name is required, 1-100 characters):
+
+    adit cloud project-documents folders create --name "Requirements" --personal --json
+
+Move an existing document to a directory, or back to the root:
+
+    adit cloud project-documents move <documentId> --folder-id <folderId> --personal --json
+    adit cloud project-documents move <documentId> --root --personal --json
+
+Use exactly one of --folder-id or --root. Keep --team, --personal and --project selections consistent across listing, creation, upload and movement. Match the user's names to returned IDs; ask only if a match is ambiguous. A request to move a document does not authorize creating a missing directory unless the user also requested creation. Directories have one level; these commands move documents, not directories. Documents and destination directories must belong to the same owner and scope; system-managed documents cannot be moved. Moving changes only directory placement, preserving contents and version history. Verify the returned projectDocument.folderId (null means root). If creation has an uncertain outcome, list directories before retrying; a duplicate-name conflict is not permission to rename or create another directory.
 
 ## Implement a selected task
 

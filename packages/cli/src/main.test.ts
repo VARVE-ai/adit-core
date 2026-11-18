@@ -125,7 +125,8 @@ describe("CLI help", () => {
     expect(cloudHelp).toContain("auth");
     expect(cloudHelp).toContain("claude [options] [cliArgs...]");
     expect(cloudHelp).toContain("codex [options] [cliArgs...]");
-    expect(cloudHelp).toContain("link [options]");
+    expect(cloudHelp).toContain("project-documents");
+    expect(cloudHelp).not.toContain("link [options]");
     expect(cloudHelp).not.toContain("intent [options]");
     for (const group of ["projects", "teams", "sessions", "commits", "usage", "reports", "team"]) expect(cloudHelp).toContain(group);
     expect(cloudHelp).not.toContain("repositories [options]");
@@ -174,11 +175,12 @@ describe("CLI help", () => {
     for (const option of ["--estimate-hours", "--estimate-days", "--clear-estimate", "--start", "--clear-start", "--task-scope", "--clear-scope", "--created-at", "--clear-created-at", "--clear-key-points", "--clear-assignee"]) expect(help).toContain(option);
   });
 
-  it("supports nested help for leaf commands", async () => {
-    const help = await parseAndCapture(["help", "cloud", "link"]);
+  it("shows project document upload help", async () => {
+    const help = await parseAndCapture(["help", "cloud", "project-documents", "upload"]);
 
-    expect(help).toContain("Usage: adit cloud link [options]");
-    expect(help).toContain("--skip-docs");
+    expect(help).toContain("Usage: adit cloud project-documents upload [options]");
+    expect(help).toContain("--file <path>");
+    expect(help).toContain("--team <id>");
   });
 
   it("rewrites the legacy intent completion syntax", () => {
