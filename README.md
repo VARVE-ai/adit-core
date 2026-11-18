@@ -167,7 +167,8 @@ The machine ID is stored globally; an existing global `client-id` is adopted onc
 | `adit init` | Choose Git repositories and session sources, then start organizing |
 | `adit server` | Start the background service if needed and open the local workbench |
 | `adit tui` | Open the same local workbench |
-| `adit status`, `adit config` | Read shared project state and paths |
+| `adit status` | Show local service state, address, port and PID, plus current workspace information; use `--json` for scripts |
+| `adit config` | Read shared project configuration and paths |
 | `adit doctor --fix` | Check shared storage and remove obsolete collection hooks |
 | `adit list`, `adit timeline` | List collected native sessions |
 | `adit search <text>` | Search collected sessions |
@@ -177,6 +178,15 @@ The machine ID is stored globally; an existing global `client-id` is adopted onc
 | `adit export session <session-id> --output history.json` | Export native turns, including full paginated content |
 | `adit export event <turn-id> --output turn.json` | Compatibility command using an exact native turn ID |
 | `adit uninstall --yes` | Delete only this project's local ADIT data through the shared deletion service |
+
+`adit status` works outside initialized workspaces and never starts the service or
+opens a browser. It reports running, busy, stopped or inspection-error states.
+`adit status --json` retains workspace fields and `backgroundRunning`, and adds
+`daemon` with `state`, `url`, `port` and `pid`. On inspection failure,
+`daemon.state` is `error`, `backgroundRunning` is `null`, and the command exits
+nonzero. An uninitialized directory reports `workspaceState: "uninitialized"`
+while still showing service status. Use `adit status` for service inspection;
+the `daemon` group provides only `start`, `stop` and `restart`.
 
 Legacy event IDs are not guessed or converted to native IDs. Old actor/event
 filters, per-turn snapshots, environment snapshots and `debug db clear-events`

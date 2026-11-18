@@ -38,8 +38,31 @@ afterEach(() => {
 
 it("recognizes a live locked daemon as busy without spawning a duplicate", async () => {
   expect(await daemonStatus()).toEqual({ ...instance, busy: true });
+  expect(await daemonStatus({ reportErrors: true })).toEqual({ ...instance, busy: true });
   expect(await startDaemon()).toEqual({ ...instance, busy: true });
   expect(spawn).not.toHaveBeenCalled();
+});
+
+it("reports corrupt records without exposing their contents", async () => {
+  writeFileSync(join(root, "daemon.json"), '{"token":"secret-value",');
+  await expect(daemonStatus({ reportErrors: true })).rejects.toThrow("Cannot read local daemon record");
+  expect(await daemonStatus()).toBeNull();
+});
+
+it("reports process inspection errors instead of claiming the daemon stopped", async () => {
+  vi.mocked(ownsDaemonProcess).mockImplementation(() => { throw new Error("Access denied"); });
+  await expect(daemonStatus({ reportErrors: true })).rejects.toThrow("Cannot verify daemon process ownership");
+  expect(await daemonStatus()).toBeNull();
+});
+
+it("reports mismatched health and a live process without a matching lock", async () => {
+  vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ service: "other-service" })));
+  await expect(daemonStatus({ reportErrors: true })).rejects.toThrow("health response does not match");
+  vi.mocked(fetch).mockRejectedValue(new Error("Health timed out"));
+  store.db.prepare("DELETE FROM adit_local_settings WHERE key='daemon-lock'").run();
+  await expect(daemonStatus({ reportErrors: true })).rejects.toThrow("process is alive");
+  vi.mocked(ownsDaemonProcess).mockReturnValue(false);
+  expect(await daemonStatus({ reportErrors: true })).toBeNull();
 });
 
 it("requires both the live process and matching instance lock for the busy fallback", async () => {

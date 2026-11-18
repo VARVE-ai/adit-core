@@ -40,6 +40,15 @@ async function parseAndCapture(args: string[]): Promise<string> {
 }
 
 describe("CLI help", () => {
+  it("removes daemon status while retaining service management commands", async () => {
+    const program = createProgram().exitOverride();
+    configureOutput(program, () => {});
+    const daemon = findCommand(program, "daemon");
+    daemon.exitOverride();
+    expect(daemon.commands.map(command => command.name())).toEqual(["start", "stop", "restart"]);
+    expect(findCommand(program, "status").helpInformation()).toContain("--json");
+    await expect(program.parseAsync(["node", "adit", "daemon", "status"])).rejects.toMatchObject({ code: "commander.unknownCommand" });
+  });
   it.each(["show", "history"])("passes memory %s --version to the nested command", async action => {
     const program = createProgram().exitOverride();
     configureOutput(program, () => {});
@@ -68,6 +77,8 @@ describe("CLI help", () => {
     expect(help).toContain("timeline|list [options]");
     expect(help).toContain("uninstall [options]");
     expect(help).toMatch(/^  restart\s+Restart the local background service$/m);
+    expect(help).toMatch(/^  daemon\s+Start, stop or restart the background service$/m);
+    expect(help).toMatch(/^  status \[options\]\s+Show local service status and current workspace information$/m);
     expect(help).toContain("help [command...]");
     expect(help).not.toMatch(/^  db\s/m);
     expect(help).not.toMatch(/^  perf\s/m);

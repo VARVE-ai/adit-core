@@ -94,14 +94,14 @@ it("keeps one detached instance and resumes collection after restart without a b
   );
   try {
     await cli("daemon", "start", "--on-login");
-    expect((await cli("daemon", "status")).stdout.trim()).toBe("Stopped");
+    expect(JSON.parse((await cli("status", "--json")).stdout).daemon.state).toBe("stopped");
     const started = await Promise.all([
       cli("server", "--no-browser"),
       cli("serve", "--no-browser"),
     ]);
     expect(started[0].stdout.trim()).toBe(started[1].stdout.trim());
     const originalPid = info().pid;
-    expect((await cli("daemon", "status")).stdout).toContain("Running:");
+    expect(JSON.parse((await cli("status", "--json")).stdout).daemon.state).toMatch(/^(running|busy)$/);
     await cli("daemon", "start");
     expect(info().pid).toBe(originalPid);
     const response = await api("/workspaces", "POST", {
@@ -114,7 +114,7 @@ it("keeps one detached instance and resumes collection after restart without a b
     await api(`/workspaces/${w.id}/collect`, "POST", {});
     await waitForDone();
     await cli("daemon", "stop");
-    expect((await cli("daemon", "status")).stdout.trim()).toBe("Stopped");
+    expect(JSON.parse((await cli("status", "--json")).stdout).daemon.state).toBe("stopped");
     appendFileSync(
       log,
       JSON.stringify({
@@ -199,14 +199,14 @@ it("runs the login launcher only with consent and falls back safely if the previ
     await launch();
     const info = JSON.parse(readFileSync(join(data, "daemon.json"), "utf8")) as { url: string; pid: number };
     expect(new URL(info.url).port).not.toBe(String(port));
-    expect((await cli("daemon", "status")).stdout).toContain("Running:");
+    expect(JSON.parse((await cli("status", "--json")).stdout).daemon.state).toMatch(/^(running|busy)$/);
     await launch();
     expect(JSON.parse(readFileSync(join(data, "daemon.json"), "utf8")).pid).toBe(info.pid);
     await startup.save({ enabled: false, version: 1 });
-    expect((await cli("daemon", "status")).stdout).toContain("Running:");
+    expect(JSON.parse((await cli("status", "--json")).stdout).daemon.state).toMatch(/^(running|busy)$/);
     await cli("daemon", "stop");
     await launch();
-    expect((await cli("daemon", "status")).stdout.trim()).toBe("Stopped");
+    expect(JSON.parse((await cli("status", "--json")).stdout).daemon.state).toBe("stopped");
   } finally {
     await cli("daemon", "stop");
     await registration.remove();
@@ -239,7 +239,7 @@ it("keeps the daemon reachable after startup collection encounters a legacy repo
       finally { db.close(); }
     }, {timeout:10000}).toMatchObject({status:"failed", error:expect.stringContaining("no git remote 'origin'")});
     expect((await fetch(info.url+"/health")).status).toBe(200);
-    expect((await cli("daemon", "status")).stdout).toContain("Running:");
+    expect(JSON.parse((await cli("status", "--json")).stdout).daemon.state).toMatch(/^(running|busy)$/);
   } finally {
     await cli("daemon", "stop");
     rmSync(root,{recursive:true,force:true});
